@@ -88,7 +88,7 @@ pub fn recoverSelectionMerges(alloc: std.mem.Allocator, insts: []const Instructi
     // No-op fast path FIRST (and critically, before any reducibility judgement):
     // if every conditional header already carries an OpSelectionMerge, there is
     // nothing to recover — return empty regardless of CFG shape. This guarantees
-    // already-structured (e.g. glslpp-native) input is never rejected, so wiring
+    // already-structured (e.g. zioshade-native) input is never rejected, so wiring
     // this pass in cannot regress a currently-compiling shader.
     var needs = false;
     for (sc.cond_headers) |h| {

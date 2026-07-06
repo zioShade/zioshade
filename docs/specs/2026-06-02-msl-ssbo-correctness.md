@@ -7,7 +7,7 @@ exit 0), the #1 thing the project forbids.
 
 ## Discovery
 
-Comparing glslpp MSL against the spirv-cross `--msl` oracle on a trivial compute
+Comparing zioshade MSL against the spirv-cross `--msl` oracle on a trivial compute
 SSBO shader surfaced **three** distinct silent-wrong bugs. Repro:
 
 ```glsl
@@ -17,7 +17,7 @@ layout(std430, binding=0) buffer Buf { uint cnt; float vals[]; } data;
 void main(){ data.cnt = 5u; data.vals[0] = 1.0; }
 ```
 
-**glslpp (invalid MSL):**
+**zioshade (invalid MSL):**
 ```cpp
 struct data { uint cnt; float vals; };          // BUG 3: named after instance; BUG 2: runtime array -> scalar
 kernel void main0(device data* data [[buffer(0)]], uint3 gl_GlobalInvocationID [[thread_position_in_grid]]) {
@@ -81,7 +81,7 @@ identifier. spirv-cross names the struct after the block (`Buf`).
   runtime array `[1]`, struct named after block — not just `[[buffer(`.
 
 ## Also-found (separate, lower severity) — spurious unused builtins
-glslpp emits unused builtin params spirv-cross omits:
+zioshade emits unused builtin params spirv-cross omits:
 - compute: always emits `gl_GlobalInvocationID [[thread_position_in_grid]]` even
   when only `threadgroups_per_grid` / `thread_position_in_threadgroup` is used.
 - fragment: always emits `gl_FragCoord [[position]]` even when unused.

@@ -10,7 +10,7 @@
 // brings the other three backends to feature parity.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -30,29 +30,29 @@ fn assertContains(haystack: []const u8, needle: []const u8) !void {
 }
 
 test "binding_shift: GLSL binding=2 with shift=-1 emits binding=1" {
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BINDING_2, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BINDING_2, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // Sanity: with default shift=0, output should mention binding = 2.
-    const baseline = try glslpp.spirvToGLSL(alloc, spv, .{ .version = 450 });
+    const baseline = try zioshade.spirvToGLSL(alloc, spv, .{ .version = 450 });
     defer alloc.free(baseline);
     try assertContains(baseline, "binding = 2");
 
     // With shift=-1, output should mention binding = 1 instead.
-    const shifted = try glslpp.spirvToGLSL(alloc, spv, .{ .version = 450, .binding_shift = -1 });
+    const shifted = try zioshade.spirvToGLSL(alloc, spv, .{ .version = 450, .binding_shift = -1 });
     defer alloc.free(shifted);
     try assertContains(shifted, "binding = 1");
 }
 
 test "binding_shift: MSL binding=2 with shift=-1 emits [[buffer(1)]]" {
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BINDING_2, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BINDING_2, .{ .stage = .fragment });
     defer alloc.free(spv);
 
-    const baseline = try glslpp.spirvToMSL(alloc, spv, .{});
+    const baseline = try zioshade.spirvToMSL(alloc, spv, .{});
     defer alloc.free(baseline);
     try assertContains(baseline, "[[buffer(2)]]");
 
-    const shifted = try glslpp.spirvToMSL(alloc, spv, .{ .binding_shift = -1 });
+    const shifted = try zioshade.spirvToMSL(alloc, spv, .{ .binding_shift = -1 });
     defer alloc.free(shifted);
     try assertContains(shifted, "[[buffer(1)]]");
 }
@@ -62,14 +62,14 @@ test "binding_shift: WGSL @binding is shifted" {
     // @group=binding/2. For set=0 binding=2 that produces an internal binding
     // of 4, which is what shows up in @binding(N). Apply shift -3 to land on
     // @binding(1).
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BINDING_2, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BINDING_2, .{ .stage = .fragment });
     defer alloc.free(spv);
 
-    const baseline = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const baseline = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(baseline);
     try assertContains(baseline, "@binding(4)");
 
-    const shifted = try glslpp.spirvToWGSL(alloc, spv, .{ .binding_shift = -3 });
+    const shifted = try zioshade.spirvToWGSL(alloc, spv, .{ .binding_shift = -3 });
     defer alloc.free(shifted);
     try assertContains(shifted, "@binding(1)");
 }

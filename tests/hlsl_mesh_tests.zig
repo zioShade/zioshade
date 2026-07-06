@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 test "hlsl mesh: emits OutputTopology and mesh<> signature" {
     const alloc = std.testing.allocator;
@@ -11,9 +11,9 @@ test "hlsl mesh: emits OutputTopology and mesh<> signature" {
         \\layout(location=0) out vec4 v_color[];
         \\void main() { SetMeshOutputsEXT(3, 1); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"triangle\")]") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "out vertices") != null);
@@ -32,9 +32,9 @@ test "hlsl mesh: lines topology emits [OutputTopology(\"line\")]" {
         \\layout(location=0) out vec4 v_color[];
         \\void main() { SetMeshOutputsEXT(2, 1); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"line\")]") != null);
     // Negative guard: must not also emit other topologies.
@@ -52,9 +52,9 @@ test "hlsl mesh: points topology emits [OutputTopology(\"point\")]" {
         \\layout(location=0) out vec4 v_color[];
         \\void main() { SetMeshOutputsEXT(1, 1); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[OutputTopology(\"point\")]") != null);
     // Negative guard: must not also emit other topologies.
@@ -80,9 +80,9 @@ test "hlsl mesh v2: VertexOut struct emitted with SV_Position and user vars" {
         \\    v_color[0] = vec4(1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     // VertexOut struct exists with gl_Position : SV_Position
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "struct VertexOut") != null);
@@ -103,9 +103,9 @@ test "hlsl mesh v2: perprimitiveEXT emits PrimOut struct" {
         \\layout(location=1) perprimitiveEXT out vec3 face_normal[];
         \\void main() { SetMeshOutputsEXT(3, 1); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "struct PrimOut") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "out primitives PrimOut") != null);
@@ -123,9 +123,9 @@ test "hlsl mesh v2: no PrimOut when no perprimitiveEXT outputs" {
         \\layout(location=0) out vec4 v_color[];
         \\void main() { SetMeshOutputsEXT(3, 1); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "struct PrimOut") == null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "out primitives") == null);
@@ -159,9 +159,9 @@ test "hlsl mesh v2.c: per-vertex stores route through verts[i].field" {
         \\    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
 
     // Positive: stores must be routed through the signature parameters.
@@ -201,9 +201,9 @@ test "hlsl mesh v2.c: VertexOut struct omits gl_MeshPerVertexEXT and indices fie
         \\    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .mesh });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .mesh });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
 
     // Locate the VertexOut struct body and assert these fields are absent.

@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -47,7 +47,7 @@ pub fn main() !void {
         var file_had_error = false;
 
         // HLSL
-        if (glslpp.spirvToHLSL(alloc, words, .{})) |result| {
+        if (zioshade.spirvToHLSL(alloc, words, .{})) |result| {
             alloc.free(result);
         } else |_| {
             if (!file_had_error) {
@@ -59,7 +59,7 @@ pub fn main() !void {
         }
 
         // GLSL
-        if (glslpp.spirvToGLSL(alloc, words, .{})) |result| {
+        if (zioshade.spirvToGLSL(alloc, words, .{})) |result| {
             alloc.free(result);
         } else |_| {
             if (!file_had_error) {
@@ -71,7 +71,7 @@ pub fn main() !void {
         }
 
         // MSL
-        if (glslpp.spirvToMSL(alloc, words, .{})) |result| {
+        if (zioshade.spirvToMSL(alloc, words, .{})) |result| {
             alloc.free(result);
         } else |_| {
             if (!file_had_error) {
@@ -83,7 +83,7 @@ pub fn main() !void {
         }
 
         // WGSL
-        if (glslpp.spirvToWGSL(alloc, words, .{})) |result| {
+        if (zioshade.spirvToWGSL(alloc, words, .{})) |result| {
             alloc.free(result);
         } else |_| {
             if (!file_had_error) {

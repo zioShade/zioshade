@@ -80,7 +80,7 @@ pub const Member = struct {
     // ── Per-member access qualifiers (#177 Item 3) ──
     /// `Coherent` (Decoration 23) on this member (`OpMemberDecorate`).
     coherent: bool = false,
-    /// `Volatile` (Decoration 21) on this member. NOTE: glslpp's own codegen
+    /// `Volatile` (Decoration 21) on this member. NOTE: zioshade's own codegen
     /// never emits `Volatile` (the GLSL `volatile` qualifier is dropped at
     /// codegen), so this flag is only populated when reflecting
     /// EXTERNALLY-produced SPIR-V (e.g. glslang).
@@ -152,7 +152,7 @@ pub const Resource = struct {
     /// i.e. a `coherent` buffer/image. (#177 Item 3)
     coherent: bool = false,
     /// True if the resource variable carries `Volatile` (Decoration 21),
-    /// i.e. a `volatile` buffer/image. NOTE: glslpp's own codegen never emits
+    /// i.e. a `volatile` buffer/image. NOTE: zioshade's own codegen never emits
     /// `Volatile` (the GLSL `volatile` qualifier is dropped at codegen), so this
     /// flag is only ever populated when reflecting EXTERNALLY-produced SPIR-V
     /// (e.g. glslang).
@@ -612,14 +612,14 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             .readonly = d.nonwritable,
             .writeonly = d.nonreadable,
             // coherent/volatile/restrict come from Coherent/Volatile/Restrict on
-            // the VARIABLE (how glslpp emits them, like readonly/writeonly).
+            // the VARIABLE (how zioshade emits them, like readonly/writeonly).
             .coherent = d.coherent,
             .is_volatile = d.is_volatile,
             .@"restrict" = d.@"restrict",
         };
 
         // Opaque resources (samplers / images / accel structs) are routed by their
-        // (de-arrayed) TYPE, not the storage class — glslpp emits sampler ARRAYS
+        // (de-arrayed) TYPE, not the storage class — zioshade emits sampler ARRAYS
         // with the `Uniform` (2) class rather than `UniformConstant` (0), so keying
         // purely on the storage class would mis-bucket a `sampler2D tex[4]` as a UBO.
         const is_opaque = switch (tk) {
@@ -738,12 +738,12 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
 /// Zig-struct reflection API are unchanged). Caller owns the returned slice and
 /// must free it with `alloc.free`.
 ///
-/// Schema mirrored (only the fields glslpp models): top-level `entryPoints`,
+/// Schema mirrored (only the fields zioshade models): top-level `entryPoints`,
 /// `types` (flat map keyed `_<id>`), `ubos`, `ssbos`, `push_constants`,
 /// `textures` (= sampled_images), `images` (= storage_images),
 /// `separate_images`, `separate_samplers`, `subpass_inputs`,
 /// `acceleration_structures`, `inputs`, `outputs`, and `specialization_constants`
-/// (glslpp-specific superset). Empty sections are omitted, matching spirv-cross.
+/// (zioshade-specific superset). Empty sections are omitted, matching spirv-cross.
 ///
 /// Struct types are emitted ONCE in `types`; resources and struct-typed members
 /// reference them by their `_<id>` key (the flat-map representation chosen for
@@ -815,7 +815,7 @@ pub fn toJson(alloc: std.mem.Allocator, res: *const ShaderResources) ![]u8 {
     try w.locationSection(&first_section, "inputs", res.inputs);
     try w.locationSection(&first_section, "outputs", res.outputs);
 
-    // specialization constants (glslpp superset; spirv-cross emits a similar list)
+    // specialization constants (zioshade superset; spirv-cross emits a similar list)
     if (res.specialization_constants.len != 0) {
         try w.sectionHeader(&first_section, "specialization_constants");
         try w.raw("[");
@@ -1073,7 +1073,7 @@ const JsonWriter = struct {
                 try self.raw(",\n      \"array\" : [ ");
                 try self.int(r.array_size);
                 // Descriptor arrays declared with a literal count (the only kind
-                // glslpp models here) pair `array` with `array_size_is_literal`,
+                // zioshade models here) pair `array` with `array_size_is_literal`,
                 // matching spirv-cross and the member serializer's shape.
                 try self.raw(" ],\n      \"array_size_is_literal\" : [ true ]");
             }

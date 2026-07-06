@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 // ============================================================
 // CLASSIFICATION TABLE — enumerate-fp run 2026-05-31 (CORRECTED)
@@ -10,7 +10,7 @@ const glslpp = @import("glslpp");
 //   (1) glslang construct verdict: `glslangValidator -V --aml --amb <fixture>`
 //       (--auto-map-locations/--auto-map-bindings strip the layout noise).
 //   (2) current conformance status (tolerate-compile + spirv-val): PASS means
-//       glslpp emits STRUCTURALLY-valid SPIR-V — but verify FAITHFULNESS too
+//       zioshade emits STRUCTURALLY-valid SPIR-V — but verify FAITHFULNESS too
 //       (e.g. `double` must emit OpTypeFloat 64; a builtin must emit its real
 //       instruction, not a silent substitute / OpUndef).
 //
@@ -34,7 +34,7 @@ const glslpp = @import("glslpp");
 //     shader-clock.frag (ARB/EXT clock), spv.nvAtomicFp16Vec.frag (NV fp16 atomics).
 //
 // BUCKET 3 — INVALID GLSL, silently MISCOMPILED (glslang REJECT real construct
-//   error + conf PASS) → strict-reject is CORRECT. These are glslpp-AUTHORED
+//   error + conf PASS) → strict-reject is CORRECT. These are zioshade-AUTHORED
 //   buggy fixtures (NOT canonical spirv-cross). USER DECISION: FIX to valid GLSL.
 //     global-var-funcs.frag + nested-funcalls.frag (functions nested in main()),
 //     crop_circle.frag (`flat` reserved keyword used as a var name),
@@ -63,7 +63,7 @@ test "harness self-test: compileToSPIRVStrict rejects a recorded error" {
         \\void main() { o = vec4(undeclared_xyz, 0.0, 0.0, 1.0); }
     ;
     // The strict arm is the enumerator's detection signal; it must fire.
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
 }
 
 test "fail-loud: a call to an undefined (declared-only) function is rejected" {
@@ -77,7 +77,7 @@ test "fail-loud: a call to an undefined (declared-only) function is rejected" {
         \\vec4 getColor();
         \\void main() { o = getColor(); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
 }
 
 test "fail-loud: a forward-referenced function (defined later) is accepted" {
@@ -91,7 +91,7 @@ test "fail-loud: a forward-referenced function (defined later) is accepted" {
         \\void main() { o = helper(); }
         \\vec4 helper() { return vec4(1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
 }
 
@@ -103,7 +103,7 @@ test "strict: user function with 1D array parameter is accepted" {
         \\float sum(float a[3]) { return a[0]+a[1]+a[2]; }
         \\void main() { float v[3]; v[0]=1.0; v[1]=2.0; v[2]=3.0; o = vec4(sum(v)); }
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
     _ = spirv;
 }
 
@@ -123,7 +123,7 @@ test "strict: user function with 2D array parameter is accepted (composite-const
         \\    as[0] = summe(vec4[][](a, b, c));
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
     _ = spirv;
 }
 
@@ -144,7 +144,7 @@ test "strict: user function with 2D array param + return (AofA fixture)" {
         \\    outfloat = g4[0][0];
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
     _ = spirv;
 }
 
@@ -167,7 +167,7 @@ test "strict: user function with 4-term 2D array expression (full composite-cons
         \\    as[0] = summe(vec4[][](values, copy_values, copy_values2));
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
     _ = spirv;
 }
 
@@ -191,7 +191,7 @@ test "strict: shared array sized by gl_WorkGroupSize.x is accepted" {
         \\    out_data[ident] = sShared[gl_WorkGroupSize.x - gl_LocalInvocationIndex - 1u];
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
     _ = spirv;
 }
 
@@ -216,7 +216,7 @@ test "strict: local array sized by a spec constant is accepted by the analyzer" 
     // the declaration and the variable was typed as a non-array scalar, so the
     // later element store failed with ctx=assign_op.
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, SPEC_SIZED_ARRAY_SRC, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, SPEC_SIZED_ARRAY_SRC, .{ .stage = .compute });
     _ = spirv;
 }
 
@@ -227,7 +227,7 @@ test "codegen: spec-const-sized local array emits OpTypeArray %specConstId (not 
     // pipeline overrides = silent-wrong). This guards the silent-wrong/regression
     // adjacent cases (multi-dim drop, const-int runtime-array) found in review.
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, SPEC_SIZED_ARRAY_SRC, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, SPEC_SIZED_ARRAY_SRC, .{ .stage = .compute });
     defer alloc.free(spirv);
 
     // Find the spec constant's result id via `OpDecorate <id> SpecId k` (op 71, decoration 1).
@@ -271,11 +271,11 @@ test "strict: multi-dim spec-const-sized local array is an honest error (not sil
         \\    v[0] = a[0][0] + a[1][1];
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
 }
 
 test "strict: a const-int-sized local array folds the const to its size (#170)" {
-    // `const int M = 4; int a[M];` — glslpp now folds a plain `const int` global
+    // `const int M = 4; int a[M];` — zioshade now folds a plain `const int` global
     // name to its initializer's value, so the local array gets a concrete size 4
     // and compiles to valid SPIR-V (no Function-storage OpTypeRuntimeArray). This
     // is valid GLSL that was previously honest-errored; the array-size resolver now
@@ -294,7 +294,7 @@ test "strict: a const-int-sized local array folds the const to its size (#170)" 
     ;
     // Strict mode fails loud on any false-positive; a clean return means the
     // const-int-sized array resolved and compiled without one.
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
     _ = spirv;
 }
 
@@ -315,7 +315,7 @@ test "strict: a self-referential const initializer honest-errors, not stack-over
         \\    v[0] = a[0];
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
 }
 
 test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compare fixture)" {
@@ -335,7 +335,7 @@ test "strict: not(bvec) / any(bvec) / all(bvec) builtins are accepted (vec_compa
         \\    gl_FragColor = vec4(r ? 1.0 : 0.0, s ? 1.0 : 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
     _ = spirv;
 }
 
@@ -351,7 +351,7 @@ test "flip: plain compileToSPIRV fails loud on a genuinely-broken shader" {
         \\layout(location=0) out vec4 o;
         \\void main() { o = vec4(undeclared_identifier_xyz, 0, 0, 1); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
 }
 
 test "flip: plain compileToSPIRV still accepts a valid shader" {
@@ -361,7 +361,7 @@ test "flip: plain compileToSPIRV still accepts a valid shader" {
         \\layout(location=0) out vec4 o;
         \\void main() { o = vec4(1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expect(spirv.len > 5);
 }
@@ -384,12 +384,12 @@ test "flip: fail-loud rejection after a completed user function leaks nothing" {
         \\float helper(float x) { return x * 2.0; }
         \\void main() { o = vec4(helper(1.0), undeclared_xyz, 0.0, 1.0); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
     // Pin the rejection to the *semantic* gate (not lex/parse): a function must
     // have been analyzed and recorded an error for the completed-function cleanup
     // path to be reachable. This keeps the guard from passing for the wrong reason
     // if error ordering ever changes.
-    try std.testing.expectEqual(@as(?glslpp.CompileDetail, .semantic_failed), glslpp.last_compile_detail);
+    try std.testing.expectEqual(@as(?zioshade.CompileDetail, .semantic_failed), zioshade.last_compile_detail);
 }
 
 test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
@@ -404,14 +404,14 @@ test "strict: SSBO block array (buffer {...} name[N]) is accepted" {
         \\}
     ;
     // tolerate-mode must compile without error
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .compute });
     defer alloc.free(spirv);
     try std.testing.expect(spirv.len > 5);
 
     // strict mode must also accept this valid construct (RED: currently rejects with UndeclaredIdentifier).
     // compileToSPIRVStrict is enumeration-only (returns empty slice on success), so we just check
     // it does NOT return an error.
-    const spirv_strict = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    const spirv_strict = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
     // strict returns &[_]u32{} on success (enumeration-only path — no codegen); just verify no error.
     _ = spirv_strict;
 }
@@ -435,7 +435,7 @@ test "strict: outerProduct(vec2, vec3) produces mat3x2 (non-square matrix)" {
         \\    fragColor = vec4(m[0].x, m[0].y, m[1].x, 1.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -460,7 +460,7 @@ test "strict: for-loop with empty update and precision qualifier init (mediump i
         \\    }
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -478,7 +478,7 @@ test "strict: gl_MaxTextureImageUnits and gl_MaxCombinedTextureImageUnits" {
         \\    fragColor = vec4(a, b, 0.0, 1.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -498,7 +498,7 @@ test "strict: textureGatherOffsets with global const ivec2[4] offsets" {
         \\    fragColor = g;
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -520,7 +520,7 @@ test "strict: SSBO array member swizzle compound-assign (p[id].vel.xyz += ...)" 
         \\    p[id].pos.xyz += p[id].vel.xyz * 0.01;
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -538,7 +538,7 @@ test "strict: partial swizzle compound-assign writes the correct components (reg
         \\layout(location=0) out vec4 o;
         \\void main() { vec4 col = inCol; col.rgb *= 2.0; o = col; }
         ;
-    const spv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     var i: usize = 5;
     var verified_merge = false;
@@ -575,7 +575,7 @@ test "strict: pixel_interlock_ordered extension and SPIRV_Cross macro pattern" {
     // for supported extensions.
     const alloc = std.testing.allocator;
     const src = @embedFile("spirv_cross_shaders/pixel-interlock-ordered.frag");
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -598,9 +598,9 @@ test "F1: double type yields a named honest unsupported error (not UndeclaredIde
         \\layout(location=0) out vec4 o;
         \\void main() { double d = 0.0; o = vec4(float(d)); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
-    const ctx = glslpp.lastErrorCtx() orelse "";
-    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = zioshade.lastErrorCtx() orelse "";
+    const inner = zioshade.lastErrorInner() orelse "";
     // The error must NAME the unsupported 64-bit construct — NOT "UndeclaredIdentifier".
     // ctx or inner must contain "64" or "double".
     const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, ctx, "double") != null
@@ -618,9 +618,9 @@ test "F1: int64_t yields a named honest unsupported error" {
         \\layout(location=0) out vec4 o;
         \\void main() { int64_t n = 5; o = vec4(float(n)); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
-    const ctx = glslpp.lastErrorCtx() orelse "";
-    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = zioshade.lastErrorCtx() orelse "";
+    const inner = zioshade.lastErrorInner() orelse "";
     try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "int64") != null or std.mem.indexOf(u8, inner, "64") != null);
 }
 
@@ -630,7 +630,7 @@ test "F1: int64_t yields a named honest unsupported error" {
 // struct, and `vec3(dpos)` then emitted `OpCompositeConstruct %float <struct>` =
 // INVALID SPIR-V at rc=0 (spirv-val: "Expected Result Type to be a composite type";
 // naga: "cannot cast a v1 to a f32") — a silent-wrong. glslang accepts the GLSL,
-// so glslpp must honest-error rather than mis-compile.
+// so zioshade must honest-error rather than mis-compile.
 test "F1: dvec3 input variable yields a named honest error (not invalid SPIR-V)" {
     const alloc = std.testing.allocator;
     const src =
@@ -638,9 +638,9 @@ test "F1: dvec3 input variable yields a named honest error (not invalid SPIR-V)"
         \\layout(location=0) in dvec3 dpos;
         \\void main() { vec3 p = vec3(dpos); gl_Position = vec4(p, 1.0); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .vertex }));
-    const ctx = glslpp.lastErrorCtx() orelse "";
-    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .vertex }));
+    const ctx = zioshade.lastErrorCtx() orelse "";
+    const inner = zioshade.lastErrorInner() orelse "";
     const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "dvec") != null or std.mem.indexOf(u8, inner, "64") != null;
     try std.testing.expect(names_it);
 }
@@ -659,9 +659,9 @@ test "F1: double-array global yields a named honest error (not invalid SPIR-V)" 
         \\layout(location=0) out vec4 o;
         \\void main() { o = vec4(float(K[0])); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
-    const ctx = glslpp.lastErrorCtx() orelse "";
-    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = zioshade.lastErrorCtx() orelse "";
+    const inner = zioshade.lastErrorInner() orelse "";
     try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null);
 }
 
@@ -679,9 +679,9 @@ test "F1: double uniform-block member yields a named honest error (not invalid S
         \\layout(location = 0) out vec4 o;
         \\void main() { o = vec4(float(u.d)); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
-    const ctx = glslpp.lastErrorCtx() orelse "";
-    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = zioshade.lastErrorCtx() orelse "";
+    const inner = zioshade.lastErrorInner() orelse "";
     const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "dvec") != null or std.mem.indexOf(u8, inner, "64") != null;
     try std.testing.expect(names_it);
 }
@@ -698,9 +698,9 @@ test "F1: double-array SSBO member yields a named honest error" {
         \\layout(std430, binding = 0) buffer B { double vals[]; };
         \\void main() { vals[0] = vals[1]; }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute }));
-    const inner = glslpp.lastErrorInner() orelse "";
-    const ctx = glslpp.lastErrorCtx() orelse "";
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute }));
+    const inner = zioshade.lastErrorInner() orelse "";
+    const ctx = zioshade.lastErrorCtx() orelse "";
     try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null);
 }
 
@@ -710,7 +710,7 @@ test "F1: double-array SSBO member yields a named honest error" {
 // (m.ior) emitted INVALID SPIR-V at rc=0 (spirv-val: "Expected Result Type to be
 // a composite type"; naga: "cannot cast a v0 to a f32"). Honest-error at the
 // struct definition (catches every use: global/local/param). glslang accepts the
-// GLSL, so glslpp must honest-error rather than mis-compile. Unwrap array bases so
+// GLSL, so zioshade must honest-error rather than mis-compile. Unwrap array bases so
 // a `double a[2]` member is caught too.
 test "F1: double struct member yields a named honest error (not invalid SPIR-V)" {
     const alloc = std.testing.allocator;
@@ -721,9 +721,9 @@ test "F1: double struct member yields a named honest error (not invalid SPIR-V)"
         \\layout(location = 0) out vec4 o;
         \\void main() { o = vec4(m.albedo, float(m.ior)); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
-    const ctx = glslpp.lastErrorCtx() orelse "";
-    const inner = glslpp.lastErrorInner() orelse "";
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    const ctx = zioshade.lastErrorCtx() orelse "";
+    const inner = zioshade.lastErrorInner() orelse "";
     try std.testing.expect(std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null);
 }
 
@@ -750,7 +750,7 @@ test "strict: imageSize/textureSize result dims match operand rank (no false-pos
         \\    o = vec4(float(a + e), float(c.x + d.x), float(f.x + g.x), 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expect(!containsOpcode(spirv, 1));
 }
@@ -762,13 +762,13 @@ test "strict: not() on a non-boolean operand fails loud (no silent-wrong)" {
         \\layout(location = 0) out vec4 o;
         \\void main() { o = vec4(float(not(3.0))); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, bad_float, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, bad_float, .{ .stage = .fragment }));
     const bad_scalar =
         \\#version 450
         \\layout(location = 0) out vec4 o;
         \\void main() { bool b = true; o = vec4(float(not(b))); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, bad_scalar, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, bad_scalar, .{ .stage = .fragment }));
 }
 
 // ============================================================
@@ -812,9 +812,9 @@ test "strict: GL_EXT_fragment_shader_barycentric (pervertexEXT + gl_BaryCoordEXT
         \\}
     ;
     // (1) modeled, not failed-loud
-    _ = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    _ = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
     // (2) faithful SPIR-V
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expect(hasCapability(spirv, CAP_FRAGMENT_BARYCENTRIC_KHR));
     try std.testing.expect(hasBuiltInDecoration(spirv, BUILTIN_BARY_COORD_KHR));
@@ -835,8 +835,8 @@ test "strict: GL_NV_fragment_shader_barycentric (pervertexNV + gl_BaryCoordNV) i
         \\    value += gl_BaryCoordNoPerspNV.x * vUV2[0] + gl_BaryCoordNoPerspNV.y * vUV2[1] + gl_BaryCoordNoPerspNV.z * vUV2[2];
         \\}
     ;
-    _ = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    _ = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     // glslang canonicalizes the NV forms to the KHR capability/builtins;
     // only the OpExtension string differs (SPV_NV_…). So the same numeric
@@ -866,8 +866,8 @@ test "strict: barycentric per-vertex interface block array (pervertexEXT in Foo 
         \\    value += gl_BaryCoordEXT.z * foo[1].a;
         \\}
     ;
-    _ = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    _ = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expect(hasCapability(spirv, CAP_FRAGMENT_BARYCENTRIC_KHR));
     try std.testing.expect(hasBuiltInDecoration(spirv, BUILTIN_BARY_COORD_KHR));
@@ -898,7 +898,7 @@ test "strict: plain fragment input interface block gets OpDecorate Block (not ba
         \\layout(location=2) in Foo { vec2 a; vec2 b; } foo;
         \\void main(){ value = foo.a + foo.b; }
     ;
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     // Block = decoration value 2 (only ever valid on an OpTypeStruct). The shader
     // has no UBO/SSBO, so the only Block must be on the in-block struct Foo.
@@ -919,7 +919,7 @@ test "strict: a plain struct used as an IO variable is NOT Block-decorated (fait
         \\layout(location=0) out vec4 fragColor;
         \\void main(){ fragColor = iblk.a + vec4(iblk.b, 0.0, 0.0); }
     ;
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectEqual(@as(usize, 0), countPlainDecoration(spirv, 2));
 }
@@ -941,7 +941,7 @@ test "strict: struct shared by a UBO member and a plain IO var is not double-Blo
         \\layout(location=0) out vec4 fragColor;
         \\void main(){ fragColor = ubo.s.a + ubo.tail + iblk.a + vec4(iblk.b, 0.0, 0.0); }
     ;
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     // Exactly one Block — the UBO. If the shared struct Sub were also Block-decorated
     // this would be 2 (and the module would be invalid SPIR-V).
@@ -1041,7 +1041,7 @@ fn containsOpcode(spirv: []const u32, opcode: u16) bool {
 //   (compute SSBO/UBO/shared blocks and the brace-less `layout(local_size_x) in;`
 //    are NOT interface blocks here and stay valid.)
 //
-// glslpp previously SILENTLY ACCEPTED the illegal combos and emitted
+// zioshade previously SILENTLY ACCEPTED the illegal combos and emitted
 // `OpDecorate %Blk Block` for an interface no GLSL compiler would produce
 // (noticed during PR #247). These guard the honest-reject; the reject tests pin
 // lastErrorCtx() == "interface-block-invalid-stage" so they cannot pass for an
@@ -1057,11 +1057,11 @@ test "strict: fragment OUTPUT interface block is an honest error (invalid GLSL)"
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(bar.a, 0.0, 1.0); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
     // The flipped fail-loud plain API must also reject it (not emit silent SPIR-V).
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
     // Pin the rejection to THIS check (not an unrelated error) — false-green guard.
-    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", zioshade.lastErrorCtx() orelse "");
 }
 
 test "strict: vertex INPUT interface block is an honest error (invalid GLSL)" {
@@ -1072,9 +1072,9 @@ test "strict: vertex INPUT interface block is an honest error (invalid GLSL)" {
         \\in Bar { vec2 a; } bar;
         \\void main(){ gl_Position = vec4(bar.a, 0.0, 1.0); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .vertex }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .vertex }));
-    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .vertex }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .vertex }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", zioshade.lastErrorCtx() orelse "");
 }
 
 test "strict: vertex OUTPUT interface block is accepted (valid GLSL)" {
@@ -1085,9 +1085,9 @@ test "strict: vertex OUTPUT interface block is accepted (valid GLSL)" {
         \\out Bar { vec2 a; } bar;
         \\void main(){ bar.a = vec2(1.0); gl_Position = vec4(0.0); }
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .vertex });
     _ = spirv;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .vertex });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .vertex });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -1101,9 +1101,9 @@ test "strict: fragment INPUT interface block is accepted (valid GLSL)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(bar.a, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment });
     _ = spirv;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }
@@ -1117,9 +1117,9 @@ test "strict: compute OUTPUT interface block is an honest error (invalid GLSL)" 
         \\out Bar { vec2 a; } bar;
         \\void main(){ bar.a = vec2(1.0); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute }));
-    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", zioshade.lastErrorCtx() orelse "");
 }
 
 test "strict: compute INPUT interface block is an honest error (invalid GLSL)" {
@@ -1135,9 +1135,9 @@ test "strict: compute INPUT interface block is an honest error (invalid GLSL)" {
         \\layout(std430, binding=0) buffer B { vec2 o; };
         \\void main(){ o = bar.a; }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute }));
-    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", zioshade.lastErrorCtx() orelse "");
 }
 
 test "strict: fragment OUTPUT interface block ARRAY instance is an honest error" {
@@ -1151,9 +1151,9 @@ test "strict: fragment OUTPUT interface block ARRAY instance is an honest error"
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(bar[0].a, 0.0, 1.0); }
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
-    try std.testing.expectEqualStrings("interface-block-invalid-stage", glslpp.lastErrorCtx() orelse "");
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+    try std.testing.expectEqualStrings("interface-block-invalid-stage", zioshade.lastErrorCtx() orelse "");
 }
 
 test "strict: compute SSBO + UBO blocks remain accepted (not interface blocks)" {
@@ -1168,9 +1168,9 @@ test "strict: compute SSBO + UBO blocks remain accepted (not interface blocks)" 
         \\layout(binding=1) uniform U { vec4 c; };
         \\void main(){ data[0] = c; }
     ;
-    const spirv = try glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .compute });
     _ = spirv;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .compute });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .compute });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
 }

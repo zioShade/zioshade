@@ -2253,7 +2253,7 @@ const Analyzer = struct {
                 // to a member-less OpTypeStruct, and any use (e.g. `in dvec3 p` then
                 // `vec3(p)`) emits invalid SPIR-V at rc=0 (spirv-val rejects; naga
                 // rejects) = silent-wrong. Honest-error here, mirroring the local
-                // var_decl path (analyzeNode .var_decl) and matching glslpp's stance
+                // var_decl path (analyzeNode .var_decl) and matching zioshade's stance
                 // that 64-bit types are unsupported (WGSL has no f64/i64 either).
                 // Unwrap array bases so `uniform double K[2]` / `const double[]` are
                 // caught too (the type is `.array` whose base is the 64-bit type).
@@ -2578,7 +2578,7 @@ const Analyzer = struct {
                 // Equivalently: an INPUT block is illegal in vertex/compute, and an
                 // OUTPUT block is illegal in fragment/compute. Geometry, tessellation
                 // (control/eval) and mesh legitimately carry BOTH directions, so they
-                // are NOT checked. glslpp otherwise silently accepts these illegal
+                // are NOT checked. zioshade otherwise silently accepts these illegal
                 // blocks and emits `OpDecorate %Blk Block` for an interface no GLSL
                 // compiler would produce (noticed in PR #247). Only `in`/`out`
                 // qualifiers reach storage_class .input/.output here — push_constant,
@@ -3422,7 +3422,7 @@ const Analyzer = struct {
                         // u64-max parses to the sentinel -1). The OpSwitch literal is
                         // a 32-bit word, so mirror literalWord: reinterpret as u64 and
                         // reject magnitudes that don't fit a 32-bit word rather than
-                        // @intCast-panicking. glslpp has no 64-bit integer type, so a
+                        // @intCast-panicking. zioshade has no 64-bit integer type, so a
                         // case label > 0xFFFFFFFF is genuinely out of range; truncating
                         // it could silently alias two distinct labels (Mitchell silent-
                         // wrong), so we error honestly instead.
@@ -4250,7 +4250,7 @@ const Analyzer = struct {
     ///
     /// `@bitCast` i64->u64 is a lossless reinterpret; `@truncate` then takes the low
     /// 32 bits and never panics. We refuse values whose magnitude does not fit in a
-    /// 32-bit word (> 0xFFFFFFFF): glslpp has no 64-bit integer type, so a literal
+    /// 32-bit word (> 0xFFFFFFFF): zioshade has no 64-bit integer type, so a literal
     /// like `999999999999999999u` (from a u64vec4 constructor) is genuinely out of
     /// range. Truncating it would emit a silently-wrong constant; instead we record
     /// a semantic error. The `<= 0xFFFFFFFF` bound is the largest losslessly-
@@ -5603,7 +5603,7 @@ const Analyzer = struct {
                     }
                     // Only take the OpMatrixTimesScalar path when the scalar is genuinely
                     // float. An unconvertible scalar (double/float16 — whose matrix ops
-                    // glslpp does not yet support) would otherwise feed a mismatched
+                    // zioshade does not yet support) would otherwise feed a mismatched
                     // component type into OpMatrixTimesScalar; leave it to the generic
                     // path rather than emit a differently-invalid op.
                     if (value_ty == .float) {
@@ -7192,7 +7192,7 @@ const Analyzer = struct {
                                 // OpImageGather Component operand to be a 32-bit int
                                 // scalar. Passing a float/vec component through unchecked
                                 // emitted `OpImageGather … %float_x` — invalid SPIR-V that
-                                // spirv-val rejects while glslpp reported success
+                                // spirv-val rejects while zioshade reported success
                                 // (silent-wrong). glslangValidator -V rejects such shaders,
                                 // so fail loudly here instead of emitting garbage. (Shadow
                                 // gather's 3rd arg is the float refz — not a component — so
@@ -7383,7 +7383,7 @@ const Analyzer = struct {
                             // perspective divide needs a homogeneous coordinate, and
                             // SPIR-V's OpImageSampleProj* require Dim 1D/2D/3D/Rect (not
                             // Cube). GLSL has no cube textureProj* overload either
-                            // (glslang: "no matching overloaded function"). glslpp used to
+                            // (glslang: "no matching overloaded function"). zioshade used to
                             // emit invalid SPIR-V ("Expected Image 'Dim' to be 1D, 2D, 3D
                             // or Rect"); honest-error instead. (#170)
                             if ((is_proj or is_proj_lod or is_proj_grad or is_proj_lod_offset or is_proj_grad_offset or is_proj_offset) and
@@ -8436,7 +8436,7 @@ const Analyzer = struct {
                         .operands = operands,
                         .ty = result_ty,
                     });
-                    // #234: glslpp emits a real OpFunctionCall (no inlining at semantic
+                    // #234: zioshade emits a real OpFunctionCall (no inlining at semantic
                     // time) and has no cross-function memory-effect summary, so a callee
                     // that runs a barrier/atomic/store — or mutates an out/inout pointer
                     // arg — is invisible to the caller's per-call-frame load cache. A
@@ -10703,7 +10703,7 @@ test "semantic: out-of-range uint literal errors instead of panicking" {
     // RED for the @intCast(i64 -> u32) panic at the uint_literal lowering site.
     // 999999999999999999 (from int64.desktop.comp's u64vec4 literal) fits in i64
     // but is ~8 orders of magnitude beyond u32 max, so @intCast panicked with
-    // "integer does not fit in destination type". glslpp has no 64-bit integer
+    // "integer does not fit in destination type". zioshade has no 64-bit integer
     // type, so silently truncating to the low 32 bits would emit a garbage
     // constant word — the Mitchell silent-wrong failure mode. Correct behavior:
     // record a semantic error (no panic, no silent-wrong output).
@@ -10733,7 +10733,7 @@ test "semantic: u64-range uint literal errors instead of silently becoming 0" {
     // 18446744073709551615u (u64 max) overflows i64, so the parser's catch
     // fell back to int_val = 0 — a silently-wrong constant that literalWord
     // happily accepted as a valid zero, BEFORE its >0xFFFFFFFF honest-error
-    // check ever saw the real magnitude. glslpp has no 64-bit integer type,
+    // check ever saw the real magnitude. zioshade has no 64-bit integer type,
     // so this literal is genuinely out of range and MUST error, not compile
     // to a bogus 0.
     const source = "void main() { uint x = 18446744073709551615u; }";
@@ -11051,7 +11051,7 @@ test "semantic: out-of-32-bit switch-case literal errors instead of panicking" {
     // semantic.zig:2430), fed by evalConstInt (:2397) rather than literalWord.
     // 18446744073709551615u (u64 max) is parsed to the sentinel i64 -1; the case
     // path then did `.literal_int = @intCast(v)` with v == -1, which PANICS with
-    // "integer does not fit in destination type" (a u32 cannot hold -1). glslpp
+    // "integer does not fit in destination type" (a u32 cannot hold -1). zioshade
     // has no 64-bit integer type, so this case label is genuinely out of range.
     // Correct behavior: an honest semantic error (no panic, no silent-wrong
     // aliasing of two distinct labels via truncation).
@@ -11399,14 +11399,14 @@ test "semantic: tolerate mode continues past first statement error" {
 // branch where `glslExtInstruction(name)` returns null. The buggy `orelse 1`
 // there defaulted the opcode to 1 (Round) and emitted an `OpExtInst` with the
 // call's full argument list — a malformed instruction that `spirv-val` rejects
-// while glslpp reported exit 0 (the Mitchell silent-wrong failure mode). The
+// while zioshade reported exit 0 (the Mitchell silent-wrong failure mode). The
 // texture builtins that exercised this (textureProjLod/Grad, textureGradOffset)
 // are all lowered now; only the VECTOR form of umul/imulExtended remains unlowered.
 //
 // Correct behavior (honest error): in the strict (non-tolerate) analyze path
 // these must return error.SemanticFailed, never a module containing a bogus
 // ext_inst. glslangValidator -V accepts these shaders, so they ARE valid GLSL —
-// glslpp must either lower them correctly or fail loudly, never emit garbage.
+// zioshade must either lower them correctly or fail loudly, never emit garbage.
 //
 // NOTE: textureGatherOffsets USED to be in this unlowerable class but is now
 // correctly lowered to OpImageGather + ConstOffsets (see the gap/builtin-reg
@@ -11557,10 +11557,10 @@ test "semantic: non-shadow textureGather stays image_gather (no over-broadening 
 // id straight into the operands with no type check, so a FLOAT component
 // (`textureGather(s, uv, 0.5)`) produced `OpImageGather %v4float %img %coord
 // %float_0_5` — invalid SPIR-V that `spirv-val` rejects ("Expected Component to
-// be 32-bit int scalar") while glslpp reported exit 0. That is the Mitchell
+// be 32-bit int scalar") while zioshade reported exit 0. That is the Mitchell
 // silent-wrong failure mode: success + invalid output. glslangValidator -V
 // REJECTS the float-component shader ("no matching overloaded function found"),
-// so glslpp must fail loudly too, never emit garbage SPIR-V.
+// so zioshade must fail loudly too, never emit garbage SPIR-V.
 
 test "semantic: non-shadow textureGather with float component errors (no float Component in OpImageGather)" {
     const source =
@@ -11677,7 +11677,7 @@ test "semantic: non-shadow textureGather 2-arg form (default component) still lo
 // (semantic.zig:1733) BEFORE any analyzeExpression/literalWord runs on it. Its
 // int_literal/uint_literal branches previously did a raw `@intCast(int_val)`
 // (i64 -> u32), which PANICS ("integer does not fit in destination type") for a
-// literal whose magnitude exceeds the 32-bit word range. glslpp has no 64-bit
+// literal whose magnitude exceeds the 32-bit word range. zioshade has no 64-bit
 // integer type, so such a literal is genuinely out of range and MUST produce an
 // honest error, never crash the compiler. These RED tests pin that behavior for
 // both the pure-literal and spec-derived initializer forms.

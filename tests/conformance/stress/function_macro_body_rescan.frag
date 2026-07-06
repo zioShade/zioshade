@@ -1,7 +1,7 @@
 // Tests: a function-like macro whose body calls another macro (#170). The C
 // preprocessor RESCANS a macro's replacement for further macros, so
 // `#define WRAP(z) ADD(SQ(z), 1.0)` expands to `ADD(SQ(t), 1.0)` and that
-// `ADD(...)`/`SQ(...)` must then expand too. glslpp emitted the substituted body
+// `ADD(...)`/`SQ(...)` must then expand too. zioshade emitted the substituted body
 // raw, so the body's macro calls reached the parser undefined. Completes the
 // rescan started for object-macro bodies (#385) and argument pre-expansion (#384).
 #version 450

@@ -2,13 +2,13 @@
 // Real-world corpus walker.
 //
 // Walks `tests/external/` for `.frag` / `.vert` / `.comp` / `.glsl` files and
-// runs each through the full glslpp pipeline:
+// runs each through the full zioshade pipeline:
 //
 //   GLSL → SPIR-V → {GLSL, HLSL, MSL, WGSL} cross-compile
 //
 // If `naga` is on PATH, the emitted WGSL is also piped through
 // `naga --input-kind wgsl` as an external sanity check. If naga isn't
-// available the runner still walks the corpus and reports the glslpp-side
+// available the runner still walks the corpus and reports the zioshade-side
 // PASS/FAIL — the external validation step just shows up as "skipped".
 //
 // Output is per-shader (PASS / FAIL with reason) plus a per-backend summary
@@ -18,7 +18,7 @@
 //     mise exec -- zig build test-realworld
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const Backend = enum {
     spirv,
@@ -44,7 +44,7 @@ const BackendStatus = enum { pass, fail, skip };
 
 const PerShaderResult = struct {
     path: []const u8,
-    stage: glslpp.Stage,
+    stage: zioshade.Stage,
     statuses: [6]BackendStatus,
     messages: [6]?[]const u8, // owned by `alloc`, indexed by @intFromEnum(Backend)
 
@@ -131,14 +131,14 @@ fn lessThanPath(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.lessThan(u8, a, b);
 }
 
-fn detectStage(path: []const u8) ?glslpp.Stage {
+fn detectStage(path: []const u8) ?zioshade.Stage {
     if (std.mem.endsWith(u8, path, ".vert")) return .vertex;
     if (std.mem.endsWith(u8, path, ".frag")) return .fragment;
     if (std.mem.endsWith(u8, path, ".comp")) return .compute;
     return null;
 }
 
-fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: glslpp.Stage, naga_available: bool) PerShaderResult {
+fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: zioshade.Stage, naga_available: bool) PerShaderResult {
     var result: PerShaderResult = .{
         .path = alloc.dupe(u8, path) catch unreachable,
         .stage = stage,
@@ -171,8 +171,8 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: glslpp.Stage, na
     const source: [:0]const u8 = buf.items[0 .. buf.items.len - 1 :0];
 
     // Stage 1: GLSL → SPIR-V
-    const spv = glslpp.compileToSPIRV(alloc, source, .{ .stage = stage }) catch |err| {
-        const detail = glslpp.last_compile_detail;
+    const spv = zioshade.compileToSPIRV(alloc, source, .{ .stage = stage }) catch |err| {
+        const detail = zioshade.last_compile_detail;
         result.statuses[@intFromEnum(Backend.spirv)] = .fail;
         result.messages[@intFromEnum(Backend.spirv)] = std.fmt.allocPrint(
             alloc,
@@ -185,7 +185,7 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: glslpp.Stage, na
     result.statuses[@intFromEnum(Backend.spirv)] = .pass;
 
     // Stage 2: GLSL
-    if (glslpp.spirvToGLSL(alloc, spv, .{})) |s| {
+    if (zioshade.spirvToGLSL(alloc, spv, .{})) |s| {
         alloc.free(s);
         result.statuses[@intFromEnum(Backend.glsl)] = .pass;
     } else |err| {
@@ -194,7 +194,7 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: glslpp.Stage, na
     }
 
     // Stage 3: HLSL
-    if (glslpp.spirvToHLSL(alloc, spv, .{})) |s| {
+    if (zioshade.spirvToHLSL(alloc, spv, .{})) |s| {
         alloc.free(s);
         result.statuses[@intFromEnum(Backend.hlsl)] = .pass;
     } else |err| {
@@ -203,7 +203,7 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: glslpp.Stage, na
     }
 
     // Stage 4: MSL
-    if (glslpp.spirvToMSL(alloc, spv, .{})) |s| {
+    if (zioshade.spirvToMSL(alloc, spv, .{})) |s| {
         alloc.free(s);
         result.statuses[@intFromEnum(Backend.msl)] = .pass;
     } else |err| {
@@ -212,7 +212,7 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: glslpp.Stage, na
     }
 
     // Stage 5: WGSL (+ naga)
-    if (glslpp.spirvToWGSL(alloc, spv, .{})) |wgsl| {
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |wgsl| {
         defer alloc.free(wgsl);
         result.statuses[@intFromEnum(Backend.wgsl)] = .pass;
         if (naga_available) {

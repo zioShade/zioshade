@@ -1,23 +1,23 @@
-//! Head-to-head benchmark: glslpp (in-process Zig library) vs glslang +
+//! Head-to-head benchmark: zioshade (in-process Zig library) vs glslang +
 //! spirv-cross (invoked as subprocess CLIs). Emits a markdown table.
 //!
 //! This is a *workflow* comparison: most projects integrate the C++ pipeline
-//! by spawning the CLI tools per shader. glslpp avoids that by being an
+//! by spawning the CLI tools per shader. zioshade avoids that by being an
 //! in-process library. A library-vs-library comparison would require linking
 //! libglslang.a + libspirv-cross.a, which the Zig build does not do.
 //!
 //! Build with:  zig build bench-compare
 //! Override toolchain paths via env vars:
-//!   GLSLPP_BENCH_GLSLANG   — path to glslangValidator(.exe)
-//!   GLSLPP_BENCH_SPIRVX    — path to spirv-cross(.exe)
+//!   ZIOSHADE_BENCH_GLSLANG   — path to glslangValidator(.exe)
+//!   ZIOSHADE_BENCH_SPIRVX    — path to spirv-cross(.exe)
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const Shader = struct {
     name: []const u8,
     source: [:0]const u8,
-    stage: glslpp.Stage = .fragment,
+    stage: zioshade.Stage = .fragment,
 };
 
 const SHADERS = [_]Shader{
@@ -107,20 +107,20 @@ fn findTool(env_name: []const u8, default_name: []const u8, alloc: std.mem.Alloc
     return alloc.dupe(u8, default_name);
 }
 
-fn benchGlslpp(alloc: std.mem.Allocator, shader: Shader) !Stats {
+fn benchZioshade(alloc: std.mem.Allocator, shader: Shader) !Stats {
     var stats: Stats = .{};
     var w: u64 = 0;
     while (w < WARMUP) : (w += 1) {
-        const spirv = glslpp.compileToSPIRV(alloc, shader.source, .{ .stage = shader.stage }) catch return error.WarmupFailed;
+        const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = shader.stage }) catch return error.WarmupFailed;
         alloc.free(spirv);
     }
     var total_ns: u128 = 0;
     var iter: u64 = 0;
     while (iter < ITERS) : (iter += 1) {
         const start = std.time.Instant.now() catch continue;
-        const spirv = try glslpp.compileToSPIRV(alloc, shader.source, .{ .stage = shader.stage });
+        const spirv = try zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = shader.stage });
         defer alloc.free(spirv);
-        const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
+        const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
         defer alloc.free(hlsl);
         const end = std.time.Instant.now() catch continue;
         const dur_ns: u64 = end.since(start);
@@ -209,9 +209,9 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const glslang = try findTool("GLSLPP_BENCH_GLSLANG", "glslangValidator", alloc);
+    const glslang = try findTool("ZIOSHADE_BENCH_GLSLANG", "glslangValidator", alloc);
     defer alloc.free(glslang);
-    const spirvx = try findTool("GLSLPP_BENCH_SPIRVX", "spirv-cross", alloc);
+    const spirvx = try findTool("ZIOSHADE_BENCH_SPIRVX", "spirv-cross", alloc);
     defer alloc.free(spirvx);
 
     // Temp dir for subprocess inputs.
@@ -221,7 +221,7 @@ pub fn main() !void {
     const sysroot_tmp = std.process.getEnvVarOwned(tmp_alloc, "TEMP") catch
         std.process.getEnvVarOwned(tmp_alloc, "TMPDIR") catch
         try tmp_alloc.dupe(u8, "/tmp");
-    const tmpdir = try std.fmt.allocPrint(tmp_alloc, "{s}{s}glslpp-bench-{d}", .{ sysroot_tmp, std.fs.path.sep_str, std.time.timestamp() });
+    const tmpdir = try std.fmt.allocPrint(tmp_alloc, "{s}{s}zioshade-bench-{d}", .{ sysroot_tmp, std.fs.path.sep_str, std.time.timestamp() });
     std.fs.makeDirAbsolute(tmpdir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
@@ -234,15 +234,15 @@ pub fn main() !void {
         }
     };
 
-    try out.print("# glslpp vs glslang+spirv-cross benchmark\n\n", .{});
+    try out.print("# zioshade vs glslang+spirv-cross benchmark\n\n", .{});
     try out.print("- Iterations per shader: {d} (after {d} warmup)\n", .{ ITERS, WARMUP });
-    try out.print("- glslpp: in-process Zig library call (GLSL → SPIR-V → HLSL SM 6.0)\n", .{});
+    try out.print("- zioshade: in-process Zig library call (GLSL → SPIR-V → HLSL SM 6.0)\n", .{});
     try out.print("- reference: `{s}` + `{s}` invoked as subprocess CLIs (same pipeline)\n\n", .{ glslang, spirvx });
-    try out.print("| Shader | glslpp avg | glslpp min | reference avg | reference min | speedup (avg) | HLSL bytes glslpp / ref |\n", .{});
+    try out.print("| Shader | zioshade avg | zioshade min | reference avg | reference min | speedup (avg) | HLSL bytes zioshade / ref |\n", .{});
     try out.print("|---|---:|---:|---:|---:|---:|---:|\n", .{});
 
     for (SHADERS) |sh| {
-        const g = benchGlslpp(alloc, sh) catch |err| {
+        const g = benchZioshade(alloc, sh) catch |err| {
             try out.print("| {s} | ERR: {s} | | | | | |\n", .{ sh.name, @errorName(err) });
             continue;
         };
@@ -262,7 +262,7 @@ pub fn main() !void {
     }
 
     try out.print("\n", .{});
-    try out.print("> **Caveat:** this benchmark compares **in-process glslpp** to **subprocess glslang+spirv-cross**. ", .{});
+    try out.print("> **Caveat:** this benchmark compares **in-process zioshade** to **subprocess glslang+spirv-cross**. ", .{});
     try out.print("Most projects integrate the C++ pipeline by spawning these CLI tools, so this matches real-world workflow cost. ", .{});
     try out.print("Most of the gap is process-spawn overhead; a true library-vs-library comparison ", .{});
     try out.print("(linking libglslang.a + libspirv-cross.a) is not yet published.\n", .{});

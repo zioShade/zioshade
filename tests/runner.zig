@@ -1,6 +1,6 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
-const compat = glslpp.compat;
+const zioshade = @import("zioshade");
+const compat = zioshade.compat;
 
 const Result = enum { pass, fail, skip, compile_error };
 
@@ -131,7 +131,7 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     defer alloc.free(source_z);
 
     // Detect stage from file extension
-    const stage: glslpp.Stage = blk: {
+    const stage: zioshade.Stage = blk: {
         if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
             break :blk .vertex
         else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
@@ -163,13 +163,13 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     };
 
     // Compile GLSL -> SPIR-V
-    const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+    const spirv_ver: zioshade.SPIRVVersion = if (stage == .mesh or stage == .task or
         stage == .raygen or stage == .closesthit or stage == .miss or
         stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
-    const words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch {
-        const detail = glslpp.last_compile_detail orelse .semantic_failed;
-        const ctx = glslpp.lastErrorCtx() orelse "";
-        const inner = glslpp.lastErrorInner() orelse "";
+    const words = zioshade.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch {
+        const detail = zioshade.last_compile_detail orelse .semantic_failed;
+        const ctx = zioshade.lastErrorCtx() orelse "";
+        const inner = zioshade.lastErrorInner() orelse "";
         std.debug.print("  COMPILE-{} {s} ctx={s} inner={s}\n", .{ detail, @tagName(detail), ctx, inner });
         return .compile_error;
     };
@@ -252,7 +252,7 @@ fn enumerateShader(
     defer alloc.free(source_z);
 
     // Detect stage from file extension
-    const stage: glslpp.Stage = blk: {
+    const stage: zioshade.Stage = blk: {
         if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
             break :blk .vertex
         else if (std.mem.endsWith(u8, path, ".comp") or std.mem.endsWith(u8, path, ".c.glsl"))
@@ -283,23 +283,23 @@ fn enumerateShader(
             break :blk .fragment;
     };
 
-    const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+    const spirv_ver: zioshade.SPIRVVersion = if (stage == .mesh or stage == .task or
         stage == .raygen or stage == .closesthit or stage == .miss or
         stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
 
     // Tolerate compile: if this fails there is nothing to enumerate.
-    const tol_words = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch return;
+    const tol_words = zioshade.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver }) catch return;
     defer alloc.free(tol_words);
 
     // Strict compile: a false-positive candidate fires here.
-    if (glslpp.compileToSPIRVStrict(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver })) |_| {
+    if (zioshade.compileToSPIRVStrict(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver })) |_| {
         // Strict also succeeded: not a false-positive candidate.
         // compileToSPIRVStrict returns a static empty slice — nothing to free.
     } else |err| {
         if (err == error.SemanticFailed) {
             stats.strict_fp += 1;
-            const ctx = glslpp.lastErrorCtx() orelse "(none)";
-            const inner = glslpp.lastErrorInner() orelse "(none)";
+            const ctx = zioshade.lastErrorCtx() orelse "(none)";
+            const inner = zioshade.lastErrorInner() orelse "(none)";
             log("  FP {s} ctx={s} inner={s}\n", .{ path, ctx, inner });
 
             // Update per-ctx histogram
@@ -487,7 +487,7 @@ fn strictGateDir(
         const source_z = alloc.dupeZ(u8, final_source) catch continue;
         defer alloc.free(source_z);
 
-        const stage: glslpp.Stage = blk: {
+        const stage: zioshade.Stage = blk: {
             if (std.mem.endsWith(u8, full_path, ".vert") or std.mem.endsWith(u8, full_path, ".v.glsl"))
                 break :blk .vertex
             else if (std.mem.endsWith(u8, full_path, ".comp") or std.mem.endsWith(u8, full_path, ".c.glsl"))
@@ -518,11 +518,11 @@ fn strictGateDir(
                 break :blk .fragment;
         };
 
-        const spirv_ver: glslpp.SPIRVVersion = if (stage == .mesh or stage == .task or
+        const spirv_ver: zioshade.SPIRVVersion = if (stage == .mesh or stage == .task or
             stage == .raygen or stage == .closesthit or stage == .miss or
             stage == .intersection or stage == .anyhit or stage == .callable) .@"1.4" else .@"1.5";
 
-        const compile_result = glslpp.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver });
+        const compile_result = zioshade.compileToSPIRV(alloc, source_z, .{ .stage = stage, .spirv_version = spirv_ver });
         if (compile_result) |words| {
             alloc.free(words);
             if (isKnownUnsupported(full_path)) {
@@ -541,8 +541,8 @@ fn strictGateDir(
                 stats.fail += 1;
                 log("  FP-REGRESSION {s} ctx={s} inner={s}\n", .{
                     full_path,
-                    glslpp.lastErrorCtx() orelse "(none)",
-                    glslpp.lastErrorInner() orelse "(none)",
+                    zioshade.lastErrorCtx() orelse "(none)",
+                    zioshade.lastErrorInner() orelse "(none)",
                 });
             }
         }

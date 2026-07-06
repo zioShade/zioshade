@@ -1,7 +1,7 @@
 // Tests: component-wise matrix arithmetic with a scalar (#170). GLSL `mat + s`,
 // `s - mat`, `s / mat` (and `mat / mat`) apply the op to every component, but
 // SPIR-V has no matrix OpFAdd/OpFSub/OpFDiv with a scalar (or whole-matrix divide).
-// glslpp emitted those on a (matrix, scalar) / (matrix, matrix) pair = invalid
+// zioshade emitted those on a (matrix, scalar) / (matrix, matrix) pair = invalid
 // SPIR-V. The scalar is splatted into a matrix and the op decomposes per column;
 // matrix OpFDiv is now decomposed per-column in codegen too (so `mat / mat` and
 // the splat-based `s / mat` both work).

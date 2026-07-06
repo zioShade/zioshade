@@ -5,26 +5,26 @@
 //! `location` output — to keep the body alive through dead-code elimination.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
 fn compileToMsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    return try glslpp.spirvToMSL(alloc, spirv, .{});
+    return try zioshade.spirvToMSL(alloc, spirv, .{});
 }
 
-fn compileToMslStage(source: [:0]const u8, stage: glslpp.Stage) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = stage });
+fn compileToMslStage(source: [:0]const u8, stage: zioshade.Stage) ![]const u8 {
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = stage });
     defer alloc.free(spirv);
-    return try glslpp.spirvToMSL(alloc, spirv, .{});
+    return try zioshade.spirvToMSL(alloc, spirv, .{});
 }
 
-fn compileToMslStageVer(source: [:0]const u8, stage: glslpp.Stage, metal_version: u32) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = stage });
+fn compileToMslStageVer(source: [:0]const u8, stage: zioshade.Stage, metal_version: u32) ![]const u8 {
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = stage });
     defer alloc.free(spirv);
-    return try glslpp.spirvToMSL(alloc, spirv, .{ .metal_version = metal_version });
+    return try zioshade.spirvToMSL(alloc, spirv, .{ .metal_version = metal_version });
 }
 
 fn assertContains(haystack: []const u8, needle: []const u8) !void {
@@ -39,9 +39,9 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     return error.TestUnexpectedFind;
 }
 
-/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT glslpp's own
-/// frontend). Needed for opcodes glslpp's frontend never emits — e.g. glslang
-/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the glslpp frontend
+/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT zioshade's own
+/// frontend). Needed for opcodes zioshade's frontend never emits — e.g. glslang
+/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the zioshade frontend
 /// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/msl_test_{s}.frag", .{name});
@@ -53,7 +53,7 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
         defer src_file.close();
         try src_file.writeAll(std.mem.sliceTo(source, 0));
     }
-    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
     const result = std.process.Child.run(.{
         .allocator = alloc,
@@ -78,7 +78,7 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
 // `.FOrdNotEqual` (plus the integer compare family) — `.FUnordNotEqual` fell through
 // to `else => null`, so the caller honest-errored (`error.UnstructuredControlFlow`)
 // even though MSL's `!=` is itself unordered (true on NaN) = exactly OpFUnordNotEqual,
-// matching the main emitBinOp path. Reachable only via external SPIR-V (glslpp's
+// matching the main emitBinOp path. Reachable only via external SPIR-V (zioshade's
 // frontend emits the ordered FOrdNotEqual for float `!=`).
 test "T-dowhile.funord: do-while body-cf + float `!=` (OpFUnordNotEqual) -> native do/while (#170)" {
     const spirv = compileToSpirv("dowhile_funord_ne",
@@ -95,7 +95,7 @@ test "T-dowhile.funord: do-while body-cf + float `!=` (OpFUnordNotEqual) -> nati
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
     try assertContains(msl, "} while (");
     try assertContains(msl, "!=");
@@ -248,7 +248,7 @@ test "SSBO with a runtime array of structs still emits (no UnsupportedUboMemberL
     ;
     const msl = try compileToMslStage(source, .compute);
     defer alloc.free(msl);
-    // (glslpp names the buffer struct after the instance, `s`.) The point is it
+    // (zioshade names the buffer struct after the instance, `s`.) The point is it
     // emits as a reference and the struct-of array element is sized, not thrown.
     try assertContains(msl, "device s& s");
     try assertContains(msl, "Foo items[1]");
@@ -734,9 +734,9 @@ test "CBUFFER_ACCESS: MSL struct member access uses source member name not array
         \\    _fragColor = vec4(t, t, t, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
     // Must NOT use array indexing for struct member access
     try assertNotContains(msl, "Globals[0]");
@@ -760,9 +760,9 @@ test "msl: bitfieldReverse -> reverse_bits" {
         \\    fragColor = vec4(float(a));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "reverse_bits") != null);
 }
@@ -776,9 +776,9 @@ test "msl: bitCount -> popcount" {
         \\    fragColor = vec4(float(a));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "popcount") != null);
 }
@@ -945,11 +945,11 @@ test "msl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent 
         \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(
         error.UnsupportedImageOperands,
-        glslpp.spirvToMSL(alloc, spirv, .{}),
+        zioshade.spirvToMSL(alloc, spirv, .{}),
     );
 }
 
@@ -960,7 +960,7 @@ test "msl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent 
 // fragment Input variables must be gathered into a `struct main0_in` with
 // `T name [[user(locnN)]]` fields, threaded into the entry via
 // `main0_in in [[stage_in]]`, and referenced in the body as `in.<name>`.
-// glslpp keeps its `main0_impl` helper factoring, so `in` is also threaded
+// zioshade keeps its `main0_impl` helper factoring, so `in` is also threaded
 // into `main0_impl` by value. The previously-emitted MSL referenced bare,
 // undeclared input variables (e.g. `uv.x`) — non-compiling MSL at exit 0.
 // ---------------------------------------------------------------------------
@@ -1126,7 +1126,7 @@ test "T16.1: single location input + varying + gl_Position" {
     try assertContains(msl, "struct main0_out");
     try assertContains(msl, "float2 vUV [[user(locn0)]];");
     try assertContains(msl, "float4 gl_Position [[position]];");
-    // Body refs through the structs. (glslpp decomposes vec constructors into
+    // Body refs through the structs. (zioshade decomposes vec constructors into
     // intermediate vars — `in.aPos.x` etc. — then assigns; the structural fact
     // is that the input resolves off `in.` and the store target off `out.`.)
     try assertContains(msl, "out.vUV = in.aUV");
@@ -1203,7 +1203,7 @@ test "T16.4: vertex with a UBO threads the cbuffer and stage-in together" {
     ;
     const msl = try compileToMslStage(source, .vertex);
     defer alloc.free(msl);
-    // The UBO struct is emitted (glslpp names it after the instance var `u`
+    // The UBO struct is emitted (zioshade names it after the instance var `u`
     // with a float4x4 member — its own convention, not spirv-cross's `struct U`).
     try assertContains(msl, "struct u");
     try assertContains(msl, "float4x4");
@@ -1244,7 +1244,7 @@ test "T16.5: swizzle/access-chain on input and output resolve off in./out." {
 }
 
 test "T16.6: NOT a bare void main0 — vertex must have the entry wrapper" {
-    // Direct regression guard for the original bug: glslpp used to emit
+    // Direct regression guard for the original bug: zioshade used to emit
     // `void main0()` referencing undeclared aPos/aUV/vUV/gl_Position.
     const source =
         \\#version 450
@@ -1443,7 +1443,7 @@ test "T17.8: single trailing vec3 — float3 (matches spirv-cross), no offset at
 // produced SILENT-WRONG std140 layout (compiles at exit 0, reads wrong data —
 // undetectable without a Metal compiler). Each member type below was diffed
 // against the spirv-cross --msl oracle (Step-0 truth table); these tests pin
-// glslpp's emitted MSL type to EXACTLY what spirv-cross emits.
+// zioshade's emitted MSL type to EXACTLY what spirv-cross emits.
 //
 // std140 facts that drive the oracle's choices (all verified via spirv-dis):
 //   * Matrices always carry MatrixStride 16 (each column is vec4-aligned).
@@ -1864,7 +1864,7 @@ test "T17.3: plain sampler2D stays texture2d<float> (no depth2d regression)" {
 }
 
 test "T17.4: samplerCubeShadow is NOT promoted to depth2d (2D-scoped)" {
-    // glslpp marks ALL shadow samplers (2D/Cube/Array) with OpTypeImage Depth=1,
+    // zioshade marks ALL shadow samplers (2D/Cube/Array) with OpTypeImage Depth=1,
     // but only the 2D form maps to MSL `depth2d<float>`; a cube shadow's correct
     // type is `depthcube<float>`. Since this backend has no non-2D texture support
     // (every texture is hardcoded 2D), mis-typing a cube shadow as `depth2d` would
@@ -1972,7 +1972,7 @@ test "T18.22: row_major UBO matrix access must be transposed (vs column_major)" 
     //   row_major    → out.o = float4(a.m[0][0], a.m[1][0], a.m[2][0], a.m[3][0]);
     //   column_major → out.o = a.m[0];
     // The RowMajor decoration means the matrix is stored transposed, so reading
-    // logical column 0 must GATHER element 0 from every stored column. glslpp
+    // logical column 0 must GATHER element 0 from every stored column. zioshade
     // currently ignores the RowMajor decoration and emits the SAME `a_1.m._m0`
     // for both qualifiers — reading row-major storage as column-major
     // (silent-wrong output). See codegen RowMajor/MatrixStride fix on
@@ -2025,9 +2025,9 @@ test "T18.23: non-square row_major matrix is an honest error (not silent-wrong)"
         \\layout(location=0) out vec4 o;
         \\void main() { o = a.m[0]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    if (glslpp.spirvToMSL(alloc, spirv, .{})) |msl| {
+    if (zioshade.spirvToMSL(alloc, spirv, .{})) |msl| {
         defer alloc.free(msl);
         std.debug.print(
             "expected an honest error for non-square row_major matrix, got MSL:\n{s}\n",
@@ -2044,7 +2044,7 @@ test "T18.24: row_major SQUARE matrix ARRAY read is transposed" {
     // an array of matrices. Reading `a.m[1][0]` must transpose the indexed
     // element: ORACLE spirv-cross --msl emits
     //   float4(a.m[1][0][0], a.m[1][1][0], a.m[1][2][0], a.m[1][3][0])
-    // i.e. transpose(a.m[1])[0]. Without array handling glslpp emitted the
+    // i.e. transpose(a.m[1])[0]. Without array handling zioshade emitted the
     // untransposed `a_1.m[1]._m0` (silent-wrong).
     const source =
         \\#version 450
@@ -2070,9 +2070,9 @@ test "T18.25: non-square row_major matrix in a NESTED struct is an honest error"
         \\layout(location=0) out vec4 o;
         \\void main() { o = a.inner.m[0]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    if (glslpp.spirvToMSL(alloc, spirv, .{})) |msl| {
+    if (zioshade.spirvToMSL(alloc, spirv, .{})) |msl| {
         defer alloc.free(msl);
         std.debug.print(
             "expected an honest error for nested non-square row_major matrix, got MSL:\n{s}\n",
@@ -2092,9 +2092,9 @@ test "T18.26: storing through a row_major matrix is an honest error (not silent-
         \\layout(location=0) out vec4 o;
         \\void main() { b.m[0] = vec4(1.0); o = vec4(0.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    if (glslpp.spirvToMSL(alloc, spirv, .{})) |msl| {
+    if (zioshade.spirvToMSL(alloc, spirv, .{})) |msl| {
         defer alloc.free(msl);
         std.debug.print(
             "expected an honest error for a row_major matrix store, got MSL:\n{s}\n",
@@ -2251,9 +2251,9 @@ test "msl: descriptor remap overrides [[buffer]]/[[texture]]/[[sampler]] slots" 
         \\layout(location = 0) out vec4 o;
         \\void main() { o = texture(tex, uv) * u.tint; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{
         .resource_bindings = &.{
             .{ .set = 0, .binding = 0, .msl_slot = 4 },
             .{ .set = 0, .binding = 1, .msl_slot = 2 },
@@ -2293,13 +2293,13 @@ test "msl: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
         \\    o = c;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const ok = try glslpp.spirvToMSL(alloc, spirv, .{});
+    const ok = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(ok);
     const stripped = try stripMerge(alloc, spirv);
     defer alloc.free(stripped);
-    const recovered = try glslpp.spirvToMSL(alloc, stripped, .{});
+    const recovered = try zioshade.spirvToMSL(alloc, stripped, .{});
     defer alloc.free(recovered);
     try std.testing.expectEqualStrings(ok, recovered);
 }
@@ -2314,7 +2314,7 @@ test "msl: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
 // DECLARED identifier. The previous backend referenced the array composite /
 // Private var by an undeclared name (`a[i]` → `vN[i]` with no `vN` anywhere,
 // or a local `T v[N]; v = vC;` array-copy of an undeclared `vC`) — both are
-// silent-wrong: glslpp exits 0 but the MSL does not compile in Metal.
+// silent-wrong: zioshade exits 0 but the MSL does not compile in Metal.
 //
 // Oracle: spirv-cross --msl promotes both to module scope as
 // `constant spvUnsafeArray<T,N> _k = …;` indexed `_k[i]`.
@@ -2604,11 +2604,11 @@ test "msl: whole-array value copy of a SPEC-CONSTANT-sized array is an honest er
         \\  FragColor = b[i];
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(
         error.UnresolvableArrayLength,
-        glslpp.spirvToMSL(alloc, spirv, .{}),
+        zioshade.spirvToMSL(alloc, spirv, .{}),
     );
 }
 
@@ -3097,7 +3097,7 @@ test "T-atomic.7: MSL signed atomic casts to atomic_int (#265)" {
 // texture2d; spirv-cross emulates with a buffer-backed linear texture. The
 // queried image is bound as a texture AND a separate `device atomic_T*` backing
 // buffer; the atomic targets `(device atomic_T*)&img_atomic[spvImage2DAtomicCoord(coord, img)]`.
-// Previously glslpp emitted `&img[coord]` (not addressable in Metal) — silent-wrong.
+// Previously zioshade emitted `&img[coord]` (not addressable in Metal) — silent-wrong.
 // Oracle: spirv-cross --msl.
 test "T-imgatomic.1: MSL uimage2D atomic uses spvImage2DAtomicCoord backing buffer (#267)" {
     const source =
@@ -3165,9 +3165,9 @@ test "T-imgatomic.4: MSL image atomics honest-error under argument buffers (#267
         \\layout(r32ui, binding = 0) uniform uimage2D img;
         \\void main() { imageAtomicAdd(img, ivec2(0), 7u); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true }));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true }));
 }
 
 test "T-imgatomic.5: MSL image atomics in a FRAGMENT shader honest-error (#267)" {
@@ -3354,9 +3354,9 @@ test "T-imgrw.10: MSL argbuf storage image takes ONE [[id]] slot, no sampler (#2
         \\    o = imageLoad(img, ivec2(0)) + texture(tex, uv);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
     try assertNotContains(msl, "imgSmplr");                // storage image: no sampler
     try assertContains(msl, "img [[id(0)]]");              // texture at slot 0
@@ -3365,7 +3365,7 @@ test "T-imgrw.10: MSL argbuf storage image takes ONE [[id]] slot, no sampler (#2
 }
 
 // findMSB/findLSB are GLSL.std.450 FindSMsb/FindUMsb/FindILsb — NOT raw clz/ctz.
-// glslpp's MSL backend mapped findLSB→ctz and findMSB→clz, which is silent-wrong:
+// zioshade's MSL backend mapped findLSB→ctz and findMSB→clz, which is silent-wrong:
 // findMSB(1u) is 0 (the MSB *index*), but clz(1u) is 31; findLSB(0) must be -1, but
 // ctz(0) is 32. The fix emits the spirv-cross helper math inline (clz(T(0)) is the bit
 // width, so clz(T(0)) - (clz(x) + 1) == 31 - clz(x) for 32-bit, with the x==0 → -1 guard
@@ -3443,7 +3443,7 @@ test "T-bits.4: MSL findLSB/findMSB are componentwise for vectors (typed splats)
 }
 
 // packHalf2x16/unpackHalf2x16 have NO MSL builtin — Metal converts via half + as_type.
-// glslpp emitted the invented `pack_float_to_half2x16`/`unpack_half2x16_to_float`, which
+// zioshade emitted the invented `pack_float_to_half2x16`/`unpack_half2x16_to_float`, which
 // do not exist → non-compiling MSL. The unorm/snorm variants (pack_float_to_unorm2x16,
 // etc.) ARE real MSL builtins and stay. spirv-cross: `as_type<uint>(half2(x))` /
 // `float2(as_type<half2>(x))`.
@@ -3490,7 +3490,7 @@ test "T-pack.2: MSL unorm/snorm pack/unpack keep their real MSL builtins (#gaps 
     try assertNotContains(msl, "unpack_half2x16_to_float");
 }
 
-// GLSL inverse(matN) has NO MSL builtin — Metal has no matrix `inverse()`. glslpp emitted
+// GLSL inverse(matN) has NO MSL builtin — Metal has no matrix `inverse()`. zioshade emitted
 // a bare `inverse(m)` → non-compiling MSL. Fix mirrors the WGSL backend + spirv-cross: emit
 // an emit-once spvInverseNxN cofactor/adjugate helper and call it.
 test "T-inv.1: MSL inverse(matN) calls an emit-once spvInverse helper, not a phantom builtin (#gaps inverse)" {
@@ -3516,7 +3516,7 @@ test "T-inv.1: MSL inverse(matN) calls an emit-once spvInverse helper, not a pha
     try assertContains(msl, "= spvInverse3x3(");
     try assertContains(msl, "= spvInverse4x4(");
     try assertNotContains(msl, "= inverse("); // the phantom MSL builtin call
-    // glslpp emits no forward declarations, so the helper DEFINITION must precede its
+    // zioshade emits no forward declarations, so the helper DEFINITION must precede its
     // call site or the MSL won't compile (Metal = C++ definition-before-use).
     const def3 = std.mem.indexOf(u8, msl, "float3x3 spvInverse3x3(float3x3 m)").?;
     const call3 = std.mem.indexOf(u8, msl, "= spvInverse3x3(").?;
@@ -3644,7 +3644,7 @@ test "T-qlod.1: MSL textureQueryLod emits calculate_clamped/unclamped_lod on MSL
 }
 
 test "T-qlod.2: MSL textureQueryLod honest-errors below MSL 2.2 (#278)" {
-    // calculate_*_lod don't exist before MSL 2.2, so glslpp must fail loud (matching
+    // calculate_*_lod don't exist before MSL 2.2, so zioshade must fail loud (matching
     // spirv-cross, which refuses ImageQueryLod when metal_version < 22) rather than emit
     // non-compiling MSL.
     try std.testing.expectError(error.UnsupportedOp, compileToMslStageVer(querylod_src, .fragment, 21));
@@ -3748,9 +3748,9 @@ test "T-interp.4: the MSL 2.3 interpolation guard does not trip a plain-input sh
 // the emitted string against the spirv-cross oracle form.
 test "T-arrlen.1: runtime SSBO array .length() lowers to spvBufferSizeConstants in MSL (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
     // The host-bound size buffer is declared as a kernel param at the next free [[buffer]]
     // slot ABOVE the two SSBOs (0,1) — slot 2; pinning it guards the slot computation.
@@ -3767,9 +3767,9 @@ test "T-arrlen.1: runtime SSBO array .length() lowers to spvBufferSizeConstants 
 // offset 0, so the subtraction is invisible there).
 test "T-arrlen.3: multi-member SSBO .length() uses the member byte offset in MSL (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { uint count; float data[]; } b;\nlayout(std430,binding=1) buffer O { uint n; } o;\nvoid main(){ o.n = b.count + uint(b.data.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
     try assertContains(msl, "(spvBufferSizeConstants[0] - 4) / 4");
     try assertNotContains(msl, "// unhandled");
@@ -3780,9 +3780,9 @@ test "T-arrlen.3: multi-member SSBO .length() uses the member byte offset in MSL
 // rather than referencing an unbound identifier.
 test "T-arrlen.4: runtime SSBO .length() under argument_buffers honest-errors in MSL (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{ .argument_buffers = true }));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true }));
 }
 
 // #296: a runtime SSBO `.length()` in a NON-compute (fragment) stage stays an honest error —
@@ -3790,9 +3790,9 @@ test "T-arrlen.4: runtime SSBO .length() under argument_buffers honest-errors in
 // fragment `.length()` would reference an unbound identifier. Fail loud instead.
 test "T-arrlen.2: runtime SSBO array .length() in a fragment shader honest-errors in MSL (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(location=0) out float o;\nvoid main(){ o = float(d.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToMSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToMSL(alloc, spirv, .{}));
 }
 
 // #170: a NESTED sampler array (`sampler1D s[2][2]`) was missed by the shared
@@ -3809,7 +3809,7 @@ test "T-samplerarr.nested: nested sampler array honest-errors in MSL (#170)" {
         \\void main() { o = texture(s[0][1], c) + texture(s[1][0], c); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToMSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedSamplerArray, zioshade.spirvToMSL(alloc, spirv, .{}));
 }
 
 // #170: MSL ImageSampleExplicitLod IGNORED the Grad image operand (mask 0x4) —

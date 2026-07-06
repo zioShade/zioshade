@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fetch popular Shadertoy shaders and prepare them for testing with glslpp.
+Fetch popular Shadertoy shaders and prepare them for testing with zioshade.
 Uses the Shadertoy API to fetch shader code, then wraps it with the wintty
 shadertoy prefix.
 """
@@ -94,7 +94,7 @@ void mainImage( out vec4 fragColor, in vec2 fragCoord );
 void main() { mainImage (_fragColor, gl_FragCoord.xy); }
 """
 
-GLSLPP_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.zig-cache', 'bin', 'conformance-runner.exe')
+ZIOSHADE_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.zig-cache', 'bin', 'conformance-runner.exe')
 SPIRV_VAL = 'C:/VulkanSDK/1.4.341.1/Bin/spirv-val.exe'
 # LICENSE WARNING: shaders downloaded from shadertoy.com default to
 # CC BY-NC-SA 3.0 (non-commercial), and the Shadertoy API terms restrict
@@ -163,15 +163,15 @@ def prepare_shader(shader_info):
     return WINTTY_PREFIX + '\n\n' + '\n'.join(filtered)
 
 
-def compile_glslpp(source, output_path):
-    """Compile GLSL to SPIR-V using glslpp."""
+def compile_zioshade(source, output_path):
+    """Compile GLSL to SPIR-V using zioshade."""
     with tempfile.NamedTemporaryFile(mode='w', suffix='.glsl', delete=False, encoding='utf-8') as f:
         f.write(source)
         temp_path = f.name
     
     try:
         result = subprocess.run(
-            [GLSLPP_RUNNER, temp_path, '--save-spv', output_path],
+            [ZIOSHADE_RUNNER, temp_path, '--save-spv', output_path],
             capture_output=True, text=True, timeout=15
         )
         if os.path.exists(output_path):
@@ -215,13 +215,13 @@ RESET = '\033[0m'
 
 
 def main():
-    if not os.path.exists(GLSLPP_RUNNER):
-        print(f"{RED}glslpp runner not found at {GLSLPP_RUNNER}{RESET}")
+    if not os.path.exists(ZIOSHADE_RUNNER):
+        print(f"{RED}zioshade runner not found at {ZIOSHADE_RUNNER}{RESET}")
         sys.exit(1)
     
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     
-    print(f"{BLUE}Shadertoy Shader Audit: glslpp vs real-world shaders{RESET}")
+    print(f"{BLUE}Shadertoy Shader Audit: zioshade vs real-world shaders{RESET}")
     print(f"  Shaders to test: {len(SHADER_IDS)}")
     print()
     
@@ -255,7 +255,7 @@ def main():
             f.write(full_source)
         
         # Compile
-        ok, output = compile_glslpp(full_source, spv_path)
+        ok, output = compile_zioshade(full_source, spv_path)
         
         if not ok:
             # Extract error

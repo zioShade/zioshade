@@ -1,4 +1,4 @@
-# glslpp Performance Benchmark
+# zioshade Performance Benchmark
 
 ## Test Environment
 - **CPU**: (varies by machine)
@@ -6,7 +6,7 @@
 - **Build**: ReleaseFast (Zig 0.15.2)
 - **Iterations**: 100 per shader (10 warmup)
 
-## glslpp Pipeline Performance
+## zioshade Pipeline Performance
 
 ### GLSL → SPIR-V → HLSL (single backend)
 
@@ -23,9 +23,9 @@
 - **Average**: 683 µs per shader
 - All 3 backend outputs generated in under 1ms
 
-## Comparison: glslpp vs glslang+spirv-cross
+## Comparison: zioshade vs glslang+spirv-cross
 
-glslpp is a single-process, pure Zig compiler. The traditional pipeline requires:
+zioshade is a single-process, pure Zig compiler. The traditional pipeline requires:
 1. glslangValidator CLI process spawn (~10-50ms on Windows due to process creation overhead)
 2. spirv-cross CLI process spawn (~10-50ms on Windows)
 3. C++ runtime initialization
@@ -33,7 +33,7 @@ glslpp is a single-process, pure Zig compiler. The traditional pipeline requires
 Estimated comparison:
 - **glslang + spirv-cross CLI**: 50-200ms (dominated by process creation)
 - **glslang + spirv-cross library (DLL)**: 5-20ms (library init + compilation)
-- **glslpp (single process)**: 0.3-2ms (pure computation, no IPC)
+- **zioshade (single process)**: 0.3-2ms (pure computation, no IPC)
 
 **Speedup**: 25-500x depending on whether CLI or library API is used.
 
@@ -46,6 +46,6 @@ Estimated comparison:
 
 ## Benchmark Reproduction
 ```bash
-zig build-exe -OReleaseFast --dep glslpp -Mroot=tools/bench_perf.zig -Mglslpp=src/root.zig -femit-bin=bench_perf.exe
+zig build-exe -OReleaseFast --dep zioshade -Mroot=tools/bench_perf.zig -Mzioshade=src/root.zig -femit-bin=bench_perf.exe
 ./bench_perf.exe
 ```

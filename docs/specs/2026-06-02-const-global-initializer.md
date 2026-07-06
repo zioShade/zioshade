@@ -12,7 +12,7 @@ const float LUT[16] = float[](1,2,3,4, 1,2,3,4, 1,2,3,4, 1,2,3,4);
 layout(location=0) flat in int index;
 void main(){ FragColor = LUT[index]; }   // dynamic index → can't constant-fold
 ```
-glslpp lowers `LUT` to a **Private global `OpVariable` with no initializer and no
+zioshade lowers `LUT` to a **Private global `OpVariable` with no initializer and no
 stores** — its 16 values appear *nowhere* in the emitted SPIR-V:
 ```
 %LUT = OpVariable %_ptr_Private__arr_float_uint_16 Private      ← word-count 4, no init
@@ -37,7 +37,7 @@ and **materialises a Function-local `indexable` copy per dynamic access**:
 %6         = OpAccessChain %_ptr_Function_float %indexable %index
 ```
 
-## Root cause (glslpp)
+## Root cause (zioshade)
 
 1. `ir.Global` (`src/ir.zig` ~186) has **no `initializer` field** — the const
    initializer is lost at AST→IR lowering.

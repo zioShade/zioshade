@@ -167,7 +167,7 @@ fn glslStd450Name(op: u32) []const u8 {
 }
 
 /// Safe display name for an `Op` in a diagnostic. `Op` is a NON-EXHAUSTIVE enum
-/// (`_,`), so a SPIR-V opcode glslpp does not name (e.g. OpIAddCarry=149 from
+/// (`_,`), so a SPIR-V opcode zioshade does not name (e.g. OpIAddCarry=149 from
 /// GLSL `uaddCarry`) parses to a tag-less value. `@tagName` PANICS on such a
 /// value ("invalid enum value"), which turned the honest-error path into a hard
 /// process crash on perfectly valid input. Use this instead of `@tagName` at any
@@ -232,7 +232,7 @@ fn recordUnsupportedEarlyReturn() error{UnsupportedEarlyReturn} {
     return error.UnsupportedEarlyReturn;
 }
 
-/// Single source of truth: glslpp's internal GLSL.std.450 opcode number → WGSL
+/// Single source of truth: zioshade's internal GLSL.std.450 opcode number → WGSL
 /// builtin name. Used by BOTH the main emit path and the loop-replay path so the
 /// two cannot drift (they previously had divergent inline switches — the replay
 /// path was missing modf/frexp/ldexp/pack*/unpack*/findILsb/findSMsb). Unmapped
@@ -306,7 +306,7 @@ fn glslStd450WgslName(instruction: u32) error{UnsupportedExtInst}![]const u8 {
         62 => "unpack2x16float",
         63 => "unpack4x8snorm",
         64 => "unpack4x8unorm",
-        // Geometric — glslpp numbering starts at 66.
+        // Geometric — zioshade numbering starts at 66.
         66 => "length",
         67 => "distance",
         68 => "cross",
@@ -561,7 +561,7 @@ fn collectOffsetStructsRec(module: *const ParsedModule, type_id: u32, out: *std.
 /// `gl_PerVertex` Block: it wraps gl_Position (+ gl_PointSize/ClipDistance/
 /// CullDistance) in a member-decorated struct and writes them via
 /// `OpAccessChain <var> <member> + OpStore`, NOT as direct var-level-decorated
-/// outputs the way glslpp's own frontend does. External-SPIR-V only.
+/// outputs the way zioshade's own frontend does. External-SPIR-V only.
 fn perVertexBlockStructType(module: *const ParsedModule, var_id: u32) ?u32 {
     const vdef = getDef(module, var_id) orelse return null;
     if (vdef.op != .Variable or vdef.words.len < 4) return null;
@@ -715,7 +715,7 @@ fn isArrayType(module: *const ParsedModule, type_id: u32) bool {
 /// `sampler2DShadow` and friends lower to such images. WGSL requires these to
 /// be a `texture_depth_*` texture paired with a `sampler_comparison`, so both
 /// resource types must follow this flag; emitting the default
-/// `texture_2d<f32>` + plain `sampler` is silent-wrong (glslpp exits 0 but
+/// `texture_2d<f32>` + plain `sampler` is silent-wrong (zioshade exits 0 but
 /// naga rejects with "Comparison sampling mismatch"). Accepts either an
 /// OpTypeImage id or an OpTypeSampledImage id (the latter is unwrapped to its
 /// underlying image).
@@ -1142,7 +1142,7 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     .{ "texture_storage_1d", {} },       .{ "texture_storage_2d", {} },
     .{ "texture_storage_2d_array", {} }, .{ "texture_storage_3d", {} },
     .{ "texture_external", {} },
-    // Predeclared builtin FUNCTION names that glslpp EMITS as calls AND that are
+    // Predeclared builtin FUNCTION names that zioshade EMITS as calls AND that are
     // ALSO legal GLSL identifiers — i.e. WGSL builtins whose GLSL counterpart has
     // a DIFFERENT name, so a GLSL variable can legally be named the WGSL one
     // (`bitcast`←floatBitsToInt, `select`←OpSelect, `dpdx`←dFdx, `countOneBits`←
@@ -1175,7 +1175,7 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     // call. (textureGather IS also a GLSL builtin so can't be a GLSL var — listed
     // for completeness; the entry is harmless.) Same class as bitcast/select.
     // textureSampleBias / textureSampleBaseClampToEdge are reserved PROACTIVELY —
-    // glslpp does not emit them yet (the ImageSample Bias/MinLod operands are not
+    // zioshade does not emit them yet (the ImageSample Bias/MinLod operands are not
     // currently lowered), but reserving a real WGSL builtin name is always safe. (#170)
     .{ "textureSample", {} },            .{ "textureSampleBias", {} },
     .{ "textureSampleLevel", {} },       .{ "textureSampleGrad", {} },
@@ -1546,7 +1546,7 @@ fn emitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap
     if (want_offsets and inst.words.len > 2) {
         // WGSL always places the first struct member at offset 0; a uniform block
         // whose member 0 sits at a non-zero offset would need a synthetic leading
-        // pad member to reproduce. glslpp's frontend packs member 0 at 0 (std140),
+        // pad member to reproduce. zioshade's frontend packs member 0 at 0 (std140),
         // so this is a defensive honest-error guarding against a future silent-wrong.
         if (memberOffset(module, type_id, 0)) |o0| {
             if (o0 != 0) {
@@ -1935,7 +1935,7 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
     // OpName precedes constants in the SPIR-V binary layout, the literal
     // wins in the map. Renaming naively would corrupt the literal — e.g.
     // `const bool ENABLED = true;` would emit `if (true_) { ... }`, which
-    // naga rejects as an unknown identifier. glslpp's own frontend only
+    // naga rejects as an unknown identifier. zioshade's own frontend only
     // attaches OpName to globals/functions/spec-constants, but external
     // SPIR-V (glslang, hand-crafted) freely names plain constants, so the
     // skip is required for `spirvToWGSL` as a public API.
@@ -2520,7 +2520,7 @@ fn collectWrappedUniformMembersForStruct(module: *const ParsedModule, struct_typ
 /// whose ArrayStride is a KNOWN value that is not a multiple of 16. WGSL's
 /// uniform address space requires every array element stride to be a multiple of
 /// 16. std430 / scalar-block-layout uniform and push-constant blocks pack arrays
-/// TIGHTLY (`float Arr[4]` → stride 4; `vec2 v[2]` → stride 8), and glslpp cannot
+/// TIGHTLY (`float Arr[4]` → stride 4; `vec2 v[2]` → stride 8), and zioshade cannot
 /// widen them to vec4 without reading WRONG DATA from the host (it packs elements
 /// at 0,4,8,12 — not 0,16,32,48; this is exactly why collectWrappedUniformMembers-
 /// ForStruct only wraps stride-16 members). Such a block has no faithful core-WGSL
@@ -2908,7 +2908,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     defer out.deinit(alloc);
     const w = out.writer(alloc);
 
-    try w.writeAll("// Generated by glslpp SPIR-V → WGSL cross-compiler\n\n");
+    try w.writeAll("// Generated by zioshade SPIR-V → WGSL cross-compiler\n\n");
 
     // Emit-once generated matrix-inverse helper(s) flagged by the pre-emit scan
     // (WGSL has no inverse builtin). Written before any struct/function so they
@@ -2923,7 +2923,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // #170 (I): a spec-constant-sized array is unrepresentable in WGSL except as
     // a `var<workgroup>` type (override array sizing is workgroup-only). Any
     // OTHER variable — function-local, Private, or a UBO/SSBO whose struct has a
-    // spec-const-sized member — therefore cannot be faithfully lowered: glslpp
+    // spec-const-sized member — therefore cannot be faithfully lowered: zioshade
     // would emit a runtime `array<T>` (naga-invalid as a local) or drop the
     // members to an empty struct. Fail loud instead. (Workgroup vars are skipped,
     // so a representable override-sized workgroup array is unaffected.)
@@ -2953,7 +2953,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 const builtin = getDecVal(&decorations, inst.words[2], .built_in);
                 // GL_ARB_shader_stencil_export's gl_FragStencilRef has NO WGSL
                 // equivalent (WGSL fragment shaders cannot write the stencil ref).
-                // glslpp's SPIR-V emits it as an undecorated scalar-int Output, so
+                // zioshade's SPIR-V emits it as an undecorated scalar-int Output, so
                 // the backend would otherwise auto-assign it an @location and force
                 // the int into a vec4f color slot (naga reject). Fail loud instead.
                 // OpName preserves the GLSL builtin name, so match on it.
@@ -3345,7 +3345,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // #170: an SSBO that is an ARRAY of blocks whose struct holds a runtime-sized
     // array (`buffer SSBO { vec4 data[]; } ssbos[2];`) has no core-WGSL form —
     // a runtime array can't nest inside a fixed array (naga "Base type for the
-    // array is invalid"). glslpp emitted `var<storage> ssbos: array<SSBO, 2>` =
+    // array is invalid"). zioshade emitted `var<storage> ssbos: array<SSBO, 2>` =
     // silent-wrong. Honest-error rather than emit naga-rejected WGSL.
     for (cbuffers.items) |cb| {
         if (!cb.is_ssbo) continue;
@@ -4112,7 +4112,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     } else if (is_fragment and output_vars.items.len > 1) {
         // Two outputs sharing a @location is GLSL dual-source blending
         // (`layout(location=0, index=0/1)`), which WGSL expresses with
-        // `@blend_src(0/1)`. glslpp's SPIR-V currently drops the `Index`
+        // `@blend_src(0/1)`. zioshade's SPIR-V currently drops the `Index`
         // decoration, so the backend cannot reconstruct which output is src0 vs
         // src1 — emitting two `@location(0)` is invalid (naga: "Multiple bindings
         // at location 0 are present"). Fail loud rather than emit it.
@@ -4341,7 +4341,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // Same predicate as the redefinition pre-seed (ioBlockStructType): a
             // struct-typed stage input is ALWAYS a GLSL interface block (plain
             // structs cannot be non-block I/O), so the struct shape alone is the
-            // signal — glslpp's SPIR-V does not emit the `Block` decoration.
+            // signal — zioshade's SPIR-V does not emit the `Block` decoration.
             const sty = ioBlockStructType(&module, iv.type_id, iv.builtin) orelse continue;
             const sdef = getDef(&module, sty) orelse continue;
             try io_block_inputs.put(iv.id, {});
@@ -4416,7 +4416,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // #170 (H): GLSL `layout(location=N, component=M)` packs several bindings
     // into one location's component slots. WGSL has no @component, so two stage
     // inputs sharing an explicit @location is invalid (naga: "Multiple bindings
-    // at location N are present"). glslpp does not reconstruct component packing,
+    // at location N are present"). zioshade does not reconstruct component packing,
     // so fail loud rather than emit the naga-rejected duplicate-location
     // interface. (Builtins carry no @location; interface-block members carry
     // their own locations, so only plain @location varyings can collide here.)
@@ -4524,7 +4524,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // WGSL entry-point IO may only be numeric scalars/vectors — a matrix or
             // array at a @location is rejected by naga ("Only numeric scalars and
             // vectors are allowed"). spirv-cross flattens a matrix/array varying into
-            // N column/element @locations; glslpp does not reconstruct that, and its
+            // N column/element @locations; zioshade does not reconstruct that, and its
             // sibling guards already honest-error on a matrix/array MEMBER at a
             // @location (see emitFlattenedLeafParams), so a top-level matrix/array
             // input must fail loud too rather than emit a silently-invalid signature. (#170)
@@ -7308,7 +7308,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // BroadcastFirst/All/Any/Shuffle*/Inclusive*/Exclusive* and the scan/
             // reduction forms) directly, with NO `enable subgroups;`. naga 29.0.3
             // rejects subgroups entirely (even `enable subgroups;` is unsupported),
-            // so that output was SILENT-WRONG (glslpp exited 0 but naga rejected).
+            // so that output was SILENT-WRONG (zioshade exited 0 but naga rejected).
             // Fail loud with a named error instead.
             .SubgroupAllKHR, .GroupNonUniformAll,
             .SubgroupAnyKHR, .GroupNonUniformAny,
@@ -7361,7 +7361,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .All => try emitCall(module, names, inst, "all", w, arena, indent),
             .Any => try emitCall(module, names, inst, "any", w, arena, indent),
 
-            // IsInf/IsNan — WGSL has NO isInf/isNan builtins (glslpp previously
+            // IsInf/IsNan — WGSL has NO isInf/isNan builtins (zioshade previously
             // emitted isinf(x)/isnan(x), which naga rejects as undefined identifiers).
             .IsNan => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
@@ -7534,7 +7534,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // ImageQueryLevels — WGSL textureNumLevels returns UNSIGNED (u32),
-            // but GLSL textureQueryLevels is a SIGNED `int`, so glslpp's result
+            // but GLSL textureQueryLevels is a SIGNED `int`, so zioshade's result
             // type (`rt`) is i32; emit `i32(textureNumLevels(t))` to convert
             // (matching the ImageQuerySize/textureDimensions wrap above). A bare
             // builtin would leave `let v: i32 = textureNumLevels(t)` → naga reject.
@@ -7555,7 +7555,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // ImageQueryLod (GLSL textureQueryLod) — WGSL has NO equivalent
-            // (no textureQueryLod builtin). glslpp previously emitted
+            // (no textureQueryLod builtin). zioshade previously emitted
             // `textureQueryLod(...)`, which naga rejects as an undefined identifier
             // (silent-wrong). Fail loud with a named error instead.
             .ImageQueryLod => {
@@ -8061,7 +8061,7 @@ fn isConstant(module: *const ParsedModule, id: u32) bool {
     return ci.op == .Constant;
 }
 
-/// Returns the value of a scalar integer OpConstant, else null. glslpp lowers
+/// Returns the value of a scalar integer OpConstant, else null. zioshade lowers
 /// every integer type to a 32-bit i32/u32 in WGSL, so the value lives in
 /// words[3] (a 64-bit constant would also use words[4], but those are
 /// honest-errored in the frontend before reaching this backend).
@@ -8077,9 +8077,9 @@ fn isConstantZero(module: *const ParsedModule, id: u32) bool {
     const ci = common.getDef(module, id) orelse return false;
     // The literal word for a scalar int 0 / float +0.0 is the all-zero bit pattern.
     // Limitation: a 64-bit integer constant `0x1_00000000` also has words[3]==0; this
-    // would false-positive, but glslpp honest-errors 64-bit integer types in the
+    // would false-positive, but zioshade honest-errors 64-bit integer types in the
     // frontend (semantic.zig) before they reach the WGSL backend, so it is unreachable
-    // for glslpp's own output (and a false honest-error is preferable to silent-wrong
+    // for zioshade's own output (and a false honest-error is preferable to silent-wrong
     // for hand-fed external SPIR-V).
     return ci.op == .Constant and ci.words.len > 3 and ci.words[3] == 0;
 }
@@ -8175,7 +8175,7 @@ fn emitShift(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
 /// CONSTANT over-shift a shader-creation error — naga rejects the faithful
 /// translation at exit 0 (silent-wrong). Masking to the low 5 bits is a no-op for
 /// in-range amounts and the same wrap hardware / the HLSL+MSL backends apply. All
-/// glslpp WGSL ints are 32-bit, so the mask is always & 31. The result is always
+/// zioshade WGSL ints are 32-bit, so the mask is always & 31. The result is always
 /// cast/built as `shift_cast` (u32 / vecN<u32>) to match the base's dimension.
 /// Covers: scalar constants, constant-composite VECTOR amounts (mask each
 /// component — constIntValue is null for composites, so they escaped the scalar

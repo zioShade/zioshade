@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 /// SPIR-V to GLSL cross-compiler CLI.
 /// Usage: zig build spv-to-glsl -- <input.spv> <output.glsl>
@@ -37,7 +37,7 @@ pub fn main() !void {
     @memcpy(std.mem.sliceAsBytes(spirv_words), spv_bytes);
 
     // Cross-compile to GLSL
-    const glsl = glslpp.spirvToGLSL(alloc, spirv_words, .{ .version = 430 }) catch |err| {
+    const glsl = zioshade.spirvToGLSL(alloc, spirv_words, .{ .version = 430 }) catch |err| {
         std.debug.print("Error cross-compiling to GLSL: {}\n", .{err});
         return;
     };

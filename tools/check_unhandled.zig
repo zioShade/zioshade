@@ -1,15 +1,15 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 // Use the public cross-compile API — the internal spirv_to_* modules are not
 // exported from src/root.zig, so referencing them broke the 0.15.2 build.
 const hlsl = struct {
-    const spirvToHLSL = glslpp.spirvToHLSL;
+    const spirvToHLSL = zioshade.spirvToHLSL;
 };
 const glsl_backend = struct {
-    const spirvToGLSL = glslpp.spirvToGLSL;
+    const spirvToGLSL = zioshade.spirvToGLSL;
 };
 const msl = struct {
-    const spirvToMSL = glslpp.spirvToMSL;
+    const spirvToMSL = zioshade.spirvToMSL;
 };
 
 pub fn main() !void {
@@ -52,14 +52,14 @@ pub fn main() !void {
                 std.mem.indexOf(u8, source, "void mainImage") == null)
                 continue;
 
-            const stage: glslpp.Stage = if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
+            const stage: zioshade.Stage = if (std.mem.endsWith(u8, path, ".vert") or std.mem.endsWith(u8, path, ".v.glsl"))
                 .vertex
             else if (std.mem.endsWith(u8, path, ".comp"))
                 .compute
             else
                 .fragment;
 
-            const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = stage }) catch continue;
+            const spirv = zioshade.compileToSPIRV(alloc, source, .{ .stage = stage }) catch continue;
             defer alloc.free(spirv);
 
             total += 1;

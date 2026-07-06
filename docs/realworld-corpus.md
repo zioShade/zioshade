@@ -2,7 +2,7 @@
 
 `tests/external/` holds a small hand-authored corpus of canonical Vulkan /
 WebGPU shaders. The `test-realworld` build step runs each shader through the
-full glslpp pipeline (`compileToSPIRV` → SPIR-V → {GLSL, HLSL, MSL, WGSL})
+full zioshade pipeline (`compileToSPIRV` → SPIR-V → {GLSL, HLSL, MSL, WGSL})
 and, when `naga` is on `PATH`, pipes the emitted WGSL through
 `naga --input-kind wgsl` as an external sanity check.
 
@@ -30,7 +30,7 @@ step, so the unit-test count (1724/1724 as of `c77f5452`) is unchanged.
 
 ### Naga WGSL failures
 
-Two shaders produce WGSL that glslpp's WGSL backend emits successfully but
+Two shaders produce WGSL that zioshade's WGSL backend emits successfully but
 that `naga` rejects on parse:
 
 1. **`10_atomic_add.comp`** — `naga` rejects:

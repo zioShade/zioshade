@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test glslpp against a curated collection of real-world GLSL shaders.
+Test zioshade against a curated collection of real-world GLSL shaders.
 These cover diverse feature sets: ray marching, SDF, noise, fractals,
 post-processing, image processing, procedural textures, etc.
 """
@@ -11,7 +11,7 @@ import sys
 import tempfile
 import struct
 
-GLSLPP_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.zig-cache', 'bin', 'conformance-runner.exe')
+ZIOSHADE_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.zig-cache', 'bin', 'conformance-runner.exe')
 SPIRV_VAL = 'C:/VulkanSDK/1.4.341.1/Bin/spirv-val.exe'
 
 GREEN = '\033[92m'
@@ -738,13 +738,13 @@ void main() {
 """
 
 
-def compile_glslpp(source, output_path):
+def compile_zioshade(source, output_path):
     with tempfile.NamedTemporaryFile(mode='w', suffix='.glsl', delete=False, encoding='utf-8') as f:
         f.write(source)
         temp_path = f.name
     try:
         result = subprocess.run(
-            [GLSLPP_RUNNER, temp_path, '--save-spv', output_path],
+            [ZIOSHADE_RUNNER, temp_path, '--save-spv', output_path],
             capture_output=True, text=True, timeout=15
         )
         if os.path.exists(output_path):
@@ -772,8 +772,8 @@ def get_bound(path):
 
 
 def main():
-    if not os.path.exists(GLSLPP_RUNNER):
-        print(f"{RED}glslpp runner not found{RESET}")
+    if not os.path.exists(ZIOSHADE_RUNNER):
+        print(f"{RED}zioshade runner not found{RESET}")
         sys.exit(1)
     
     print(f"{BLUE}Real-World GLSL Shader Audit{RESET}")
@@ -782,9 +782,9 @@ def main():
     
     results = []
     for name, source in sorted(SHADERS.items()):
-        spv_path = os.path.join(os.environ.get('TEMP', '/tmp'), f'glslpp_test_{name}.spv')
+        spv_path = os.path.join(os.environ.get('TEMP', '/tmp'), f'zioshade_test_{name}.spv')
         
-        ok, output = compile_glslpp(source, spv_path)
+        ok, output = compile_zioshade(source, spv_path)
         if not ok:
             err = [l for l in output.split('\n') if 'error' in l.lower() or 'COMPILE' in l or 'spirv-val' in l]
             err_str = err[0][:100] if err else output[:100]

@@ -1210,7 +1210,7 @@ test "compile shader with uniforms" {
 test "fail-loud: nested function definition is rejected, not silently dropped" {
     // GLSL forbids nested function definitions. glslang rejects this with a
     // syntax error ("unexpected LEFT_BRACE, expecting SEMICOLON"). Before the
-    // parser recorded its error-recovery, glslpp's `synchronize()` silently
+    // parser recorded its error-recovery, zioshade's `synchronize()` silently
     // discarded the malformed body and emitted a hollow module at exit 0,
     // defeating the fail-loud contract. compileToSPIRV must surface an error.
     const alloc = std.testing.allocator;

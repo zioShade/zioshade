@@ -1,5 +1,5 @@
 #!/bin/bash
-# Rendering comparison: glslpp vs spirv-cross
+# Rendering comparison: zioshade vs spirv-cross
 # Compiles fragment shaders through both pipelines, renders with OpenGL, and compares pixels.
 #
 # Usage: bash tools/render_compare.sh [shader_dir] [size]
@@ -11,7 +11,7 @@ set -euo pipefail
 GLSLANG="${GLSLANG:-glslangValidator}"
 SPIRVCROSS="${SPIRVCROSS:-spirv-cross}"
 RENDER_TOOL="${RENDER_TOOL:-tools/gl_render_compare.exe}"
-GLSLPP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+ZIOSHADE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SHADER_DIR="${1:-tests/render_compare}"
 SIZE="${2:-128}"
 TMPDIR="${TMPDIR:-/tmp/render_compare_$$}"
@@ -35,18 +35,18 @@ fail=0
 skip=0
 total_max_diff=0
 
-echo "Rendering Comparison: glslpp vs spirv-cross"
+echo "Rendering Comparison: zioshade vs spirv-cross"
 echo "Shader dir: $SHADER_DIR"
 echo "Resolution: ${SIZE}x${SIZE}"
 echo "============================================"
 
-for frag in "$GLSLPP_DIR/$SHADER_DIR"/*.frag; do
+for frag in "$ZIOSHADE_DIR/$SHADER_DIR"/*.frag; do
     [ -f "$frag" ] || continue
     name=$(basename "$frag" .frag)
     total=$((total + 1))
 
     spv="$TMPDIR/${name}.spv"
-    glslpp_glsl="$TMPDIR/${name}_glslpp.glsl"
+    zioshade_glsl="$TMPDIR/${name}_zioshade.glsl"
     spirvcross_glsl="$TMPDIR/${name}_spirvcross.glsl"
 
     # Step 1: glslangValidator → SPIR-V
@@ -56,9 +56,9 @@ for frag in "$GLSLPP_DIR/$SHADER_DIR"/*.frag; do
         continue
     fi
 
-    # Step 2a: glslpp SPIR-V → GLSL
-    if ! "$SPV_TO_GLSL" "$spv" "$glslpp_glsl" 2>/dev/null; then
-        echo "  SKIP $name (glslpp GLSL failed)"
+    # Step 2a: zioshade SPIR-V → GLSL
+    if ! "$SPV_TO_GLSL" "$spv" "$zioshade_glsl" 2>/dev/null; then
+        echo "  SKIP $name (zioshade GLSL failed)"
         skip=$((skip + 1))
         continue
     fi
@@ -71,7 +71,7 @@ for frag in "$GLSLPP_DIR/$SHADER_DIR"/*.frag; do
     fi
 
     # Step 3: Render and compare
-    output=$("$GLSLPP_DIR/$RENDER_TOOL" "$glslpp_glsl" "$spirvcross_glsl" "$SIZE" "$SIZE" 2>&1) || true
+    output=$("$ZIOSHADE_DIR/$RENDER_TOOL" "$zioshade_glsl" "$spirvcross_glsl" "$SIZE" "$SIZE" 2>&1) || true
     max_diff=$(echo "$output" | grep "Max channel diff:" | sed 's/.*: //' || echo "-1")
     match=$(echo "$output" | grep -c "MATCH" || echo "0")
 

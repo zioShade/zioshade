@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 /// Fuzz-test all SPIR-V backends with random valid SPIR-V modules.
 /// The backends should never crash — at worst return an error.
@@ -159,28 +159,28 @@ pub fn main() !void {
         words.items[bound_idx] = next_id;
 
         // Test each backend
-        if (glslpp.spirvToHLSL(alloc, words.items, .{})) |result| {
+        if (zioshade.spirvToHLSL(alloc, words.items, .{})) |result| {
             alloc.free(result);
             hlsl_ok += 1;
         } else |_| {
             hlsl_err += 1;
         }
 
-        if (glslpp.spirvToGLSL(alloc, words.items, .{})) |result| {
+        if (zioshade.spirvToGLSL(alloc, words.items, .{})) |result| {
             alloc.free(result);
             glsl_ok += 1;
         } else |_| {
             glsl_err += 1;
         }
 
-        if (glslpp.spirvToMSL(alloc, words.items, .{})) |result| {
+        if (zioshade.spirvToMSL(alloc, words.items, .{})) |result| {
             alloc.free(result);
             msl_ok += 1;
         } else |_| {
             msl_err += 1;
         }
 
-        if (glslpp.spirvToWGSL(alloc, words.items, .{})) |result| {
+        if (zioshade.spirvToWGSL(alloc, words.items, .{})) |result| {
             alloc.free(result);
             wgsl_ok += 1;
         } else |_| {

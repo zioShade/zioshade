@@ -1,6 +1,6 @@
 // Tests: compound `mat += scalar` / `mat -= scalar` (#170). GLSL applies the
 // scalar to every component, but SPIR-V has no matrix OpFAdd/OpFSub with a scalar
-// operand — glslpp emitted those on a (matrix, scalar) pair = invalid SPIR-V
+// operand — zioshade emitted those on a (matrix, scalar) pair = invalid SPIR-V
 // ("Expected floating scalar or vector type"). The scalar is splatted into a
 // matrix and the op decomposes per column (the compound analog of the binary
 // `mat ± scalar` splat). Covers float and int scalars across mat2/mat3.

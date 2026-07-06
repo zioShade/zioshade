@@ -1,5 +1,5 @@
 .{
-    .name = .glslpp,
+    .name = .zioshade,
     .version = "0.1.0",
     .minimum_zig_version = "0.15.2",
     .paths = .{
@@ -7,5 +7,5 @@
         "build.zig.zon",
         "src",
     },
-    .fingerprint = 0xbf8c31f1e35e1ecc,
+    .fingerprint = 0x8a823918dadacdf2,
 }

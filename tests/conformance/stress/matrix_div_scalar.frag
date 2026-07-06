@@ -1,5 +1,5 @@
 // Tests: binary `mat / scalar` (#170). GLSL divides every component by the
-// scalar, but SPIR-V has no whole-matrix OpFDiv — glslpp emitted OpFDiv on the
+// scalar, but SPIR-V has no whole-matrix OpFDiv — zioshade emitted OpFDiv on the
 // matrix operand (invalid SPIR-V: "Expected floating scalar or vector type").
 // The lowering must be `mat * (1.0/scalar)` via OpMatrixTimesScalar, matching
 // glslang. Covers float and int scalars across mat2/mat3.

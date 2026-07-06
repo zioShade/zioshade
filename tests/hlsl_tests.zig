@@ -6,7 +6,7 @@
 //! but they serve as regression guards and progress trackers.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -17,18 +17,18 @@ const alloc = std.testing.allocator;
 /// Compile GLSL → SPIR-V → HLSL, returning the HLSL source.
 /// Caller frees the result.
 fn compileToHlsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    return try glslpp.spirvToHLSL(alloc, spirv, .{
+    return try zioshade.spirvToHLSL(alloc, spirv, .{
         .shader_model = 60,
     });
 }
 
 /// Compile GLSL → SPIR-V → HLSL for a given stage.
-fn compileToHlslStage(source: [:0]const u8, stage: glslpp.Stage) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = stage });
+fn compileToHlslStage(source: [:0]const u8, stage: zioshade.Stage) ![]const u8 {
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = stage });
     defer alloc.free(spirv);
-    return try glslpp.spirvToHLSL(alloc, spirv, .{
+    return try zioshade.spirvToHLSL(alloc, spirv, .{
         .shader_model = 60,
     });
 }
@@ -47,9 +47,9 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     return error.TestUnexpectedFind;
 }
 
-/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT glslpp's own
-/// frontend). Needed for opcodes glslpp's frontend never emits — e.g. glslang
-/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the glslpp frontend
+/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT zioshade's own
+/// frontend). Needed for opcodes zioshade's frontend never emits — e.g. glslang
+/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the zioshade frontend
 /// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/hlsl_test_{s}.frag", .{name});
@@ -61,7 +61,7 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
         defer src_file.close();
         try src_file.writeAll(std.mem.sliceTo(source, 0));
     }
-    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
     const result = std.process.Child.run(.{
         .allocator = alloc,
@@ -595,7 +595,7 @@ test "T12.1: compileShadertoyToHlsl API works" {
         \\#version 430 core
         \\void main() {}
     ;
-    const result = try glslpp.compileShadertoyToHlsl(alloc, source, .{ .stage = .fragment });
+    const result = try zioshade.compileShadertoyToHlsl(alloc, source, .{ .stage = .fragment });
     defer alloc.free(result.hlsl);
     try assertContains(result.hlsl, "main");
 }
@@ -2212,9 +2212,9 @@ test "WIN3: binding=0 produces register(b0)" {
         \\    _fragColor = vec4(iResolution, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{
         .shader_model = 60,
     });
     defer alloc.free(hlsl);
@@ -3674,9 +3674,9 @@ test "T72.2: array of samplers honest-errors (HLSL backend lacks support)" {
         \\    fragColor = texture(tex[0], vec2(0.5));
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
+    try std.testing.expectError(error.UnsupportedSamplerArray, zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
 }
 
 // #170: a NESTED sampler array (`sampler1D s[2][2]`) was missed by the inline
@@ -3696,7 +3696,7 @@ test "T72.3: nested sampler array honest-errors in HLSL (#170)" {
         \\void main() { o = texture(s[0][1], c) + texture(s[1][0], c); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
+    try std.testing.expectError(error.UnsupportedSamplerArray, zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
 }
 
 test "T73.1: GLSL std.450 trig functions (sin, cos, tan)" {
@@ -3747,7 +3747,7 @@ test "T73.3: GLSL std.450 sqrt, rsqrt" {
         \\    fragColor.zw = vec2(0.0, 1.0);
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T74.1: GLSL std.450 cross, normalize, length, distance" {
@@ -7853,7 +7853,7 @@ test "T312.1: mat3x4 times vec4" {
         \\    fragColor = vec4(r, 1.0);
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T313.1: nested struct uniform access" {
@@ -9537,7 +9537,7 @@ test "T398.1: do-while with continue -> native do/while (#246, was #244 honest-e
 // to `else => null` and the native do-while rebuild honest-errored
 // (`error.UnstructuredControlFlow`) — though it is perfectly representable: HLSL's `!=`
 // is itself unordered (true on NaN) = exactly OpFUnordNotEqual, matching the main
-// emitBinOp path. Reachable only via external SPIR-V (glslpp's frontend emits the
+// emitBinOp path. Reachable only via external SPIR-V (zioshade's frontend emits the
 // ordered FOrdNotEqual for float `!=`).
 test "T398.2: do-while body-cf + float `!=` (OpFUnordNotEqual) -> native do/while (#170)" {
     const spirv = compileToSpirv("dowhile_funord_ne",
@@ -9554,7 +9554,7 @@ test "T398.2: do-while body-cf + float `!=` (OpFUnordNotEqual) -> native do/whil
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try assertContains(hlsl, "} while (");
     try assertContains(hlsl, "!=");
@@ -10420,7 +10420,7 @@ test "T443.1: textureGatherOffsets" {
         \\}
     ;
     // compileToSPIRV must succeed (semantic analyzer must not record any error)
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
     // HLSL cross-compilation fails because ConstOffsets has no HLSL equivalent
@@ -11818,7 +11818,7 @@ test "T518.1: depth range gl_DepthRange" {
         \\    fragColor = vec4(near, far, diff, 1.0);
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T519.1: nonuniformEXT qualifier" {
@@ -12004,7 +12004,7 @@ test "T528.1: noise functions" {
         \\    fragColor = vec4(n1, n2.x, n3.x, 1.0);
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }));
 }
 
 test "T529.1: mat4x3 and mat3x4 operations" {
@@ -12705,7 +12705,7 @@ test "T562.1: subgroup basic operations" {
         \\    if (elect != 0u) values[id] = 1.0;
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T563.1: subgroup arithmetic add" {
@@ -12722,7 +12722,7 @@ test "T563.1: subgroup arithmetic add" {
         \\    values[id] = sum;
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T564.1: compute matrix multiply tiled" {
@@ -12752,7 +12752,7 @@ test "T564.1: compute matrix multiply tiled" {
         \\    matC[id.y * 64u + id.x] = sum;
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T565.1: conditional discard with side effects" {
@@ -12808,7 +12808,7 @@ test "T567.1: subgroup ballot and shuffle" {
         \\    values[id] = shuffled + float(ballot.x);
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T568.1: quad operations" {
@@ -12826,7 +12826,7 @@ test "T568.1: quad operations" {
         \\    values[id] = horiz + vert;
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T569.1: compute histogram" {
@@ -13325,7 +13325,7 @@ test "T589.1: compute marching cubes table lookup" {
         \\    }
         \\}
     ;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
 test "T590.1: vertex morph targets" {
@@ -13566,9 +13566,9 @@ test "hlsl: bitfieldReverse -> reversebits" {
         \\    fragColor = vec4(float(a));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "reversebits") != null);
 }
@@ -13582,9 +13582,9 @@ test "hlsl: bitCount -> countbits" {
         \\    fragColor = vec4(float(a));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "countbits") != null);
 }
@@ -13602,9 +13602,9 @@ test "hlsl: constFold integer division and modulo" {
         \\    fragColor = vec4(float(b + c));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     // Division and modulo should still be present (runtime values)
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "/") != null or std.mem.indexOf(u8, hlsl, "/") != null);
@@ -13625,9 +13625,9 @@ test "hlsl: constFold bitwise and shift with runtime values" {
         \\    fragColor = vec4(float(b + c + d + e + f));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     // Bitwise and shift ops should be present (runtime values)
     try assertContains(hlsl, "<<");
@@ -13645,9 +13645,9 @@ test "hlsl: double negation elimination" {
         \\    fragColor = vec4(a, b, 0.0, 1.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try assertContains(hlsl, "u");
 }
@@ -13667,9 +13667,9 @@ test "hlsl: complex optimizer pipeline" {
         \\    fragColor = vec4(b + f + e, 0.0, 0.0, 1.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try assertContains(hlsl, "4");
     try assertContains(hlsl, "u");
@@ -13690,7 +13690,7 @@ test "codegen: AC+Store stale load cache regression" {
         \\    fragColor = v;
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     // Count OpLoad(61) instructions to verify v is loaded after each modification
     var load_count: u32 = 0;
@@ -13913,9 +13913,9 @@ test "HLSL: SSBO pixel-interlock with interlock produces RasterizerOrdered" {
         \\    endInvocationInterlockARB();
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     // With interlock extension, SSBO becomes RasterizerOrderedStructuredBuffer
     try assertContains(hlsl, "RasterizerOrderedStructuredBuffer");
@@ -13953,9 +13953,9 @@ test "HLSL: selection-block-dominator do-while(false)" {
         \\    } while(false);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try std.testing.expect(hlsl.len > 0);
 }
@@ -13978,9 +13978,9 @@ test "HLSL: helper-invocation gl_HelperInvocation" {
         \\    FragColor = c;
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     // Should use IsHelperLane() instead of TEXCOORD semantic
     try assertContains(hlsl, "IsHelperLane()");
@@ -13999,9 +13999,9 @@ test "HLSL: sample-parameter gl_SampleMaskIn gl_SampleMask" {
         \\    FragColor = gl_SamplePosition + vec2(float(gl_SampleID));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     // Should contain SV_SampleIndex for gl_SampleID
     try std.testing.expect(hlsl.len > 0);
@@ -14019,9 +14019,9 @@ test "HLSL: sample-parameter with gl_SampleMaskIn[0]" {
         \\    gl_SampleMask[0] = 1;
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     std.debug.print("\n=== sample-param-mask HLSL ===\n{s}\n", .{hlsl});
     try std.testing.expect(hlsl.len > 0);
@@ -14033,7 +14033,7 @@ test "HLSL: barycentric-khr from SPIR-V binary" {
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     // Should contain nointerpolation and SV_Barycentrics
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "nointerpolation") != null);
@@ -14050,7 +14050,7 @@ test "HLSL: barycentric-nv with overlapping per-vertex arrays is an honest error
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
-    try std.testing.expectError(error.UnsupportedBarycentricArrayOverlap, glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 }));
+    try std.testing.expectError(error.UnsupportedBarycentricArrayOverlap, zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 }));
 }
 
 test "HLSL: single-array-member SSBO unwraps to RWStructuredBuffer<elem> (dxc 2048-byte limit)" {
@@ -14064,7 +14064,7 @@ test "HLSL: single-array-member SSBO unwraps to RWStructuredBuffer<elem> (dxc 20
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<float4>") != null);
     // The wrapper struct must NOT be declared, and the access is flattened.
@@ -14086,7 +14086,7 @@ test "HLSL: compute SSBO with runtime array drops struct wrapper" {
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
 
     // The SSBO must be flattened to RWStructuredBuffer<float>.
@@ -14118,11 +14118,11 @@ test "hlsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
         \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expectError(
         error.UnsupportedImageOperands,
-        glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 }),
+        zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 }),
     );
 }
 
@@ -14153,12 +14153,12 @@ test "HLSL: byte-identical UBO blocks keep distinct member names" {
 // ---------------------------------------------------------------------------
 // T597: row_major / column_major UBO matrix layout (silent-wrong fix)
 //
-// glslpp ignored the SPIR-V RowMajor decoration entirely, emitting
+// zioshade ignored the SPIR-V RowMajor decoration entirely, emitting
 // byte-identical HLSL for a row_major vs column_major UBO matrix block. Two
 // distinct, independently-verified bugs hide behind that:
 //
 //   (1) The RowMajor decoration was never consumed, so a row_major block and a
-//       column_major block produced the SAME `float4x4 a_m` declaration. glslpp
+//       column_major block produced the SAME `float4x4 a_m` declaration. zioshade
 //       stores a cbuffer matrix as the LOGICAL matrix M (its `mul(M, v)` order
 //       proves it — verified by a dxc → spirv-cross round-trip of the
 //       column_major output, which is exactly `M*v`). A row_major block's std140
@@ -14167,14 +14167,14 @@ test "HLSL: byte-identical UBO blocks keep distinct member names" {
 //       `row_major` storage qualifier on the member so HLSL reconstructs M.
 //       NOTE: this is the OPPOSITE of spirv-cross's text (it emits `column_major`
 //       for RowMajor) because spirv-cross stores Mᵀ and multiplies on the left
-//       (`mul(v, M)`); glslpp's convention is the transpose of spirv-cross's, so
+//       (`mul(v, M)`); zioshade's convention is the transpose of spirv-cross's, so
 //       it needs the opposite keyword. Round-trip-proven, not copied.
 //
 //   (2) A matrix-COLUMN read `a.m[i]` was emitted as HLSL `a_m[i]`, but HLSL
 //       `m[i]` is a ROW while GLSL/SPIR-V `m[i]` is a COLUMN. With a_m == M, the
 //       read must transpose: `transpose(a_m)[i]`. This was wrong for BOTH
 //       layouts (confirmed by round-trip: column_major `a.m[0]` read row 0).
-//       Local matrices are unaffected — glslpp builds them with HLSL's
+//       Local matrices are unaffected — zioshade builds them with HLSL's
 //       row-filling constructor, so the double transpose cancels.
 // ---------------------------------------------------------------------------
 
@@ -14204,7 +14204,7 @@ test "T597.1: row_major UBO mat4 carries the row_major qualifier; column_major s
         return error.TestUnexpectedFind;
     }
     // RowMajor → HLSL `row_major` storage qualifier (reconstructs the logical M
-    // given glslpp's mul(M,v) convention; opposite of spirv-cross's text).
+    // given zioshade's mul(M,v) convention; opposite of spirv-cross's text).
     try assertContains(row, "row_major");
     // ColMajor stays bare (HLSL default is column_major) — no regression.
     try assertNotContains(col, "row_major");
@@ -14234,16 +14234,16 @@ test "T597.3: non-square row_major UBO matrix is an honest error (not silent-wro
         \\layout(location=0) out vec4 o;
         \\void main() { o = a.m[0]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(
         error.UnsupportedRowMajorMatrix,
-        glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
+        zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
     );
 }
 
 test "T597.4: local matrix column read is NOT transposed (regression guard)" {
-    // glslpp builds a local matrix with HLSL's row-filling constructor, so the
+    // zioshade builds a local matrix with HLSL's row-filling constructor, so the
     // value is Mᵀ and HLSL row-indexing already yields the GLSL column — no
     // transpose needed. The UBO read fix must NOT touch local-matrix reads.
     const source: [:0]const u8 =
@@ -14432,9 +14432,9 @@ test "descriptor remap: resource_bindings overrides register assignment" {
         \\layout(location = 0) out vec4 o;
         \\void main() { o = texture(tex, uv) * u.tint; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{
         .shader_model = 60,
         .resource_bindings = &.{
             .{ .set = 0, .binding = 0, .register = 5 },
@@ -14454,9 +14454,9 @@ test "descriptor remap: empty resource_bindings preserves default registers" {
         \\layout(location = 0) out vec4 o;
         \\void main() { o = u.tint; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     // No remap → default register from the binding number.
     try assertContains(hlsl, "register(b2)");
@@ -14491,13 +14491,13 @@ test "hlsl: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
         \\    o = c;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const ok = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    const ok = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
     defer alloc.free(ok);
     const stripped = try stripMerge(alloc, spirv);
     defer alloc.free(stripped);
-    const recovered = try glslpp.spirvToHLSL(alloc, stripped, .{ .shader_model = 60 });
+    const recovered = try zioshade.spirvToHLSL(alloc, stripped, .{ .shader_model = 60 });
     defer alloc.free(recovered);
     try std.testing.expectEqualStrings(ok, recovered);
 }
@@ -14624,16 +14624,16 @@ test "T-qlod.1: HLSL textureQueryLod uses CalculateLevelOfDetail (#gaps querylod
 
 // #296: runtime-sized SSBO array `.length()` (OpArrayLength) now lowers to HLSL's
 // `RWStructuredBuffer<T>.GetDimensions(count, stride)` (the element COUNT is the array
-// length). glslpp flattens a single-runtime-array SSBO `{ T data[]; }` to
+// length). zioshade flattens a single-runtime-array SSBO `{ T data[]; }` to
 // `RWStructuredBuffer<T>` (see the dxc-2048-byte test above), so GetDimensions returns the
 // length directly — simpler than spirv-cross's ByteAddressBuffer `(bytes-off)/stride` model
 // (which it uses because it keeps a byte buffer). dxc-validated; conformance validates SPIR-V
 // only, so this guards the emitted HLSL string.
 test "T-arrlen.1: runtime SSBO array .length() lowers to RWStructuredBuffer.GetDimensions (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
     try assertContains(hlsl, "RWStructuredBuffer<float> B");
     try assertContains(hlsl, "B.GetDimensions(");
@@ -14651,9 +14651,9 @@ test "T-arrlen.1: runtime SSBO array .length() lowers to RWStructuredBuffer.GetD
 // faithfully representable.)
 test "T-arrlen.2: multi-member SSBO .length() honest-errors in HLSL (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { uint count; float data[]; } b;\nlayout(std430,binding=1) buffer Out { uint n; } o;\nvoid main(){ o.n = uint(b.data.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
 }
 
 // #170: textureGradOffset → HLSL SampleGrad(sampler, coord, ddx, ddy, offset). The

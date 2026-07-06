@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -25,7 +25,7 @@ fn countOpStores(spirv: []const u32) usize {
         const opcode = word & 0xFFFF;
         const word_count = word >> 16;
         if (word_count == 0) break; // malformed; bail
-        if (opcode == @intFromEnum(glslpp.spirv.Op.Store)) count += 1;
+        if (opcode == @intFromEnum(zioshade.spirv.Op.Store)) count += 1;
         i += word_count;
     }
     return count;
@@ -60,7 +60,7 @@ test "mesh shader emits OpStore for per-vertex, per-primitive and user-location 
         \\    gl_PrimitiveTriangleIndicesEXT[0] = uvec3(0, 1, 2);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{
         .stage = .mesh,
         .spirv_version = .@"1.4",
     });
@@ -87,13 +87,13 @@ test "mesh shader user per-vertex output arrays are sized (no OpTypeRuntimeArray
         \\    v_color[0] = vec4(1.0, 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{
         .stage = .mesh,
         .spirv_version = .@"1.4",
     });
     defer alloc.free(spirv);
 
     // OpTypeRuntimeArray = 30, OpTypeArray = 28
-    try std.testing.expect(!hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.TypeRuntimeArray)));
-    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.TypeArray)));
+    try std.testing.expect(!hasOpcode(spirv, @intFromEnum(zioshade.spirv.Op.TypeRuntimeArray)));
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(zioshade.spirv.Op.TypeArray)));
 }

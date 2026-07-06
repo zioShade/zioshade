@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch cross-compilation validation and rendering comparison for glslpp.
+Batch cross-compilation validation and rendering comparison for zioshade.
 
 Usage:
   python batch_compare.py --validate                    # Validate all shaders compile
@@ -30,15 +30,15 @@ SPIRVCROSS = os.environ.get("SPIRVCROSS", "spirv-cross")
 DXC = os.environ.get("DXC", "dxc")
 MAC_SSH = os.environ.get("MAC_SSH", "alex@macbookale")
 
-GLSLPP_DIR = Path(__file__).parent
+ZIOSHADE_DIR = Path(__file__).parent
 
 @dataclass
 class ShaderResult:
     name: str
-    glslpp_compile_ok: bool = False
-    glslpp_hlsl_ok: bool = False
-    glslpp_glsl_ok: bool = False
-    glslpp_msl_ok: bool = False
+    zioshade_compile_ok: bool = False
+    zioshade_hlsl_ok: bool = False
+    zioshade_glsl_ok: bool = False
+    zioshade_msl_ok: bool = False
     ref_compile_ok: bool = False
     ref_hlsl_ok: bool = False
     ref_glsl_ok: bool = False
@@ -54,21 +54,21 @@ def find_shaders():
     shaders = []
     
     # spirv-cross reference shaders
-    for f in sorted((GLSLPP_DIR / "tests/spirv-cross").glob("*.frag")):
+    for f in sorted((ZIOSHADE_DIR / "tests/spirv-cross").glob("*.frag")):
         shaders.append(("spirv-cross", f))
     
     # glslang-430 shaders
-    for f in sorted((GLSLPP_DIR / "tests/glslang-430").glob("*.frag")):
+    for f in sorted((ZIOSHADE_DIR / "tests/glslang-430").glob("*.frag")):
         shaders.append(("glslang-430", f))
     
     # wintty shaders (assembled)
-    for f in sorted((GLSLPP_DIR / "tests/wintty").glob("test_*.glsl")):
+    for f in sorted((ZIOSHADE_DIR / "tests/wintty").glob("test_*.glsl")):
         shaders.append(("wintty", f))
     
     return shaders
 
-def compile_glslpp(shader_path: Path, target: str) -> tuple[bool, Optional[bytes]]:
-    """Compile a shader through glslpp via the dump-shader tool."""
+def compile_zioshade(shader_path: Path, target: str) -> tuple[bool, Optional[bytes]]:
+    """Compile a shader through zioshade via the dump-shader tool."""
     # We use the build system for this
     pass
 
@@ -125,11 +125,11 @@ def generate_reference(spv_path: Path, output_prefix: str):
             results[target] = out_path
     return results
 
-def compare_rendering_msl(glslpp_msl: str, ref_msl: str) -> tuple[bool, int]:
+def compare_rendering_msl(zioshade_msl: str, ref_msl: str) -> tuple[bool, int]:
     """Compare MSL rendering on macOS via SSH."""
     try:
         # Copy files to Mac
-        subprocess.run(["scp", glslpp_msl, f"{MAC_SSH}:/tmp/glslpp.msl"], 
+        subprocess.run(["scp", zioshade_msl, f"{MAC_SSH}:/tmp/zioshade.msl"], 
                        capture_output=True, timeout=30)
         subprocess.run(["scp", ref_msl, f"{MAC_SSH}:/tmp/ref.msl"],
                        capture_output=True, timeout=30)
@@ -139,7 +139,7 @@ def compare_rendering_msl(glslpp_msl: str, ref_msl: str) -> tuple[bool, int]:
             ["ssh", MAC_SSH, 
              "swiftc -o /tmp/ShaderCompare /tmp/ShaderCompare.swift "
              "-framework Metal -framework MetalKit -framework Foundation 2>/dev/null && "
-             "/tmp/ShaderCompare /tmp/glslpp.msl /tmp/ref.msl /tmp/compare"],
+             "/tmp/ShaderCompare /tmp/zioshade.msl /tmp/ref.msl /tmp/compare"],
             capture_output=True, text=True, timeout=60
         )
         
@@ -198,8 +198,8 @@ def batch_validate():
             ok, _ = validate_with_glslang(ref_outputs["glsl"])
             if not ok: ref_ok = False
         
-        # Step 4: Validate glslpp outputs
-        # (This would use the glslpp build tools - simplified here)
+        # Step 4: Validate zioshade outputs
+        # (This would use the zioshade build tools - simplified here)
         
         print("OK" if ref_ok else "REF_FAIL")
         if ref_ok:
@@ -234,19 +234,19 @@ def batch_render_msl():
     ]
     
     # Copy ShaderBatchCompare to Mac first
-    swift_tool = GLSLPP_DIR / "tools/ShaderBatchCompare.swift"
+    swift_tool = ZIOSHADE_DIR / "tools/ShaderBatchCompare.swift"
     subprocess.run(["scp", str(swift_tool), f"{MAC_SSH}:ShaderBatchCompare.swift"],
                    capture_output=True, timeout=30)
     
     for name, prefix in wintty_shaders:
-        glslpp_msl = GLSLPP_DIR / f"{prefix}.msl"
+        zioshade_msl = ZIOSHADE_DIR / f"{prefix}.msl"
         
-        if not glslpp_msl.exists():
-            print(f"  {name}: SKIP (no glslpp MSL output)")
+        if not zioshade_msl.exists():
+            print(f"  {name}: SKIP (no zioshade MSL output)")
             continue
         
         # Generate spirv-cross reference
-        glsl_path = GLSLPP_DIR / f"{prefix}.glsl"
+        glsl_path = ZIOSHADE_DIR / f"{prefix}.glsl"
         spv_path = f"/tmp/{name.lower()}_ref.spv"
         ref_msl_path = f"/tmp/{name.lower()}_ref.msl"
         
@@ -260,13 +260,13 @@ def batch_render_msl():
                        text=True) # TODO: write to file
         
         # Copy to Mac and compare
-        subprocess.run(["scp", str(glslpp_msl), f"{MAC_SSH}:/tmp/{name.lower()}_glslpp.msl"],
+        subprocess.run(["scp", str(zioshade_msl), f"{MAC_SSH}:/tmp/{name.lower()}_zioshade.msl"],
                        capture_output=True, timeout=30)
         
         # Run comparison
         result = subprocess.run(
             ["ssh", MAC_SSH,
-             f"./ShaderCompare /tmp/{name.lower()}_glslpp.msl /tmp/{name.lower()}_ref.msl /tmp/{name.lower()}_compare"],
+             f"./ShaderCompare /tmp/{name.lower()}_zioshade.msl /tmp/{name.lower()}_ref.msl /tmp/{name.lower()}_compare"],
             capture_output=True, text=True, timeout=60
         )
         
@@ -274,7 +274,7 @@ def batch_render_msl():
         print(result.stdout)
 
 def main():
-    parser = argparse.ArgumentParser(description="Batch shader comparison for glslpp")
+    parser = argparse.ArgumentParser(description="Batch shader comparison for zioshade")
     parser.add_argument("--validate", action="store_true", help="Validate all shaders")
     parser.add_argument("--render-msl", action="store_true", help="MSL rendering comparison")
     parser.add_argument("--render-hlsl", action="store_true", help="HLSL rendering comparison")

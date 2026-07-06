@@ -1,6 +1,6 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
-const reflect = @import("glslpp").reflection;
+const zioshade = @import("zioshade");
+const reflect = @import("zioshade").reflection;
 
 // =============================================================================
 // G1: Reflection API — deep correctness tests
@@ -8,7 +8,7 @@ const reflect = @import("glslpp").reflection;
 
 test "G1: multiple UBOs at different bindings and sets" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(std140, set = 0, binding = 0) uniform UBO0 { vec4 a; };
         \\layout(std140, set = 0, binding = 1) uniform UBO1 { vec4 b; };
@@ -17,7 +17,7 @@ test "G1: multiple UBOs at different bindings and sets" {
         \\void main() { FragColor = a + b + c; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 3), res.uniform_buffers.len);
 
@@ -32,7 +32,7 @@ test "G1: multiple UBOs at different bindings and sets" {
 
 test "G1: UBO member names and offsets are extracted" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(std140, binding = 0) uniform MyBlock {
         \\    vec4 position;
@@ -43,7 +43,7 @@ test "G1: UBO member names and offsets are extracted" {
         \\void main() { FragColor = position * color * scale; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
     const ubo = res.uniform_buffers[0];
@@ -61,7 +61,7 @@ test "G1: UBO member names and offsets are extracted" {
 
 test "G1: UBO member type kinds are resolved" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(std140, binding = 0) uniform Types {
         \\    int i;
@@ -74,7 +74,7 @@ test "G1: UBO member type kinds are resolved" {
         \\void main() { FragColor = vec4(float(i), float(u), f, 1.0) * m * v; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     const ubo = res.uniform_buffers[0];
     try std.testing.expect(ubo.members.len >= 5);
@@ -87,7 +87,7 @@ test "G1: UBO member type kinds are resolved" {
 
 test "G1: multiple sampled images at different bindings" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(binding = 0) uniform sampler2D texA;
         \\layout(binding = 1) uniform sampler2D texB;
@@ -99,7 +99,7 @@ test "G1: multiple sampled images at different bindings" {
         \\}
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expect(res.sampled_images.len >= 2);
     var found_0 = false;
@@ -113,7 +113,7 @@ test "G1: multiple sampled images at different bindings" {
 
 test "G1: vertex shader entry point and inputs" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(location = 0) in vec3 aPos;
         \\layout(location = 1) in vec2 aUV;
@@ -124,7 +124,7 @@ test "G1: vertex shader entry point and inputs" {
         \\}
     , .{ .stage = .vertex });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expect(res.entry_points.len >= 1);
     try std.testing.expectEqual(reflect.Stage.vertex, res.entry_points[0].stage);
@@ -134,7 +134,7 @@ test "G1: vertex shader entry point and inputs" {
 
 test "G1: compute shader entry point with SSBOs" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
         \\layout(std430, binding = 0) buffer SrcBuf { float src[]; };
@@ -145,7 +145,7 @@ test "G1: compute shader entry point with SSBOs" {
         \\}
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expect(res.entry_points.len >= 1);
     try std.testing.expectEqual(reflect.Stage.compute, res.entry_points[0].stage);
@@ -154,12 +154,12 @@ test "G1: compute shader entry point with SSBOs" {
 
 test "G1: empty shader reflects minimal resources" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\void main() {}
     , .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 0), res.uniform_buffers.len);
     try std.testing.expectEqual(@as(usize, 0), res.storage_buffers.len);
@@ -173,20 +173,20 @@ test "G1: empty shader reflects minimal resources" {
 test "G1: invalid SPIR-V magic returns error" {
     const alloc = std.testing.allocator;
     const bad_spv = [_]u32{ 0xDEADBEEF, 0, 0, 0, 0 };
-    const result = glslpp.reflectSPIRV(alloc, &bad_spv);
+    const result = zioshade.reflectSPIRV(alloc, &bad_spv);
     try std.testing.expectError(error.InvalidSPIRV, result);
 }
 
 test "G1: too-short SPIR-V returns error" {
     const alloc = std.testing.allocator;
     const short_spv = [_]u32{ 0x07230203 };
-    const result = glslpp.reflectSPIRV(alloc, &short_spv);
+    const result = zioshade.reflectSPIRV(alloc, &short_spv);
     try std.testing.expectError(error.InvalidSPIRV, result);
 }
 
 test "G1: push constant with members" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(push_constant) uniform Push {
         \\    mat4 mvp;
@@ -196,7 +196,7 @@ test "G1: push constant with members" {
         \\void main() { FragColor = tint; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 1), res.push_constants.len);
     const pc = res.push_constants[0];
@@ -209,7 +209,7 @@ test "G1: push constant with members" {
 
 test "G1: resource IDs are non-zero and unique" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\layout(std140, binding = 0) uniform A { vec4 x; };
         \\layout(std140, binding = 1) uniform B { vec4 y; };
@@ -217,7 +217,7 @@ test "G1: resource IDs are non-zero and unique" {
         \\void main() { FragColor = x + y; }
     , .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
     try std.testing.expectEqual(@as(usize, 2), res.uniform_buffers.len);
     try std.testing.expect(res.uniform_buffers[0].id != res.uniform_buffers[1].id);
@@ -235,11 +235,11 @@ test "G1: reflectGLSL matches reflectSPIRV for same source" {
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = texture(tex, vUV) * tint; }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
-    var res1 = try glslpp.reflectSPIRV(alloc, spv);
+    var res1 = try zioshade.reflectSPIRV(alloc, spv);
     defer res1.deinit(alloc);
-    var res2 = try glslpp.reflectGLSL(alloc, source, .{ .stage = .fragment });
+    var res2 = try zioshade.reflectGLSL(alloc, source, .{ .stage = .fragment });
     defer res2.deinit(alloc);
 
     try std.testing.expectEqual(res1.uniform_buffers.len, res2.uniform_buffers.len);
@@ -253,11 +253,11 @@ test "G1: reflectGLSL matches reflectSPIRV for same source" {
 // =============================================================================
 
 test "G4: GLSL 300 (ESSL) is rejected with an honest error" {
-    // #169: 300 is OpenGL ES Shading Language, which glslpp intentionally does NOT
+    // #169: 300 is OpenGL ES Shading Language, which zioshade intentionally does NOT
     // emit. Requesting it must fail loudly rather than silently produce an invalid
     // or wrong-dialect #version. Mirrors the honest-error gate in root.zig.
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.UnsupportedGlslVersion, glslpp.compileGlslToGlslVersion(alloc,
+    try std.testing.expectError(error.UnsupportedGlslVersion, zioshade.compileGlslToGlslVersion(alloc,
         \\#version 430
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = vec4(1.0); }
@@ -266,7 +266,7 @@ test "G4: GLSL 300 (ESSL) is rejected with an honest error" {
 
 test "G4: GLSL 330 output contains #version 330" {
     const alloc = std.testing.allocator;
-    const glsl = try glslpp.compileGlslToGlslVersion(alloc,
+    const glsl = try zioshade.compileGlslToGlslVersion(alloc,
         \\#version 430
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = vec4(1.0); }
@@ -277,7 +277,7 @@ test "G4: GLSL 330 output contains #version 330" {
 
 test "G4: GLSL 450 output preserves binding qualifiers" {
     const alloc = std.testing.allocator;
-    const glsl = try glslpp.compileGlslToGlslVersion(alloc,
+    const glsl = try zioshade.compileGlslToGlslVersion(alloc,
         \\#version 430
         \\layout(std140, binding = 3) uniform UBO { vec4 data; };
         \\layout(location = 0) out vec4 FragColor;
@@ -290,7 +290,7 @@ test "G4: GLSL 450 output preserves binding qualifiers" {
 
 test "G4: GLSL 460 output valid" {
     const alloc = std.testing.allocator;
-    const glsl = try glslpp.compileGlslToGlslVersion(alloc,
+    const glsl = try zioshade.compileGlslToGlslVersion(alloc,
         \\#version 430
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = vec4(1.0, 0.0, 0.0, 1.0); }
@@ -301,7 +301,7 @@ test "G4: GLSL 460 output valid" {
 
 test "G4: backward-compatible compileGlslToGlsl still works" {
     const alloc = std.testing.allocator;
-    const glsl = try glslpp.compileGlslToGlsl(alloc,
+    const glsl = try zioshade.compileGlslToGlsl(alloc,
         \\#version 430
         \\layout(location = 0) out vec4 FragColor;
         \\void main() { FragColor = vec4(0.5); }
@@ -319,11 +319,11 @@ test "G4: cross-compile preserves shader semantics across versions" {
         \\void main() { FragColor = vec4(vUV, 0.0, 1.0); }
     ;
 
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     inline for (.{ 330, 430, 450, 460 }) |ver| {
-        const glsl = try glslpp.compileGlslToGlslVersion(alloc, source, .fragment, ver);
+        const glsl = try zioshade.compileGlslToGlslVersion(alloc, source, .fragment, ver);
         defer alloc.free(glsl);
         try std.testing.expect(std.mem.indexOf(u8, glsl, "void main()") != null);
     }
@@ -335,7 +335,7 @@ test "G4: cross-compile preserves shader semantics across versions" {
 
 test "G10: basic HLSL output contains cbuffer for UBO" {
     const alloc = std.testing.allocator;
-    const hlsl = try glslpp.compileGlslToHlsl(alloc,
+    const hlsl = try zioshade.compileGlslToHlsl(alloc,
         \\#version 430
         \\layout(std140, binding = 0) uniform MyCBuffer {
         \\    vec4 color;
@@ -351,7 +351,7 @@ test "G10: basic HLSL output contains cbuffer for UBO" {
 
 test "G10: HLSL output uses Texture2D + SamplerState for sampler2D" {
     const alloc = std.testing.allocator;
-    const hlsl = try glslpp.compileGlslToHlsl(alloc,
+    const hlsl = try zioshade.compileGlslToHlsl(alloc,
         \\#version 430
         \\layout(binding = 0) uniform sampler2D myTex;
         \\layout(location = 0) in vec2 vUV;
@@ -366,7 +366,7 @@ test "G10: HLSL output uses Texture2D + SamplerState for sampler2D" {
 
 test "G10: HLSL vertex shader has VS signature" {
     const alloc = std.testing.allocator;
-    const hlsl = try glslpp.compileGlslToHlsl(alloc,
+    const hlsl = try zioshade.compileGlslToHlsl(alloc,
         \\#version 430
         \\layout(location = 0) in vec3 aPos;
         \\void main() {
@@ -381,7 +381,7 @@ test "G10: HLSL vertex shader has VS signature" {
 
 test "G10: HLSL compute shader has [numthreads]" {
     const alloc = std.testing.allocator;
-    const hlsl = try glslpp.compileGlslToHlsl(alloc,
+    const hlsl = try zioshade.compileGlslToHlsl(alloc,
         \\#version 430
         \\layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
         \\layout(std430, binding = 0) buffer Data { float values[]; };
@@ -397,7 +397,7 @@ test "G10: HLSL compute shader has [numthreads]" {
 
 test "G10: HLSL output for mat4 uses float4x4" {
     const alloc = std.testing.allocator;
-    const hlsl = try glslpp.compileGlslToHlsl(alloc,
+    const hlsl = try zioshade.compileGlslToHlsl(alloc,
         \\#version 430
         \\layout(std140, binding = 0) uniform UBO { mat4 mvp; };
         \\layout(location = 0) in vec4 aPos;
@@ -423,10 +423,10 @@ test "cross: reflected resources match across GLSL and HLSL backends" {
         \\void main() { FragColor = texture(tex, vUV) * data; }
     ;
 
-    var res = try glslpp.reflectGLSL(alloc, source, .{ .stage = .fragment });
+    var res = try zioshade.reflectGLSL(alloc, source, .{ .stage = .fragment });
     defer res.deinit(alloc);
 
-    const hlsl = try glslpp.compileGlslToHlsl(alloc, source, .fragment);
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, source, .fragment);
     defer alloc.free(hlsl);
 
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
@@ -443,9 +443,9 @@ test "cross: SSBO reflected as storage_buffer and present in HLSL" {
         \\layout(std140, binding = 1) uniform Params { float scale; };
         \\void main() { vals[0] *= scale; }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spv);
-    var res = try glslpp.reflectSPIRV(alloc, spv);
+    var res = try zioshade.reflectSPIRV(alloc, spv);
     defer res.deinit(alloc);
 
     try std.testing.expectEqual(@as(usize, 1), res.storage_buffers.len);
@@ -453,7 +453,7 @@ test "cross: SSBO reflected as storage_buffer and present in HLSL" {
     try std.testing.expectEqual(@as(usize, 1), res.uniform_buffers.len);
     try std.testing.expectEqual(@as(u32, 1), res.uniform_buffers[0].binding);
 
-    const hlsl = try glslpp.compileGlslToHlsl(alloc, source, .compute);
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, source, .compute);
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "ByteAddressBuffer") != null or
         std.mem.indexOf(u8, hlsl, "StructuredBuffer") != null or
@@ -541,7 +541,7 @@ fn spirvHasOp(spv: []const u32, opcode: u32) bool {
 // of type OpTypeImage" in spirv-val. Now they emit OpTypeImage <int|uint> Buffer.
 test "gap#194: isamplerBuffer emits OpTypeImage with int component (texelFetch/textureSize)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding = 0) uniform isamplerBuffer s;
         \\layout(location = 0) out vec4 o;
@@ -559,7 +559,7 @@ test "gap#194: isamplerBuffer emits OpTypeImage with int component (texelFetch/t
 
 test "gap#194: usamplerBuffer emits OpTypeImage with uint component (texelFetch/textureSize)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding = 0) uniform usamplerBuffer s;
         \\layout(location = 0) out vec4 o;
@@ -577,7 +577,7 @@ test "gap#194: usamplerBuffer emits OpTypeImage with uint component (texelFetch/
 
 test "gap#194 regression: float samplerBuffer still emits OpTypeImage with float component" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding = 0) uniform samplerBuffer s;
         \\layout(location = 0) out vec4 o;
@@ -600,7 +600,7 @@ test "fold: signed int literal in float-vector ctor wraps (two's complement) lik
     // +2.147e9 (sign flip = silent-wrong). f32 bit patterns: -2147483648.0 =
     // 0xCF000000, +2147483648.0 = 0x4F000000.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location = 0) out vec2 o;
         \\void main() { o = vec2(2147483648, 0); }
@@ -614,7 +614,7 @@ test "fold: unsigned literal in float-vector ctor stays positive" {
     // The `u` suffix makes it unsigned — 2147483648u is +2.147e9 (= 0x4F000000),
     // matching glslang. Guards against over-correcting the signed fix.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location = 0) out vec2 o;
         \\void main() { o = vec2(2147483648u, 0u); }
@@ -632,7 +632,7 @@ test "frontend: separate sampler2DShadow(tex,samp) emits a depth-compare, not Op
     // the depth compare vanished (empty main / OpUndef result = silent-wrong).
     // Assert the emitted SPIR-V now contains an OpImageSampleDref* op.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 310 es
         \\precision mediump float;
         \\layout(set = 0, binding = 0) uniform mediump samplerShadow uS;
@@ -649,7 +649,7 @@ test "frontend: separate sampler2DShadow with textureLod emits explicit-lod dept
     // Same root cause via the EXPLICIT-LOD path: textureLod(sampler2DShadow(...),
     // …) must lower to OpImageSampleDrefExplicitLod (90), not be dropped.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(set = 0, binding = 0) uniform samplerShadow uS;
         \\layout(set = 0, binding = 1) uniform texture2D uT;
@@ -666,7 +666,7 @@ test "frontend: separate sampler2DShadow with textureLod emits explicit-lod dept
 // the implicit-lod proj op (image_sample_proj) would silently sample the wrong mip.
 test "frontend: textureProjLod emits OpImageSampleProjExplicitLod with a Lod operand" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(location=0) in vec3 c;
@@ -684,7 +684,7 @@ test "frontend: textureProjLod emits OpImageSampleProjExplicitLod with a Lod ope
 // must honest-error rather than mis-compile.
 test "frontend: textureProjLod on a shadow sampler honest-errors (no silent-wrong)" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow sh;
         \\layout(location=0) in vec4 c;
@@ -700,7 +700,7 @@ test "frontend: textureProjLod on a shadow sampler honest-errors (no silent-wron
 // Grad form [coord,dPdx,dPdy]). Result must be VALID SPIR-V.
 test "frontend: textureProjLodOffset emits valid OpImageSampleProjExplicitLod (Lod|ConstOffset)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(location=0) in vec3 c;
@@ -718,21 +718,21 @@ test "frontend: textureProjLodOffset emits valid OpImageSampleProjExplicitLod (L
 // sampler (would drop the projection), and a NON-CONSTANT offset (can't be ConstOffset).
 test "frontend: textureProjLodOffset cube/shadow/non-const-offset honest-error" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform samplerCube s;
         \\layout(location=0) in vec4 c;
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureProjLodOffset(s, c, 1.0, ivec2(1, 0)); }
     , .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow s;
         \\layout(location=0) in vec4 c;
         \\layout(location=0) out float o;
         \\void main(){ o = textureProjLodOffset(s, c, 1.0, ivec2(1, 0)); }
     , .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) in vec3 c;
@@ -748,7 +748,7 @@ test "frontend: textureProjLodOffset cube/shadow/non-const-offset honest-error" 
 // [si,coord,dPdx,dPdy,offset]). Result must be VALID SPIR-V.
 test "frontend: textureProjGradOffset emits valid OpImageSampleProjExplicitLod (Grad|ConstOffset)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(location=0) in vec3 c;
@@ -766,21 +766,21 @@ test "frontend: textureProjGradOffset emits valid OpImageSampleProjExplicitLod (
 // SPIR-V), and a NON-CONSTANT offset (can't be ConstOffset).
 test "frontend: textureProjGradOffset cube/shadow/non-const-offset honest-error" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform samplerCube s;
         \\layout(location=0) in vec4 c;
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureProjGradOffset(s, c, vec3(0.1), vec3(0.2), ivec2(1, 0)); }
     , .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow s;
         \\layout(location=0) in vec4 c;
         \\layout(location=0) out float o;
         \\void main(){ o = textureProjGradOffset(s, c, vec2(0.1), vec2(0.2), ivec2(1, 0)); }
     , .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) in vec3 c;
@@ -791,7 +791,7 @@ test "frontend: textureProjGradOffset cube/shadow/non-const-offset honest-error"
 }
 
 // #170: GLSL `&&` / `||` MUST short-circuit — the RHS is not evaluated when the LHS
-// determines the result. glslpp used to emit eager OpLogicalAnd/Or, which evaluates
+// determines the result. zioshade used to emit eager OpLogicalAnd/Or, which evaluates
 // both operands and DROPS a side-effecting RHS (e.g. a function mutating an inout
 // arg) = silent-wrong. When the RHS may have side effects, it now lowers to real
 // short-circuit control flow (OpBranchConditional), so the side effect is conditional.
@@ -803,7 +803,7 @@ test "frontend: side-effecting && / || short-circuit (OpBranchConditional, not e
             "layout(location=0) out vec4 o;\n" ++
             "bool se(inout int c){ c += 1; return true; }\n" ++
             "void main(){ int c=0; bool a=iv.x>0.0; bool r = a " ++ op ++ " se(c); o=vec4(float(c), r?1.0:0.0, 0, 1); }\n";
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
         try std.testing.expect(spirvHasOpcode(spv, 250)); // OpBranchConditional (short-circuit)
         try std.testing.expect(!spirvHasOpcode(spv, 166)); // not eager OpLogicalOr
@@ -816,7 +816,7 @@ test "frontend: side-effecting && / || short-circuit (OpBranchConditional, not e
 // short-circuit lowering only kicks in for a side-effecting RHS.
 test "frontend: pure && / || keep eager OpLogicalOr/And (no short-circuit overhead)" {
     const alloc = std.testing.allocator;
-    const spv_or = try glslpp.compileToSPIRV(alloc,
+    const spv_or = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) in vec4 iv;
         \\layout(location=0) out vec4 o;
@@ -825,7 +825,7 @@ test "frontend: pure && / || keep eager OpLogicalOr/And (no short-circuit overhe
     defer alloc.free(spv_or);
     try std.testing.expect(spirvHasOpcode(spv_or, 166)); // OpLogicalOr (eager, no branch)
 
-    const spv_and = try glslpp.compileToSPIRV(alloc,
+    const spv_and = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) in vec4 iv;
         \\layout(location=0) out vec4 o;
@@ -840,7 +840,7 @@ test "frontend: pure && / || keep eager OpLogicalOr/And (no short-circuit overhe
 // flow = invalid SPIR-V). It falls back to the eager path there — still VALID SPIR-V.
 test "frontend: && in a loop condition stays valid SPIR-V (no broken back-edge)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) out vec4 o;
         \\bool chk(inout int n){ n++; return n < 10; }
@@ -855,7 +855,7 @@ test "frontend: && in a loop condition stays valid SPIR-V (no broken back-edge)"
 // with a ConstOffset operand (its own IR tag — image_sample_proj has no operands).
 test "frontend: textureProjOffset emits valid OpImageSampleProjImplicitLod (ConstOffset)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(location=0) in vec3 c;
@@ -872,21 +872,21 @@ test "frontend: textureProjOffset emits valid OpImageSampleProjImplicitLod (Cons
 // can't carry the offset), and a NON-CONSTANT offset.
 test "frontend: textureProjOffset cube/shadow/non-const-offset honest-error" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform samplerCube s;
         \\layout(location=0) in vec4 c;
         \\layout(location=0) out vec4 o;
         \\void main(){ o = textureProjOffset(s, c, ivec2(1, 0)); }
     , .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow s;
         \\layout(location=0) in vec4 c;
         \\layout(location=0) out float o;
         \\void main(){ o = textureProjOffset(s, c, ivec2(1, 0)); }
     , .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) in vec3 c;
@@ -903,7 +903,7 @@ test "frontend: textureProjOffset cube/shadow/non-const-offset honest-error" {
 // the Lod operand (or the implicit-lod proj op) would lose the gradients.
 test "frontend: textureProjGrad emits OpImageSampleProjExplicitLod with a Grad operand" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(location=0) in vec3 c;
@@ -920,7 +920,7 @@ test "frontend: textureProjGrad emits OpImageSampleProjExplicitLod with a Grad o
 // a gradient vec2 as the float Lod operand → invalid SPIR-V). Honest-error.
 test "frontend: shadow textureProjGrad honest-errors (no invalid SPIR-V)" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow sh;
         \\layout(location=0) in vec4 c;
@@ -931,7 +931,7 @@ test "frontend: shadow textureProjGrad honest-errors (no invalid SPIR-V)" {
 
 // #170: projective sampling is undefined for a CUBE image (SPIR-V requires Dim
 // 1D/2D/3D/Rect for OpImageSampleProj*; GLSL has no cube textureProj* overload).
-// glslpp emitted invalid SPIR-V; now honest-errors for the whole proj family.
+// zioshade emitted invalid SPIR-V; now honest-errors for the whole proj family.
 test "frontend: textureProj/ProjLod/ProjGrad on a cube sampler honest-error (were invalid SPIR-V)" {
     const alloc = std.testing.allocator;
     const srcs = [_][:0]const u8{
@@ -955,7 +955,7 @@ test "frontend: textureProj/ProjLod/ProjGrad on a cube sampler honest-error (wer
         ,
     };
     for (srcs) |src| {
-        try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+        try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
     }
 }
 
@@ -966,7 +966,7 @@ test "frontend: textureProj/ProjLod/ProjGrad on a cube sampler honest-error (wer
 // must be VALID SPIR-V (the offset word in image-operand bit order).
 test "frontend: textureGradOffset emits valid OpImageSampleExplicitLod (Grad|ConstOffset)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) in vec2 uv;
@@ -985,14 +985,14 @@ test "frontend: textureGradOffset emits valid OpImageSampleExplicitLod (Grad|Con
 // error, not mis-compile. (Covers a pre-existing shadow-textureGrad hole too.)
 test "frontend: shadow textureGrad / textureGradOffset honest-error (were invalid SPIR-V)" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow s;
         \\layout(location=0) in vec3 c;
         \\layout(location=0) out float o;
         \\void main(){ o = textureGrad(s, c, vec2(0.1), vec2(0.2)); }
     , .{ .stage = .fragment }));
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow s;
         \\layout(location=0) in vec3 c;
@@ -1005,7 +1005,7 @@ test "frontend: shadow textureGrad / textureGradOffset honest-error (were invali
 // operand). A dynamic offset cannot be a ConstOffset → honest-error, not invalid SPIR-V.
 test "frontend: textureGradOffset with a non-constant offset honest-errors" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2D s;
         \\layout(location=0) in vec2 uv;
@@ -1017,11 +1017,11 @@ test "frontend: textureGradOffset with a non-constant offset honest-errors" {
 
 // #170: a ConstOffset image operand is illegal on a Cube image (SPIR-V) and GLSL
 // has no cube *Offset overload (glslang: "no matching overloaded function found").
-// glslpp must honest-error, not emit invalid SPIR-V ("ConstOffset cannot be used
+// zioshade must honest-error, not emit invalid SPIR-V ("ConstOffset cannot be used
 // with Cube Image 'Dim'"). Guards the offset gate for all offset sample builtins.
 test "frontend: textureGradOffset on a cube sampler honest-errors (not invalid SPIR-V)" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform samplerCube s;
         \\layout(location=0) in vec3 c;
@@ -1040,7 +1040,7 @@ test "frontend: textureGradOffset on a cube sampler honest-errors (not invalid S
 test "frontend: 3-arg shadow textureOffset honest-errors (was invalid SPIR-V), siblings still compile" {
     const alloc = std.testing.allocator;
     // The broken case → honest error (not invalid SPIR-V).
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(binding=0) uniform sampler2DShadow sh;
         \\layout(location=0) in vec2 uv;
@@ -1072,7 +1072,7 @@ test "frontend: 3-arg shadow textureOffset honest-errors (was invalid SPIR-V), s
         \\void main(){ o = vec4(textureOffset(sh, vec3(uv, 0.5), ivec2(1), 0.1)); }
     };
     for (ok_srcs) |src| {
-        const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
         defer alloc.free(spv);
         try std.testing.expect(spirvHasOpcode(spv, 89) or spirvHasOpcode(spv, 90)); // a Dref sample op
     }
@@ -1089,7 +1089,7 @@ test "frontend: unsigned comparisons emit OpU* (not signed) — operator + built
     const alloc = std.testing.allocator;
     // Operator form on uvec.
     {
-        const spv = try glslpp.compileToSPIRV(alloc,
+        const spv = try zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(location=0) flat in uvec2 a;
             \\layout(location=1) flat in uvec2 b;
@@ -1107,7 +1107,7 @@ test "frontend: unsigned comparisons emit OpU* (not signed) — operator + built
     }
     // SIGNED operands still emit the signed ops (no over-correction / regression).
     {
-        const spv = try glslpp.compileToSPIRV(alloc,
+        const spv = try zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(location=0) flat in ivec2 a;
             \\layout(location=1) flat in ivec2 b;
@@ -1121,7 +1121,7 @@ test "frontend: unsigned comparisons emit OpU* (not signed) — operator + built
     // MIXED int/uint: GLSL promotes to UNSIGNED (the int is bitcast to uint), so
     // `int < uint` must also use OpULessThan — selection checks BOTH operands.
     {
-        const spv = try glslpp.compileToSPIRV(alloc,
+        const spv = try zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(location=0) flat in int si;
             \\layout(location=1) flat in uint ui;
@@ -1135,14 +1135,14 @@ test "frontend: unsigned comparisons emit OpU* (not signed) — operator + built
 }
 
 // #170: a MIXED int/uint min/max/clamp promotes to UNSIGNED (GLSL int→uint rule).
-// glslpp defaulted the result type to the first arg (int) → SMax/SMin/SClamp
+// zioshade defaulted the result type to the first arg (int) → SMax/SMin/SClamp
 // emitted with a uint operand. That is valid SPIR-V, but the WGSL back-end then
 // emits `max(i32, u32)` which naga REJECTS ("inconsistent type") = silent-wrong.
 // The signed operand must be bitcast to unsigned and the U-variant used.
 // OpBitcast = 124.
 test "frontend: mixed int/uint max bitcasts the signed operand to unsigned (no SMax)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) flat in int si;
         \\layout(location=1) flat in uint ui;
@@ -1151,7 +1151,7 @@ test "frontend: mixed int/uint max bitcasts the signed operand to unsigned (no S
     , .{ .stage = .fragment });
     defer alloc.free(spv);
     // The signed operand is reinterpreted as unsigned via OpBitcast (124) before
-    // the unsigned ext-inst max — glslpp did NOT emit this before the fix.
+    // the unsigned ext-inst max — zioshade did NOT emit this before the fix.
     try std.testing.expect(spirvHasOpcode(spv, 124));
 }
 
@@ -1164,7 +1164,7 @@ test "frontend: unsigned division uses OpUDiv; signed right-shift uses arithmeti
     const alloc = std.testing.allocator;
     // uint/uint → UDiv; uint>>n stays logical (correct for unsigned).
     {
-        const spv = try glslpp.compileToSPIRV(alloc,
+        const spv = try zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(location=0) flat in uvec2 a;
             \\layout(location=1) flat in uvec2 b;
@@ -1179,7 +1179,7 @@ test "frontend: unsigned division uses OpUDiv; signed right-shift uses arithmeti
     }
     // int/int → SDiv (no over-correction); int>>n → arithmetic (sign-extend).
     {
-        const spv = try glslpp.compileToSPIRV(alloc,
+        const spv = try zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(location=0) flat in ivec2 a;
             \\layout(location=1) flat in ivec2 b;
@@ -1210,7 +1210,7 @@ test "frontend: unsigned division uses OpUDiv; signed right-shift uses arithmeti
 /// (mirrors the resolveVulkanTool/SkipZigTest pattern used across the suite).
 fn spirvValOrSkip(spv: []const u32) !void {
     const alloc = std.testing.allocator;
-    const tool = glslpp.compat.resolveVulkanTool(alloc, "spirv-val") catch return error.SkipZigTest;
+    const tool = zioshade.compat.resolveVulkanTool(alloc, "spirv-val") catch return error.SkipZigTest;
     defer alloc.free(tool);
 
     var tmp = std.testing.tmpDir(.{});
@@ -1242,7 +1242,7 @@ const dyn_double_index_src =
 
 test "frontend #170: dynamic m[i][j] on a local matrix emits valid SPIR-V (opt)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, dyn_double_index_src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, dyn_double_index_src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try spirvValOrSkip(spv);
 }
@@ -1252,7 +1252,7 @@ test "frontend #170: dynamic m[i][j] on a local matrix emits valid SPIR-V (no-op
     // unoptimized module must already be valid (it was not — VectorExtractDynamic
     // on an OpAccessChain pointer).
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRVNoOpt(alloc, dyn_double_index_src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRVNoOpt(alloc, dyn_double_index_src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try spirvValOrSkip(spv);
 }
@@ -1260,22 +1260,22 @@ test "frontend #170: dynamic m[i][j] on a local matrix emits valid SPIR-V (no-op
 test "frontend #170: dynamic m[i][j] cross-compiles to all four backends" {
     // A frontend fix produces valid SPIR-V, which every backend then accepts.
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, dyn_double_index_src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, dyn_double_index_src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
-    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(wgsl.len > 0);
 
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{});
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{});
     defer alloc.free(hlsl);
     try std.testing.expect(hlsl.len > 0);
 
-    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
     defer alloc.free(msl);
     try std.testing.expect(msl.len > 0);
 
-    const glsl = try glslpp.spirvToGLSL(alloc, spv, .{});
+    const glsl = try zioshade.spirvToGLSL(alloc, spv, .{});
     defer alloc.free(glsl);
     try std.testing.expect(glsl.len > 0);
 }

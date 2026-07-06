@@ -1,7 +1,7 @@
 // Tests: a function-like macro call used as an argument to another function-like
 // macro (#170). The C preprocessor expands a macro's arguments BEFORE substituting
 // them, so `ADD(SQ(t), SQ(t + 1.0))` must expand the inner `SQ(...)` calls first.
-// glslpp substituted argument tokens raw, leaving the nested `SQ(...)` unexpanded —
+// zioshade substituted argument tokens raw, leaving the nested `SQ(...)` unexpanded —
 // it reached the parser as a call to an undefined `SQ` (UndeclaredIdentifier),
 // wrongly rejecting valid GLSL. A single (non-nested) function macro already worked.
 #version 450

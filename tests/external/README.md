@@ -1,7 +1,7 @@
 # tests/external/ — Real-world shader corpus
 
 Curated shaders that exercise common Vulkan / WebGPU patterns end-to-end:
-glslpp compile → reflect → cross-compile (WGSL / HLSL / MSL / GLSL).
+zioshade compile → reflect → cross-compile (WGSL / HLSL / MSL / GLSL).
 
 Run with:
 
@@ -12,13 +12,13 @@ Each shader's expected pass mode is documented inline. Categories:
 - **Compute**: SSBO read/write, atomics, shared memory.
 - **Fragment**: textures, samplers, multi-render-target, builtins.
 - **Vertex**: location-bound I/O, gl_Position, uniform blocks.
-- **Mesh**: SetMeshOutputsEXT, EmitMeshTasksEXT (current glslpp limitation:
+- **Mesh**: SetMeshOutputsEXT, EmitMeshTasksEXT (current zioshade limitation:
   HLSL mesh signature is M5.2 v1 placeholder; WGSL doesn't support mesh).
 - **Ray tracing**: traceRayEXT, payload structs.
 
 Sources:
 
-- Hand-authored for this project (MIT OR Apache-2.0 dual-licensed, same as glslpp).
+- Hand-authored for this project (MIT OR Apache-2.0 dual-licensed, same as zioshade).
 - Pattern inspiration from shader codes in glslang / spirv-cross test suites
   but **rewritten from scratch** to avoid license entanglement.
 
@@ -27,7 +27,7 @@ Sources:
 If [`naga`](https://github.com/gfx-rs/wgpu/tree/trunk/naga) is on `PATH`
 (e.g., `cargo install naga-cli`), the realworld runner pipes each emitted
 WGSL through `naga --input-kind wgsl` as an external sanity check. If naga
-isn't available, the runner still walks the corpus and reports glslpp-side
+isn't available, the runner still walks the corpus and reports zioshade-side
 PASS/FAIL — it just skips the external validation step.
 
 ## Known limitations exercised by this corpus

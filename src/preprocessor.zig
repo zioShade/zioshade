@@ -935,7 +935,7 @@ pub const Preprocessor = struct {
         self.output.clearRetainingCapacity();
         self.if_stack.clearRetainingCapacity();
 
-        // Pre-define macros for all extensions that glslpp supports.
+        // Pre-define macros for all extensions that zioshade supports.
         // This mirrors what glslang does: extensions we handle must be pre-defined so
         // #ifdef GL_EXT_NAME guards (which appear BEFORE the matching #extension line
         // in spirv-cross-generated shaders) evaluate to true.

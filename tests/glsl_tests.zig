@@ -5,20 +5,20 @@
 //! The input is GLSL 430, compiled to SPIR-V, then cross-compiled back to GLSL 430.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
 fn compileToGlsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    return try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    return try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
 }
 
-fn compileToGlslStage(source: [:0]const u8, stage: glslpp.Stage) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = stage });
+fn compileToGlslStage(source: [:0]const u8, stage: zioshade.Stage) ![]const u8 {
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = stage });
     defer alloc.free(spirv);
-    return try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    return try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
 }
 
 fn assertContains(haystack: []const u8, needle: []const u8) !void {
@@ -33,9 +33,9 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
     return error.TestUnexpectedFind;
 }
 
-/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT glslpp's own
-/// frontend). Needed for opcodes glslpp's frontend never emits — e.g. glslang
-/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the glslpp frontend
+/// Compile GLSL → SPIR-V with the *glslang* reference compiler (NOT zioshade's own
+/// frontend). Needed for opcodes zioshade's frontend never emits — e.g. glslang
+/// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the zioshade frontend
 /// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/glsl_test_{s}.frag", .{name});
@@ -47,7 +47,7 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
         defer src_file.close();
         try src_file.writeAll(std.mem.sliceTo(source, 0));
     }
-    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
     const result = std.process.Child.run(.{
         .allocator = alloc,
@@ -1247,9 +1247,9 @@ test "glsl: bitfieldReverse roundtrip" {
         \\    fragColor = vec4(float(a));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const glsl_out = try glslpp.spirvToGLSL(alloc, spv, .{});
+    const glsl_out = try zioshade.spirvToGLSL(alloc, spv, .{});
     defer alloc.free(glsl_out);
     try std.testing.expect(std.mem.indexOf(u8, glsl_out, "bitfieldReverse") != null);
 }
@@ -1263,9 +1263,9 @@ test "glsl: bitCount roundtrip" {
         \\    fragColor = vec4(float(a));
         \\}
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const glsl_out = try glslpp.spirvToGLSL(alloc, spv, .{});
+    const glsl_out = try zioshade.spirvToGLSL(alloc, spv, .{});
     defer alloc.free(glsl_out);
     try std.testing.expect(std.mem.indexOf(u8, glsl_out, "bitCount") != null);
 }
@@ -1811,13 +1811,13 @@ test "GLSL: unstructured switch (stripped OpSelectionMerge) is recovered (G2)" {
         \\    o = c;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const ok = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 }); // structured original
+    const ok = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }); // structured original
     defer alloc.free(ok);
     const stripped = try stripMergeInstructions(alloc, spirv);
     defer alloc.free(stripped);
-    const recovered = try glslpp.spirvToGLSL(alloc, stripped, .{ .version = 430 });
+    const recovered = try zioshade.spirvToGLSL(alloc, stripped, .{ .version = 430 });
     defer alloc.free(recovered);
     try std.testing.expectEqualStrings(ok, recovered); // faithful recovery — default not dropped
 }
@@ -1854,9 +1854,9 @@ test "G2: structurizeModule is a byte-identical no-op on already-structured SPIR
         \\    o = vec4(c, 1.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const out = try glslpp.cfg_structurize.structurizeModule(alloc, spv);
+    const out = try zioshade.cfg_structurize.structurizeModule(alloc, spv);
     defer alloc.free(out);
     try std.testing.expectEqualSlices(u32, spv, out); // no-op: nothing to recover
 }
@@ -1872,11 +1872,11 @@ test "G2: strip merges → structurize → backend GLSL matches the original" {
         \\    o = vec4(c, 1.0);
         \\}
     ;
-    const spv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // Ground truth: GLSL from the structured SPIR-V.
-    const glsl_orig = try glslpp.spirvToGLSL(alloc, spv, .{ .version = 450 });
+    const glsl_orig = try zioshade.spirvToGLSL(alloc, spv, .{ .version = 450 });
     defer alloc.free(glsl_orig);
 
     // Make it unstructured by stripping the merge instructions.
@@ -1885,9 +1885,9 @@ test "G2: strip merges → structurize → backend GLSL matches the original" {
     try std.testing.expect(stripped.len < spv.len); // something was removed
 
     // Recover structure, then cross-compile — must reproduce the original GLSL.
-    const restructured = try glslpp.cfg_structurize.structurizeModule(alloc, stripped);
+    const restructured = try zioshade.cfg_structurize.structurizeModule(alloc, stripped);
     defer alloc.free(restructured);
-    const glsl_recovered = try glslpp.spirvToGLSL(alloc, restructured, .{ .version = 450 });
+    const glsl_recovered = try zioshade.spirvToGLSL(alloc, restructured, .{ .version = 450 });
     defer alloc.free(glsl_recovered);
 
     try std.testing.expectEqualStrings(glsl_orig, glsl_recovered);
@@ -2167,7 +2167,7 @@ test "T-bf.1: GLSL bitfieldExtract/bitfieldInsert lower to native builtins (#gap
 }
 
 // #286: a plain non-opaque global uniform (`uniform int n;` — a default-uniform-block
-// member, which glslpp supports as a desktop-GLSL extension) was emitted as an empty
+// member, which zioshade supports as a desktop-GLSL extension) was emitted as an empty
 // `uniform n {} n_1;` block with the scalar dropped, while the body referenced `n` (the
 // block name) → non-compiling GLSL. It must emit a plain `uniform int n;` declaration
 // instead (matching the WGSL backend's `var<uniform> n: i32;`). glslang(desktop)-valid.
@@ -2258,9 +2258,9 @@ test "T-uni.4: multi-dim bare uniform array keeps all dimensions (#289)" {
 // the output was hand-validated glslang-clean (matches spirv-cross's `.length()` lowering).
 test "T-arrlen.1: runtime SSBO array .length() lowers to native GLSL .length() (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(std430,binding=1) buffer Out { uint n; };\nvoid main(){ n = uint(d.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(glsl);
     // Runtime array member declared with original name + `[]` (was silent-wrong `float B_m0;`).
     try assertContains(glsl, "float d[];");
@@ -2279,9 +2279,9 @@ test "T-arrlen.1: runtime SSBO array .length() lowers to native GLSL .length() (
 // scalar is declared `uint count;` (not an array) and the runtime member is `float data[];`.
 test "T-arrlen.2: named-instance multi-member SSBO .length() resolves the right member (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(local_size_x=1) in;\nlayout(std430,binding=0) buffer B { uint count; float data[]; } b;\nlayout(std430,binding=1) buffer O { uint n; } o;\nvoid main(){ o.n = b.count + uint(b.data.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(glsl);
     try assertContains(glsl, "uint count;");     // scalar member, not an array
     try assertContains(glsl, "float data[];");   // runtime array member with []
@@ -2295,9 +2295,9 @@ test "T-arrlen.2: named-instance multi-member SSBO .length() resolves the right 
 // guards on stage + StorageBuffer class and falls back to error.UnsupportedOp.
 test "T-arrlen.3: SSBO .length() in a fragment shader honest-errors (no undeclared buffer) (#296)" {
     const source: [:0]const u8 = "#version 450\nlayout(std430,binding=0) buffer B { float d[]; };\nlayout(location=0) out float o;\nvoid main(){ o = float(d.length()); }";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToGLSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToGLSL(alloc, spirv, .{}));
 }
 
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
@@ -2309,7 +2309,7 @@ test "T-arrlen.3: SSBO .length() in a fragment shader honest-errors (no undeclar
 // `error.UnstructuredControlFlow` even though the construct is perfectly representable:
 // GLSL's `!=` operator is itself unordered (true when either operand is NaN) = exactly
 // OpFUnordNotEqual. The main `emitBinOp` path already mapped `.FUnordNotEqual` → `!=`;
-// only this do-while inline path missed it. glslpp's own frontend emits the ordered
+// only this do-while inline path missed it. zioshade's own frontend emits the ordered
 // FOrdNotEqual for float `!=`, so the gap is reachable only through external SPIR-V
 // (glslang/spirv-opt) via the spirvToGLSL public API.
 test "T-dowhile.funord: do-while body-cf + float `!=` (OpFUnordNotEqual) -> native do/while (#170)" {
@@ -2327,7 +2327,7 @@ test "T-dowhile.funord: do-while body-cf + float `!=` (OpFUnordNotEqual) -> nati
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
     defer alloc.free(glsl);
     // Native bottom-test loop with the float `!=` rebuilt inline, NOT an honest-error.
     try assertContains(glsl, "} while (");

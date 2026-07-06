@@ -18,7 +18,7 @@ layout(location = 4) in flat float f;   // separate top-level varyings too
 void main(){ FragColor = vin.f + vin.g + float(vin.h) + vin.i + f + ...; }
 ```
 lowers to a SPIR-V `Input` `OpVariable` whose type is an `OpTypeStruct`
-(`VertexData`), with a block-level `OpDecorate %vin Location 0`. glslpp emits:
+(`VertexData`), with a block-level `OpDecorate %vin Location 0`. zioshade emits:
 ```wgsl
 fn main(@location(0) vin: VertexData, @location(4) @interpolate(flat) f: f32, …)
 ```
@@ -44,7 +44,7 @@ fn main(vin: VertexData, @location(4) @interpolate(flat) f: f32, …) -> @locati
 ```
 The body's `vin.f` already works because `vin` is a by-value struct parameter.
 
-## Design (glslpp, `spirv_to_wgsl.zig`)
+## Design (zioshade, `spirv_to_wgsl.zig`)
 
 Gate on the precise shape so non-block inputs are byte-identical (the input
 emission path feeds ~1900 passing shaders — zero-regression is mandatory):

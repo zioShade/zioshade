@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     const alloc = std.heap.page_allocator; // short-lived CLI; OS reclaims on exit
@@ -21,7 +21,7 @@ pub fn main() !void {
     const source: [:0]const u8 = buf.items[0 .. buf.items.len - 1 :0];
 
     // Compile GLSL → SPIR-V
-    const spirv_words = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch |err| {
+    const spirv_words = zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch |err| {
         std.debug.print("Compilation error: {}\n", .{err});
         return err;
     };

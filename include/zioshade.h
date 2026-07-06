@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// glslpp public C ABI header.
+// zioshade public C ABI header.
 //
-// This is the C-callable surface for glslpp — a GLSL -> SPIR-V compiler
+// This is the C-callable surface for zioshade — a GLSL -> SPIR-V compiler
 // with cross-compilation backends to HLSL, GLSL, MSL, and WGSL. The Zig
 // implementation lives in `src/`; this header is the stable contract for
 // non-Zig consumers (C, C++, Rust via bindgen, Python via ctypes, etc.).
@@ -16,62 +16,62 @@
 // `hlsl`, `glsl`, `msl`, `wgsl`) are populated by the callee. The caller
 // owns the returned buffer and MUST release it via the matching freer:
 //
-//   uint32_t* words           -> glslpp_free_u32(words)
-//   char*     {hlsl|glsl|...} -> glslpp_free_str(buf)
+//   uint32_t* words           -> zioshade_free_u32(words)
+//   char*     {hlsl|glsl|...} -> zioshade_free_str(buf)
 //
 // Calling the C runtime `free()` directly on these pointers is UNDEFINED
 // BEHAVIOR. The implementation uses a length-prefix layout (the visible
 // pointer is offset from the underlying allocator block), so `free()`
-// will see a bogus header. Always use the glslpp_free_* helpers.
+// will see a bogus header. Always use the zioshade_free_* helpers.
 //
 // Thread-safety
 // -------------
 // Each call manages its own arena via a threadlocal allocator. Concurrent
-// calls from different threads are safe. The `glslpp_last_error_*` getters
+// calls from different threads are safe. The `zioshade_last_error_*` getters
 // read threadlocal state owned by the calling thread.
 
-#ifndef GLSLPP_H
-#define GLSLPP_H
+#ifndef ZIOSHADE_H
+#define ZIOSHADE_H
 
-/* Semantic version of the glslpp C ABI. Bump MAJOR on any ABI break.
+/* Semantic version of the zioshade C ABI. Bump MAJOR on any ABI break.
  *
  * NOTE: This is the version of the C ABI surface defined by this header,
- * NOT the version of the glslpp library as a whole. The library version
+ * NOT the version of the zioshade library as a whole. The library version
  * lives in `build.zig.zon` and evolves independently. The C ABI starts at
  * 0.1.0 and only bumps when the structural shape of this header changes
  * (new/removed/reordered functions, struct field layout changes, enum
  * value renumbering, etc.) — not on every library release. Do NOT try to
  * sync these to the library version automatically.
  */
-#define GLSLPP_VERSION_MAJOR 0
-#define GLSLPP_VERSION_MINOR 1
-#define GLSLPP_VERSION_PATCH 0
+#define ZIOSHADE_VERSION_MAJOR 0
+#define ZIOSHADE_VERSION_MINOR 1
+#define ZIOSHADE_VERSION_PATCH 0
 
 /* Export-visibility macro for public function declarations.
  *
- * Consumers building against a shared glslpp library should define
- * `GLSLPP_USE_SHARED` before including this header on Windows so the
- * declarations resolve to `__declspec(dllimport)`. The glslpp build
- * itself defines `GLSLPP_BUILD_SHARED` when producing a shared library
+ * Consumers building against a shared zioshade library should define
+ * `ZIOSHADE_USE_SHARED` before including this header on Windows so the
+ * declarations resolve to `__declspec(dllimport)`. The zioshade build
+ * itself defines `ZIOSHADE_BUILD_SHARED` when producing a shared library
  * so the same declarations become `__declspec(dllexport)`. On ELF
- * platforms with GCC/Clang, `GLSLPP_BUILD_SHARED` opts the symbols into
+ * platforms with GCC/Clang, `ZIOSHADE_BUILD_SHARED` opts the symbols into
  * default visibility for `-fvisibility=hidden` builds. In all other
- * cases (static linking, unknown compiler) `GLSLPP_API` expands to
+ * cases (static linking, unknown compiler) `ZIOSHADE_API` expands to
  * nothing.
  */
 #if defined(_WIN32) || defined(__CYGWIN__)
-  #if defined(GLSLPP_BUILD_SHARED)
-    #define GLSLPP_API __declspec(dllexport)
-  #elif defined(GLSLPP_USE_SHARED)
-    #define GLSLPP_API __declspec(dllimport)
+  #if defined(ZIOSHADE_BUILD_SHARED)
+    #define ZIOSHADE_API __declspec(dllexport)
+  #elif defined(ZIOSHADE_USE_SHARED)
+    #define ZIOSHADE_API __declspec(dllimport)
   #else
-    #define GLSLPP_API
+    #define ZIOSHADE_API
   #endif
 #else
-  #if defined(GLSLPP_BUILD_SHARED) && (defined(__GNUC__) || defined(__clang__))
-    #define GLSLPP_API __attribute__((visibility("default")))
+  #if defined(ZIOSHADE_BUILD_SHARED) && (defined(__GNUC__) || defined(__clang__))
+    #define ZIOSHADE_API __attribute__((visibility("default")))
   #else
-    #define GLSLPP_API
+    #define ZIOSHADE_API
   #endif
 #endif
 
@@ -87,71 +87,71 @@ extern "C" {
  * -------------------------------------------------------------------------*/
 
 /**
- * Return code for every glslpp_* function.
+ * Return code for every zioshade_* function.
  *
- * Mirrors `glslpp.Error` from `src/root.zig`. `GLSLPP_ERR_INVALID_INPUT` is
+ * Mirrors `zioshade.Error` from `src/root.zig`. `ZIOSHADE_ERR_INVALID_INPUT` is
  * additional to the Zig error set and covers C-side argument validation
  * (NULL pointers, out-of-range enums, zero-length SPIR-V, etc.).
  */
 typedef enum {
-    GLSLPP_OK              = 0,
-    GLSLPP_ERR_OOM         = 1, /* Out of memory. */
-    GLSLPP_ERR_LEX         = 2, /* Lexer failed (invalid tokens). */
-    GLSLPP_ERR_PREPROCESS  = 3, /* Preprocessor failed (#if, #include, ...). */
-    GLSLPP_ERR_PARSE       = 4, /* Parser failed (syntax error). */
-    GLSLPP_ERR_SEMANTIC    = 5, /* Semantic analysis failed (type error, ...). */
-    GLSLPP_ERR_CODEGEN     = 6, /* SPIR-V or backend codegen failed. */
-    GLSLPP_ERR_INVALID_INPUT = 7 /* C-side argument validation failed. */
-} glslpp_status_t;
+    ZIOSHADE_OK              = 0,
+    ZIOSHADE_ERR_OOM         = 1, /* Out of memory. */
+    ZIOSHADE_ERR_LEX         = 2, /* Lexer failed (invalid tokens). */
+    ZIOSHADE_ERR_PREPROCESS  = 3, /* Preprocessor failed (#if, #include, ...). */
+    ZIOSHADE_ERR_PARSE       = 4, /* Parser failed (syntax error). */
+    ZIOSHADE_ERR_SEMANTIC    = 5, /* Semantic analysis failed (type error, ...). */
+    ZIOSHADE_ERR_CODEGEN     = 6, /* SPIR-V or backend codegen failed. */
+    ZIOSHADE_ERR_INVALID_INPUT = 7 /* C-side argument validation failed. */
+} zioshade_status_t;
 
 /* ---------------------------------------------------------------------------
  * Shader stage
  * -------------------------------------------------------------------------*/
 
 /**
- * Shader stage selector for `glslpp_compile`.
+ * Shader stage selector for `zioshade_compile`.
  *
  * Values mirror the Zig `Stage` enum order (`src/root.zig`):
  * vertex, fragment, compute, geometry, tess_control, tess_eval, mesh,
  * task, raygen, closesthit, miss, intersection, anyhit, callable.
  */
 typedef enum {
-    GLSLPP_STAGE_VERTEX       = 0,
-    GLSLPP_STAGE_FRAGMENT     = 1,
-    GLSLPP_STAGE_COMPUTE      = 2,
-    GLSLPP_STAGE_GEOMETRY     = 3,
-    GLSLPP_STAGE_TESS_CONTROL = 4,
-    GLSLPP_STAGE_TESS_EVAL    = 5,
-    GLSLPP_STAGE_MESH         = 6,
-    GLSLPP_STAGE_TASK         = 7,
-    GLSLPP_STAGE_RAYGEN       = 8,
-    GLSLPP_STAGE_CLOSESTHIT   = 9,
-    GLSLPP_STAGE_MISS         = 10,
-    GLSLPP_STAGE_INTERSECTION = 11,
-    GLSLPP_STAGE_ANYHIT       = 12,
-    GLSLPP_STAGE_CALLABLE     = 13
-} glslpp_stage_t;
+    ZIOSHADE_STAGE_VERTEX       = 0,
+    ZIOSHADE_STAGE_FRAGMENT     = 1,
+    ZIOSHADE_STAGE_COMPUTE      = 2,
+    ZIOSHADE_STAGE_GEOMETRY     = 3,
+    ZIOSHADE_STAGE_TESS_CONTROL = 4,
+    ZIOSHADE_STAGE_TESS_EVAL    = 5,
+    ZIOSHADE_STAGE_MESH         = 6,
+    ZIOSHADE_STAGE_TASK         = 7,
+    ZIOSHADE_STAGE_RAYGEN       = 8,
+    ZIOSHADE_STAGE_CLOSESTHIT   = 9,
+    ZIOSHADE_STAGE_MISS         = 10,
+    ZIOSHADE_STAGE_INTERSECTION = 11,
+    ZIOSHADE_STAGE_ANYHIT       = 12,
+    ZIOSHADE_STAGE_CALLABLE     = 13
+} zioshade_stage_t;
 
 /* ---------------------------------------------------------------------------
  * Compile options
  * -------------------------------------------------------------------------*/
 
 /**
- * Options for `glslpp_compile`.
+ * Options for `zioshade_compile`.
  *
  * Note: `include_paths` and `defines` from the Zig `CompileOptions` are not
  * yet exposed through the C ABI — if you need them, run your own
  * preprocessing pass against the GLSL source before calling
- * `glslpp_compile`. They may be added in a later milestone.
+ * `zioshade_compile`. They may be added in a later milestone.
  */
-/* glslpp_compile_options_t: fields may be added across glslpp minor versions.
+/* zioshade_compile_options_t: fields may be added across zioshade minor versions.
  * Consumers MUST recompile against the header that matches the library
  * version they link to. There is no `struct_size` discriminator (yet).
- * Check GLSLPP_VERSION_MAJOR/MINOR at compile time if you need to feature-gate.
+ * Check ZIOSHADE_VERSION_MAJOR/MINOR at compile time if you need to feature-gate.
  */
 typedef struct {
-    /** Shader stage. Default: GLSLPP_STAGE_FRAGMENT. */
-    glslpp_stage_t stage;
+    /** Shader stage. Default: ZIOSHADE_STAGE_FRAGMENT. */
+    zioshade_stage_t stage;
 
     /**
      * GLSL language version * 100 (e.g., 430 for #version 430,
@@ -174,7 +174,7 @@ typedef struct {
      * Default: 15 (SPIR-V 1.5).
      */
     uint32_t spirv_version_packed;
-} glslpp_compile_options_t;
+} zioshade_compile_options_t;
 
 /* ---------------------------------------------------------------------------
  * GLSL -> SPIR-V
@@ -194,19 +194,19 @@ typedef struct {
  * @param spirv_words        OUT: receives a pointer to a freshly allocated
  *                           buffer of `*spirv_word_count` u32 SPIR-V words.
  *                           On success the caller MUST release it via
- *                           `glslpp_free_u32`. Set to NULL on failure.
+ *                           `zioshade_free_u32`. Set to NULL on failure.
  * @param spirv_word_count   OUT: number of 32-bit words written
  *                           (NOT bytes — multiply by 4 for byte length).
  *                           Set to 0 on failure.
  *
- * @return GLSLPP_OK on success, or one of the GLSLPP_ERR_* codes. On
- *         failure, see `glslpp_last_error_message`/`_line`/`_column` for
+ * @return ZIOSHADE_OK on success, or one of the ZIOSHADE_ERR_* codes. On
+ *         failure, see `zioshade_last_error_message`/`_line`/`_column` for
  *         diagnostics. `*spirv_words` is set to NULL on failure.
  */
-GLSLPP_API glslpp_status_t glslpp_compile(
+ZIOSHADE_API zioshade_status_t zioshade_compile(
     const char* glsl_source,
     size_t glsl_len,
-    const glslpp_compile_options_t* opts,
+    const zioshade_compile_options_t* opts,
     uint32_t** spirv_words,
     size_t* spirv_word_count);
 
@@ -232,15 +232,15 @@ GLSLPP_API glslpp_status_t glslpp_compile(
  *                           The buffer IS null-terminated for convenience,
  *                           but `*hlsl_len` does NOT include the
  *                           terminator. On success the caller MUST
- *                           release it via `glslpp_free_str`. Set to NULL
+ *                           release it via `zioshade_free_str`. Set to NULL
  *                           on failure.
  * @param hlsl_len           OUT: HLSL source length in bytes, EXCLUDING
  *                           the trailing null terminator. Set to 0 on
  *                           failure.
  *
- * @return GLSLPP_OK or a GLSLPP_ERR_* code.
+ * @return ZIOSHADE_OK or a ZIOSHADE_ERR_* code.
  */
-GLSLPP_API glslpp_status_t glslpp_to_hlsl(
+ZIOSHADE_API zioshade_status_t zioshade_to_hlsl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     int32_t binding_shift,
@@ -261,13 +261,13 @@ GLSLPP_API glslpp_status_t glslpp_to_hlsl(
  * @param entry_point        Entry-point name. NULL is treated as "main".
  * @param glsl               OUT: pointer to a UTF-8 GLSL source buffer,
  *                           null-terminated for convenience. Free with
- *                           `glslpp_free_str`. Set to NULL on failure.
+ *                           `zioshade_free_str`. Set to NULL on failure.
  * @param glsl_len           OUT: byte length excluding the terminator.
  *                           Set to 0 on failure.
  *
- * @return GLSLPP_OK or a GLSLPP_ERR_* code.
+ * @return ZIOSHADE_OK or a ZIOSHADE_ERR_* code.
  */
-GLSLPP_API glslpp_status_t glslpp_to_glsl(
+ZIOSHADE_API zioshade_status_t zioshade_to_glsl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     uint32_t glsl_version,
@@ -293,13 +293,13 @@ GLSLPP_API glslpp_status_t glslpp_to_glsl(
  * @param entry_point        Entry-point name. NULL is treated as "main".
  * @param msl                OUT: pointer to a UTF-8 MSL source buffer,
  *                           null-terminated for convenience. Free with
- *                           `glslpp_free_str`. Set to NULL on failure.
+ *                           `zioshade_free_str`. Set to NULL on failure.
  * @param msl_len            OUT: byte length excluding the terminator.
  *                           Set to 0 on failure.
  *
- * @return GLSLPP_OK or a GLSLPP_ERR_* code.
+ * @return ZIOSHADE_OK or a ZIOSHADE_ERR_* code.
  */
-GLSLPP_API glslpp_status_t glslpp_to_msl(
+ZIOSHADE_API zioshade_status_t zioshade_to_msl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     uint32_t metal_version,
@@ -316,13 +316,13 @@ GLSLPP_API glslpp_status_t glslpp_to_msl(
  * @param entry_point        Entry-point name. NULL is treated as "main".
  * @param wgsl               OUT: pointer to a UTF-8 WGSL source buffer,
  *                           null-terminated for convenience. Free with
- *                           `glslpp_free_str`. Set to NULL on failure.
+ *                           `zioshade_free_str`. Set to NULL on failure.
  * @param wgsl_len           OUT: byte length excluding the terminator.
  *                           Set to 0 on failure.
  *
- * @return GLSLPP_OK or a GLSLPP_ERR_* code.
+ * @return ZIOSHADE_OK or a ZIOSHADE_ERR_* code.
  */
-GLSLPP_API glslpp_status_t glslpp_to_wgsl(
+ZIOSHADE_API zioshade_status_t zioshade_to_wgsl(
     const uint32_t* spirv_words,
     size_t spirv_word_count,
     const char* entry_point,
@@ -339,33 +339,33 @@ GLSLPP_API glslpp_status_t glslpp_to_wgsl(
  * recorded.
  *
  * The returned pointer is NOT owned by the caller — it references a
- * threadlocal buffer that is overwritten by the next failing glslpp_*
+ * threadlocal buffer that is overwritten by the next failing zioshade_*
  * call on the same thread. Copy the string if you need to retain it.
  * Do NOT free it.
  */
-GLSLPP_API const char* glslpp_last_error_message(void);
+ZIOSHADE_API const char* zioshade_last_error_message(void);
 
 /**
  * Returns the 1-based source line of the most recent error on the
  * calling thread, or 0 if no error has been recorded / the error has
  * no associated source location.
  */
-GLSLPP_API uint32_t glslpp_last_error_line(void);
+ZIOSHADE_API uint32_t zioshade_last_error_line(void);
 
 /**
  * Returns the 1-based source column of the most recent error on the
  * calling thread, or 0 if no error has been recorded / the error has
  * no associated source location.
  */
-GLSLPP_API uint32_t glslpp_last_error_column(void);
+ZIOSHADE_API uint32_t zioshade_last_error_column(void);
 
 /* ---------------------------------------------------------------------------
  * Buffer release
  * -------------------------------------------------------------------------*/
 
 /**
- * Release a `char*` buffer previously returned by `glslpp_to_hlsl`,
- * `glslpp_to_glsl`, `glslpp_to_msl`, or `glslpp_to_wgsl`.
+ * Release a `char*` buffer previously returned by `zioshade_to_hlsl`,
+ * `zioshade_to_glsl`, `zioshade_to_msl`, or `zioshade_to_wgsl`.
  *
  * Passing NULL is a no-op. Passing a pointer that did NOT originate from
  * one of the listed functions — for example a pointer from `malloc`,
@@ -373,21 +373,21 @@ GLSLPP_API uint32_t glslpp_last_error_column(void);
  * uses an internal length-prefix layout, so the C `free()` is NOT a
  * valid substitute.
  */
-GLSLPP_API void glslpp_free_str(char* s);
+ZIOSHADE_API void zioshade_free_str(char* s);
 
 /**
- * Release a `uint32_t*` buffer previously returned by `glslpp_compile`
+ * Release a `uint32_t*` buffer previously returned by `zioshade_compile`
  * via its `spirv_words` out-parameter.
  *
  * Passing NULL is a no-op. Passing a pointer that did NOT originate from
- * `glslpp_compile` is UNDEFINED BEHAVIOR. The C `free()` is NOT a valid
+ * `zioshade_compile` is UNDEFINED BEHAVIOR. The C `free()` is NOT a valid
  * substitute (the visible pointer is offset from the underlying
  * allocator block).
  */
-GLSLPP_API void glslpp_free_u32(uint32_t* p);
+ZIOSHADE_API void zioshade_free_u32(uint32_t* p);
 
 #ifdef __cplusplus
 } /* extern "C" */
 #endif
 
-#endif /* GLSLPP_H */
+#endif /* ZIOSHADE_H */

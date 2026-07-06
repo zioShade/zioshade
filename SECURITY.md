@@ -8,7 +8,7 @@ Instead, email **alex@deblasis.net** with:
 
 - A description of the vulnerability and the impact you anticipate.
 - A minimal proof-of-concept (GLSL source, SPIR-V binary, or test program) that reproduces.
-- The glslpp commit you tested against.
+- The zioshade commit you tested against.
 
 You can expect:
 
@@ -18,7 +18,7 @@ You can expect:
 
 ## Scope
 
-glslpp is a compiler library. Reports we are particularly interested in:
+zioshade is a compiler library. Reports we are particularly interested in:
 
 - Crashes (`@panic`, `unreachable`, stack overflow, OOM-on-fixed-input) reachable from `compileToSPIRV`, `spirvTo*`, or `reflectSPIRV` with attacker-controlled GLSL or SPIR-V input.
 - Out-of-bounds reads/writes in the SPIR-V parser or any backend, especially when feeding adversarial SPIR-V binaries.

@@ -1,17 +1,17 @@
 # Spec: Arbitrary-SPIR-V CFG structurization (G2)
 
-Status: **draft / design** — 2026-06-02. Author: glslpp maintainer.
+Status: **draft / design** — 2026-06-02. Author: zioshade maintainer.
 Tracks backlog item #4 ("Arbitrary-SPIR-V ingestion: structurize unstructured CFG").
 
 ## 1. Problem
 
-glslpp's cross-compilers (`src/spirv_to_{glsl,hlsl,msl,wgsl}.zig`) reconstruct
+zioshade's cross-compilers (`src/spirv_to_{glsl,hlsl,msl,wgsl}.zig`) reconstruct
 high-level control flow (`if` / `switch` / loops) by reading SPIR-V's **structured
 control-flow** instructions: `OpSelectionMerge` and `OpLoopMerge`. These name, for
 each header block, the *merge* block (where the construct rejoins) and — for loops
 — the *continue* block.
 
-SPIR-V emitted by glslpp's own front end always carries this merge info. But SPIR-V
+SPIR-V emitted by zioshade's own front end always carries this merge info. But SPIR-V
 from **external** producers — `glslangValidator`/`spirv-opt` after aggressive passes,
 DXC, hand-written `.spvasm` — may be **unstructured**: an `OpBranchConditional` or
 `OpSwitch` with **no** preceding `OpSelectionMerge`, back-edges with no `OpLoopMerge`,
@@ -22,7 +22,7 @@ Today (correctly, per Mitchell discipline) every backend **fails loud** with
 `error.UnstructuredControlFlow` when it hits a conditional/switch lacking merge info
 (`spirv_to_glsl.zig:1249/1283`, `spirv_to_hlsl.zig:2428/2467`,
 `spirv_to_msl.zig:2342/2373`, and the WGSL replay path). This is a *safe* state — no
-silent-wrong — but it means glslpp is not yet a drop-in for arbitrary SPIR-V.
+silent-wrong — but it means zioshade is not yet a drop-in for arbitrary SPIR-V.
 
 **Goal:** ingest unstructured-but-reducible SPIR-V by *recovering* the merge/continue
 structure, while continuing to honest-error the genuinely-irreducible minority.
@@ -42,7 +42,7 @@ honest-error on — never silent-wrong (see §5).
 Placement: a new `src/cfg_structurize.zig`, invoked from the cross-compile entry
 points (or from a shared "normalize module" step) only when a backend would otherwise
 hit the unstructured path. Cheap fast-path: if the module already has merge info for
-every multi-successor block (the glslpp-native case), the pass is a no-op.
+every multi-successor block (the zioshade-native case), the pass is a no-op.
 
 ## 3. Algorithm (reducible CFGs)
 
@@ -99,7 +99,7 @@ This is silent-wrong-prone, so the test gate is non-negotiable:
   `spirv-opt -O` to perturb structure), structurize, cross-compile, and validate the
   result with the backend oracle (glslang -V / dxc / naga) AND check the SPIR-V is
   still `spirv-val`-clean. Any divergence → bug.
-- **Conformance must not regress:** the pre-pass no-ops on glslpp-native SPIR-V
+- **Conformance must not regress:** the pre-pass no-ops on zioshade-native SPIR-V
   (already structured), so `just test-conformance` (2074 PASS / 0 FAIL) MUST be
   byte-unchanged. Gate this explicitly.
 - **Irreducible corpus:** a handful of hand-written irreducible `.spvasm` fixtures
@@ -133,7 +133,7 @@ each move gated by a green round-trip + oracle test.
   prettiest).
 - Handling SPIR-V features orthogonal to CFG (those have their own honest-error paths).
 - Changing any backend's emit logic — the pre-pass makes external SPIR-V look like
-  glslpp-native SPIR-V to the backends.
+  zioshade-native SPIR-V to the backends.
 
 ## 8. Acceptance (when #4's DoD bullet "arbitrary SPIR-V works" is met)
 

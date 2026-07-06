@@ -1,8 +1,8 @@
 //! Minimal GLSL → SPIR-V → HLSL pipeline.
-//! Build with: `zig run examples/glsl_to_hlsl.zig --mod glslpp::src/root.zig --deps glslpp`
+//! Build with: `zig run examples/glsl_to_hlsl.zig --mod zioshade::src/root.zig --deps zioshade`
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const SOURCE =
     \\#version 430
@@ -24,7 +24,7 @@ pub fn main() !void {
     const alloc = gpa.allocator();
 
     // GLSL → SPIR-V
-    const spirv = try glslpp.compileToSPIRV(alloc, SOURCE, .{
+    const spirv = try zioshade.compileToSPIRV(alloc, SOURCE, .{
         .stage = .fragment,
         .version = 430,
     });
@@ -33,7 +33,7 @@ pub fn main() !void {
     std.debug.print("SPIR-V: {d} words ({d} bytes)\n", .{ spirv.len, spirv.len * 4 });
 
     // SPIR-V → HLSL
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{
         .binding_shift = -1,
         .shader_model = 60,
     });

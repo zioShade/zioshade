@@ -1,11 +1,11 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
 // Helper: compile a fragment shader to SPIR-V
 fn compileFrag(source: [:0]const u8) ![]const u32 {
-    return glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment, .spirv_version = .@"1.5" });
+    return zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment, .spirv_version = .@"1.5" });
 }
 
 // Helper: check that an opcode appears in the SPIR-V
@@ -85,7 +85,7 @@ test "optimizer: loop with accumulation is preserved" {
     defer alloc.free(spirv);
     // The loop must be preserved because sum flows to FragColor
     // Verify there's a loop in the output (OpLoopMerge)
-    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(zioshade.spirv.Op.LoopMerge)));
 }
 
 test "optimizer: loop accumulating into a struct member is preserved (#220)" {
@@ -109,7 +109,7 @@ test "optimizer: loop accumulating into a struct member is preserved (#220)" {
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
     // The loop must survive — a.s accumulates and flows to FragColor.
-    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(zioshade.spirv.Op.LoopMerge)));
 }
 
 test "optimizer: loop accumulating into an array element is preserved (#220)" {
@@ -130,7 +130,7 @@ test "optimizer: loop accumulating into an array element is preserved (#220)" {
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    try std.testing.expect(hasOpcode(spirv, @intFromEnum(glslpp.spirv.Op.LoopMerge)));
+    try std.testing.expect(hasOpcode(spirv, @intFromEnum(zioshade.spirv.Op.LoopMerge)));
 }
 
 test "optimizer: AC+Store to composite variable preserves loads" {
@@ -165,7 +165,7 @@ test "optimizer: double negation is eliminated" {
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
     // -(-u) should simplify to u — no FNegate instructions should remain
-    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(glslpp.spirv.Op.FNegate)));
+    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(zioshade.spirv.Op.FNegate)));
 }
 
 test "optimizer: branch folding with constant condition" {
@@ -185,7 +185,7 @@ test "optimizer: branch folding with constant condition" {
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
     // The if(true) should be folded — no OpBranchConditional remaining
-    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(glslpp.spirv.Op.BranchConditional)));
+    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(zioshade.spirv.Op.BranchConditional)));
 }
 
 test "optimizer: trivial phi simplification" {
@@ -240,7 +240,7 @@ test "optimizer: float u - u is NOT folded (the fold produced `u`, and Inf-Inf=N
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.FSub)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.FSub)) >= 1);
 }
 
 test "optimizer: integer u - u is NOT folded to `u` (was a wrong-value miscompile)" {
@@ -257,7 +257,7 @@ test "optimizer: integer u - u is NOT folded to `u` (was a wrong-value miscompil
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.ISub)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.ISub)) >= 1);
 }
 
 test "optimizer: algebraic simplification x*0=0 (INTEGER — valid, no NaN/Inf)" {
@@ -275,7 +275,7 @@ test "optimizer: algebraic simplification x*0=0 (INTEGER — valid, no NaN/Inf)"
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
     // u * 0 should fold to 0 — no OpIMul should remain
-    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(glslpp.spirv.Op.IMul)));
+    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(zioshade.spirv.Op.IMul)));
 }
 
 test "optimizer: inline trivial functions" {
@@ -296,11 +296,11 @@ test "optimizer: inline trivial functions" {
 }
 
 fn compileCompute(source: [:0]const u8) ![]const u32 {
-    return glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    return zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
 }
 
 fn compileComputeNoOpt(source: [:0]const u8) ![]const u32 {
-    return glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    return zioshade.compileToSPIRVNoOpt(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
 }
 
 // Returns the word index of the FIRST instruction with `opcode`, or null.
@@ -455,7 +455,7 @@ test "frontend: sibling access-chain load not reused across ++ store on same bas
 }
 
 // #234: a barrier()/atomic hidden inside a CALLED helper must invalidate the
-// caller's load cache. glslpp emits a real OpFunctionCall (no frontend inlining);
+// caller's load cache. zioshade emits a real OpFunctionCall (no frontend inlining);
 // the call site did not invalidate load_cache/global_load_cache, so a read of a
 // shared/SSBO variable AFTER the call reused the pre-call cached load — the #223
 // memory-ordering violation, one call-frame deep.
@@ -713,8 +713,8 @@ test "optimizer: CSE does not merge OpIsInf into OpIsNan (distinct opcodes, same
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsNan)) >= 1);
-    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.IsInf)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.IsNan)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.IsInf)) >= 1);
 }
 
 // redundantStoreElim dropped a store that is OBSERVED by an ALIASING load. It keyed "last
@@ -806,7 +806,7 @@ test "optimizer: x * 0.0 is NOT folded to 0.0 for floats (Inf*0 = NaN)" {
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.FMul)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.FMul)) >= 1);
 }
 
 // Sibling guard: `all(v)` and `any(v)` over the same bvec also collided under the
@@ -823,6 +823,6 @@ test "optimizer: CSE does not merge OpAll into OpAny (distinct opcodes, same ope
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.All)) >= 1);
-    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(glslpp.spirv.Op.Any)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.All)) >= 1);
+    try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.Any)) >= 1);
 }

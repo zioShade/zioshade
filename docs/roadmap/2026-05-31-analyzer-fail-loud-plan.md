@@ -88,7 +88,7 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
 
 - [ ] **Step 3: Add `--strict-enumerate` mode to `tests/runner.zig`.**
 
-  In `mainImpl` (`tests/runner.zig:232`), parse a `--strict-enumerate` flag alongside the existing arg loop (around `:251`). When set, run a separate pass: for every fixture in `all_suites` (reuse the existing `runDir`/walk filters), compile with BOTH `glslpp.compileToSPIRV` (tolerate, current behavior) and `glslpp.compileToSPIRVStrict`. A fixture is a **false-positive candidate** when the tolerate compile *succeeds* but the strict compile *fails with `error.SemanticFailed`*. For each candidate, print `path`, `glslpp.lastErrorCtx()`, and `glslpp.lastErrorInner()` (the runner already surfaces these at `tests/runner.zig:139-141`). Tally candidates and print a per-`ctx` histogram at the end.
+  In `mainImpl` (`tests/runner.zig:232`), parse a `--strict-enumerate` flag alongside the existing arg loop (around `:251`). When set, run a separate pass: for every fixture in `all_suites` (reuse the existing `runDir`/walk filters), compile with BOTH `zioshade.compileToSPIRV` (tolerate, current behavior) and `zioshade.compileToSPIRVStrict`. A fixture is a **false-positive candidate** when the tolerate compile *succeeds* but the strict compile *fails with `error.SemanticFailed`*. For each candidate, print `path`, `zioshade.lastErrorCtx()`, and `zioshade.lastErrorInner()` (the runner already surfaces these at `tests/runner.zig:139-141`). Tally candidates and print a per-`ctx` histogram at the end.
 
   Add a `strict_fp: u32 = 0` field to `Stats`, a new `enumerateShader` helper mirroring `testShader` (`:72`) but doing the dual-compile compare, and a `--strict-enumerate` branch in `mainImpl` that walks the suites calling `enumerateShader`. Do NOT run `spirv-val` in this mode (we only care about analyzer accept/reject). Exit 0 always in `--strict-enumerate` mode (it's a report); the gating `--strict-gate` variant that exits non-zero on any candidate is added in **Task F2 Step 5**. Note: `compileToSPIRVStrict` returns a static empty slice, so a `defer alloc.free(spirv)` copied from `testShader` (`:144`) is a **safe no-op** on the strict result — do not "fix" it.
 
@@ -112,8 +112,8 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
 - [ ] **Step 7: Classify each candidate against the oracle.**
 
   For each distinct `ctx`/construct, run `glslangValidator -V <fixture>`:
-  - glslang **accepts** + glslpp *could* emit correct output → **false-positive** → Task 1 instance.
-  - glslang **accepts** + glslpp cannot represent (fp64/int64/etc.) → **Task F1** honest-error.
+  - glslang **accepts** + zioshade *could* emit correct output → **false-positive** → Task 1 instance.
+  - glslang **accepts** + zioshade cannot represent (fp64/int64/etc.) → **Task F1** honest-error.
   - glslang **rejects** → already-correct, leave as-is (record it so it's not re-investigated).
 
   Produce a classified table: `construct | ctx | count | glslang verdict | bucket`. Commit it as a comment block at the top of `tests/analyzer_strict_tests.zig`.
@@ -130,7 +130,7 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
           \\void main() { o = vec4(undeclared_xyz, 0.0, 0.0, 1.0); }
           ;
       // The strict arm is the enumerator's detection signal; it must fire.
-      try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
+      try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVStrict(alloc, src, .{ .stage = .fragment }));
   }
   ```
 
@@ -155,7 +155,7 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
 - [ ] **Step 1: Confirm the oracle accepts it (guardrail — do this before writing any code).**
 
   Run: `& "C:\VulkanSDK\1.4.341.1\Bin\glslangValidator.exe" -V tests/conformance/stress/<construct>.frag`
-  Expected: exit 0 (glslang accepts). **If glslang rejects, STOP — this is not a false-positive; glslpp rejecting it is correct.**
+  Expected: exit 0 (glslang accepts). **If glslang rejects, STOP — this is not a false-positive; zioshade rejecting it is correct.**
 
 - [ ] **Step 2: Write the failing (RED) strict-mode test in `tests/analyzer_strict_tests.zig`.**
 
@@ -167,7 +167,7 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
           \\// ... minimal valid GLSL using <construct>, identical to the fixture ...
           ;
       // Strict analysis must NOT reject valid GLSL.
-      const spirv = try glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
       // Real assertion: the construct lowered to a real instruction, not OpUndef.
       try std.testing.expect(spirv.len > 5);
@@ -188,7 +188,7 @@ Wire `tests/analyzer_strict_tests.zig` into the default `test` step in `build.zi
   ```bash
   mise exec -- zig build test 2>&1 | grep "<construct>"        # unit test passes
   mise exec -- zig build cli
-  zig-out/bin/glslpp.exe compile tests/conformance/stress/<construct>.frag --stage fragment -o /tmp/c.spv
+  zig-out/bin/zioshade.exe compile tests/conformance/stress/<construct>.frag --stage fragment -o /tmp/c.spv
   & "C:\VulkanSDK\1.4.341.1\Bin\spirv-val.exe" /tmp/c.spv      # spirv-val PASS
   ```
   Expected: unit test passes AND spirv-val passes. Also re-run `just enumerate-fp` and confirm this `ctx` count dropped (true blast-radius shrink, per the spec's dedup heuristic — cascade phantoms vanish when the root cause is modeled).
@@ -207,7 +207,7 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
 
 ## Task F1 — Honest-error pass for genuinely-unrepresentable constructs
 
-**Goal:** valid GLSL glslpp cannot represent (fp64/int64, etc.) must produce a clean, *named* `error.Unsupported*` with line/col — never silently-invalid SPIR-V.
+**Goal:** valid GLSL zioshade cannot represent (fp64/int64, etc.) must produce a clean, *named* `error.Unsupported*` with line/col — never silently-invalid SPIR-V.
 
 **Files:** `src/semantic.zig`, `tests/analyzer_strict_tests.zig`
 
@@ -221,9 +221,9 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
           \\layout(location=0) out vec4 o;
           \\void main() { double d = 1.0lf; o = vec4(float(d)); }
           ;
-      try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment }));
+      try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment }));
       // And the error names the construct + location (no silent OpUndef path):
-      try std.testing.expect(glslpp.lastErrorCtx() != null);
+      try std.testing.expect(zioshade.lastErrorCtx() != null);
   }
   ```
 
@@ -257,7 +257,7 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
           \\layout(location=0) out vec4 o;
           \\void main() { o = vec4(undeclared_identifier_xyz, 0, 0, 1); }
           ;
-      try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
+      try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }));
   }
 
   test "flip: plain compileToSPIRV still accepts the full valid corpus" {
@@ -268,7 +268,7 @@ Repeat Task 1 for each bucket until `just enumerate-fp` reports **zero** false-p
           \\layout(location=0) out vec4 o;
           \\void main() { o = vec4(1.0); }
           ;
-      const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+      const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
       defer alloc.free(spirv);
       try std.testing.expect(spirv.len > 5);
   }
@@ -371,8 +371,8 @@ The milestone is complete only when **all** hold:
 2. `just test-hlsl` green.
 3. `just test-conformance` → `2080 PASS / 0 FAIL / 7 XFAIL / 8 SKIP`, exit 0.
 4. `just enumerate-fp` reports **zero** false-positive candidates.
-5. **Oracle sweep:** a `glslangValidator -V` differential over the conformance corpus shows **zero** cases where glslpp rejects what glslang accepts. (Within-corpus only — residual risk for valid GLSL outside the corpus is documented; honest errors name the construct + line so any post-flip false-positive is an obvious, reportable bug, and `compileToSPIRVNoOpt` remains as a bisect escape hatch — per the spec's residual-risk note.)
-6. wintty's production shaders still compile (run wintty's shader build against the new glslpp).
+5. **Oracle sweep:** a `glslangValidator -V` differential over the conformance corpus shows **zero** cases where zioshade rejects what glslang accepts. (Within-corpus only — residual risk for valid GLSL outside the corpus is documented; honest errors name the construct + line so any post-flip false-positive is an obvious, reportable bug, and `compileToSPIRVNoOpt` remains as a bisect escape hatch — per the spec's residual-risk note.)
+6. wintty's production shaders still compile (run wintty's shader build against the new zioshade).
 
 Any regression in 1–6 is a **STOP**: the flip is gated behind a clean bar; do not weaken it to go green.
 

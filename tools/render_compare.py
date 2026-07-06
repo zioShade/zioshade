@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Rendering comparison pipeline for glslpp vs spirv-cross.
+Rendering comparison pipeline for zioshade vs spirv-cross.
 
 Compiles fragment shaders through both pipelines and compares rendered output
 pixel-by-pixel using OpenGL (gl_render_compare.exe).
@@ -22,7 +22,7 @@ GLSLANG = os.environ.get("GLSLANG", "glslangValidator")
 SPIRVCROSS = os.environ.get("SPIRVCROSS", "spirv-cross")
 RENDER_TOOL = Path(__file__).parent / "gl_render_compare.exe"
 
-GLSLPP_DIR = Path(__file__).parent.parent
+ZIOSHADE_DIR = Path(__file__).parent.parent
 
 # Simple fragment shaders designed for rendering comparison.
 # Each uses only gl_FragCoord (built-in) and basic math — no textures, UBOs, etc.
@@ -303,9 +303,9 @@ void main() {
 }
 
 
-def compile_glslpp_glsl(source: str, spv_path: str) -> tuple[bool, str]:
-    """Compile GLSL through glslpp: glslpp → SPIR-V → GLSL."""
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.frag', delete=False, dir=GLSLPP_DIR) as f:
+def compile_zioshade_glsl(source: str, spv_path: str) -> tuple[bool, str]:
+    """Compile GLSL through zioshade: zioshade → SPIR-V → GLSL."""
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.frag', delete=False, dir=ZIOSHADE_DIR) as f:
         f.write(source)
         src_path = f.name
 
@@ -318,31 +318,31 @@ def compile_glslpp_glsl(source: str, spv_path: str) -> tuple[bool, str]:
         if r.returncode != 0:
             return False, f"glslangValidator: {r.stderr[:200]}"
 
-        # Use dump_shader tool for glslpp compilation
+        # Use dump_shader tool for zioshade compilation
         # Actually, we need to use the Zig tool. Let me use spirv-cross for the reference
-        # and the glslpp library via the cross_validate tool.
+        # and the zioshade library via the cross_validate tool.
         # For simplicity, let's use the direct approach:
-        # glslangValidator → SPIR-V, then both glslpp and spirv-cross compile SPIR-V → GLSL
+        # glslangValidator → SPIR-V, then both zioshade and spirv-cross compile SPIR-V → GLSL
         return True, ""
     finally:
         os.unlink(src_path)
 
 
-def spirv_to_glsl_glslpp(spv_path: str, output_path: str) -> tuple[bool, str]:
-    """Convert SPIR-V to GLSL using glslpp (via cross_validate tool)."""
-    # We need a small tool that does SPIR-V → GLSL via glslpp
+def spirv_to_glsl_zioshade(spv_path: str, output_path: str) -> tuple[bool, str]:
+    """Convert SPIR-V to GLSL using zioshade (via cross_validate tool)."""
+    # We need a small tool that does SPIR-V → GLSL via zioshade
     # For now, use the dump_shader tool
-    tool = GLSLPP_DIR / "tools" / "dump_spv.zig"
+    tool = ZIOSHADE_DIR / "tools" / "dump_spv.zig"
     # Actually let's just call the library directly — we need a simple CLI wrapper
     # For now, let me build a small tool
     try:
         r = subprocess.run(
             ["zig", "build", "dump-spv", "--", spv_path, output_path.replace(".glsl", ""), "glsl"],
             capture_output=True, text=True, timeout=30,
-            cwd=str(GLSLPP_DIR)
+            cwd=str(ZIOSHADE_DIR)
         )
         if r.returncode != 0:
-            return False, f"glslpp: {r.stderr[:200]}"
+            return False, f"zioshade: {r.stderr[:200]}"
         return True, ""
     except Exception as e:
         return False, str(e)
@@ -400,7 +400,7 @@ def run_single_shader(name: str, source: str, tmpdir: str) -> dict:
     result = {
         "name": name,
         "glslang_ok": False,
-        "glslpp_glsl_ok": False,
+        "zioshade_glsl_ok": False,
         "spirvcross_glsl_ok": False,
         "render_match": None,
         "max_diff": -1,
@@ -409,7 +409,7 @@ def run_single_shader(name: str, source: str, tmpdir: str) -> dict:
 
     src_path = os.path.join(tmpdir, f"{name}.frag")
     spv_path = os.path.join(tmpdir, f"{name}.spv")
-    glslpp_glsl_path = os.path.join(tmpdir, f"{name}_glslpp.glsl")
+    zioshade_glsl_path = os.path.join(tmpdir, f"{name}_zioshade.glsl")
     spirvcross_glsl_path = os.path.join(tmpdir, f"{name}_spirvcross.glsl")
 
     with open(src_path, 'w') as f:
@@ -434,19 +434,19 @@ def run_single_shader(name: str, source: str, tmpdir: str) -> dict:
     with open(spirvcross_glsl_path, 'w') as f:
         f.write(glsl_code)
 
-    # Step 2b: glslpp SPIR-V → GLSL
+    # Step 2b: zioshade SPIR-V → GLSL
     # We need a CLI wrapper. Let's build a minimal one.
     # Actually, let me check if dump_shader can do this...
     # The dump_shader.zig takes GLSL input, compiles to SPIR-V, then cross-compiles.
     # We need a tool that takes SPIR-V and cross-compiles to GLSL.
     # Let me create a minimal wrapper script.
     
-    # For now, let's build the SPIR-V → GLSL tool inline using the glslpp library
+    # For now, let's build the SPIR-V → GLSL tool inline using the zioshade library
     # We'll create a temporary Zig file
     wrapper_path = os.path.join(tmpdir, "spv_to_glsl.zig")
     with open(wrapper_path, 'w') as f:
         f.write("""const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     const alloc = std.heap.page_allocator;
@@ -457,7 +457,7 @@ pub fn main() !void {
     }
     const spv_data = try std.fs.cwd().readFileAlloc(alloc, args[1], 10 * 1024 * 1024);
     const spirv = std.mem.bytesAsSlice(u32, spv_data);
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
     defer alloc.free(glsl);
     const file = try std.fs.cwd().createFile(args[2], .{});
     defer file.close();
@@ -475,12 +475,12 @@ pub fn main() !void {
     # Let me just use the build system's run artifact approach.
     # Better: create a standalone tool in tools/ directory.
     
-    result["error"] = "glslpp SPIR-V→GLSL tool not yet built"
+    result["error"] = "zioshade SPIR-V→GLSL tool not yet built"
     return result
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Rendering comparison for glslpp")
+    parser = argparse.ArgumentParser(description="Rendering comparison for zioshade")
     parser.add_argument("--all", action="store_true", help="Run all rendering tests")
     parser.add_argument("--list", action="store_true", help="List test shaders")
     parser.add_argument("--generate", action="store_true", help="Generate test shader files")
@@ -493,7 +493,7 @@ def main():
         return
 
     if args.generate:
-        out_dir = GLSLPP_DIR / args.output_dir
+        out_dir = ZIOSHADE_DIR / args.output_dir
         out_dir.mkdir(parents=True, exist_ok=True)
         for name, source in RENDER_TEST_SHADERS.items():
             path = out_dir / f"{name}.frag"
@@ -504,7 +504,7 @@ def main():
         return
 
     if args.all:
-        print("Rendering Comparison: glslpp vs spirv-cross")
+        print("Rendering Comparison: zioshade vs spirv-cross")
         print("=" * 60)
         print(f"GLSLANG: {GLSLANG}")
         print(f"SPIRVCROSS: {SPIRVCROSS}")

@@ -13,7 +13,7 @@
 //! loop-invariant comparison against a constant), so the closure is empty.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -225,21 +225,21 @@ fn scanBareAssigns(src: []const u8, out: *std.StringHashMap(void)) !void {
 }
 
 fn compileToHlsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    return try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    return try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
 }
 
 fn compileToGlsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    return try glslpp.spirvToGLSL(alloc, spirv, .{});
+    return try zioshade.spirvToGLSL(alloc, spirv, .{});
 }
 
 fn compileToMsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    return try glslpp.spirvToMSL(alloc, spirv, .{});
+    return try zioshade.spirvToMSL(alloc, spirv, .{});
 }
 
 const NESTED_LOOP_SRC =

@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
@@ -11,9 +11,9 @@ pub fn main() !void {
 
     if (args.len < 2) {
         std.debug.print(
-            \\glslpp — GLSL/SPIR-V shader compiler
+            \\zioshade — GLSL/SPIR-V shader compiler
             \\
-            \\Usage: glslpp <command> <input> [options]
+            \\Usage: zioshade <command> <input> [options]
             \\
             \\Commands:
             \\  compile   Compile GLSL to SPIR-V binary
@@ -53,7 +53,7 @@ pub fn main() !void {
 
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
-    var stage_override: ?glslpp.Stage = null;
+    var stage_override: ?zioshade.Stage = null;
     var entry_point: ?[]const u8 = null;
     var glsl_version: u32 = 430;
     var shader_model: u32 = 60;
@@ -65,10 +65,10 @@ pub fn main() !void {
     var include_paths = std.ArrayList([]const u8).initCapacity(alloc, 4) catch return;
     defer include_paths.deinit(alloc);
 
-    var defines = std.ArrayList(glslpp.DefineOverride).initCapacity(alloc, 8) catch return;
+    var defines = std.ArrayList(zioshade.DefineOverride).initCapacity(alloc, 8) catch return;
     defer defines.deinit(alloc);
 
-    var spec_overrides = std.ArrayList(glslpp.SpecOverride).initCapacity(alloc, 4) catch return;
+    var spec_overrides = std.ArrayList(zioshade.SpecOverride).initCapacity(alloc, 4) catch return;
     defer spec_overrides.deinit(alloc);
     var bind_overrides = std.ArrayList(BindOverride).initCapacity(alloc, 4) catch return;
     defer bind_overrides.deinit(alloc);
@@ -222,7 +222,7 @@ pub fn main() !void {
     } else if (std.mem.eql(u8, command, "validate")) {
         try doValidate(alloc, input);
     } else {
-        fatal("unknown command: {s}. See glslpp --help", .{command});
+        fatal("unknown command: {s}. See zioshade --help", .{command});
     }
 }
 
@@ -231,7 +231,7 @@ fn fatal(comptime fmt: []const u8, args: anytype) noreturn {
     std.process.exit(2);
 }
 
-fn detectStage(path: []const u8) ?glslpp.Stage {
+fn detectStage(path: []const u8) ?zioshade.Stage {
     if (std.mem.eql(u8, path, "stdin")) return null;
     // .v.glsl, .f.glsl, .c.glsl, .g.glsl conventions
     if (std.mem.endsWith(u8, path, ".v.glsl")) return .vertex;
@@ -296,7 +296,7 @@ fn writeOutput(output_path: ?[]const u8, data: []const u8) !void {
 
 // ── Compile GLSL → SPIR-V ──────────────────────────────────────────
 
-fn doCompile(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride) !void {
+fn doCompile(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: zioshade.Stage, include_paths: []const []const u8, defines: []const zioshade.DefineOverride) !void {
     const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
@@ -318,7 +318,7 @@ fn doCompile(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8
 fn doSpvToHlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8, shader_model: u32) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
-    const result = glslpp.spirvToHLSL(alloc, spv, .{
+    const result = zioshade.spirvToHLSL(alloc, spv, .{
         .shader_model = shader_model,
         .entry_point_name = entry_point orelse "main",
         .resource_bindings = hlslBindings(alloc),
@@ -327,14 +327,14 @@ fn doSpvToHlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8,
     try writeOutput(output, result);
 }
 
-fn doGlslToHlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, shader_model: u32) !void {
+fn doGlslToHlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: zioshade.Stage, include_paths: []const []const u8, defines: []const zioshade.DefineOverride, entry_point: ?[]const u8, shader_model: u32) !void {
     const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
     });
     defer alloc.free(spv);
-    const result = glslpp.spirvToHLSL(alloc, spv, .{
+    const result = zioshade.spirvToHLSL(alloc, spv, .{
         .shader_model = shader_model,
         .entry_point_name = entry_point orelse "main",
         .resource_bindings = hlslBindings(alloc),
@@ -348,7 +348,7 @@ fn doGlslToHlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const
 fn doSpvToGlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, version: u32, entry_point: ?[]const u8) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
-    const glsl = glslpp.spirvToGLSL(alloc, spv, .{
+    const glsl = zioshade.spirvToGLSL(alloc, spv, .{
         .version = version,
         .entry_point_name = entry_point orelse "main",
     }) catch |e| crossErr(e);
@@ -356,14 +356,14 @@ fn doSpvToGlsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8,
     try writeOutput(output, glsl);
 }
 
-fn doGlslToGlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, version: u32, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8) !void {
+fn doGlslToGlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: zioshade.Stage, version: u32, include_paths: []const []const u8, defines: []const zioshade.DefineOverride, entry_point: ?[]const u8) !void {
     const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
     });
     defer alloc.free(spv);
-    const glsl = glslpp.spirvToGLSL(alloc, spv, .{
+    const glsl = zioshade.spirvToGLSL(alloc, spv, .{
         .version = version,
         .entry_point_name = entry_point orelse "main",
     }) catch |e| crossErr(e);
@@ -376,7 +376,7 @@ fn doGlslToGlsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const
 fn doSpvToMsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8, metal_version: u32, argument_buffers: bool) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
-    const result = glslpp.spirvToMSL(alloc, spv, .{
+    const result = zioshade.spirvToMSL(alloc, spv, .{
         .metal_version = metal_version,
         .entry_point_name = entry_point orelse "main",
         .argument_buffers = argument_buffers,
@@ -386,14 +386,14 @@ fn doSpvToMsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, 
     try writeOutput(output, result);
 }
 
-fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8, metal_version: u32, argument_buffers: bool) !void {
+fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: zioshade.Stage, include_paths: []const []const u8, defines: []const zioshade.DefineOverride, entry_point: ?[]const u8, metal_version: u32, argument_buffers: bool) !void {
     const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
     });
     defer alloc.free(spv);
-    const result = glslpp.spirvToMSL(alloc, spv, .{
+    const result = zioshade.spirvToMSL(alloc, spv, .{
         .metal_version = metal_version,
         .entry_point_name = entry_point orelse "main",
         .argument_buffers = argument_buffers,
@@ -408,21 +408,21 @@ fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const 
 fn doSpvToWgsl(alloc: std.mem.Allocator, input: []const u8, output: ?[]const u8, entry_point: ?[]const u8) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
-    const result = glslpp.spirvToWGSL(alloc, spv, .{
+    const result = zioshade.spirvToWGSL(alloc, spv, .{
         .entry_point_name = entry_point orelse "main",
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
 }
 
-fn doGlslToWgsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: glslpp.Stage, include_paths: []const []const u8, defines: []const glslpp.DefineOverride, entry_point: ?[]const u8) !void {
+fn doGlslToWgsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: zioshade.Stage, include_paths: []const []const u8, defines: []const zioshade.DefineOverride, entry_point: ?[]const u8) !void {
     const spv = compileWithDiagsOrExit(alloc, source, .{
         .stage = stage,
         .include_paths = include_paths,
         .defines = defines,
     });
     defer alloc.free(spv);
-    const result = glslpp.spirvToWGSL(alloc, spv, .{
+    const result = zioshade.spirvToWGSL(alloc, spv, .{
         .entry_point_name = entry_point orelse "main",
     }) catch |e| crossErr(e);
     defer alloc.free(result);
@@ -433,7 +433,7 @@ fn doGlslToWgsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const
 
 /// Print buffer-block member layout metadata (offset / strides / runtime /
 /// access quals), recursing into nested struct members (#177).
-fn printMembers(members: []const glslpp.reflection.Member, indent: usize) void {
+fn printMembers(members: []const zioshade.reflection.Member, indent: usize) void {
     const p = std.debug.print;
     for (members) |m| {
         for (0..indent) |_| p("  ", .{});
@@ -457,7 +457,7 @@ fn printMembers(members: []const glslpp.reflection.Member, indent: usize) void {
 fn doReflect(alloc: std.mem.Allocator, input: []const u8, json_output: bool) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
-    var resources = glslpp.reflectSPIRV(alloc, spv) catch |err| {
+    var resources = zioshade.reflectSPIRV(alloc, spv) catch |err| {
         std.debug.print("error: reflection failed: {}\n", .{err});
         std.process.exit(1);
     };
@@ -466,7 +466,7 @@ fn doReflect(alloc: std.mem.Allocator, input: []const u8, json_output: bool) !vo
     // `--json`: emit the spirv-cross-style reflection JSON to stdout instead of
     // the human-readable text dump (#177 Item 2).
     if (json_output) {
-        const json = glslpp.reflectionToJson(alloc, &resources) catch |err| {
+        const json = zioshade.reflectionToJson(alloc, &resources) catch |err| {
             std.debug.print("error: JSON serialization failed: {}\n", .{err});
             std.process.exit(1);
         };
@@ -506,7 +506,7 @@ fn doReflect(alloc: std.mem.Allocator, input: []const u8, json_output: bool) !vo
 fn doValidate(alloc: std.mem.Allocator, input: []const u8) !void {
     const spv = try readSpv(alloc, input);
     defer alloc.free(spv);
-    const valid = glslpp.validateSPIRV(alloc, spv) catch false;
+    const valid = zioshade.validateSPIRV(alloc, spv) catch false;
     if (valid) {
         std.debug.print("Validation passed: {s}\n", .{input});
     } else {
@@ -516,17 +516,17 @@ fn doValidate(alloc: std.mem.Allocator, input: []const u8) !void {
 }
 
 fn compileErr(err: anyerror) noreturn {
-    const detail = glslpp.last_compile_detail;
+    const detail = zioshade.last_compile_detail;
     std.debug.print("error: {s}", .{@errorName(err)});
     if (detail) |d| std.debug.print(" ({s})", .{@tagName(d)});
-    const ctx = glslpp.lastErrorCtx();
+    const ctx = zioshade.lastErrorCtx();
     if (ctx) |c| std.debug.print(": {s}", .{c});
     std.debug.print("\n", .{});
     std.process.exit(1);
 }
 
 /// Print one diagnostic in glslang-style `path:line:col: kind: message` format.
-fn printDiagnostic(d: glslpp.diagnostic.Diagnostic) void {
+fn printDiagnostic(d: zioshade.diagnostic.Diagnostic) void {
     const kind_str: []const u8 = switch (d.kind) {
         .@"error" => "error",
         .warning => "warning",
@@ -541,8 +541,8 @@ fn printDiagnostic(d: glslpp.diagnostic.Diagnostic) void {
 
 /// Module-scope override list populated by `--spec-const ID=VALUE` parsing in
 /// `main`. Single-threaded CLI usage justifies the global; library callers
-/// should use `glslpp.compileToSPIRVWithSpecOverrides` directly.
-var cli_spec_overrides: []const glslpp.SpecOverride = &.{};
+/// should use `zioshade.compileToSPIRVWithSpecOverrides` directly.
+var cli_spec_overrides: []const zioshade.SpecOverride = &.{};
 
 /// Parsed `--bind set:binding:reg` descriptor-remap overrides (G6). Backend-
 /// neutral triples; converted to HlslCompileOptions.resource_bindings /
@@ -551,17 +551,17 @@ const BindOverride = struct { set: u32, binding: u32, reg: u32 };
 var cli_resource_bindings: []const BindOverride = &.{};
 
 /// Build the HLSL `resource_bindings` slice from the CLI `--bind` overrides.
-fn hlslBindings(alloc: std.mem.Allocator) []const glslpp.ResourceBinding {
+fn hlslBindings(alloc: std.mem.Allocator) []const zioshade.ResourceBinding {
     if (cli_resource_bindings.len == 0) return &.{};
-    const out = alloc.alloc(glslpp.ResourceBinding, cli_resource_bindings.len) catch return &.{};
+    const out = alloc.alloc(zioshade.ResourceBinding, cli_resource_bindings.len) catch return &.{};
     for (cli_resource_bindings, 0..) |b, i| out[i] = .{ .set = b.set, .binding = b.binding, .register = b.reg };
     return out;
 }
 
 /// Build the MSL `resource_bindings` slice from the CLI `--bind` overrides.
-fn mslBindings(alloc: std.mem.Allocator) []const glslpp.MslResourceBinding {
+fn mslBindings(alloc: std.mem.Allocator) []const zioshade.MslResourceBinding {
     if (cli_resource_bindings.len == 0) return &.{};
-    const out = alloc.alloc(glslpp.MslResourceBinding, cli_resource_bindings.len) catch return &.{};
+    const out = alloc.alloc(zioshade.MslResourceBinding, cli_resource_bindings.len) catch return &.{};
     for (cli_resource_bindings, 0..) |b, i| out[i] = .{ .set = b.set, .binding = b.binding, .msl_slot = b.reg };
     return out;
 }
@@ -573,14 +573,14 @@ fn mslBindings(alloc: std.mem.Allocator) []const glslpp.MslResourceBinding {
 fn compileWithDiagsOrExit(
     alloc: std.mem.Allocator,
     source: [:0]const u8,
-    opts: glslpp.CompileOptions,
+    opts: zioshade.CompileOptions,
 ) []const u32 {
-    var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+    var diags = std.ArrayListUnmanaged(zioshade.diagnostic.Diagnostic).empty;
     defer {
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    const spv = glslpp.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |e| {
+    const spv = zioshade.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |e| {
         for (diags.items) |d| printDiagnostic(d);
         compileErr(e);
     };
@@ -591,7 +591,7 @@ fn compileWithDiagsOrExit(
     const out = alloc.alloc(u32, spv.len) catch return spv;
     @memcpy(out, spv);
     alloc.free(spv);
-    glslpp.applySpecOverrides(out, cli_spec_overrides);
+    zioshade.applySpecOverrides(out, cli_spec_overrides);
     return out;
 }
 
@@ -599,7 +599,7 @@ fn crossErr(err: anyerror) noreturn {
     // WGSL records an actionable detail for some honest errors (errors carry no
     // payload) — surface it so the message is more than just the error name.
     if (err == error.UnsupportedExtInst or err == error.UnsupportedEarlyReturn) {
-        if (glslpp.wgslLastErrorDetail()) |detail| {
+        if (zioshade.wgslLastErrorDetail()) |detail| {
             std.debug.print("error: cross-compilation failed: {s}: {s}\n", .{ @errorName(err), detail });
             std.process.exit(1);
         }

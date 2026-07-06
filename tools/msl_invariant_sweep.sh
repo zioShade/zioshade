@@ -18,12 +18,12 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-CLI="zig-out/bin/glslpp.exe"
-[ -x "$CLI" ] || CLI="zig-out/bin/glslpp"
+CLI="zig-out/bin/zioshade.exe"
+[ -x "$CLI" ] || CLI="zig-out/bin/zioshade"
 if [ ! -x "$CLI" ]; then echo "build first: mise exec -- zig build" >&2; exit 2; fi
 
 SUITES="tests/spirv-cross tests/glslang-430 tests/ghostty tests/compute tests/conformance/stress"
-# Relative path under the repo: the Windows glslpp.exe cannot write a Git-Bash
+# Relative path under the repo: the Windows zioshade.exe cannot write a Git-Bash
 # `/tmp/...` mktemp path, which silently made every emit "fail".
 mkdir -p .zig-cache
 TMP=".zig-cache/msl-invariant-sweep.msl"

@@ -2,7 +2,7 @@
 //! Specialization-constant cross-compilation tests (M3 milestone).
 //! Verifies that each backend emits its idiomatic spec-const syntax.
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const SHADER_INT_SPEC =
     \\#version 450
@@ -13,9 +13,9 @@ const SHADER_INT_SPEC =
 
 test "M3.1 WGSL: int spec const emits @id(N) override" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_INT_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_INT_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(3)") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "override") != null);
@@ -25,9 +25,9 @@ test "M3.1 WGSL: int spec const emits @id(N) override" {
 
 test "M3.2 HLSL: int spec const emits [[vk::constant_id(N)]] const" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_INT_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_INT_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .binding_shift = -1, .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .binding_shift = -1, .shader_model = 60 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(3)]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "const int") != null);
@@ -51,7 +51,7 @@ const SHADER_BOOL_SPEC =
 
 test "M3.3 SPIR-V: bool spec const emits OpSpecConstantTrue (op 48)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
     // Scan SPIR-V for opcode 48 (OpSpecConstantTrue)
     var found = false;
@@ -68,9 +68,9 @@ test "M3.3 SPIR-V: bool spec const emits OpSpecConstantTrue (op 48)" {
 
 test "M3.3 GLSL: bool spec const cross-compiles to layout(constant_id=N) const bool ... = true" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spv, .{});
+    const glsl = try zioshade.spirvToGLSL(alloc, spv, .{});
     defer alloc.free(glsl);
     try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 1) const bool") != null);
     try std.testing.expect(std.mem.indexOf(u8, glsl, "= true;") != null);
@@ -78,9 +78,9 @@ test "M3.3 GLSL: bool spec const cross-compiles to layout(constant_id=N) const b
 
 test "M3.3 WGSL: bool spec const cross-compiles to override ... = true" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(1)") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "override") != null);
@@ -89,9 +89,9 @@ test "M3.3 WGSL: bool spec const cross-compiles to override ... = true" {
 
 test "M3.3 HLSL: bool spec const cross-compiles to [[vk::constant_id(N)]] const bool ... = true" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .binding_shift = -1, .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .binding_shift = -1, .shader_model = 60 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(1)]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "const bool") != null);
@@ -100,9 +100,9 @@ test "M3.3 HLSL: bool spec const cross-compiles to [[vk::constant_id(N)]] const 
 
 test "M3.3 MSL: bool spec const cross-compiles to [[function_constant(N)]] = true" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "constant bool") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(1)]]") != null);
@@ -113,10 +113,10 @@ test "M3.3 MSL: bool spec const cross-compiles to [[function_constant(N)]] = tru
 
 test "M3.6: SpecOverride rewrites int spec const literal" {
     const alloc = std.testing.allocator;
-    const overrides = [_]glslpp.SpecOverride{
+    const overrides = [_]zioshade.SpecOverride{
         .{ .spec_id = 3, .value_u32 = 99 },
     };
-    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+    const spv = try zioshade.compileToSPIRVWithSpecOverrides(
         alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, overrides[0..],
     );
     defer alloc.free(spv);
@@ -139,10 +139,10 @@ test "M3.6: SpecOverride rewrites int spec const literal" {
 test "M3.6: SpecOverride swaps bool spec const True <-> False" {
     const alloc = std.testing.allocator;
     // Source declares `ENABLE_FX = true` (SpecId 1). Override to false.
-    const overrides = [_]glslpp.SpecOverride{
+    const overrides = [_]zioshade.SpecOverride{
         .{ .spec_id = 1, .value_u32 = 0 },
     };
-    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+    const spv = try zioshade.compileToSPIRVWithSpecOverrides(
         alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment }, overrides[0..],
     );
     defer alloc.free(spv);
@@ -164,8 +164,8 @@ test "M3.6: SpecOverride swaps bool spec const True <-> False" {
 
 test "M3.6: SpecOverride empty list is a no-op (no copy, no leak)" {
     const alloc = std.testing.allocator;
-    const empty: []const glslpp.SpecOverride = &.{};
-    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+    const empty: []const zioshade.SpecOverride = &.{};
+    const spv = try zioshade.compileToSPIRVWithSpecOverrides(
         alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, empty,
     );
     defer alloc.free(spv);
@@ -183,7 +183,7 @@ const SHADER_VEC3_SPEC =
 
 test "M3.4 SPIR-V: vec3 spec const emits OpSpecConstantComposite (op 51)" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
     defer alloc.free(spirv);
     var found_composite = false;
     var op50_count: usize = 0;
@@ -203,7 +203,7 @@ test "M3.4 SPIR-V: vec3 spec const emits OpSpecConstantComposite (op 51)" {
 
 test "M3.4 SPIR-V: vec3 components decorated with sequential SpecIds (2, 3, 4)" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
     defer alloc.free(spirv);
     // Walk for OpDecorate ... SpecId N. Expect SpecIds 2, 3, 4 present and 5 absent.
     var seen2 = false;
@@ -232,7 +232,7 @@ test "M3.4 SPIR-V: vec3 components decorated with sequential SpecIds (2, 3, 4)" 
 
 test "M3.4 SPIR-V: vec3 component default literal is 0.5 (bit pattern 0x3F000000)" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
     defer alloc.free(spirv);
     // Walk for OpSpecConstant (50) and check at least one has literal == bits(0.5).
     const expected: u32 = @bitCast(@as(f32, 0.5));
@@ -250,9 +250,9 @@ test "M3.4 SPIR-V: vec3 component default literal is 0.5 (bit pattern 0x3F000000
 
 test "M3.4 GLSL: vec3 spec const cross-compiles to per-scalar + composite const" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spv, .{});
+    const glsl = try zioshade.spirvToGLSL(alloc, spv, .{});
     defer alloc.free(glsl);
     // Three per-scalar layout(constant_id) declarations and a vec3 composite.
     try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 2)") != null);
@@ -263,9 +263,9 @@ test "M3.4 GLSL: vec3 spec const cross-compiles to per-scalar + composite const"
 
 test "M3.4 HLSL: vec3 spec const cross-compiles to per-scalar + static const composite" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spv, .{ .binding_shift = -1, .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .binding_shift = -1, .shader_model = 60 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(2)]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[[vk::constant_id(3)]]") != null);
@@ -275,9 +275,9 @@ test "M3.4 HLSL: vec3 spec const cross-compiles to per-scalar + static const com
 
 test "M3.4 MSL: vec3 spec const cross-compiles to per-scalar [[function_constant]] + composite" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const msl = try glslpp.spirvToMSL(alloc, spv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(2)]]") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(3)]]") != null);
@@ -287,9 +287,9 @@ test "M3.4 MSL: vec3 spec const cross-compiles to per-scalar [[function_constant
 
 test "M3.4 WGSL: vec3 spec const cross-compiles to per-scalar overrides + composite const" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, SHADER_VEC3_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(2)") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@id(3)") != null);
@@ -312,7 +312,7 @@ const SHADER_VEC4_SPEC =
 
 test "M3.4 SPIR-V: vec4 spec const emits 4 OpSpecConstants + OpSpecConstantComposite" {
     const alloc = std.testing.allocator;
-    const spirv = try glslpp.compileToSPIRV(alloc, SHADER_VEC4_SPEC, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, SHADER_VEC4_SPEC, .{ .stage = .fragment });
     defer alloc.free(spirv);
     var found_composite = false;
     var op50_count: usize = 0;
@@ -333,10 +333,10 @@ test "M3.4 SPIR-V: vec4 spec const emits 4 OpSpecConstants + OpSpecConstantCompo
 
 test "M3.6: SpecOverride non-matching spec_id is silently ignored" {
     const alloc = std.testing.allocator;
-    const overrides = [_]glslpp.SpecOverride{
+    const overrides = [_]zioshade.SpecOverride{
         .{ .spec_id = 999, .value_u32 = 0xDEADBEEF },
     };
-    const spv = try glslpp.compileToSPIRVWithSpecOverrides(
+    const spv = try zioshade.compileToSPIRVWithSpecOverrides(
         alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, overrides[0..],
     );
     defer alloc.free(spv);
@@ -368,7 +368,7 @@ test "M3.5 SPIR-V: int*const emits OpSpecConstantOp" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(DOUBLE)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     var found = false;
     var i: usize = 5;
@@ -394,7 +394,7 @@ test "M3.5 SPIR-V: nested expression emits two OpSpecConstantOp" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(QUAD)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     var count: u32 = 0;
     var i: usize = 5;
@@ -420,7 +420,7 @@ test "M3.5 SPIR-V: all four arithmetic ops emit OpSpecConstantOp" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(ADD + SUB + MUL + DIV)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
     var count: u32 = 0;
     var i: usize = 5;
@@ -448,9 +448,9 @@ test "M3.5 GLSL: cross-compile preserves derived const as expression" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(DOUBLE)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{});
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(glsl);
     // Leaf spec const declared with user identifier preserved.
     try std.testing.expect(std.mem.indexOf(u8, glsl, "layout(constant_id = 1) const int SIZE = 4") != null);
@@ -470,12 +470,12 @@ test "spec const: original GLSL name preserved across all backends" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(MY_SIZE)); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // GLSL
     {
-        const out = try glslpp.spirvToGLSL(alloc, spv, .{});
+        const out = try zioshade.spirvToGLSL(alloc, spv, .{});
         defer alloc.free(out);
         if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
             std.debug.print("GLSL backend missing MY_SIZE:\n{s}\n", .{out});
@@ -484,7 +484,7 @@ test "spec const: original GLSL name preserved across all backends" {
     }
     // HLSL
     {
-        const out = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+        const out = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
         defer alloc.free(out);
         if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
             std.debug.print("HLSL backend missing MY_SIZE:\n{s}\n", .{out});
@@ -493,7 +493,7 @@ test "spec const: original GLSL name preserved across all backends" {
     }
     // MSL
     {
-        const out = try glslpp.spirvToMSL(alloc, spv, .{});
+        const out = try zioshade.spirvToMSL(alloc, spv, .{});
         defer alloc.free(out);
         if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
             std.debug.print("MSL backend missing MY_SIZE:\n{s}\n", .{out});
@@ -502,7 +502,7 @@ test "spec const: original GLSL name preserved across all backends" {
     }
     // WGSL
     {
-        const out = try glslpp.spirvToWGSL(alloc, spv, .{});
+        const out = try zioshade.spirvToWGSL(alloc, spv, .{});
         defer alloc.free(out);
         if (std.mem.indexOf(u8, out, "MY_SIZE") == null) {
             std.debug.print("WGSL backend missing MY_SIZE:\n{s}\n", .{out});
@@ -520,33 +520,33 @@ test "spec const: derived user-bound name preserved across all backends" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(DOUBLE_SIZE)); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     // GLSL
     {
-        const out = try glslpp.spirvToGLSL(alloc, spv, .{});
+        const out = try zioshade.spirvToGLSL(alloc, spv, .{});
         defer alloc.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
         try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
     }
     // HLSL
     {
-        const out = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+        const out = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
         defer alloc.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
         try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
     }
     // MSL
     {
-        const out = try glslpp.spirvToMSL(alloc, spv, .{});
+        const out = try zioshade.spirvToMSL(alloc, spv, .{});
         defer alloc.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
         try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
     }
     // WGSL
     {
-        const out = try glslpp.spirvToWGSL(alloc, spv, .{});
+        const out = try zioshade.spirvToWGSL(alloc, spv, .{});
         defer alloc.free(out);
         try std.testing.expect(std.mem.indexOf(u8, out, "SIZE") != null);
         try std.testing.expect(std.mem.indexOf(u8, out, "DOUBLE_SIZE") != null);
@@ -561,7 +561,7 @@ test "spec const: derived user-bound name preserved across all backends" {
 // path used `@truncate` and SILENTLY produced a wrong component word
 // (5000000000 → 705032704); the float-element path used `@floatFromInt` and
 // silently accepted the out-of-range literal. glslangValidator rejects both
-// with "numeric literal too big", so glslpp must record an honest error
+// with "numeric literal too big", so zioshade must record an honest error
 // (error.SemanticFailed) rather than emit a silent-wrong constant.
 
 /// Collect every OpSpecConstant (op 50) 32-bit literal value from a SPIR-V blob.
@@ -587,11 +587,11 @@ test "M3.4 spec const: uvec2 component literal > 0xFFFFFFFF is an honest error, 
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(V.x), float(V.y), 0.0, 1.0); }
     ;
-    // Oracle (glslangValidator -V): "numeric literal too big". glslpp must
+    // Oracle (glslangValidator -V): "numeric literal too big". zioshade must
     // reject too — the silent-truncation path turned 5000000000 into 705032704.
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
+        zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
     );
 }
 
@@ -607,7 +607,7 @@ test "M3.4 spec const: vec2 int-element literal > 0xFFFFFFFF is an honest error 
     // (@floatFromInt) previously accepted the out-of-32-bit literal silently.
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
+        zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
     );
 }
 
@@ -619,7 +619,7 @@ test "M3.4 spec const: in-range uvec2(7u, 8u) components emit correct literals 7
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(V.x), float(V.y), 0.0, 1.0); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     const lits = try collectSpecConstLiterals(alloc, spv);
     defer alloc.free(lits);
@@ -637,7 +637,7 @@ test "M3.4 spec const: in-range ivec3(1, 2, 3) components emit correct literals 
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = vec4(float(I.x), float(I.y), float(I.z), 1.0); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     const lits = try collectSpecConstLiterals(alloc, spv);
     defer alloc.free(lits);
@@ -657,7 +657,7 @@ test "M3.4 spec const: in-range vec2(3, 4) int args convert to float component l
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = vec4(V, 0.0, 1.0); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     const lits = try collectSpecConstLiterals(alloc, spv);
     defer alloc.free(lits);
@@ -679,6 +679,6 @@ test "M3.4 spec const: scalar uint default > 0xFFFFFFFF is an honest error (scal
     // already guarded; this test pins that behavior against regressions.
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
+        zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }),
     );
 }

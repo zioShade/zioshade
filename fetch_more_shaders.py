@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fetch additional GLSL shader test suites from GitHub for testing glslpp.
+Fetch additional GLSL shader test suites from GitHub for testing zioshade.
 Clones (shallow) or downloads shader files from known public repos.
 """
 
@@ -22,7 +22,7 @@ YELLOW = '\033[93m'
 BLUE = '\033[94m'
 RESET = '\033[0m'
 
-GLSLPP_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.zig-cache', 'bin', 'conformance-runner.exe')
+ZIOSHADE_RUNNER = os.path.join(os.path.dirname(os.path.abspath(__file__)), '.zig-cache', 'bin', 'conformance-runner.exe')
 SPIRV_VAL = 'C:/VulkanSDK/1.4.341.1/Bin/spirv-val.exe'
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FETCH_DIR = os.path.join(BASE_DIR, '.shader_fetch_cache')
@@ -49,10 +49,10 @@ def get_bound(path):
 
 
 def test_shader(shader_path):
-    """Compile a single shader with glslpp and validate."""
-    spv_path = os.path.join(os.environ.get('TEMP', '/tmp'), f'glslpp_extra_test.spv')
+    """Compile a single shader with zioshade and validate."""
+    spv_path = os.path.join(os.environ.get('TEMP', '/tmp'), f'zioshade_extra_test.spv')
     
-    result = run([GLSLPP_RUNNER, shader_path, '--save-spv', spv_path], timeout=15)
+    result = run([ZIOSHADE_RUNNER, shader_path, '--save-spv', spv_path], timeout=15)
     if not os.path.exists(spv_path):
         stdout = result.stdout + result.stderr
         if 'SKIP' in stdout:
@@ -198,8 +198,8 @@ def fetch_local_dir(name, dir_path, max_shaders=100):
 
 
 def main():
-    if not os.path.exists(GLSLPP_RUNNER):
-        print(f"{RED}glslpp runner not found at {GLSLPP_RUNNER}{RESET}")
+    if not os.path.exists(ZIOSHADE_RUNNER):
+        print(f"{RED}zioshade runner not found at {ZIOSHADE_RUNNER}{RESET}")
         sys.exit(1)
     
     os.makedirs(FETCH_DIR, exist_ok=True)

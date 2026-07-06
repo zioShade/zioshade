@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -13,7 +13,7 @@ test "mesh shader requires SPIR-V 1.4+" {
         \\#extension GL_EXT_mesh_shader : require
         \\layout(local_size_x = 32) in;
     ;
-    const result = glslpp.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.3" });
+    const result = zioshade.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.3" });
     try std.testing.expectError(error.CodegenFailed, result);
 }
 
@@ -28,12 +28,12 @@ test "mesh shader without extension should fail" {
     ;
     // Compiling as mesh stage without extension should still compile — the compiler
     // infers the need from the stage selection. This matches glslang behavior.
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
     // Should contain MeshShadingEXT capability
     var found = false;
     for (spirv) |word| {
-        if (word & 0xFFFF == @intFromEnum(glslpp.spirv.Capability.mesh_shading_ext)) {
+        if (word & 0xFFFF == @intFromEnum(zioshade.spirv.Capability.mesh_shading_ext)) {
             found = true;
         }
     }
@@ -46,7 +46,7 @@ test "task shader requires SPIR-V 1.4+" {
         \\#extension GL_EXT_mesh_shader : require
         \\layout(local_size_x = 32) in;
     ;
-    const result = glslpp.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.0" });
+    const result = zioshade.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.0" });
     try std.testing.expectError(error.CodegenFailed, result);
 }
 
@@ -64,7 +64,7 @@ test "task shader compiles with EmitMeshTasksEXT" {
         \\    EmitMeshTasksEXT(1, 1, 1, sharedData);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
     try std.testing.expect(spirv.len > 0);
     try std.testing.expectEqual(@as(u32, 0x07230203), spirv[0]); // magic
@@ -89,9 +89,9 @@ test "task shader cross-compiles to HLSL" {
         \\    EmitMeshTasksEXT(1, 1, 1, sharedData);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 65 });
     defer alloc.free(hlsl);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "[numthreads(4, 1, 1)]") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "DispatchMesh") != null);
@@ -111,7 +111,7 @@ test "mesh shader with points topology" {
         \\    SetMeshOutputsEXT(1, 1);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
     try std.testing.expect(spirv.len > 0);
 }
@@ -126,7 +126,7 @@ test "mesh shader with lines topology" {
         \\    SetMeshOutputsEXT(2, 1);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
     try std.testing.expect(spirv.len > 0);
 }
@@ -141,9 +141,9 @@ test "mesh shader GLSL cross-compilation returns error" {
         \\    SetMeshOutputsEXT(3, 1);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .mesh, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
-    const result = glslpp.spirvToGLSL(alloc, spirv, .{});
+    const result = zioshade.spirvToGLSL(alloc, spirv, .{});
     try std.testing.expectError(error.CrossCompileUnsupported, result);
 }
 
@@ -157,8 +157,8 @@ test "task shader GLSL cross-compilation returns error" {
         \\    EmitMeshTasksEXT(1, 1, 1, payload);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .task, .spirv_version = .@"1.4" });
     defer alloc.free(spirv);
-    const result = glslpp.spirvToGLSL(alloc, spirv, .{});
+    const result = zioshade.spirvToGLSL(alloc, spirv, .{});
     try std.testing.expectError(error.CrossCompileUnsupported, result);
 }

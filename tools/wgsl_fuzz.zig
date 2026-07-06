@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -91,14 +91,14 @@ pub fn main() !void {
         defer alloc.free(sourceZ);
 
         // Try to compile to SPIR-V
-        const spv_result = glslpp.compileToSPIRV(alloc, sourceZ, .{ .stage = .fragment }) catch {
+        const spv_result = zioshade.compileToSPIRV(alloc, sourceZ, .{ .stage = .fragment }) catch {
             compile_fail += 1;
             continue;
         };
         defer alloc.free(spv_result);
 
         // Try to convert to WGSL
-        const wgsl_result = glslpp.spirvToWGSL(alloc, spv_result, .{}) catch |err| {
+        const wgsl_result = zioshade.spirvToWGSL(alloc, spv_result, .{}) catch |err| {
             crash += 1;
             if (crash <= 20) {
                 std.debug.print("  WGSL CRASH #{d}: {} — source:\n{s}\n\n", .{ crash, err, source });

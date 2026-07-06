@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -42,7 +42,7 @@ pub fn main() !void {
         const source = try alloc.dupeZ(u8, source_raw);
         defer alloc.free(source);
 
-        const stage: glslpp.Stage = if (std.mem.endsWith(u8, path, ".vert"))
+        const stage: zioshade.Stage = if (std.mem.endsWith(u8, path, ".vert"))
             .vertex
         else if (std.mem.endsWith(u8, path, ".comp"))
             .compute
@@ -51,16 +51,16 @@ pub fn main() !void {
         else
             .fragment;
 
-        const spv_result = glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = stage });
+        const spv_result = zioshade.compileToSPIRVNoOpt(alloc, source, .{ .stage = stage });
         if (spv_result) |spv| {
             const result = if (std.mem.eql(u8, backend, "hlsl"))
-                glslpp.spirvToHLSL(alloc, spv, .{})
+                zioshade.spirvToHLSL(alloc, spv, .{})
             else if (std.mem.eql(u8, backend, "glsl"))
-                glslpp.spirvToGLSL(alloc, spv, .{})
+                zioshade.spirvToGLSL(alloc, spv, .{})
             else if (std.mem.eql(u8, backend, "msl"))
-                glslpp.spirvToMSL(alloc, spv, .{})
+                zioshade.spirvToMSL(alloc, spv, .{})
             else
-                glslpp.spirvToWGSL(alloc, spv, .{});
+                zioshade.spirvToWGSL(alloc, spv, .{});
 
             if (result) |output| {
                 alloc.free(output);

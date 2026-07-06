@@ -67,7 +67,7 @@ fn isUniformVar(m: *const ParsedModule, id: u32) bool { const inst = getDef(m, i
 /// Only 2D is gated on purpose: this whole backend hardcodes 2D textures, so a
 /// non-2D depth sampler (samplerCubeShadow → depthcube, sampler2DArrayShadow →
 /// depth2d_array, etc.) must NOT be promoted to `depth2d` — that would swap one
-/// non-compiling type for another. glslpp marks ALL shadow samplers with
+/// non-compiling type for another. zioshade marks ALL shadow samplers with
 /// Depth=1 regardless of dimension, so the Dim check is what keeps the depth2d
 /// promotion scoped to the case it actually models. Non-2D textures (shadow or
 /// not) are a separate, backend-wide gap.
@@ -965,7 +965,7 @@ fn mslValueType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u3
         // literal at words[3]) gives that. A spec-constant length, an
         // `OpSpecConstantOp`-computed length, or a missing/zero-word def must NOT
         // silently default to 1 (a silent-wrong sizing); fail loud instead.
-        // Deferred to a frontend fix — see deblasis/glslpp#173.
+        // Deferred to a frontend fix — see deblasis/zioshade#173.
         const len_def = getDef(m, inst.words[3]) orelse return error.UnresolvableArrayLength;
         if (len_def.op != .Constant or len_def.words.len <= 3) return error.UnresolvableArrayLength;
         const n: u32 = len_def.words[3];
@@ -1207,7 +1207,7 @@ const InverseDims = struct { n2: bool = false, n3: bool = false, n4: bool = fals
 
 /// Scan the module for GLSL.std.450 MatrixInverse(34) ExtInsts and record which
 /// helper dimensions are needed, so each is emitted at most once. Assumes the module's
-/// only ExtInstImport is GLSL.std.450 (always true for glslpp-produced SPIR-V) — the
+/// only ExtInstImport is GLSL.std.450 (always true for zioshade-produced SPIR-V) — the
 /// set id (words[3]) is not re-checked, matching the rest of the .ExtInst handling.
 fn moduleInverseDims(m: *const ParsedModule) InverseDims {
     var r = InverseDims{};
@@ -1316,7 +1316,7 @@ fn mslStorageAccessSuffix(acc: ImageAccess) []const u8 {
 /// True if any OpImageTexelPointer (image atomic) lives in a NON-entry function. The
 /// emulation binds the `device atomic_T*` backing buffer only in the entry-point
 /// signature, so a non-entry helper performing an image atomic would reference an
-/// undeclared `<img>_atomic` (silent-wrong). glslpp's own frontend inlines all user
+/// undeclared `<img>_atomic` (silent-wrong). zioshade's own frontend inlines all user
 /// functions into the entry, so this only arises for externally-supplied, non-inlined
 /// SPIR-V — honest-error it. (Image atomics whose operand is a function PARAMETER are
 /// already rejected by mslAtomicImageScalar's `op != .Variable` check.)
@@ -1344,7 +1344,7 @@ const spv_image2d_atomic_template =
 ;
 
 /// The exact `spvUnsafeArray<T, Num>` template emitted by `spirv-cross --msl`
-/// (reproduced verbatim so glslpp output is structurally equivalent).
+/// (reproduced verbatim so zioshade output is structurally equivalent).
 const spv_unsafe_array_template =
     \\template<typename T, size_t Num>
     \\struct spvUnsafeArray
@@ -1575,7 +1575,7 @@ pub const MslCompileOptions = struct {
     resource_bindings: []const MslResourceBinding = &.{},
     /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → [[buffer(0)]].
     /// Applied uniformly to [[buffer]], [[texture]], and [[sampler]] slot indices
-    /// (their indices are separate namespaces, but glslpp's convention — matching
+    /// (their indices are separate namespaces, but zioshade's convention — matching
     /// HLSL — is one shift across all kinds). Negative results clamp to 0.
     binding_shift: i32 = 0,
     /// When true, group descriptor-set resources into `spvDescriptorSetBufferN`
@@ -1671,7 +1671,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // arrays (`const mat4 M[N]`), which the FRONTEND does not fold to an
     // OpConstantComposite (float/vec ARE folded). Rather than emit a reference to
     // an undeclared name (silent-wrong), fail loud until the frontend folds them
-    // (deferred to a frontend fix — see deblasis/glslpp#173). Detect: a Private OpVariable whose
+    // (deferred to a frontend fix — see deblasis/zioshade#173). Detect: a Private OpVariable whose
     // unwrapped pointee is an array, with no initializer operand and no recovered
     // const initializer, that is actually referenced by the body.
     for (module.instructions) |inst| {
@@ -2584,7 +2584,7 @@ fn typeNatSize(m: *const ParsedModule, type_id: u32) u32 {
 /// mat3[]→float3x3[] mat4[]→float4x4[].
 ///
 /// Any element whose correct widened std140→MSL form is NOT implemented returns
-/// error.UnsupportedUboMemberLayout — glslpp fails LOUDLY rather than emitting a
+/// error.UnsupportedUboMemberLayout — zioshade fails LOUDLY rather than emitting a
 /// silent-wrong (wrong-stride / wrong-type) array layout.
 fn mslWidenedElementType(m: *const ParsedModule, elem_type_id: u32, stride: u32, matrix_stride: ?u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
     const elem_inst = getDef(m, elem_type_id) orelse return error.UnsupportedUboMemberLayout;
@@ -3649,7 +3649,7 @@ fn emitBody(
             } else {
                 // Unstructured control flow (OpBranchConditional without
                 // OpSelectionMerge). The convergence-guessing reconstruction is
-                // silent-wrong (can mis-nest / drop branches); fail loud. glslpp's
+                // silent-wrong (can mis-nest / drop branches); fail loud. zioshade's
                 // own frontend always emits merge info. Backlog #4 (G2) =
                 // structurize. Mirrors the GLSL backend (#88).
                 return error.UnstructuredControlFlow;

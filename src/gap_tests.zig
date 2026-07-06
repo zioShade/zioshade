@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const testing = std.testing;
-const glslpp = @import("root.zig");
+const zioshade = @import("root.zig");
 const semantic = @import("semantic.zig");
 const ir = @import("ir.zig");
 const codegen = @import("codegen.zig");
@@ -20,8 +20,8 @@ const spirv = @import("spirv.zig");
 
 /// Compile GLSL source to SPIR-V words, spirv-val the result, and return the words.
 /// Caller owns the returned slice.
-fn compileToWords(alloc: std.mem.Allocator, source: [:0]const u8, stage: glslpp.Stage) ![]const u32 {
-    const words = glslpp.compileToSPIRV(alloc, source, .{ .stage = stage }) catch |err| {
+fn compileToWords(alloc: std.mem.Allocator, source: [:0]const u8, stage: zioshade.Stage) ![]const u32 {
+    const words = zioshade.compileToSPIRV(alloc, source, .{ .stage = stage }) catch |err| {
         std.debug.print("COMPILE ERROR: {s}\n  ctx={s} inner={s}\n", .{
             @errorName(err),
             semantic.last_error_ctx,
@@ -1645,7 +1645,7 @@ test "gap: textureGatherOffsets(s, coord, const ivec2[4], comp) emits OpImageGat
     defer testing.allocator.free(words);
 
     // (a) compiles + spirv-val PASS
-    try testing.expect(try glslpp.validateSPIRV(testing.allocator, words));
+    try testing.expect(try zioshade.validateSPIRV(testing.allocator, words));
 
     // (b) exactly one OpImageGather, vec4 result, no Dref form.
     try testing.expectEqual(@as(usize, 1), countOp(words, .ImageGather));
@@ -1686,7 +1686,7 @@ test "gap: textureGatherOffsets default component (no comp arg) emits Component 
     const words = try compileToWords(testing.allocator, source, .fragment);
     defer testing.allocator.free(words);
 
-    try testing.expect(try glslpp.validateSPIRV(testing.allocator, words));
+    try testing.expect(try zioshade.validateSPIRV(testing.allocator, words));
     try testing.expectEqual(@as(usize, 1), countOp(words, .ImageGather));
 
     const gi = firstInstWords(words, .ImageGather) orelse return error.NoGather;
@@ -1710,7 +1710,7 @@ test "gap: non-offset textureGather stays plain OpImageGather (no ConstOffsets, 
     const words = try compileToWords(testing.allocator, source, .fragment);
     defer testing.allocator.free(words);
 
-    try testing.expect(try glslpp.validateSPIRV(testing.allocator, words));
+    try testing.expect(try zioshade.validateSPIRV(testing.allocator, words));
     try testing.expectEqual(@as(usize, 1), countOp(words, .ImageGather));
     const gi = firstInstWords(words, .ImageGather) orelse return error.NoGather;
     // 6 words: header, result_type, result, sampled_image, coord, component.
@@ -1735,7 +1735,7 @@ test "gap: textureGatherOffsets with NON-const offsets array is an honest error 
         \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
         \\}
     ;
-    const words = try glslpp.compileToSPIRV(testing.allocator, source, .{ .stage = .fragment });
+    const words = try zioshade.compileToSPIRV(testing.allocator, source, .{ .stage = .fragment });
     defer testing.allocator.free(words);
     // The specific reason is carried in last_error_inner (last_error_ctx is
     // clobbered to the enclosing expression name by the errdefer chain).

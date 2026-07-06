@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -18,11 +18,11 @@ pub fn main() !void {
     const input: [:0]const u8 = try alloc.dupeZ(u8, raw);
     defer alloc.free(input);
 
-    const stage: glslpp.Stage = if (std.mem.endsWith(u8, args[1], ".comp")) .compute else if (std.mem.endsWith(u8, args[1], ".vert")) .vertex else if (std.mem.endsWith(u8, args[1], ".geom")) .geometry else if (std.mem.endsWith(u8, args[1], ".tesc")) .tessellation_control else if (std.mem.endsWith(u8, args[1], ".tese")) .tessellation_evaluation else .fragment;
-    const result = glslpp.compileToSPIRV(alloc, input, .{ .stage = stage });
+    const stage: zioshade.Stage = if (std.mem.endsWith(u8, args[1], ".comp")) .compute else if (std.mem.endsWith(u8, args[1], ".vert")) .vertex else if (std.mem.endsWith(u8, args[1], ".geom")) .geometry else if (std.mem.endsWith(u8, args[1], ".tesc")) .tessellation_control else if (std.mem.endsWith(u8, args[1], ".tese")) .tessellation_evaluation else .fragment;
+    const result = zioshade.compileToSPIRV(alloc, input, .{ .stage = stage });
     const spv = result catch |err| {
         std.debug.print("Compile error: {}\n", .{err});
-        if (glslpp.last_compile_detail) |d| {
+        if (zioshade.last_compile_detail) |d| {
             std.debug.print("Detail: {s}\n", .{@tagName(d)});
         }
         return err;

@@ -1,4 +1,4 @@
-# glslpp — CI-equivalent recipes
+# zioshade — CI-equivalent recipes
 # All recipes use `mise exec --` to ensure Zig 0.15.2 is used.
 # Run `just` or `just ci` to execute the full CI pipeline locally.
 
@@ -52,25 +52,25 @@ strict-gate:
 #   WGSL → naga          (wgsl-naga / test-realworld)
 #   MSL silent-wrong invariants               (msl-lint)
 
-# cross-compiler structural differential: glslpp output vs SPIRV-Cross
+# cross-compiler structural differential: zioshade output vs SPIRV-Cross
 test-cross-compare:
     {{zig}} build test-cross-compare --summary all
 
-# validate glslpp WGSL output against naga (real-world shader corpus)
+# validate zioshade WGSL output against naga (real-world shader corpus)
 test-realworld:
     {{zig}} build test-realworld --summary all
 
-# validate glslpp HLSL output against DXC over the SPIR-V corpus (stage-aware:
+# validate zioshade HLSL output against DXC over the SPIR-V corpus (stage-aware:
 # vs/ps/cs/ms profiles auto-selected from each module's execution model). This
 # is the HLSL analog of `wgsl-naga` / `msl-lint` — dxc is the real HLSL oracle.
 # Reports per-stage PASS/FAIL/SKIP. Requires dxc (override the `dxc` variable).
 #
 # Baseline at SM 6.0: ZERO unexplained divergences. The 4 known FAILs are all
-# DXC/D3D constraints on otherwise-correct glslpp HLSL, NOT glslpp bugs:
+# DXC/D3D constraints on otherwise-correct zioshade HLSL, NOT zioshade bugs:
 #   * barycentric-{khr,khr-io-block,nv}: `SV_Barycentrics` requires ps_6_1
 #     (correct semantic; this gate compiles at 6.0).
 #   * complex-expression-in-access-chain: a structured-buffer element exceeds
-#     DXC's hard 2048-byte element-size limit (16384 B); a D3D limit, not glslpp.
+#     DXC's hard 2048-byte element-size limit (16384 B); a D3D limit, not zioshade.
 # Any NEW fail beyond these four is a real divergence to fix.
 hlsl-dxc:
     {{zig}} build test-dxc -- "{{dxc}}" tests/spirv_bins 60
@@ -115,7 +115,7 @@ validate-dxc: generate-outputs
 
 # regenerate saved HLSL outputs from wintty shaders
 generate-outputs:
-    {{zig}} run -ODebug --dep glslpp -Mroot=tools/dump_crt_hlsl.zig -Mglslpp=src/root.zig
+    {{zig}} run -ODebug --dep zioshade -Mroot=tools/dump_crt_hlsl.zig -Mzioshade=src/root.zig
 
 # regenerate docs/STATUS.md (single source of truth) from a real conformance run
 status:
@@ -139,7 +139,7 @@ fuzz-million:
 bench:
     {{zig}} build bench
 
-# lib-vs-lib: glslpp vs SPIRV-Cross, both IN-PROCESS, same SPIR-V → GLSL/HLSL/MSL
+# lib-vs-lib: zioshade vs SPIRV-Cross, both IN-PROCESS, same SPIR-V → GLSL/HLSL/MSL
 # (honest comparison; needs the Vulkan SDK spirv-cross libs). Override iters:
 #   just lib-bench 2000
 lib-bench count="1000":

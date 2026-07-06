@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Shared diagnostic-assertion helpers for glslpp tests.
+//! Shared diagnostic-assertion helpers for zioshade tests.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub const ExpectedDiagnostic = struct {
     line: ?u32 = null,
     column: ?u32 = null,
-    kind: ?glslpp.diagnostic.Diagnostic.Kind = null,
+    kind: ?zioshade.diagnostic.Diagnostic.Kind = null,
     message_contains: ?[]const u8 = null,
     path_contains: ?[]const u8 = null,
 };
@@ -15,7 +15,7 @@ pub const ExpectedDiagnostic = struct {
 /// Asserts that at least one Diagnostic in `diags` matches every non-null
 /// field of `expect`. Prints the full diagnostic list on mismatch.
 pub fn expectDiagnostic(
-    diags: []const glslpp.diagnostic.Diagnostic,
+    diags: []const zioshade.diagnostic.Diagnostic,
     expect: ExpectedDiagnostic,
 ) !void {
     for (diags) |d| {

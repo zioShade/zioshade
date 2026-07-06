@@ -1,4 +1,4 @@
-// Original work, written for glslpp. Shadertoy-STYLE only: it mimics the
+// Original work, written for zioshade. Shadertoy-STYLE only: it mimics the
 // iTime/iResolution uniform shape but is not derived from any shadertoy.com
 // shader. Real Shadertoy content (CC BY-NC-SA 3.0) is never committed to this
 // repository; fetch_shadertoy.py downloads into the gitignored

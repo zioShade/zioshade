@@ -1,5 +1,5 @@
 // Tests: matrix `*=` / `/=` by a scalar (#170). GLSL scales every component by
-// the scalar, but glslpp's compound-assign path emitted whole-matrix OpFMul/
+// the scalar, but zioshade's compound-assign path emitted whole-matrix OpFMul/
 // OpFDiv (invalid SPIR-V: "Expected floating scalar or vector type"). The lowering
 // must use OpMatrixTimesScalar, with `/=` scaling by the reciprocal (matching
 // glslang's `mat * (1.0/s)`). Covers float and int scalars across mat2/mat3.

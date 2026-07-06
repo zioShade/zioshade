@@ -1,6 +1,6 @@
 // Tests: multi-component swizzle WRITE whose base is an addressable lvalue that
 // is not a bare identifier (#170) — array element (`a[i].yz = ...`), struct
-// member (`s.v.xy = ...`), and a dynamic array index. glslpp's plain swizzle-write
+// member (`s.v.xy = ...`), and a dynamic array index. zioshade's plain swizzle-write
 // path only handled bare-identifier bases; anything else fell through to a generic
 // lvalue assignment that cannot address a multi-component swizzle
 // (error.InvalidAssignment), wrongly rejecting valid GLSL. The base vector is now

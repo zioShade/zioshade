@@ -6,7 +6,7 @@
 // `#extension GL_EXT_buffer_reference : require` directive (previously
 // silently rejected because the name wasn't in the known-extension list).
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 test "buffer_reference: extension is recognized and compiles" {
     const alloc = std.testing.allocator;
@@ -20,10 +20,10 @@ test "buffer_reference: extension is recognized and compiles" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(u.ref.v); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len >= 5);
-    try std.testing.expectEqual(@as(u32, glslpp.spirv.MAGIC), spv[0]);
+    try std.testing.expectEqual(@as(u32, zioshade.spirv.MAGIC), spv[0]);
 }
 
 test "buffer_reference: GL_EXT_buffer_reference define is set" {
@@ -40,7 +40,7 @@ test "buffer_reference: GL_EXT_buffer_reference define is set" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(u.ref.v); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(spv.len >= 5);
 }
@@ -59,10 +59,10 @@ test "buffer_reference WGSL backend escapes ref reserved keyword" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(u.ref.v); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
-    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
 
     // The bare reserved keyword must not appear as a struct field name.
@@ -94,10 +94,10 @@ test "buffer_reference WGSL backend emits pointee struct declaration" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = vec4(u.ref.v); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
-    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
 
     if (std.mem.indexOf(u8, wgsl, "struct FloatRef") == null) {
@@ -123,10 +123,10 @@ test "WGSL post-process renames OpName-sourced variable named like a keyword" {
         \\layout(location=0) out vec4 fragColor;
         \\void main() { fragColor = ref.color; }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
 
-    const wgsl = try glslpp.spirvToWGSL(alloc, spv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
 
     if (std.mem.indexOf(u8, wgsl, "var<uniform> ref:") != null) {

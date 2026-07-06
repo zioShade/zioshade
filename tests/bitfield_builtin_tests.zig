@@ -9,7 +9,7 @@
 //! Vector forms (ivecN/uvecN) are preserved natively by SPIR-V.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 fn findOpcode(spv: []const u32, opcode: u16) bool {
     if (spv.len < 5) return false;
@@ -32,7 +32,7 @@ test "bitfieldExtract (uint) compiles and emits OpBitFieldUExtract" {
         \\layout(location=0) out uint result;
         \\void main() { result = bitfieldExtract(b.v, b.o, b.c); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(findOpcode(spv, 203)); // OpBitFieldUExtract
 }
@@ -45,7 +45,7 @@ test "bitfieldExtract (int) emits OpBitFieldSExtract" {
         \\layout(location=0) out int result;
         \\void main() { result = bitfieldExtract(b.v, b.o, b.c); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(findOpcode(spv, 202)); // OpBitFieldSExtract
 }
@@ -58,7 +58,7 @@ test "bitfieldInsert emits OpBitFieldInsert" {
         \\layout(location=0) out uint result;
         \\void main() { result = bitfieldInsert(b.base, b.ins, b.o, b.c); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(findOpcode(spv, 201)); // OpBitFieldInsert
 }
@@ -71,7 +71,7 @@ test "bitfieldExtract (uvec2) vector form emits OpBitFieldUExtract" {
         \\layout(location=0) out uvec2 result;
         \\void main() { result = bitfieldExtract(b.v, b.o, b.c); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(findOpcode(spv, 203)); // OpBitFieldUExtract on vector
 }
@@ -84,7 +84,7 @@ test "bitfieldInsert (ivec4) vector form emits OpBitFieldInsert" {
         \\layout(location=0) out ivec4 result;
         \\void main() { result = bitfieldInsert(b.base, b.ins, b.o, b.c); }
     ;
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     try std.testing.expect(findOpcode(spv, 201)); // OpBitFieldInsert on vector
 }
