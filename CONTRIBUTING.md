@@ -1,11 +1,11 @@
-# Contributing to glslpp
+# Contributing to zioshade
 
-Thank you for considering a contribution! glslpp is a young, single-contributor project — please read this short guide before opening a PR so we don't waste each other's time.
+Thank you for considering a contribution! zioshade is a young, single-contributor project — please read this short guide before opening a PR so we don't waste each other's time.
 
 ## Before you start
 
 - For anything beyond a trivial fix or documentation patch, **please open an issue first** describing the change. Many gaps listed in [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) are intentional scope decisions (e.g. WGSL opcode coverage, reflection completeness) — confirming we want the change avoids wasted effort.
-- The scope is intentionally narrow: glslpp targets the GLSL surface needed by [wintty](https://github.com/deblasis/wintty) and similar projects. PRs that expand the dialect, add backends, or introduce major optimization passes are welcome, but expect scrutiny on test coverage and conformance impact.
+- The scope is intentionally narrow: zioshade targets the GLSL surface needed by [wintty](https://github.com/deblasis/wintty) and similar projects. PRs that expand the dialect, add backends, or introduce major optimization passes are welcome, but expect scrutiny on test coverage and conformance impact.
 
 ## Toolchain
 

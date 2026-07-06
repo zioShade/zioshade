@@ -1,7 +1,7 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
-const diagnostic = glslpp.diagnostic;
-const semantic = glslpp.semantic;
+const zioshade = @import("zioshade");
+const diagnostic = zioshade.diagnostic;
+const semantic = zioshade.semantic;
 const diag_helpers = @import("helpers/diagnostics.zig");
 
 // =============================================================================
@@ -16,7 +16,7 @@ test "semantic error reports line and column for undefined variable" {
         diags.deinit(alloc);
     }
 
-    const result = glslpp.compileToSPIRVWithDiagnostics(
+    const result = zioshade.compileToSPIRVWithDiagnostics(
         alloc,
         \\#version 430
         \\void main() { undeclared_var = 42; }
@@ -43,7 +43,7 @@ test "semantic error message includes context" {
         diags.deinit(alloc);
     }
 
-    const result = glslpp.compileToSPIRVWithDiagnostics(
+    const result = zioshade.compileToSPIRVWithDiagnostics(
         alloc,
         \\#version 430
         \\void main() {
@@ -69,7 +69,7 @@ test "lexer error reports line and column for invalid token" {
     const alloc = std.testing.allocator;
 
     // Try to compile a shader with a known lexer error (unterminated string)
-    const result = glslpp.compileToSPIRV(alloc,
+    const result = zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\void main() {
         \\    int x = 0;
@@ -90,7 +90,7 @@ test "parser error reports line and column" {
     semantic.clearError();
 
     // This shader has a parser error: if without proper body
-    const result = glslpp.compileToSPIRV(alloc,
+    const result = zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\void main() {
         \\    if (true)
@@ -121,14 +121,14 @@ test "parser: malformed float exponent fails loud, not silent 0.0" {
     // The parser records the malformed-literal error and recovers; semantic analysis
     // (fail_on_recorded_errors) then rejects it — the same fail-loud channel the int path
     // uses, surfacing as SemanticFailed. The point is it ERRORS, not that it is 0.0.
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, bad1, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, bad1, .{ .stage = .fragment }));
     const bad2: [:0]const u8 = "#version 450\nlayout(location=0) out vec4 o;\nvoid main(){ float x = 1.5e+; o = vec4(x); }";
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc, bad2, .{ .stage = .fragment }));
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, bad2, .{ .stage = .fragment }));
     // Well-formed float forms must still compile (no over-rejection): trailing dot, leading
     // dot, plain/negative/positive exponent, float suffix.
     inline for (.{ "1.5e3", "1.", ".5", "1.5e-3", "2.0e+4", "3.0f", "0.0", "1e3" }) |lit| {
         const ok: [:0]const u8 = "#version 450\nlayout(location=0) out vec4 o;\nvoid main(){ float x = " ++ lit ++ "; o = vec4(x); }";
-        const okr = try glslpp.compileToSPIRV(alloc, ok, .{ .stage = .fragment });
+        const okr = try zioshade.compileToSPIRV(alloc, ok, .{ .stage = .fragment });
         alloc.free(okr);
     }
 }
@@ -138,7 +138,7 @@ test "break outside loop reports meaningful context" {
 
     semantic.clearError();
 
-    const result = glslpp.compileToSPIRV(alloc,
+    const result = zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\void main() {
         \\    break;
@@ -162,7 +162,7 @@ test "continue outside loop reports meaningful context" {
 
     semantic.clearError();
 
-    const result = glslpp.compileToSPIRV(alloc,
+    const result = zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\void main() {
         \\    continue;
@@ -186,7 +186,7 @@ test "type mismatch reports meaningful context" {
     semantic.clearError();
 
     // This shader has a type mismatch: bool + float
-    const result = glslpp.compileToSPIRV(alloc,
+    const result = zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\void main() {
         \\    float x = true + 1.0;
@@ -214,7 +214,7 @@ test "error location persists through compileToSPIRVWithDiagnostics" {
     }
 
     // Shader with an undefined variable on line 3
-    const result = glslpp.compileToSPIRVWithDiagnostics(
+    const result = zioshade.compileToSPIRVWithDiagnostics(
         alloc,
         \\#version 430
         \\void main() {
@@ -284,7 +284,7 @@ test "Diagnostic.format without path omits filename" {
 
 test "expectDiagnostic helper matches glslang-style format" {
     const alloc = std.testing.allocator;
-    var diags = std.ArrayListUnmanaged(glslpp.diagnostic.Diagnostic).empty;
+    var diags = std.ArrayListUnmanaged(zioshade.diagnostic.Diagnostic).empty;
     defer {
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
@@ -311,7 +311,7 @@ test "diagnostics: multiple undeclared identifiers each get their own diagnostic
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    const result = glslpp.compileToSPIRVWithDiagnostics(
+    const result = zioshade.compileToSPIRVWithDiagnostics(
         alloc,
         \\#version 430
         \\void main() {
@@ -367,7 +367,7 @@ test "diagnostics: exceeding the cap appends one truncation marker and fails lou
     const src_z = try src.toOwnedSliceSentinel(alloc, 0);
     defer alloc.free(src_z);
 
-    const result = glslpp.compileToSPIRVWithDiagnostics(
+    const result = zioshade.compileToSPIRVWithDiagnostics(
         alloc,
         src_z,
         .{ .stage = .fragment },
@@ -401,7 +401,7 @@ test "diagnostics: valid shader produces no diagnostics and compiles" {
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    const result = glslpp.compileToSPIRVWithDiagnostics(
+    const result = zioshade.compileToSPIRVWithDiagnostics(
         alloc,
         \\#version 430
         \\void main() {
@@ -423,7 +423,7 @@ test "multiple errors accumulate line/column correctly" {
     // Shader that may produce multiple semantic issues
     semantic.clearError();
 
-    const result = glslpp.compileToSPIRV(alloc,
+    const result = zioshade.compileToSPIRV(alloc,
         \\#version 430
         \\void main() {
         \\    vec4 a = undefined1;

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-//! Library-vs-library benchmark: glslpp vs SPIRV-Cross, both linked IN-PROCESS
+//! Library-vs-library benchmark: zioshade vs SPIRV-Cross, both linked IN-PROCESS
 //! (no subprocess), cross-compiling the SAME SPIR-V to GLSL / HLSL / MSL.
 //!
 //! This is the honest "lib-vs-lib" comparison — the older `bench` step times
-//! glslpp library calls against the `glslangValidator` *subprocess*, which
+//! zioshade library calls against the `glslangValidator` *subprocess*, which
 //! over-states the win (subprocess spawn + I/O dominate). Here both sides are
 //! plain in-process function calls on identical input.
 //!
@@ -13,7 +13,7 @@
 //!
 //! Run: `just lib-bench`  (or `zig build lib-bench -- --iters 2000`)
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const c = @cImport({
     @cInclude("spirv_cross_c.h");
@@ -23,7 +23,7 @@ const Backend = enum { glsl, hlsl, msl };
 
 const Shader = struct {
     name: []const u8,
-    stage: glslpp.Stage,
+    stage: zioshade.Stage,
     src: [:0]const u8,
 };
 
@@ -93,13 +93,13 @@ fn spvcCompile(spirv: []const u32, backend: Backend) ?usize {
     return std.mem.len(result);
 }
 
-/// One full glslpp parse→emit of `spirv` to `backend`. Returns output length,
+/// One full zioshade parse→emit of `spirv` to `backend`. Returns output length,
 /// or null on error.
-fn glslppCompile(alloc: std.mem.Allocator, spirv: []const u32, backend: Backend) ?usize {
+fn zioshadeCompile(alloc: std.mem.Allocator, spirv: []const u32, backend: Backend) ?usize {
     const out = switch (backend) {
-        .glsl => glslpp.spirvToGLSL(alloc, spirv, .{ .version = 450 }),
-        .hlsl => glslpp.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
-        .msl => glslpp.spirvToMSL(alloc, spirv, .{}),
+        .glsl => zioshade.spirvToGLSL(alloc, spirv, .{ .version = 450 }),
+        .hlsl => zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
+        .msl => zioshade.spirvToMSL(alloc, spirv, .{}),
     } catch return null;
     defer alloc.free(out);
     return out.len;
@@ -127,28 +127,28 @@ pub fn main() !void {
     }
 
     
-    std.debug.print("glslpp vs SPIRV-Cross — in-process, {d} iters/cell (median ns/op)\n\n", .{iters});
-    std.debug.print("{s:<14} {s:<7} {s:>12} {s:>12} {s:>8}  bytes\n", .{ "shader", "backend", "glslpp", "spirv-cross", "ratio" });
+    std.debug.print("zioshade vs SPIRV-Cross — in-process, {d} iters/cell (median ns/op)\n\n", .{iters});
+    std.debug.print("{s:<14} {s:<7} {s:>12} {s:>12} {s:>8}  bytes\n", .{ "shader", "backend", "zioshade", "spirv-cross", "ratio" });
     std.debug.print("{s}", .{"--------------------------------------------------------------------------\n"});
 
     const samples = try alloc.alloc(u64, iters);
     defer alloc.free(samples);
 
-    var tot_glslpp: f64 = 0;
+    var tot_zioshade: f64 = 0;
     var tot_spvc: f64 = 0;
     var cells: usize = 0;
 
     for (corpus) |sh| {
-        const spirv = glslpp.compileToSPIRV(alloc, sh.src, .{ .stage = sh.stage }) catch {
-            std.debug.print("{s:<14} (glslpp could not compile to SPIR-V — skipped)\n", .{sh.name});
+        const spirv = zioshade.compileToSPIRV(alloc, sh.src, .{ .stage = sh.stage }) catch {
+            std.debug.print("{s:<14} (zioshade could not compile to SPIR-V — skipped)\n", .{sh.name});
             continue;
         };
         defer alloc.free(spirv);
 
         for ([_]Backend{ .glsl, .hlsl, .msl }) |be| {
             // Correctness gate: both must produce output, else SKIP the cell.
-            const g_len = glslppCompile(alloc, spirv, be) orelse {
-                std.debug.print("{s:<14} {s:<7}  (glslpp skip)\n", .{ sh.name, @tagName(be) });
+            const g_len = zioshadeCompile(alloc, spirv, be) orelse {
+                std.debug.print("{s:<14} {s:<7}  (zioshade skip)\n", .{ sh.name, @tagName(be) });
                 continue;
             };
             const s_len = spvcCompile(spirv, be) orelse {
@@ -157,12 +157,12 @@ pub fn main() !void {
             };
 
             // Warmup.
-            _ = glslppCompile(alloc, spirv, be);
+            _ = zioshadeCompile(alloc, spirv, be);
             _ = spvcCompile(spirv, be);
 
             for (0..iters) |i| {
                 var t = std.time.Timer.start() catch unreachable;
-                _ = glslppCompile(alloc, spirv, be);
+                _ = zioshadeCompile(alloc, spirv, be);
                 samples[i] = t.read();
             }
             const g_ns = median(samples);
@@ -174,7 +174,7 @@ pub fn main() !void {
             const s_ns = median(samples);
 
             const ratio = @as(f64, @floatFromInt(s_ns)) / @as(f64, @floatFromInt(g_ns));
-            tot_glslpp += @floatFromInt(g_ns);
+            tot_zioshade += @floatFromInt(g_ns);
             tot_spvc += @floatFromInt(s_ns);
             cells += 1;
             std.debug.print("{s:<14} {s:<7} {d:>12} {d:>12} {d:>7.2}x  {d}/{d}\n", .{ sh.name, @tagName(be), g_ns, s_ns, ratio, g_len, s_len });
@@ -182,8 +182,8 @@ pub fn main() !void {
     }
 
     if (cells > 0) {
-        std.debug.print("\nAggregate median-of-medians ratio (spirv-cross / glslpp): {d:.2}x over {d} cells\n", .{ tot_spvc / tot_glslpp, cells });
-        std.debug.print("{s}", .{"(ratio > 1 means glslpp is faster; both are in-process parse→emit on identical SPIR-V)\n"});
+        std.debug.print("\nAggregate median-of-medians ratio (spirv-cross / zioshade): {d:.2}x over {d} cells\n", .{ tot_spvc / tot_zioshade, cells });
+        std.debug.print("{s}", .{"(ratio > 1 means zioshade is faster; both are in-process parse→emit on identical SPIR-V)\n"});
     } else {
         std.debug.print("{s}", .{"\nNo comparable cells — check SPIRV-Cross linkage.\n"});
     }

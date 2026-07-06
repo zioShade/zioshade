@@ -3,12 +3,12 @@
 //! (201/202/203) opcodes. The names emitted by the WGSL backend differ from
 //! their GLSL.std.450 counterparts (pack2x16snorm vs packSnorm2x16, etc.).
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
-fn compileWgsl(alloc: std.mem.Allocator, src: [:0]const u8, stage: glslpp.Stage) ![]const u8 {
-    const spv = try glslpp.compileToSPIRV(alloc, src, .{ .stage = stage });
+fn compileWgsl(alloc: std.mem.Allocator, src: [:0]const u8, stage: zioshade.Stage) ![]const u8 {
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = stage });
     defer alloc.free(spv);
-    return try glslpp.spirvToWGSL(alloc, spv, .{});
+    return try zioshade.spirvToWGSL(alloc, spv, .{});
 }
 
 // ── M4.1: packing ──
@@ -155,7 +155,7 @@ test "WGSL: smooth float varying is NOT given @interpolate(flat)" {
 
 // ── M4.2: bitfield ──
 //
-// glslpp's semantic layer doesn't accept `bitfieldInsert`/`bitfieldExtract`
+// zioshade's semantic layer doesn't accept `bitfieldInsert`/`bitfieldExtract`
 // directly (would need GLSL 400+ built-in registration), so we test the
 // WGSL emitter via hand-crafted SPIR-V containing OpBitFieldInsert (201)
 // and OpBitFieldUExtract (203).
@@ -207,7 +207,7 @@ test "M4.2 WGSL: OpBitFieldInsert emits insertBits" {
         // OpFunctionEnd (56, wc=1)
         (1 << 16) | 56,
     };
-    const wgsl = try glslpp.spirvToWGSL(alloc, &words, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, &words, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "insertBits(") != null);
 }
@@ -238,7 +238,7 @@ test "M4.2 WGSL: OpBitFieldUExtract emits extractBits" {
         (1 << 16) | 253,
         (1 << 16) | 56,
     };
-    const wgsl = try glslpp.spirvToWGSL(alloc, &words, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, &words, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "extractBits(") != null);
 }

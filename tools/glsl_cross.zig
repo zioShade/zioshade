@@ -1,5 +1,5 @@
 const std = @import("std");
-pub const glslpp = @import("glslpp");
+pub const zioshade = @import("zioshade");
 
 // Migrated to plain Zig 0.15.2 (was using the 0.16 `compat` main-init shim,
 // which broke the build: 0.15.2 `main` takes no arguments). Mirrors the other
@@ -29,16 +29,16 @@ pub fn main() !void {
     defer alloc.free(src_buf);
     @memcpy(src_buf[0..glsl_src.len], glsl_src);
 
-    const spv = try glslpp.compileToSPIRV(alloc, src_buf, .{ .stage = .fragment });
+    const spv = try zioshade.compileToSPIRV(alloc, src_buf, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     var output: []const u8 = undefined;
     if (std.mem.eql(u8, target, "hlsl")) {
-        output = try glslpp.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+        output = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
     } else if (std.mem.eql(u8, target, "glsl")) {
-        output = try glslpp.spirvToGLSL(alloc, spv, .{});
+        output = try zioshade.spirvToGLSL(alloc, spv, .{});
     } else if (std.mem.eql(u8, target, "msl")) {
-        output = try glslpp.spirvToMSL(alloc, spv, .{});
+        output = try zioshade.spirvToMSL(alloc, spv, .{});
     } else {
         std.debug.print("Unknown target: {s}\n", .{target});
         return;
@@ -46,7 +46,7 @@ pub fn main() !void {
     defer alloc.free(output);
 
     var out_path: [512]u8 = undefined;
-    const out_name = try std.fmt.bufPrint(&out_path, "{s}_glslpp.{s}", .{ output_prefix, target });
+    const out_name = try std.fmt.bufPrint(&out_path, "{s}_zioshade.{s}", .{ output_prefix, target });
     try dir.writeFile(.{ .sub_path = out_name, .data = output });
     std.debug.print("Wrote {s}\n", .{out_name});
 }

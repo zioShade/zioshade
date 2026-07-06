@@ -23,7 +23,7 @@ Smallest GLSL snippet (or attached SPIR-V binary) that triggers the issue:
 
 ```bash
 zig build cli
-zig-out/bin/glslpp ...
+zig-out/bin/zioshade ...
 ```
 
 **Expected vs actual**
@@ -33,7 +33,7 @@ zig-out/bin/glslpp ...
 
 **Environment**
 
-- glslpp commit: `git rev-parse HEAD`
+- zioshade commit: `git rev-parse HEAD`
 - Zig version: `zig version`
 - OS: Linux / macOS / Windows + version
 - Backend involved (if cross-compile): HLSL / GLSL / MSL / WGSL

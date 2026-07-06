@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -78,7 +78,7 @@ pub fn main() !void {
     // Warmup
     for (0..warmup) |_| {
         for (shaders) |s| {
-            const spirv = glslpp.compileToSPIRV(alloc, s.source, .{ .stage = .fragment }) catch continue;
+            const spirv = zioshade.compileToSPIRV(alloc, s.source, .{ .stage = .fragment }) catch continue;
             alloc.free(spirv);
         }
     }
@@ -95,7 +95,7 @@ pub fn main() !void {
 
         for (0..iterations) |_| {
             const start = std.time.nanoTimestamp();
-            const spirv = glslpp.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch continue;
+            const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch continue;
             const end = std.time.nanoTimestamp();
             const elapsed = @as(u64, @intCast(end - start));
             total_ns += elapsed;
@@ -120,10 +120,10 @@ pub fn main() !void {
 
         for (0..iterations) |_| {
             const start = std.time.nanoTimestamp();
-            const spirv = glslpp.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch continue;
-            const hlsl = glslpp.spirvToHLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
-            const glsl_out = glslpp.spirvToGLSL(alloc, spirv, .{}) catch { alloc.free(spirv); alloc.free(hlsl); continue; };
-            const msl = glslpp.spirvToMSL(alloc, spirv, .{}) catch { alloc.free(spirv); alloc.free(hlsl); alloc.free(glsl_out); continue; };
+            const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch continue;
+            const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
+            const glsl_out = zioshade.spirvToGLSL(alloc, spirv, .{}) catch { alloc.free(spirv); alloc.free(hlsl); continue; };
+            const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch { alloc.free(spirv); alloc.free(hlsl); alloc.free(glsl_out); continue; };
             const end = std.time.nanoTimestamp();
             total_ns += @as(u64, @intCast(end - start));
             alloc.free(spirv);
@@ -140,13 +140,13 @@ pub fn main() !void {
     std.debug.print("\n{s}\n", .{"-" ** 64});
     std.debug.print("Cross-compile only: SPIR-V → backend (pre-compiled SPIR-V)\n", .{});
 
-    const pre_spv = glslpp.compileToSPIRV(alloc, shaders[0].source, .{ .stage = .fragment }) catch unreachable;
+    const pre_spv = zioshade.compileToSPIRV(alloc, shaders[0].source, .{ .stage = .fragment }) catch unreachable;
 
     var cross_ns: u64 = 0;
     const cross_iters = 2000;
     for (0..cross_iters) |_| {
         const start = std.time.nanoTimestamp();
-        const hlsl = glslpp.spirvToHLSL(alloc, pre_spv, .{}) catch continue;
+        const hlsl = zioshade.spirvToHLSL(alloc, pre_spv, .{}) catch continue;
         const end = std.time.nanoTimestamp();
         cross_ns += @as(u64, @intCast(end - start));
         alloc.free(hlsl);
@@ -156,7 +156,7 @@ pub fn main() !void {
     var cross_glsl_ns: u64 = 0;
     for (0..cross_iters) |_| {
         const start = std.time.nanoTimestamp();
-        const glsl_out = glslpp.spirvToGLSL(alloc, pre_spv, .{}) catch continue;
+        const glsl_out = zioshade.spirvToGLSL(alloc, pre_spv, .{}) catch continue;
         const end = std.time.nanoTimestamp();
         cross_glsl_ns += @as(u64, @intCast(end - start));
         alloc.free(glsl_out);
@@ -166,7 +166,7 @@ pub fn main() !void {
     var cross_msl_ns: u64 = 0;
     for (0..cross_iters) |_| {
         const start = std.time.nanoTimestamp();
-        const msl = glslpp.spirvToMSL(alloc, pre_spv, .{}) catch continue;
+        const msl = zioshade.spirvToMSL(alloc, pre_spv, .{}) catch continue;
         const end = std.time.nanoTimestamp();
         cross_msl_ns += @as(u64, @intCast(end - start));
         alloc.free(msl);

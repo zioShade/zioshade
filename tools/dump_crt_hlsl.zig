@@ -1,5 +1,5 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     // Short-lived generator: compileToSPIRV intentionally leaks internal state
@@ -24,21 +24,21 @@ pub fn main() !void {
     try buf.append(alloc, 0);
     const source: [:0]const u8 = buf.items[0 .. buf.items.len - 1 :0];
 
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     std.debug.print("SPIR-V: {d} words\n", .{spirv.len});
 
-    const hlsl = try glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
     defer alloc.free(hlsl);
     try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.hlsl", .data = hlsl });
     std.debug.print("HLSL: {d} bytes\n", .{hlsl.len});
 
-    const glsl = try glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
     defer alloc.free(glsl);
     try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.glsl", .data = glsl });
     std.debug.print("GLSL: {d} bytes\n", .{glsl.len});
 
-    const msl = try glslpp.spirvToMSL(alloc, spirv, .{});
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
     try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.msl", .data = msl });
     std.debug.print("MSL: {d} bytes\n", .{msl.len});

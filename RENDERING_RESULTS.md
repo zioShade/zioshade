@@ -1,13 +1,13 @@
 ## Rendering Comparison Results (2026-05-11)
 
 ### Method
-- **glslpp pipeline**: GLSL → compileToSPIRV() → spirvToHLSL/GLSL/MSL()
+- **zioshade pipeline**: GLSL → compileToSPIRV() → spirvToHLSL/GLSL/MSL()
 - **Reference pipeline**: Original GLSL compiled and rendered directly (OpenGL) OR glslangValidator (-V) → SPIR-V → spirv-cross (--version 430) for cross-compilation comparison
 - Both rendered on actual GPU hardware, compared per-pixel
 
 ### MSL Backend (macOS Metal, Apple M2, 256×256)
 
-| Shader | glslpp bytes | spirv-cross bytes | Different pixels | Result |
+| Shader | zioshade bytes | spirv-cross bytes | Different pixels | Result |
 |--------|-------------|-------------------|------------------|--------|
 | CRT    | 6390        | 5256              | **0/65,536**     | ✅ MATCH |
 | Focus  | 2803        | 3111              | **0/65,536**     | ✅ MATCH |
@@ -27,7 +27,7 @@
 
 ### HLSL Backend (Windows DXC validation, compiler-level)
 
-| Shader | glslpp bytes | DXC result |
+| Shader | zioshade bytes | DXC result |
 |--------|-------------|------------|
 | CRT    | 6074        | ✅ Pass (ps_6_0) |
 | Focus  | 2417        | ✅ Pass (ps_6_0) |
@@ -35,7 +35,7 @@
 ### Summary
 - **10 shaders validated** across 2 GPU backends (Metal + OpenGL)
 - **0 different pixels** in every test
-- glslpp output is **byte-identical** in rendered output to spirv-cross/original GLSL
+- zioshade output is **byte-identical** in rendered output to spirv-cross/original GLSL
 
 ### Tools
 - `tools/ShaderCompare.swift` — macOS Metal single-shader comparison

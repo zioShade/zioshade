@@ -1,5 +1,5 @@
 // Tests: isamplerBuffer / usamplerBuffer texel-buffer fetch + size — issue #194.
-// Pre-fix glslpp had no parser keyword for isamplerBuffer/usamplerBuffer, so the
+// Pre-fix zioshade had no parser keyword for isamplerBuffer/usamplerBuffer, so the
 // declarations never reached the (already-present) codegen arms; had they, the
 // type fell through to an empty OpTypeStruct → spirv-val "Expected Image to be of
 // type OpTypeImage". Post-fix each emits OpTypeImage <int|uint> Buffer 0 0 0 1

@@ -1,19 +1,19 @@
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 pub fn main() !void {
     const alloc = std.heap.page_allocator; // short-lived CLI; OS reclaims on exit
     const args = try std.process.argsAlloc(alloc);
     defer std.process.argsFree(alloc, args);
     if (args.len < 4) {
-        std.debug.print("Usage: cross_validate <input.glsl> <glslpp_output_prefix> <spirvcross_output_prefix>\n", .{});
-        std.debug.print("  Compiles GLSL via both glslpp and glslangValidator+spirv-cross\n", .{});
+        std.debug.print("Usage: cross_validate <input.glsl> <zioshade_output_prefix> <spirvcross_output_prefix>\n", .{});
+        std.debug.print("  Compiles GLSL via both zioshade and glslangValidator+spirv-cross\n", .{});
         std.debug.print("  Generates .hlsl, .glsl, .msl from both pipelines\n", .{});
         return;
     }
 
     const input_path = args[1];
-    const glslpp_prefix = args[2];
+    const zioshade_prefix = args[2];
     const spirvcross_prefix = args[3];
     _ = spirvcross_prefix; // spirv-cross comparison pipeline not yet wired here
 
@@ -28,48 +28,48 @@ pub fn main() !void {
     try buf.append(alloc, 0);
     const source: [:0]const u8 = buf.items[0 .. buf.items.len - 1 :0];
 
-    // === Pipeline 1: glslpp ===
-    const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch |err| {
-        std.debug.print("SKIP glslpp compileToSPIRV: {}\n", .{err});
+    // === Pipeline 1: zioshade ===
+    const spirv = zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch |err| {
+        std.debug.print("SKIP zioshade compileToSPIRV: {}\n", .{err});
         return;
     };
     defer alloc.free(spirv);
-    std.debug.print("glslpp SPIR-V: {d} words\n", .{spirv.len});
+    std.debug.print("zioshade SPIR-V: {d} words\n", .{spirv.len});
 
-    // glslpp → HLSL
-    const hlsl = glslpp.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 }) catch |err| {
-        std.debug.print("SKIP glslpp spirvToHLSL: {}\n", .{err});
+    // zioshade → HLSL
+    const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 }) catch |err| {
+        std.debug.print("SKIP zioshade spirvToHLSL: {}\n", .{err});
         return;
     };
     defer alloc.free(hlsl);
-    const hlsl_path = try std.fmt.allocPrint(alloc, "{s}.hlsl", .{glslpp_prefix});
+    const hlsl_path = try std.fmt.allocPrint(alloc, "{s}.hlsl", .{zioshade_prefix});
     defer alloc.free(hlsl_path);
     try std.fs.cwd().writeFile(.{ .sub_path = hlsl_path, .data = hlsl });
 
-    // glslpp → GLSL
-    const glsl = glslpp.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| {
-        std.debug.print("SKIP glslpp spirvToGLSL: {}\n", .{err});
+    // zioshade → GLSL
+    const glsl = zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| {
+        std.debug.print("SKIP zioshade spirvToGLSL: {}\n", .{err});
         return;
     };
     defer alloc.free(glsl);
-    const glsl_path = try std.fmt.allocPrint(alloc, "{s}.glsl", .{glslpp_prefix});
+    const glsl_path = try std.fmt.allocPrint(alloc, "{s}.glsl", .{zioshade_prefix});
     defer alloc.free(glsl_path);
     try std.fs.cwd().writeFile(.{ .sub_path = glsl_path, .data = glsl });
 
-    // glslpp → MSL
-    const msl = glslpp.spirvToMSL(alloc, spirv, .{}) catch |err| {
-        std.debug.print("SKIP glslpp spirvToMSL: {}\n", .{err});
+    // zioshade → MSL
+    const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch |err| {
+        std.debug.print("SKIP zioshade spirvToMSL: {}\n", .{err});
         return;
     };
     defer alloc.free(msl);
-    const msl_path = try std.fmt.allocPrint(alloc, "{s}.msl", .{glslpp_prefix});
+    const msl_path = try std.fmt.allocPrint(alloc, "{s}.msl", .{zioshade_prefix});
     defer alloc.free(msl_path);
     try std.fs.cwd().writeFile(.{ .sub_path = msl_path, .data = msl });
 
-    // Write glslpp SPIR-V
-    const spv_path = try std.fmt.allocPrint(alloc, "{s}.spv", .{glslpp_prefix});
+    // Write zioshade SPIR-V
+    const spv_path = try std.fmt.allocPrint(alloc, "{s}.spv", .{zioshade_prefix});
     defer alloc.free(spv_path);
     try std.fs.cwd().writeFile(.{ .sub_path = spv_path, .data = std.mem.sliceAsBytes(spirv) });
 
-    std.debug.print("glslpp outputs: {s}.*\n", .{glslpp_prefix});
+    std.debug.print("zioshade outputs: {s}.*\n", .{zioshade_prefix});
 }

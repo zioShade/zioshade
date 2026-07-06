@@ -1,8 +1,11 @@
 # Changelog
 
-All notable changes to glslpp are documented here. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [SemVer](https://semver.org/) on the public API exported from `src/root.zig`.
+All notable changes to zioshade are documented here. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project adheres to [SemVer](https://semver.org/) on the public API exported from `src/root.zig`.
 
 ## [Unreleased]
+
+### Changed
+- **Project renamed from glslpp to zioshade.** The Zig package name is now `.zioshade` (import with `@import("zioshade")`), the CLI binary is `zig-out/bin/zioshade`, the C ABI header is `include/zioshade.h` with `zioshade_`-prefixed symbols and `ZIOSHADE_`-prefixed macros, and the C library artifacts are `libzioshade*`. The repository moved to `deblasis/zioshade`. Historical changelog entries below keep the old name.
 
 ### Added
 - **HLSL + MSL: faithful emission of do-while with body control flow — completes #246 (dxc-gated for HLSL).** Replicates the GLSL native `do { body } while(<inlined cond>);` emission (below) into the HLSL (`emitWhileLoopHLSL`) and MSL (`emitWhileLoopMSL`) backends: `tryInlineDoWhileCond`/`inlineDoWhileOperand` rebuild the back-edge condition over the persistent loop vars (single comparison `a OP b`; non-trivial → honest-error), the wrapper becomes `do {` and the bottom `} while (<inlined>);` (negated when the back-edge loops-on-false), and the latch block is no longer emitted as body statements. HLSL output is **dxc-clean** (`do { i++; if(v13) continue; … } while (v10 < 5);`); MSL is structurally identical. The HLSL/MSL `#244` honest-error tests (`tests/loop_phi_tests.zig`) and the stale `T398.1` (`tests/hlsl_tests.zig`) are flipped to positive assertions. With all three text backends now emitting the native form, **#246 is complete**. Adversarial review (bdd-reviewer, APPROVE): verified byte-equivalent parity with the merged GLSL version (the `else => null` operand fallback is present in both new copies — the buggy `names.get(id)` did not reappear), zero operator drift across the three helper copies, and no stale honest-error test left behind. Conformance unchanged **PASS 2087 / FAIL 0 / XFAIL 13**; test-glsl/hlsl/msl/loop-phi green. Follow-up: lift the now-triplicated `tryInlineDoWhileCond`/`detectDoWhileBackEdge` to `spirv_cross_common.zig`.

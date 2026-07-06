@@ -3403,7 +3403,7 @@ const Codegen = struct {
             // less-portable read_write default. The image case is gated on
             // isStorageImage() — NOT the whole uniform_constant class — because
             // spirv-val rejects these decorations on a sampled image / combined
-            // sampler, and glslpp (unlike glslang) does not reject a bogus
+            // sampler, and zioshade (unlike glslang) does not reject a bogus
             // `readonly sampler2D`; decorating it would emit invalid SPIR-V.
             if (global.storage_class == .storage_buffer or
                 (global.storage_class == .uniform_constant and global.ty.isStorageImage()))

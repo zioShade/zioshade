@@ -45,7 +45,7 @@ fn main_inner() -> vec4f { ... }   // references uv_1, writes fragColor_1
 }
 ```
 
-## Design (glslpp)
+## Design (zioshade)
 
 Gate precisely so **shaders that don't hit the pattern are byte-identical**
 (zero regression risk for the ~1900 currently-passing fixtures):

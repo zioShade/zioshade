@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 //
-// Minimal C consumer for the glslpp C ABI.
+// Minimal C consumer for the zioshade C ABI.
 //
 // Demonstrates the full pipeline:
-//   1. Compile a tiny GLSL fragment shader to SPIR-V via glslpp_compile.
-//   2. Cross-compile the resulting SPIR-V to HLSL via glslpp_to_hlsl.
-//   3. Release both buffers via the matching glslpp_free_* helpers.
+//   1. Compile a tiny GLSL fragment shader to SPIR-V via zioshade_compile.
+//   2. Cross-compile the resulting SPIR-V to HLSL via zioshade_to_hlsl.
+//   3. Release both buffers via the matching zioshade_free_* helpers.
 //
 // Doubles as the M7.3 CI smoke test: if this program runs to completion
 // and exits 0 on Windows, Linux, and macOS, the C ABI surface is good.
@@ -14,7 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "glslpp.h"
+#include "zioshade.h"
 
 static const char* GLSL =
     "#version 450\n"
@@ -30,8 +30,8 @@ int main(void) {
     // -----------------------------------------------------------------------
     // Zero-initialise so future-added fields default to 0/NULL — keeps this
     // example forward-compatible across minor ABI bumps.
-    glslpp_compile_options_t opts = {0};
-    opts.stage = GLSLPP_STAGE_FRAGMENT;
+    zioshade_compile_options_t opts = {0};
+    opts.stage = ZIOSHADE_STAGE_FRAGMENT;
     opts.version = 450;
     opts.is_essl = 0;
     opts.spirv_version_packed = 15;  // SPIR-V 1.5, packed as major*10 + minor
@@ -41,15 +41,15 @@ int main(void) {
 
     // Pass strlen(GLSL) rather than sizeof so we honour the "need not be
     // null-terminated" contract — the impl copies and terminates internally.
-    glslpp_status_t st = glslpp_compile(
+    zioshade_status_t st = zioshade_compile(
         GLSL,
         strlen(GLSL),
         &opts,
         &spirv_words,
         &spirv_word_count);
-    if (st != GLSLPP_OK) {
-        const char* msg = glslpp_last_error_message();
-        fprintf(stderr, "glslpp_compile failed (status=%d): %s\n",
+    if (st != ZIOSHADE_OK) {
+        const char* msg = zioshade_last_error_message();
+        fprintf(stderr, "zioshade_compile failed (status=%d): %s\n",
                 (int)st, msg ? msg : "(no message)");
         return 1;
     }
@@ -61,7 +61,7 @@ int main(void) {
     char* hlsl = NULL;
     size_t hlsl_len = 0;
 
-    st = glslpp_to_hlsl(
+    st = zioshade_to_hlsl(
         spirv_words,
         spirv_word_count,
         /*binding_shift=*/0,
@@ -69,11 +69,11 @@ int main(void) {
         /*entry_point=*/NULL,
         &hlsl,
         &hlsl_len);
-    if (st != GLSLPP_OK) {
-        const char* msg = glslpp_last_error_message();
-        fprintf(stderr, "glslpp_to_hlsl failed (status=%d): %s\n",
+    if (st != ZIOSHADE_OK) {
+        const char* msg = zioshade_last_error_message();
+        fprintf(stderr, "zioshade_to_hlsl failed (status=%d): %s\n",
                 (int)st, msg ? msg : "(no message)");
-        glslpp_free_u32(spirv_words);
+        zioshade_free_u32(spirv_words);
         return 2;
     }
 
@@ -90,12 +90,12 @@ int main(void) {
     // -----------------------------------------------------------------------
     // Release owned buffers.
     // -----------------------------------------------------------------------
-    glslpp_free_str(hlsl);
-    glslpp_free_u32(spirv_words);
+    zioshade_free_str(hlsl);
+    zioshade_free_u32(spirv_words);
 
     // NULL-free smoke test: must be a no-op, not a crash.
-    glslpp_free_str(NULL);
-    glslpp_free_u32(NULL);
+    zioshade_free_str(NULL);
+    zioshade_free_u32(NULL);
 
     return 0;
 }

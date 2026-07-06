@@ -2,7 +2,7 @@
 //! WGSL backend tests — GLSL → SPIR-V → WGSL pipeline.
 
 const std = @import("std");
-const glslpp = @import("glslpp");
+const zioshade = @import("zioshade");
 
 const alloc = std.testing.allocator;
 
@@ -24,7 +24,7 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
         try src_file.writeAll(std.mem.sliceTo(source, 0));
     }
 
-    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
     const result = std.process.Child.run(.{
         .allocator = alloc,
@@ -53,7 +53,7 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
 /// Same as compileToSpirv but writes a `.vert` source so glslang compiles it at
 /// the VERTEX stage (the extension selects the stage). Produces the EXTERNAL
 /// glslang IR shape — notably gl_Position wrapped in a member-decorated
-/// `gl_PerVertex` Block — which glslpp's own frontend never emits.
+/// `gl_PerVertex` Block — which zioshade's own frontend never emits.
 fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}.vert", .{name});
     defer alloc.free(tmp_src);
@@ -66,7 +66,7 @@ fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
         try src_file.writeAll(std.mem.sliceTo(source, 0));
     }
 
-    const glslang = glslpp.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
     const result = std.process.Child.run(.{
         .allocator = alloc,
@@ -146,7 +146,7 @@ fn truncateLastOperand(words: []const u32, opcode: u16) ![]u32 {
 }
 
 /// Return a copy of `words` whose FIRST instruction with opcode `from_op` has its
-/// opcode rewritten to `to_op` (same word count, operands untouched). glslpp's
+/// opcode rewritten to `to_op` (same word count, operands untouched). zioshade's
 /// frontend always lowers GLSL `>>` to OpShiftRightLogical even for signed
 /// operands (codegen.zig), so OpShiftRightArithmetic never appears in its own
 /// output — the only way to reach the backend's arithmetic-shift arm is hand-fed
@@ -168,7 +168,7 @@ fn rewriteFirstOpcode(words: []const u32, from_op: u16, to_op: u16) ![]u32 {
 }
 
 // Validate WGSL with naga — the external WebGPU validator. The whole point of
-// the "silent-wrong" class of bugs is that glslpp emits text that LOOKS fine
+// the "silent-wrong" class of bugs is that zioshade emits text that LOOKS fine
 // (exit 0) but a real validator rejects, so string assertions alone can pass
 // while the output is still invalid. naga is the ground truth. When naga isn't
 // installed we SKIP rather than fail, keeping `zig build test` hermetic.
@@ -199,7 +199,7 @@ fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
 }
 
 // Validate SPIR-V with spirv-val, skipping when the binary is not on PATH
-// (mirrors nagaValidateOrSkip). glslpp.validateSPIRV returns false when
+// (mirrors nagaValidateOrSkip). zioshade.validateSPIRV returns false when
 // spirv-val is missing, so asserting on it directly fails spuriously on
 // machines without the Vulkan SDK and `zig build test` stops being hermetic.
 fn spirvValValidateOrSkip(spirv: []const u32, label: []const u8) !void {
@@ -228,28 +228,28 @@ fn spirvValValidateOrSkip(spirv: []const u32, label: []const u8) !void {
     return error.SpirvValValidationFailed;
 }
 
-/// Compile GLSL → SPIR-V → WGSL via glslpp's own frontend (mirrors the MSL/HLSL
+/// Compile GLSL → SPIR-V → WGSL via zioshade's own frontend (mirrors the MSL/HLSL
 /// test helpers). Caller frees the result.
 fn compileToWgsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    return try glslpp.spirvToWGSL(alloc, spirv, .{});
+    return try zioshade.spirvToWGSL(alloc, spirv, .{});
 }
 
 fn compileVertToWgsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    return try glslpp.spirvToWGSL(alloc, spirv, .{});
+    return try zioshade.spirvToWGSL(alloc, spirv, .{});
 }
 
 fn compileCompToWgsl(source: [:0]const u8) ![]const u8 {
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    return try glslpp.spirvToWGSL(alloc, spirv, .{});
+    return try zioshade.spirvToWGSL(alloc, spirv, .{});
 }
 
-/// Compile a GLSL fixture FILE (relative to the repo root) → WGSL via glslpp's
-/// frontend. Used for cases whose cross-function structure glslpp's inliner
+/// Compile a GLSL fixture FILE (relative to the repo root) → WGSL via zioshade's
+/// frontend. Used for cases whose cross-function structure zioshade's inliner
 /// collapses for small inline shaders — the real fixture preserves the helper.
 fn compileFileToWgsl(path: []const u8) ![]const u8 {
     const file = try std.fs.cwd().openFile(path, .{});
@@ -294,7 +294,7 @@ fn runWgslTest(test_case: ShaderTest) !void {
     };
     defer alloc.free(spirv);
 
-    const wgsl = glslpp.spirvToWGSL(alloc, spirv, .{}) catch |err| {
+    const wgsl = zioshade.spirvToWGSL(alloc, spirv, .{}) catch |err| {
         std.debug.print("FAIL [{s}]: spirvToWGSL failed: {}\n", .{ test_case.name, err });
         return err;
     };
@@ -437,11 +437,11 @@ test "wgsl type conversions" {
 }
 
 // An unmapped GLSL.std.450 extended instruction (interpolateAtCentroid →
-// glslpp opcode 76) must make the WGSL backend FAIL LOUDLY, not silently emit
+// zioshade opcode 76) must make the WGSL backend FAIL LOUDLY, not silently emit
 // invalid `unknown(...)` text. interpolateAt* are frontend-supported but
 // unmapped in the WGSL ext-inst dispatch, so they exercise the fallback path.
 //
-// Compiled through glslpp's own frontend (not glslang) so the internal
+// Compiled through zioshade's own frontend (not glslang) so the internal
 // GLSL.std.450 numbering (76/77/78) is what reaches spirvToWGSL.
 test "wgsl unmapped ext-inst errors honestly instead of emitting unknown()" {
     const source: [:0]const u8 =
@@ -455,12 +455,12 @@ test "wgsl unmapped ext-inst errors honestly instead of emitting unknown()" {
         \\}
     ;
 
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
 
     try std.testing.expectError(
         error.UnsupportedExtInst,
-        glslpp.spirvToWGSL(alloc, spirv, .{}),
+        zioshade.spirvToWGSL(alloc, spirv, .{}),
     );
 }
 
@@ -479,9 +479,9 @@ test "wgsl scalar isinf lowers to a naga-valid idiom (#170)" {
         \\    fragColor = vec4(b ? 1.0 : 0.0, 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The non-existent WGSL builtin must never leak (naga: undefined identifier).
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "isInf") == null);
@@ -505,9 +505,9 @@ test "wgsl non-finite float constant emits bitcast, not bare inf/nan (#252)" {
         \\    fragColor = vec4(big, 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x") != null);
     // The bare non-finite identifiers must never leak.
@@ -529,9 +529,9 @@ test "wgsl non-finite float in a const-global initializer is an honest error (#2
         \\const vec4 LUT[2] = vec4[2](vec4(1e40, 0.0, 0.0, 1.0), vec4(1.0));
         \\void main() { fragColor = LUT[idx]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl non-finite spec-constant (override) default is an honest error (#252)" {
@@ -541,9 +541,9 @@ test "wgsl non-finite spec-constant (override) default is an honest error (#252)
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = vec4(K, 0.0, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: atomicCompSwap(mem, compare, data) → WGSL atomicCompareExchangeWeak(ptr,
@@ -562,9 +562,9 @@ test "wgsl atomicCompSwap uses the comparator, not a memory-semantics operand (#
         \\    b.out_old = old;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Must compare against 7 and store 9 — `atomicCompareExchangeWeak(&ptr, 7u, 9u)`.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "atomicCompareExchangeWeak(") != null);
@@ -586,9 +586,9 @@ test "wgsl atomicExchange stores the value operand, not the scope (#170)" {
         \\    b.out_old = old;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "atomicExchange(&b.slot, 42u)") != null);
     try nagaValidateOrSkip(wgsl, "atomic-exchange");
@@ -608,9 +608,9 @@ test "wgsl atomic binary op uses the value operand, not the scope (#170)" {
         \\    atomicAdd(b.total, 37u); // add 37, NOT the scope constant 1
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute, .spirv_version = .@"1.5" });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "atomicAdd(&b.total, 37u)") != null);
     try nagaValidateOrSkip(wgsl, "atomic-add-value");
@@ -627,9 +627,9 @@ test "wgsl constant unsigned division by zero is an honest error (#258)" {
         \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl constant integer modulo by zero is an honest error (#258)" {
@@ -641,9 +641,9 @@ test "wgsl constant integer modulo by zero is an honest error (#258)" {
         \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #254 (follow-up to #252): the frontend does NOT fold a constant division by zero,
@@ -661,9 +661,9 @@ test "wgsl constant division by zero folds to a bitcast, not a literal division 
         \\    fragColor = vec4(a, 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // +inf has bit pattern 0x7f800000.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x7f800000") != null);
@@ -685,9 +685,9 @@ test "wgsl constant 0/0 folds to a NaN bitcast (#254)" {
         \\    fragColor = vec4(a, 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "/ 0.0f") == null);
@@ -708,9 +708,9 @@ test "wgsl constant mod by zero folds to a NaN bitcast (#254)" {
         \\    fragColor = vec4(a, 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "bitcast<f32>(0x") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "% 0.0f") == null);
@@ -734,9 +734,9 @@ test "wgsl runtime integer division by zero emits a valid division, not 0.0 (#25
         \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The type-wrong band-aid output must be gone.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, ": i32 = 0.0;") == null);
@@ -756,9 +756,9 @@ test "wgsl constant integer division by zero is an honest error (#258)" {
         \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // WGSL has no matrix-inverse builtin. GLSL inverse() (GLSL.std.450 MatrixInverse)
@@ -782,9 +782,9 @@ test "wgsl inverse(mat4) lowers to spvInverse4 helper (naga-validated)" {
         \\    fragColor = inverse(m) * vec4(1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "fn spvInverse4(") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "spvInverse4(") != null);
@@ -805,9 +805,9 @@ test "wgsl inverse(mat3) lowers to spvInverse3 helper (naga-validated)" {
         \\    fragColor = vec4(inverse(m) * vec3(1.0), 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "fn spvInverse3(") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "spvInverse3(") != null);
@@ -825,9 +825,9 @@ test "wgsl inverse(mat2) lowers to spvInverse2 helper (naga-validated)" {
         \\    fragColor = vec4(inverse(m) * vec2(1.0), 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "fn spvInverse2(") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "spvInverse2(") != null);
@@ -840,7 +840,7 @@ test "wgsl inverse(mat2) lowers to spvInverse2 helper (naga-validated)" {
 // WGSL backend must FAIL LOUDLY rather than silently emit a plain
 // `textureGather` that drops the offsets. ImageGather IS otherwise mapped in
 // WGSL, so it needs a specific ConstOffsets guard (the unmapped-op path does
-// not cover it). NOTE: glslpp's OWN frontend DOES compile `textureGatherOffsets`
+// not cover it). NOTE: zioshade's OWN frontend DOES compile `textureGatherOffsets`
 // (the 4-offset form, via the .image_gather_offsets IR tag → ConstOffsets 0x20),
 // so this test uses the internal compileToSPIRV path — unlike the single-offset
 // `textureGatherOffset` below, which the frontend rejects and must be compiled
@@ -855,12 +855,12 @@ test "wgsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
         \\  o = textureGatherOffsets(s, vec2(0.5), offs, 1);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
 
     try std.testing.expectError(
         error.UnsupportedImageOperands,
-        glslpp.spirvToWGSL(alloc, spirv, .{}),
+        zioshade.spirvToWGSL(alloc, spirv, .{}),
     );
 }
 
@@ -870,9 +870,9 @@ test "wgsl: textureGatherOffsets (ConstOffsets) is an honest error, not a silent
 // argument — `textureGather(component, t, s, coords, offset)` — so the offset
 // must be emitted. Dropping it (the previous behavior) silently gathers the
 // WRONG texels (silent-wrong): the call type-checks and naga accepts it, but the
-// sampled neighborhood is shifted. glslpp's frontend now compiles
+// sampled neighborhood is shifted. zioshade's frontend now compiles
 // `textureGatherOffset` directly (the builtin is registered and lowered to
-// OpImageGather + ConstOffset), so this exercises the FULL glslpp pipeline
+// OpImageGather + ConstOffset), so this exercises the FULL zioshade pipeline
 // frontend→WGSL end-to-end. (#170)
 test "wgsl: textureGatherOffset (single ConstOffset) keeps the offset, not a silent plain gather" {
     const source: [:0]const u8 =
@@ -883,10 +883,10 @@ test "wgsl: textureGatherOffset (single ConstOffset) keeps the offset, not a sil
         \\  o = textureGatherOffset(s, vec2(0.5), ivec2(3, 4), 1);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
 
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
 
     // The offset must reach the textureGather call as a trailing 5th argument
@@ -914,11 +914,11 @@ test "wgsl: textureGatherOffset on sampler2DArray keeps offset after array_index
         \\  o = textureGatherOffset(s, vUV, ivec2(3, 4), 1);
         \\}
     ;
-    // glslpp's frontend now compiles textureGatherOffset directly (full pipeline).
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    // zioshade's frontend now compiles textureGatherOffset directly (full pipeline).
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
 
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
 
     // array_index (i32(round(vUV.z))) precedes the trailing offset.
@@ -949,7 +949,7 @@ test "wgsl: textureGatherOffset with a runtime (non-const) offset is an honest e
 
     try std.testing.expectError(
         error.UnsupportedImageOperands,
-        glslpp.spirvToWGSL(alloc, spirv, .{}),
+        zioshade.spirvToWGSL(alloc, spirv, .{}),
     );
 }
 
@@ -957,7 +957,7 @@ test "wgsl: textureGatherOffset with a runtime (non-const) offset is an honest e
 // (word[4] == 1). WGSL's `textureGatherCompare` / `textureSampleCompare`
 // builtins REQUIRE a `texture_depth_2d` texture paired with a
 // `sampler_comparison` sampler. The backend defaulted every texture to
-// `texture_2d<f32>` + plain `sampler`, producing WGSL that glslpp emits without
+// `texture_2d<f32>` + plain `sampler`, producing WGSL that zioshade emits without
 // error (exit 0) but that naga REJECTS:
 //
 //   "Comparison sampling mismatch: image has class Sampled { kind: Float, ... },
@@ -1182,7 +1182,7 @@ const ShadowCase = struct {
 fn runShadowValidTest(c: ShadowCase) !void {
     const spirv = try compileToSpirv(c.name, c.source);
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
 
     // The depth texture must be emitted with its exact comparison type (the
@@ -1230,7 +1230,7 @@ test "wgsl: textureProj(sampler2DShadow) lowers to a projective textureSampleCom
     );
     defer alloc.free(spirv);
     // Previously error.UnsupportedOp; must now emit valid WGSL.
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "texture_depth_2d");
     try assertContains(wgsl, "sampler_comparison");
@@ -1249,7 +1249,7 @@ test "wgsl: textureProj(sampler2DShadow) lowers to a projective textureSampleCom
 // depth-array path: the type name must carry `_array` AND the sample/fetch/gather
 // call must split the array layer out as a SEPARATE i32 argument. Emitting the
 // non-array type (texture_2d<f32>) with the full packed coordinate is silent-
-// wrong at the glslpp level (exit 0) but naga REJECTS it ("coordinate type does
+// wrong at the zioshade level (exit 0) but naga REJECTS it ("coordinate type does
 // not match dimension"). This is the #187 PART B fix.
 // ---------------------------------------------------------------------------
 
@@ -1278,7 +1278,7 @@ const ArrayTexCase = struct {
 fn runArrayTexValidTest(c: ArrayTexCase) !void {
     const spirv = try compileToSpirv(c.name, c.source);
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
 
     // The arrayed texture must be emitted with its `_array` type name...
@@ -1404,15 +1404,15 @@ test "WGSL: unmapped ext-inst error names the GLSL.std.450 instruction" {
         \\layout(location=0) out vec4 o;
         \\void main(){ o = interpolateAtCentroid(c); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
 
     try std.testing.expectError(
         error.UnsupportedExtInst,
-        glslpp.spirvToWGSL(alloc, spirv, .{}),
+        zioshade.spirvToWGSL(alloc, spirv, .{}),
     );
 
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "InterpolateAtCentroid") != null);
     try std.testing.expect(std.mem.indexOf(u8, detail, "76") != null);
 }
@@ -1429,11 +1429,11 @@ test "wgsl: geometry stage errors honestly (WGSL has no geometry entry point)" {
         \\    EndPrimitive();
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .geometry, .spirv_version = .@"1.5" });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .geometry, .spirv_version = .@"1.5" });
     defer alloc.free(spirv);
 
-    try std.testing.expectError(error.UnsupportedStage, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedStage, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "Geometry") != null);
 }
 
@@ -1449,9 +1449,9 @@ test "wgsl: scalar isnan lowers to (x != x); scalar isinf to a naga-valid idiom"
             \\layout(location=0) out vec4 o;
             \\void main() { o = vec4(isnan(a) ? 1.0 : 0.0); }
         ;
-        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
-        const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+        const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
         defer alloc.free(wgsl);
         // Pin the (x != x) let-binding idiom, not just any `!=` in the output.
         try std.testing.expect(std.mem.indexOf(u8, wgsl, "bool = (") != null);
@@ -1465,9 +1465,9 @@ test "wgsl: scalar isnan lowers to (x != x); scalar isinf to a naga-valid idiom"
             \\layout(location=0) out vec4 o;
             \\void main() { o = vec4(isinf(a) ? 1.0 : 0.0); }
         ;
-        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
-        const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+        const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
         defer alloc.free(wgsl);
         try std.testing.expect(std.mem.indexOf(u8, wgsl, "isinf(") == null);
         try std.testing.expect(std.mem.indexOf(u8, wgsl, "isInf") == null);
@@ -1476,7 +1476,7 @@ test "wgsl: scalar isnan lowers to (x != x); scalar isinf to a naga-valid idiom"
 }
 
 test "wgsl: textureQueryLod errors honestly (WGSL has no equivalent)" {
-    // WGSL has no textureQueryLod builtin; glslpp must fail loud, not emit
+    // WGSL has no textureQueryLod builtin; zioshade must fail loud, not emit
     // textureQueryLod(...) which naga rejects (silent-wrong).
     const source =
         \\#version 450
@@ -1485,10 +1485,10 @@ test "wgsl: textureQueryLod errors honestly (WGSL has no equivalent)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(textureQueryLod(t, uv), 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "textureQueryLod") != null);
 }
 
@@ -1502,10 +1502,10 @@ test "wgsl: fragment-shader interlock errors honestly (WGSL has no interlock)" {
         \\layout(location=0) out vec4 o;
         \\void main() { beginInvocationInterlockARB(); o = vec4(1.0); endInvocationInterlockARB(); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "interlock") != null);
 }
 
@@ -1527,7 +1527,7 @@ test "wgsl: scalar bool ==/!= (OpLogicalEqual/NotEqual) lower to naga-valid oper
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "logical-eq-scalar");
 }
@@ -1546,17 +1546,17 @@ test "wgsl: bvec equal/notEqual (vector OpLogicalEqual/NotEqual) lower component
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "logical-eq-vec");
 }
 
-// A SPIR-V opcode that glslpp's `Op` enum does not NAME (here OpUMulExtended=151,
+// A SPIR-V opcode that zioshade's `Op` enum does not NAME (here OpUMulExtended=151,
 // emitted by GLSL `umulExtended`) must fail loud with error.UnsupportedOp — never
 // crash. The honest-error fallback formatted the op via `@tagName(inst.op)`, which
 // PANICS ("invalid enum value") on a non-exhaustive enum value with no matching
 // field, so the process aborted on perfectly valid glslang SPIR-V instead of
-// reporting the honest error. NOTE: glslpp's own frontend now EMULATES umulExtended
+// reporting the honest error. NOTE: zioshade's own frontend now EMULATES umulExtended
 // with core u32 ops (16-bit-limb mulhi) and never emits the struct-result
 // OpUMulExtended, so opcode 151 only appears in EXTERNAL (glslang) SPIR-V — which is
 // exactly why glslang is the oracle here, and 151 is still a tag-less opcode that
@@ -1574,10 +1574,10 @@ test "wgsl: an opcode the Op enum doesn't name fails loud, not a @tagName panic 
         \\}
     );
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
     // The detail must identify the unnamed op by its numeric opcode (151) rather
     // than crash trying to look up a non-existent enum tag name.
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "151") != null);
 }
 
@@ -1642,7 +1642,7 @@ test "wgsl: vector umulExtended/imulExtended are emulated component-wise and nag
 // is the wrapping add/sub (WGSL u32 arithmetic wraps, matching SPIR-V), member 1 is
 // the carry/borrow recovered with `select`. These feed glslang's struct-result
 // SPIR-V (OpIAddCarry) to exercise the WGSL BACK-END's struct-member recovery —
-// glslpp's own frontend now EMULATES these with core ops (add + ULessThan + select)
+// zioshade's own frontend now EMULATES these with core ops (add + ULessThan + select)
 // rather than emitting OpIAddCarry, covered by the full-pipeline test below.
 test "wgsl: scalar uaddCarry lowers to a naga-valid select idiom (#170)" {
     const spirv = try compileToSpirv("uaddcarry_scalar",
@@ -1656,7 +1656,7 @@ test "wgsl: scalar uaddCarry lowers to a naga-valid select idiom (#170)" {
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Carry is recovered via select (no struct-returning builtin leaks).
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
@@ -1677,7 +1677,7 @@ test "wgsl: scalar usubBorrow lowers to a naga-valid select idiom (#170)" {
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Borrow is recovered via select on a less-than comparison.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
@@ -1697,7 +1697,7 @@ test "wgsl: vector uaddCarry lowers componentwise (naga-valid) (#170)" {
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
     try nagaValidateOrSkip(wgsl, "uaddcarry-vec");
@@ -1715,13 +1715,13 @@ test "wgsl: vector usubBorrow lowers componentwise (naga-valid) (#170)" {
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "select(") != null);
     try nagaValidateOrSkip(wgsl, "usubborrow-vec");
 }
 
-// #170: the FULL glslpp pipeline (frontend emulation → WGSL) for uaddCarry, with
+// #170: the FULL zioshade pipeline (frontend emulation → WGSL) for uaddCarry, with
 // the carry written DIRECTLY to an SSBO member out-parameter (`b.c`, not a temp).
 // Exercises analyzeLValue-on-SSBO-member for the store, the core-op emulation
 // (add + ULessThan + select), and naga validity end-to-end.
@@ -1785,10 +1785,10 @@ test "wgsl: unmapped input built-in (gl_PointCoord) errors honestly" {
         \\layout(location = 0) out vec4 fragColor;
         \\void main() { fragColor = vec4(gl_PointCoord, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "@builtin") != null);
 }
 
@@ -1802,9 +1802,9 @@ test "wgsl: vertex input without explicit location is still emitted as a param" 
         \\layout(location = 0) out vec4 vColor;
         \\void main() { vColor = inV; gl_Position = inV; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "inV: vec4f") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(") != null);
@@ -1813,17 +1813,17 @@ test "wgsl: vertex input without explicit location is still emitted as a param" 
 test "wgsl: vertex shader without gl_Position errors honestly" {
     // WGSL requires a @builtin(position) vertex output. A vertex shader that
     // never writes gl_Position cannot be valid WGSL; fabricating one would be
-    // silent-wrong, so glslpp must fail loud.
+    // silent-wrong, so zioshade must fail loud.
     const source =
         \\#version 430 core
         \\in vec4 inV;
         \\layout(location = 0) out vec4 outV;
         \\void main() { outV = inV; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "gl_Position") != null);
 }
 
@@ -1831,7 +1831,7 @@ test "wgsl: external glslang vertex shader (gl_PerVertex block) compiles" {
     // glslang wraps gl_Position in a member-decorated `gl_PerVertex` Block output
     // struct (OpMemberDecorate <struct> 0 BuiltIn Position; written via
     // OpAccessChain <var> 0 + OpStore), NOT a direct Position-decorated output var
-    // like glslpp's own frontend. The WGSL output-collection only looked at
+    // like zioshade's own frontend. The WGSL output-collection only looked at
     // VAR-level builtins, so EVERY external glslang vertex shader honest-errored
     // ("requires a gl_Position output"). The block's member 0 must be recognized
     // as the @builtin(position) output. (#170)
@@ -1843,7 +1843,7 @@ test "wgsl: external glslang vertex shader (gl_PerVertex block) compiles" {
     ;
     const spirv = compileVertToSpirv("pervertex_block", source) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@vertex") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(position)") != null);
@@ -1863,7 +1863,7 @@ test "wgsl: external glslang vertex shader writing only gl_Position compiles" {
     ;
     const spirv = compileVertToSpirv("pervertex_posonly", source) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@vertex") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(position)") != null);
@@ -1873,7 +1873,7 @@ test "wgsl: external glslang vertex shader writing only gl_Position compiles" {
 
 test "wgsl: external glslang vertex shader writing gl_PointSize errors honestly" {
     // The gl_PerVertex block's gl_PointSize (member 1) has no WGSL output. If the
-    // shader writes it, glslpp must fail loud rather than silently drop it.
+    // shader writes it, zioshade must fail loud rather than silently drop it.
     const source: [:0]const u8 =
         \\#version 450
         \\layout(location=0) in vec3 pos;
@@ -1881,10 +1881,10 @@ test "wgsl: external glslang vertex shader writing gl_PointSize errors honestly"
     ;
     const spirv = compileVertToSpirv("pervertex_pointsize", source) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
     // Must fail because of gl_PointSize specifically — not because gl_Position
     // went unrecognized (the pre-fix failure mode).
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "PointSize") != null or
         std.mem.indexOf(u8, detail, "point") != null);
 }
@@ -1900,9 +1900,9 @@ test "wgsl: shared block var is renamed to avoid struct-name collision" {
         \\shared blk { int a; } ;
         \\void main() { blk.a = 2; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "struct blk {") != null);
     // The variable must NOT also be named exactly `blk` (no `var<workgroup> blk:`).
@@ -1920,10 +1920,10 @@ test "wgsl: gl_Layer / gl_ViewportIndex error honestly (no WGSL built-in)" {
         \\layout(location=0) out vec4 color;
         \\void main() { color = vec4(float(gl_Layer)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "layer") != null);
 }
 
@@ -1940,9 +1940,9 @@ test "wgsl: constant unsigned vector uses WGSL vec constructor, not GLSL uintN" 
         \\    o = vec4(vec2(a), 0.0, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "vec2<u32>(7u, 15u)") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "uint2(") == null);
@@ -1970,10 +1970,10 @@ test "wgsl: unsupported op in switch/loop replay path errors honestly" {
         \\    o = c;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "replay") != null);
 }
 
@@ -1988,9 +1988,9 @@ test "wgsl: textureGather emits the component as the first argument" {
         \\layout(location = 0) out vec4 o;
         \\void main() { o = textureGather(uTex, uv, 0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Component (0) comes first, before the texture identifier.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "textureGather(0, uTex, uTex_sampler, uv)") != null);
@@ -2019,9 +2019,9 @@ test "wgsl: CompositeExtract/Select in loop-replay path do not leak opcode names
         \\    o = vec4(acc, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "CompositeExtract") == null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "Select(") == null);
@@ -2053,16 +2053,16 @@ test "wgsl: nested switch does not leak OpSelectionMerge as a value" {
         \\    fragColor = vec4(color, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "SelectionMerge") == null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "LoopMerge") == null);
 }
 
 test "wgsl: QCOM block-match errors honestly (WGSL has no QCOM image ops)" {
-    // GL_QCOM_image_processing block-match has no WGSL equivalent. glslpp must
+    // GL_QCOM_image_processing block-match has no WGSL equivalent. zioshade must
     // fail loud instead of falling through to the `var v: T;` placeholder, which
     // produces silent-wrong WGSL that naga rejects ("redefinition of `v`").
     const source =
@@ -2079,10 +2079,10 @@ test "wgsl: QCOM block-match errors honestly (WGSL has no QCOM image ops)" {
         \\    fragColor = textureBlockMatchSADQCOM(target_samp, t, ref_samp, r, uvec2(4, 4));
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "QCOM") != null);
 }
 
@@ -2091,7 +2091,7 @@ test "wgsl: QCOM block-match errors honestly (WGSL has no QCOM image ops)" {
 //
 // WGSL has no row_major language feature — matrices are always column-major and
 // `m[i]` returns COLUMN i (like GLSL/MSL). So the column_major case is already
-// correct, but glslpp emitted byte-identical WGSL for a row_major block: a
+// correct, but zioshade emitted byte-identical WGSL for a row_major block: a
 // row_major matrix's std140 bytes are the row-major layout of M, which WGSL
 // reads (column-major) as Mᵀ — silent-wrong. The fix mirrors the MSL backend:
 // wrap reads of a row_major matrix in `transpose(...)` so the stored Mᵀ is read
@@ -2196,11 +2196,11 @@ test "wgsl: non-square row_major UBO matrix is an honest error (not silent-wrong
         \\layout(location=0) out vec4 o;
         \\void main() { o = a.m[0]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try std.testing.expectError(
         error.UnsupportedRowMajorMatrix,
-        glslpp.spirvToWGSL(alloc, spirv, .{}),
+        zioshade.spirvToWGSL(alloc, spirv, .{}),
     );
 }
 
@@ -2216,9 +2216,9 @@ test "wgsl: gl_VertexIndex/gl_InstanceIndex emit u32 @builtin with i32 conversio
         \\    col = vec4(1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(vertex_index) gl_VertexIndex_b: u32") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(instance_index) gl_InstanceIndex_b: u32") != null);
@@ -2248,9 +2248,9 @@ test "wgsl: passthrough fragment store emits a defined return identifier (not fr
         \\void main(){ o = -(-vIn); }
     ;
     inline for (.{ passthrough, double_negate }) |source| {
-        const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+        const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
-        const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+        const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
         defer alloc.free(wgsl);
         // The return value must be the in-scope input identifier, never an
         // undefined generated name or freed-memory bytes.
@@ -2274,9 +2274,9 @@ test "wgsl: MRT passthrough stores emit defined identifiers (not freed-memory ga
         \\layout(location=1) out vec4 o1;
         \\void main(){ o0 = vIn; o1 = vIn; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "return FragmentOutput(vIn, vIn);") != null);
     for (wgsl) |c| try std.testing.expect(c != 0xAA);
@@ -2291,9 +2291,9 @@ test "wgsl: gl_FragDepth passthrough store emits a defined identifier (not freed
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(1.0); gl_FragDepth = d; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // depth operand must be the in-scope input `d`, not an undefined name.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, ", d);") != null);
@@ -2319,9 +2319,9 @@ test "wgsl: heavily-used immutable input load inlines to its name in inline expr
         \\    fragColor = vec4(result, result * 0.5, result * 0.25, 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The immutable input `u` must appear in the arithmetic; no undefined `v9`.
     // (Scalar float constants are now typed with an `f` suffix — #170 G5 Pass 2 —
@@ -2341,9 +2341,9 @@ test "wgsl: direct recursion is an honest error (WGSL forbids recursion)" {
         \\int fib(int n) { if (n < 2) return n; return fib(n-1) + fib(n-2); }
         \\void main(){ o = vec4(float(fib(5))); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedRecursion, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedRecursion, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl: non-recursive nested function calls still compile (no false recursion flag)" {
@@ -2356,9 +2356,9 @@ test "wgsl: non-recursive nested function calls still compile (no false recursio
         \\vec2 outer(vec2 p) { return inner(p) + p; }
         \\void main(){ o = vec4(outer(uv), 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(wgsl.len > 0);
 }
@@ -2435,9 +2435,9 @@ test "wgsl: a loop without phis does not inherit a previous loop's phi update (s
         \\  o = a + float(k);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertNoUndeclaredVTemp(wgsl);
 }
@@ -2451,9 +2451,9 @@ test "wgsl: frexp/modf emit WGSL struct-return form (not the illegal pointer for
         "#version 310 es\nprecision mediump float;\n" ++
         "layout(location=0) out float FragColor;\nlayout(location=0) in float v0;\n" ++
         "void main(){\n  int e0; float f0 = frexp(v0, e0);\n  float r0; float m0 = modf(v0, r0);\n  FragColor = f0 + m0 + float(e0) + r0;\n}\n";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Struct-return fields must be used; no 2-arg builtin call.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, ".fract") != null);
@@ -2475,9 +2475,9 @@ test "wgsl: a stage input used in a helper function is promoted to var<private>"
         "void main(){ fragColor = vec4(effect(vec2(0.5))); }\n";
     // NoOpt so the helper is not inlined away — guarantees a genuine
     // cross-function reference to the input for this test.
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The input is a module-scope private global, bridged from a renamed param.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<private> uv: vec2f;") != null);
@@ -2493,9 +2493,9 @@ test "wgsl: a shader with NO cross-function input is unchanged (no spurious var<
         "layout(location=0) in vec2 uv;\n" ++
         "layout(location=0) out vec4 fragColor;\n" ++
         "void main(){ fragColor = vec4(uv, 0.0, 1.0); }\n";
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<private> uv") == null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "uv_in") == null);
@@ -2512,9 +2512,9 @@ test "wgsl: an output read back in the body is declared as a local var (not dire
         "layout(location=0) out vec4 o;\n" ++
         "void main(){ o.xy = v; o.zw = o.xy + o.zw; }\n";
     // NoOpt so the output read-back is preserved for the test.
-    const spirv = try glslpp.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRVNoOpt(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The output is a declared local var and is returned (not a bare reconstruction).
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var o: vec4f;") != null);
@@ -2525,7 +2525,7 @@ test "wgsl: an output read back in the body is declared as a local var (not dire
 test "wgsl: clip-distance is an honest error, not a naga-invalid @location array" {
     // gl_ClipDistance is an array<f32,N> built-in; WGSL only allows numeric
     // scalars/vectors as user entry-point I/O (naga rejects the array), and
-    // glslpp previously emitted `@location(N) gl_ClipDistance: array<f32,8>`
+    // zioshade previously emitted `@location(N) gl_ClipDistance: array<f32,8>`
     // — naga-invalid (silent-wrong). It must fail loud instead.
     const source: [:0]const u8 =
         \\#version 450
@@ -2533,16 +2533,16 @@ test "wgsl: clip-distance is an honest error, not a naga-invalid @location array
         \\layout(location=0) in vec4 p;
         \\void main(){ gl_Position = p; gl_ClipDistance[0] = p.x; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl: stage output interface block is flattened into VertexOutput" {
     // GLSL `out Block { vec4 color; vec3 normal; } vout;` -> a struct-typed
     // Output. WGSL forbids a nested struct field in an I/O struct, so the block
     // members are flattened into VertexOutput and `vout.color` becomes
-    // `vertex_out.color`. glslpp emitted `@location(0) vout: Block` (undeclared
+    // `vertex_out.color`. zioshade emitted `@location(0) vout: Block` (undeclared
     // nested struct) → naga "no definition in scope".
     const source: [:0]const u8 =
         \\#version 450
@@ -2550,9 +2550,9 @@ test "wgsl: stage output interface block is flattened into VertexOutput" {
         \\out Block { vec4 color; vec3 normal; } vout;
         \\void main(){ gl_Position = Position; vout.color = vec4(1.0); vout.normal = vec3(0.5); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) color: vec4f") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(1) normal: vec3f") != null);
@@ -2565,7 +2565,7 @@ test "wgsl: stage output interface block is flattened into VertexOutput" {
 test "wgsl: stage input interface block is declared as a struct with @location members" {
     // GLSL `in Block { flat float f; vec4 g; int h; } vin;` -> a struct-typed
     // Input variable. WGSL needs a struct with @location/@interpolate members
-    // passed by value; glslpp emitted `@location(0) vin: Block` with the struct
+    // passed by value; zioshade emitted `@location(0) vin: Block` with the struct
     // undeclared (naga: "no definition in scope for identifier: Block").
     const source: [:0]const u8 =
         \\#version 450
@@ -2573,9 +2573,9 @@ test "wgsl: stage input interface block is declared as a struct with @location m
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(vin.f) + vin.g + vec4(float(vin.h)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "struct Block {") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) f: f32") != null);
@@ -2597,9 +2597,9 @@ test "wgsl: struct constructed from vector components keeps per-field args" {
         \\struct P { float a; float b; };
         \\void main(){ P p = P(uv.x, uv.y); o = vec4(p.a, p.b, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "(uv.x, uv.y)") != null);
     try nagaValidateOrSkip(wgsl, "struct-from-vec");
@@ -2607,7 +2607,7 @@ test "wgsl: struct constructed from vector components keeps per-field args" {
 
 test "wgsl: dual-source blending (two outputs at one @location) is an honest error" {
     // GLSL `layout(location=0, index=0/1)` dual-source blending → WGSL needs
-    // @blend_src, but glslpp's SPIR-V drops the Index decoration, so the backend
+    // @blend_src, but zioshade's SPIR-V drops the Index decoration, so the backend
     // can't tell src0 from src1. Emitting two @location(0) is naga-invalid
     // ("Multiple bindings at location 0"); fail loud instead.
     const source: [:0]const u8 =
@@ -2616,24 +2616,24 @@ test "wgsl: dual-source blending (two outputs at one @location) is an honest err
         \\layout(location=0, index=1) out vec4 c1;
         \\void main(){ c0 = vec4(1.0); c1 = vec4(2.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl: depth-only fragment declares -> FragmentOutput return type" {
     // A shader writing only gl_FragDepth (no color output) returns
     // `FragmentOutput(...)` from its body, so the signature must declare the
-    // return type. glslpp emitted `fn main()` (no return type) because
+    // return type. zioshade emitted `fn main()` (no return type) because
     // output_var_id was null → naga "Returning Some where None is expected".
     const source: [:0]const u8 =
         \\#version 450
         \\layout(depth_greater) out float gl_FragDepth;
         \\void main(){ gl_FragDepth = 0.5; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "-> FragmentOutput") != null);
     try nagaValidateOrSkip(wgsl, "depth-only");
@@ -2641,7 +2641,7 @@ test "wgsl: depth-only fragment declares -> FragmentOutput return type" {
 
 test "wgsl: vector shift coerces the amount to vecN<u32>, not scalar u32" {
     // `uvec2(1) << uvec2(a,b)` — the WGSL shift amount must match the base's
-    // vector dimension (`vec2<u32> << vec2<u32>`). glslpp wrapped it in scalar
+    // vector dimension (`vec2<u32> << vec2<u32>`). zioshade wrapped it in scalar
     // `u32(...)` ("cannot cast a vec2<u32> to a u32"); scalar shifts keep `u32()`.
     const source: [:0]const u8 =
         \\#version 450
@@ -2649,9 +2649,9 @@ test "wgsl: vector shift coerces the amount to vecN<u32>, not scalar u32" {
         \\layout(location=0) out uvec2 o;
         \\void main(){ o = (uvec2(1u) << a) - 1u; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "vec2<u32>(") != null);
     try nagaValidateOrSkip(wgsl, "vec-shift");
@@ -2667,9 +2667,9 @@ test "wgsl: scalar geometric builtins lower to scalar ops (normalize->sign etc.)
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(normalize(u.a), length(u.a), distance(u.a, u.b), 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "sign(") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "abs(") != null);
@@ -2685,13 +2685,13 @@ test "wgsl: scalar refract is an honest error (vector-only builtin, formula not 
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(refract(u.i, u.n, u.e)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl: gl_PointSize is an honest error, not @builtin(__point_size)" {
-    // WGSL points always render at 1px — there is no point-size output. glslpp
+    // WGSL points always render at 1px — there is no point-size output. zioshade
     // previously emitted `@builtin(__point_size)` (an invented builtin) which
     // naga rejects ("Identifier starts with a reserved prefix: `__point_size`").
     // The PointSize decoration only appears when the shader actually writes
@@ -2701,9 +2701,9 @@ test "wgsl: gl_PointSize is an honest error, not @builtin(__point_size)" {
         \\layout(location=0) in vec4 p;
         \\void main(){ gl_Position = p; gl_PointSize = 4.0; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl: constant array of vectors uses array<vecN<T>,M>, not the scalar elem type" {
@@ -2720,9 +2720,9 @@ test "wgsl: constant array of vectors uses array<vecN<T>,M>, not the scalar elem
         \\    o = vec4(pal[idx], 1.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Element type is the vector (vec3f / vec3<f32>), never a bare scalar array.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<vec3") != null);
@@ -2745,9 +2745,9 @@ test "wgsl: constant array of structs uses array<StructName,N> element type" {
         \\    o = vec4(foos[0].a + foos[1].b);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<Foobar, 2>") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "array<f32, 2>(Foobar") == null);
@@ -2769,9 +2769,9 @@ test "wgsl: array element extract uses [i] indexing, not a .x swizzle" {
         \\    o = vals[0] + vals[1] + consts[0];
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "array-extract-index");
 }
@@ -2791,9 +2791,9 @@ test "wgsl: module-scope const array indexed at runtime emits its values" {
         \\const float LUT[4] = float[](1.0, 2.0, 3.0, 4.0);
         \\void main(){ int i = int(gl_FragCoord.x) & 3; o = LUT[i]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "array<f32, 4>(1.0, 2.0, 3.0, 4.0)");
     try assertNotContains(wgsl, "var<private> LUT"); // not a zero-init fallback
@@ -3044,7 +3044,7 @@ test "wgsl: projective shadow (sampler2DShadow) lowers to a projective compare" 
     // Projective depth-compare HAS a faithful lowering: textureProj divides both
     // the coordinate and the depth reference by the coordinate's last component,
     // so textureProj(sampler2DShadow, P) → textureSampleCompare(t, s, P.xy / P.w,
-    // P.z / P.w). (Was previously honest-errored; #170.) Uses glslpp's OWN frontend
+    // P.z / P.w). (Was previously honest-errored; #170.) Uses zioshade's OWN frontend
     // — a different SPIR-V producer than the glslang-based test above, covering the
     // OpCompositeInsert coordinate-packing both emit.
     const source: [:0]const u8 =
@@ -3053,9 +3053,9 @@ test "wgsl: projective shadow (sampler2DShadow) lowers to a projective compare" 
         \\layout(location=0) out float o;
         \\void main(){ o = textureProj(tex, vec4(gl_FragCoord.xy, 0.5, 1.0)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleCompare(");
     try assertContains(wgsl, ".xy /");
@@ -3077,9 +3077,9 @@ test "wgsl: fragment-shader interlock is an honest error (no WGSL equivalent)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ beginInvocationInterlockARB(); counter += 1u; endInvocationInterlockARB(); o = vec4(1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl: the main-path else no longer emits a silent-wrong placeholder var" {
@@ -3145,9 +3145,9 @@ test "wgsl: outerProduct(vec3,vec3) builds a mat3x3 (naga-validated)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ mat3 m = outerProduct(a, b); o = vec4(m[0], 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "mat3x3") != null);
     try nagaValidateOrSkip(wgsl, "outerProduct-mat3");
@@ -3161,9 +3161,9 @@ test "wgsl: outerProduct(vec2,vec2) builds a mat2x2 (naga-validated)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ mat2 m = outerProduct(a, b); o = vec4(m[0], m[1]); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "mat2x2") != null);
     try nagaValidateOrSkip(wgsl, "outerProduct-mat2");
@@ -3179,9 +3179,9 @@ test "wgsl: outerProduct(vec4,vec2) builds a non-square mat2x4 (naga-validated)"
         \\layout(location=0) out vec4 o;
         \\void main(){ mat2x4 m = outerProduct(a, b); o = m[0] + m[1]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "mat2x4") != null);
     try nagaValidateOrSkip(wgsl, "outerProduct-mat2x4");
@@ -3200,9 +3200,9 @@ test "wgsl: all-constant smoothstep is naga-valid (abstract-literal typing)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ float t = smoothstep(0.08, 0.03, 1.0); o = vec4(t); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // A scalar float constant must be typed (e.g. `0.08f`) rather than abstract.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "0.08f") != null);
@@ -3215,9 +3215,9 @@ test "wgsl: all-constant mix is naga-valid (abstract-literal typing)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ float t = mix(0.25, 0.75, 0.5); o = vec4(t); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "abstract-mix");
 }
@@ -3235,10 +3235,10 @@ test "wgsl: subgroupElect errors honestly (WGSL/naga has no subgroups)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(subgroupElect() ? 1.0 : 0.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "subgroup") != null);
 }
 
@@ -3256,10 +3256,10 @@ test "wgsl: image atomic errors honestly (WGSL has no image atomics)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ uint old = imageAtomicAdd(img, ivec2(0,0), 1u); o = vec4(float(old)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "image atomic") != null);
 }
 
@@ -3302,10 +3302,10 @@ test "wgsl: texel buffer errors honestly (WGSL has no texture_buffer type)" {
         \\layout(binding = 4) uniform highp samplerBuffer uSamp;
         \\void main(){ gl_Position = texelFetch(uSamp, 10); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "texel buffer") != null);
 }
 
@@ -3330,9 +3330,9 @@ test "wgsl: A2 scalar array member in uniform wrapped as array<vec4>+.x" {
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(u.arr[u.n], 0.0, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The scalar-element array member is widened to vec4<f32>.
     try assertContains(wgsl, "array<vec4<f32>, 4>");
@@ -3350,9 +3350,9 @@ test "wgsl: A2 vec2 array member in uniform wrapped as array<vec4>+.xy" {
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(u.arr[u.n], 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "array<vec4<f32>, 4>");
     try assertContains(wgsl, ".xy");
@@ -3376,9 +3376,9 @@ test "wgsl: A2 mixed block — scalar array wrapped, vec4 array NOT wrapped" {
         \\  o = vec4(u.sarr[u.n], 0.0, 0.0, 1.0) + u.m[0] + u.v4[u.n] + u.off;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The scalar array member is widened to vec4<f32>.
     try assertContains(wgsl, "array<vec4<f32>, 3>");
@@ -3399,9 +3399,9 @@ test "wgsl: A2 regression — array-of-vec4 uniform stays unwrapped, no swizzle"
         \\layout(location=0) out vec4 o;
         \\void main(){ o = u.a[u.n]; }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Already-aligned vec4 array stays the normal shorthand (NOT re-widened).
     try assertContains(wgsl, "array<vec4f, 3>");
@@ -3420,9 +3420,9 @@ test "wgsl: A2 SSBO scalar array member NOT wrapped (uniform-only gate)" {
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(b.arr[b.n], 0.0, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // SSBO scalar array stays a plain f32 array — NOT widened.
     try assertContains(wgsl, "array<f32, 4>");
@@ -3464,10 +3464,10 @@ test "wgsl: A2 scalar-block-layout uniform honest-errors, not silently wrapped (
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(u.arr[u.n], 0.0, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "stride") != null);
 }
 
@@ -3481,9 +3481,9 @@ test "wgsl: A2 std140 uniform still wraps at ArrayStride 16 (#170 review regress
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(u.arr[u.n], 0.0, 0.0, 1.0); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // std140 stride 16 → still widened + swizzled (value-correct).
     try assertContains(wgsl, "array<vec4<f32>, 4>");
@@ -3520,7 +3520,7 @@ test "wgsl: input built-in read in a helper is bridged to var<private>" {
     // gl_FragCoord is `@builtin(position)` — an entry-param only. A helper that
     // reads it referenced an out-of-scope identifier. Bridge it (like @location
     // inputs) to a module-scope var<private> copied from the renamed entry param.
-    // Uses the witness fixture: glslpp inlines a trivial helper, collapsing the
+    // Uses the witness fixture: zioshade inlines a trivial helper, collapsing the
     // cross-function pattern, but raymarch_simple's scene() is preserved.
     const wgsl = try compileFileToWgsl("tests/spirv-cross/raymarch_simple.frag");
     defer alloc.free(wgsl);
@@ -3645,7 +3645,7 @@ test "wgsl: separate comparison sampler is an honest error (unrepresentable)" {
 // #170 (A3): a GLSL `in Inputs { … } vin;` stage-input interface block must emit
 // the struct EXACTLY ONCE — as the @location-decorated entry-parameter struct.
 // Previously the whole-struct `OpLoad %Inputs %vin` in the body also triggered a
-// plain (un-decorated) `struct Inputs { … }` forward-decl, so glslpp emitted the
+// plain (un-decorated) `struct Inputs { … }` forward-decl, so zioshade emitted the
 // type twice and naga rejected the WGSL with "redefinition of `Inputs`".
 test "wgsl: stage-input interface block struct is emitted once (no redefinition)" {
     const src: [:0]const u8 =
@@ -3681,7 +3681,7 @@ test "wgsl: stage-input interface block struct is emitted once (no redefinition)
 // prior LOUD behavior (both decls emitted → naga "redefinition" reject) rather
 // than emit silently-wrong @location-on-uniform. A full fix (renamed IO struct)
 // is deferred. This test pins that the guard fires: the plain data decl survives
-// alongside the @location IO decl (two `struct Inputs {`), so glslpp never emits
+// alongside the @location IO decl (two `struct Inputs {`), so zioshade never emits
 // the lenient-but-wrong single-struct form.
 test "wgsl: struct used as both interface block and UBO member is not silently merged" {
     const src: [:0]const u8 =
@@ -3708,7 +3708,7 @@ test "wgsl: struct used as both interface block and UBO member is not silently m
 }
 
 // #170 (B): GLSL `textureQueryLevels` returns a SIGNED `int`, but WGSL
-// `textureNumLevels` returns `u32`. glslpp annotates the `let` with the GLSL
+// `textureNumLevels` returns `u32`. zioshade annotates the `let` with the GLSL
 // (signed) result type, so emitting the bare builtin left `let v: i32 =
 // textureNumLevels(t);` — naga rejects ("type of `v` is expected to be `i32`,
 // but got `u32`"). The result must be wrapped `i32(textureNumLevels(t))`, just
@@ -3831,7 +3831,7 @@ test "wgsl: writeonly storage image emits write access mode (NonReadable)" {
 }
 
 // #217 review [MAJOR]: NonWritable/NonReadable are valid (per spirv-val) only on
-// storage images and buffers. glslpp — unlike glslang, which rejects
+// storage images and buffers. zioshade — unlike glslang, which rejects
 // `readonly sampler2D` — does NOT reject memory qualifiers on a combined
 // sampler, so the frontend gate that emits these decorations must fire only for
 // storage IMAGES, never for any uniform_constant resource. A too-broad gate
@@ -3845,7 +3845,7 @@ test "wgsl: readonly/writeonly on a non-storage-image sampler emits no NonWritab
         \\layout(location = 0) out vec4 o;
         \\void main() { o = texture(uTex, vec2(0.5)); }
     ;
-    const ro_spv = try glslpp.compileToSPIRV(alloc, ro, .{ .stage = .fragment });
+    const ro_spv = try zioshade.compileToSPIRV(alloc, ro, .{ .stage = .fragment });
     defer alloc.free(ro_spv);
     try std.testing.expect(!spirvHasDecoration(ro_spv, 24)); // NonWritable
     try std.testing.expect(!spirvHasDecoration(ro_spv, 25)); // NonReadable
@@ -3856,7 +3856,7 @@ test "wgsl: readonly/writeonly on a non-storage-image sampler emits no NonWritab
         \\layout(location = 0) out vec4 o;
         \\void main() { o = texture(uTex, vec2(0.5)); }
     ;
-    const wo_spv = try glslpp.compileToSPIRV(alloc, wo, .{ .stage = .fragment });
+    const wo_spv = try zioshade.compileToSPIRV(alloc, wo, .{ .stage = .fragment });
     defer alloc.free(wo_spv);
     try std.testing.expect(!spirvHasDecoration(wo_spv, 24)); // NonWritable
     try std.testing.expect(!spirvHasDecoration(wo_spv, 25)); // NonReadable
@@ -3873,7 +3873,7 @@ test "wgsl: readonly/writeonly storage image emits NonWritable/NonReadable in SP
         \\layout(location = 0) out vec4 o;
         \\void main() { o = imageLoad(uImage, ivec2(0)); }
     ;
-    const ro_spv = try glslpp.compileToSPIRV(alloc, ro, .{ .stage = .fragment });
+    const ro_spv = try zioshade.compileToSPIRV(alloc, ro, .{ .stage = .fragment });
     defer alloc.free(ro_spv);
     try std.testing.expect(spirvHasDecoration(ro_spv, 24)); // NonWritable present
     try std.testing.expect(!spirvHasDecoration(ro_spv, 25)); // but not NonReadable
@@ -3884,7 +3884,7 @@ test "wgsl: readonly/writeonly storage image emits NonWritable/NonReadable in SP
         \\layout(location = 0) out vec4 o;
         \\void main() { imageStore(uImage, ivec2(0), vec4(1.0)); o = vec4(0.0); }
     ;
-    const wo_spv = try glslpp.compileToSPIRV(alloc, wo, .{ .stage = .fragment });
+    const wo_spv = try zioshade.compileToSPIRV(alloc, wo, .{ .stage = .fragment });
     defer alloc.free(wo_spv);
     try std.testing.expect(spirvHasDecoration(wo_spv, 25)); // NonReadable present
     try std.testing.expect(!spirvHasDecoration(wo_spv, 24)); // but not NonWritable
@@ -4075,7 +4075,7 @@ test "wgsl: matrix-output store inside a switch case is an honest error" {
     try std.testing.expectError(error.UnsupportedOp, compileVertToWgsl(src));
     // Pin the detail so the catch-all UnsupportedOp can't silently start meaning
     // a different unsupported op in this matrix-heavy shader.
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "switch") != null);
 }
 
@@ -4096,14 +4096,14 @@ test "wgsl: gl_FragStencilRef output is an honest error (no WGSL stencil export)
 // #170 (H): GLSL `layout(location=N, component=M)` packs several bindings into
 // one location's component slots. WGSL has no @component, so two inputs sharing
 // @location(0) is invalid (naga: "Multiple bindings at location 0 are present").
-// glslpp does not reconstruct component packing, so it must fail loud rather
+// zioshade does not reconstruct component packing, so it must fail loud rather
 // than emit the naga-rejected duplicate-location interface (silent-wrong).
 // Pinned to the real corpus fixture (no other driver runs it through the WGSL
 // backend), and the detail is asserted so the catch-all UnsupportedOp can't
 // silently start meaning a different unsupported op.
 test "wgsl: layout(component) duplicate-location inputs are an honest error" {
     try std.testing.expectError(error.UnsupportedOp, compileFileToWgsl("tests/spirv-cross/layout-component.desktop.frag"));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "@component") != null);
 }
 
@@ -4163,9 +4163,9 @@ test "wgsl: vertex early return is honored (value preserved, not dropped)" {
         \\    gl_Position = vec4(0.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
 
     // Semantic, naga-free guard: a `return` MUST appear between the early-branch
@@ -4192,9 +4192,9 @@ test "wgsl: fragment early return is honored (value preserved, not dropped)" {
         \\    fragColor = vec4(20.0);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
 
     const a10 = std.mem.indexOf(u8, wgsl, "vec4<f32>(10.0)") orelse return error.TestExpectedFind;
@@ -4208,7 +4208,7 @@ test "wgsl: fragment early return is honored (value preserved, not dropped)" {
 // When the early return targets an output that is ASSEMBLED at the trailing
 // return from end-captured values (e.g. a frag_depth struct, whose depth is the
 // LAST store), an early `return FragmentOutput(color, <last-depth>)` would use
-// the wrong (later) depth. Rather than silently miscompile, glslpp must fail loud.
+// the wrong (later) depth. Rather than silently miscompile, zioshade must fail loud.
 test "wgsl: early return into an assembled frag_depth output errors honestly" {
     const source =
         \\#version 450
@@ -4220,9 +4220,9 @@ test "wgsl: early return into an assembled frag_depth output errors honestly" {
         \\    gl_FragDepth = 0.7;
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedEarlyReturn, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedEarlyReturn, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // A value-returning helper whose loop conditionally `return`s early used to be
@@ -4248,14 +4248,14 @@ test "wgsl: helper while-loop with early return is preserved and counter is live
         \\}
         \\void main() { o = vec4(search(t)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     // #1: the loop survived deadLoopElim (OpLoopMerge = 246).
     try std.testing.expect(countSpirvOpcode(spirv, 246) >= 1);
     // #3: the `while` counter was converted to OpPhi (245), so there is no
     // header OpLoad of the counter for a backend to hoist into a stale snapshot.
     try std.testing.expect(countSpirvOpcode(spirv, 245) >= 1);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "helper-while-early-return");
 }
@@ -4264,7 +4264,7 @@ test "wgsl: helper while-loop with early return is preserved and counter is live
 // function's entry block; the back-edge then targets the entry block, which
 // spirv-val rejects ("First block ... is targeted"). deadLoopElim used to mask
 // this by deleting such loops. A pre-header block must be spliced in so the
-// emitted SPIR-V is valid. Guard: the produced SPIR-V passes glslpp's own
+// emitted SPIR-V is valid. Guard: the produced SPIR-V passes zioshade's own
 // validator wrapper (spirv-val).
 test "wgsl: loop-as-first-statement emits valid SPIR-V (entry not a branch target)" {
     // `drain`'s loop is the function's first statement and writes an SSBO (a real
@@ -4278,7 +4278,7 @@ test "wgsl: loop-as-first-statement emits valid SPIR-V (entry not a branch targe
         \\void drain() { while (data[0] > 0) { data[0] = data[0] - 1; } }
         \\void main() { drain(); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
     defer alloc.free(spirv);
     try spirvValValidateOrSkip(spirv, "loop-as-first-statement");
 }
@@ -4301,9 +4301,9 @@ test "wgsl: escaping condition-var while-loop re-reads inside the loop (no hoist
         \\    o = vec4(x);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     const loop_idx = std.mem.indexOf(u8, wgsl, "loop {") orelse return error.TestExpectedFind;
     // The `<v> * 0.9` decay must read a value (re)defined INSIDE the loop, not a
@@ -4338,9 +4338,9 @@ test "wgsl: do-while counter is updated (not dropped by phi conversion)" {
         \\    o = vec4(x);
         \\}
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The counter increment `<v> + 1` must be stored back to a loop var. Find the
     // `+ 1` result and assert it is assigned to a name (`<name> = <result>;`),
@@ -4370,10 +4370,10 @@ test "wgsl: mutated in-parameter is copied to a local at entry (increment preser
         \\}
         \\void main() { o = vec4(float(f(0, int(t)))); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try spirvValValidateOrSkip(spirv, "mutable-in-param");
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The mutated param must be promoted to a mutable local initialised from the
     // parameter. Extract the first param name from `fn f(<p>: i32, …)` and assert
@@ -4405,10 +4405,10 @@ test "wgsl: read-only param shadowed by a mutated inner local is not promoted" {
         \\}
         \\void main() { o = vec4(f(u)); }
     ;
-    const spirv = try glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
     try spirvValValidateOrSkip(spirv, "shadowed-readonly-param");
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "shadowed-readonly-param");
 }
@@ -4646,7 +4646,7 @@ fn patchFirstOpcode(words: []u32, from: u16, to: u16) !void {
 // #170: OpQuantizeToF16 (116) — quantize a 32-bit float to the precision/range
 // expressible by a 16-bit float, then widen back to 32 bits. WGSL has an EXACT
 // 1:1 builtin, `quantizeToF16`, with identical semantics (componentwise on
-// vectors). The opcode was absent from glslpp's `Op` enum entirely, so it
+// vectors). The opcode was absent from zioshade's `Op` enum entirely, so it
 // honest-errored (UnsupportedOp) instead of lowering. glslang never emits
 // OpQuantizeToF16 from GLSL (there is no GLSL builtin), so — like the other
 // external-SPIR-V #170 fixes — we synthesize it by reusing an OpFNegate
@@ -4665,7 +4665,7 @@ test "wgsl: scalar OpQuantizeToF16 lowers to quantizeToF16 (naga-valid) (#170)" 
     );
     defer alloc.free(spirv);
     try patchFirstOpcode(spirv, 127, 116); // OpFNegate(127) -> OpQuantizeToF16(116)
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "quantizeToF16(");
     try assertNotContains(wgsl, "unhandled");
@@ -4684,7 +4684,7 @@ test "wgsl: vector OpQuantizeToF16 lowers componentwise to quantizeToF16 (naga-v
     );
     defer alloc.free(spirv);
     try patchFirstOpcode(spirv, 127, 116); // OpFNegate(127) -> OpQuantizeToF16(116)
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "quantizeToF16(");
     try assertNotContains(wgsl, "unhandled");
@@ -4711,7 +4711,7 @@ test "wgsl: scalar OpFUnordNotEqual (float !=) lowers to != (naga-valid) (#170)"
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "!=");
     try assertNotContains(wgsl, "unhandled");
@@ -4729,7 +4729,7 @@ test "wgsl: vector OpFUnordNotEqual (notEqual) lowers componentwise to != (naga-
         \\}
     );
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "!=");
     try assertNotContains(wgsl, "unhandled");
@@ -4760,7 +4760,7 @@ test "wgsl: conditional break in loop body emits break, not an empty if (#170)" 
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Two breaks expected: the loop-condition exit `if (!(i < 10)) { break; }` AND the
     // body conditional `if (i == 5) { break; }`. Before the fix only the former existed
@@ -4800,7 +4800,7 @@ test "wgsl: conditional continue in loop body emits continue, not an empty if (#
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Before the fix the body `if (i == 3) continue;` was dropped → empty `if (cond) { }`
     // with NO `continue;` emitted anywhere, so the presence of `continue;` is itself the
@@ -4828,7 +4828,7 @@ test "wgsl: negated conditional continue in loop body emits continue (#170)" {
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "continue;");
     try nagaValidateOrSkip(wgsl, "cond-continue-neg");
@@ -4849,7 +4849,7 @@ test "wgsl: textureGrad (OpImageSampleExplicitLod Grad) -> textureSampleGrad (#1
         \\void main() { o = textureGrad(s, uv, vec2(0.1), vec2(0.2)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleGrad(");
     try assertNotContains(wgsl, "textureSampleLevel");
@@ -4857,11 +4857,11 @@ test "wgsl: textureGrad (OpImageSampleExplicitLod Grad) -> textureSampleGrad (#1
 }
 
 // #170: GLSL `texture(s, uv, bias)` (an LOD-bias sample) was SILENTLY DROPPING the
-// bias — glslpp's frontend emitted OpImageSampleImplicitLod WITHOUT the Bias image
+// bias — zioshade's frontend emitted OpImageSampleImplicitLod WITHOUT the Bias image
 // operand, so the WGSL was a plain `textureSample(s, sampler, uv)` that samples the
 // wrong mip level. The frontend now emits the Bias operand and the WGSL back-end
 // spells it `textureSampleBias(t, s, coord, bias)` (fragment-only) — exercised here
-// through the FULL glslpp pipeline (frontend→WGSL), with the bias value (1.5) surviving.
+// through the FULL zioshade pipeline (frontend→WGSL), with the bias value (1.5) surviving.
 test "wgsl: texture(s, uv, bias) (OpImageSampleImplicitLod Bias) -> textureSampleBias (#170)" {
     const wgsl = compileToWgsl(
         \\#version 450
@@ -4891,7 +4891,7 @@ test "wgsl: textureOffset(s, uv, offset, bias) keeps the const offset, backend a
         \\void main() { o = textureOffset(s, uv, ivec2(1, 2), 1.5); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleBias(");
     try assertContains(wgsl, "vec2<i32>(1, 2)");
@@ -4917,7 +4917,7 @@ test "wgsl: Bias with a truncated ConstOffset operand is an honest error (#170)"
     defer alloc.free(truncated);
     try std.testing.expectError(
         error.UnsupportedImageOperands,
-        glslpp.spirvToWGSL(alloc, truncated, .{}),
+        zioshade.spirvToWGSL(alloc, truncated, .{}),
     );
 }
 
@@ -4926,7 +4926,7 @@ test "wgsl: Bias with a truncated ConstOffset operand is an honest error (#170)"
 // textureSampleGrad call as a trailing argument (after ddx, ddy); dropping it is
 // silent-wrong. Guards the happy path of the Grad-arm offset suffix. This drives
 // the parsed-external-SPIR-V backend arm via glslang as an independent oracle;
-// glslpp's OWN frontend lowering of textureGradOffset is covered separately above.
+// zioshade's OWN frontend lowering of textureGradOffset is covered separately above.
 test "wgsl: textureGradOffset keeps the const offset, backend arm (#170)" {
     const spirv = compileToSpirv("tex_grad_offset",
         \\#version 450
@@ -4936,7 +4936,7 @@ test "wgsl: textureGradOffset keeps the const offset, backend arm (#170)" {
         \\void main() { o = textureGradOffset(s, uv, vec2(0.1), vec2(0.2), ivec2(2, 3)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleGrad(");
     try assertContains(wgsl, "vec2<i32>(2, 3)");
@@ -4961,7 +4961,7 @@ test "wgsl: Grad with a truncated ConstOffset operand is an honest error (#170)"
     defer alloc.free(truncated);
     try std.testing.expectError(
         error.UnsupportedImageOperands,
-        glslpp.spirvToWGSL(alloc, truncated, .{}),
+        zioshade.spirvToWGSL(alloc, truncated, .{}),
     );
 }
 
@@ -4973,7 +4973,7 @@ test "wgsl: Grad with a truncated ConstOffset operand is an honest error (#170)"
 // output. glslang encodes this as ConstOffset (0x8) with NO Bias bit, so it exercises
 // the non-Bias arm of the handler (the Bias arm at ~6511 already handles its own
 // offset). This routes through glslang (compileToSpirv) to exercise the
-// parsed-SPIR-V → WGSL backend arm with an independent oracle; glslpp's OWN
+// parsed-SPIR-V → WGSL backend arm with an independent oracle; zioshade's OWN
 // frontend lowering of textureOffset is covered by a separate test below.
 test "wgsl: textureOffset(s, uv, offset) (OpImageSampleImplicitLod ConstOffset) keeps the offset (#170)" {
     const spirv = compileToSpirv("tex_offset",
@@ -4984,7 +4984,7 @@ test "wgsl: textureOffset(s, uv, offset) (OpImageSampleImplicitLod ConstOffset) 
         \\void main() { o = textureOffset(s, uv, ivec2(1, 0)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The offset must reach the textureSample call as a trailing 4th argument; the
     // bare (dropped-offset) form ends `..., uv)`. The `, vec2<i32>(1, 0))` substring
@@ -5008,7 +5008,7 @@ test "wgsl: textureLodOffset (OpImageSampleExplicitLod Lod|ConstOffset) keeps th
         \\void main() { o = textureLodOffset(s, uv, 0.0, ivec2(1, 0)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(");
     try assertContains(wgsl, ", vec2<i32>(1, 0))");
@@ -5030,7 +5030,7 @@ test "wgsl: textureOffset on sampler2DArray keeps the offset after the layer (#1
         \\void main() { o = textureOffset(s, uvw, ivec2(1, 0)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The rounded layer index precedes the trailing offset.
     try assertContains(wgsl, "textureSample(");
@@ -5039,8 +5039,8 @@ test "wgsl: textureOffset on sampler2DArray keeps the offset after the layer (#1
 }
 
 // #170: the FRONTEND analog of the two tests above. The two preceding tests
-// route through glslang (compileToSpirv); this one drives glslpp's OWN frontend
-// (compileToWgsl = compileToSPIRV + spirvToWGSL). glslpp's analyzer ACCEPTS
+// route through glslang (compileToSpirv); this one drives zioshade's OWN frontend
+// (compileToWgsl = compileToSPIRV + spirvToWGSL). zioshade's analyzer ACCEPTS
 // textureOffset and lowers it to `.image_sample` with [sampler, coord, offset],
 // but codegen's `.image_sample` arm emitted OpImageSampleImplicitLod WITHOUT the
 // ConstOffset image operand — silently dropping operand[2]. The native path
@@ -5048,7 +5048,7 @@ test "wgsl: textureOffset on sampler2DArray keeps the offset after the layer (#1
 // wrong, sampling the WRONG texels. The offset must survive as a trailing
 // const-offset arg. (Contrast the sibling tests' comment claiming the frontend
 // "rejects textureOffset" — it does not; it drops the offset.)
-test "wgsl: textureOffset via glslpp frontend keeps the ConstOffset (#170)" {
+test "wgsl: textureOffset via zioshade frontend keeps the ConstOffset (#170)" {
     const wgsl = try compileToWgsl(
         \\#version 450
         \\layout(binding = 0) uniform sampler2D s;
@@ -5089,7 +5089,7 @@ test "wgsl: textureOffset(s, uv, offset, bias) keeps BOTH bias and offset (#170)
 test "wgsl: textureLodOffset with a non-constant offset honest-errors (#170)" {
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRV(alloc,
+        zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(binding = 0) uniform sampler2D s;
             \\layout(location = 0) in vec2 uv;
@@ -5100,7 +5100,7 @@ test "wgsl: textureLodOffset with a non-constant offset honest-errors (#170)" {
     );
 }
 
-// #170: textureGradOffset is deliberately NOT lowered by glslpp's frontend (it
+// #170: textureGradOffset is deliberately NOT lowered by zioshade's frontend (it
 // is now in isTextureBuiltin and lowers faithfully). It IS representable in WGSL —
 // textureSampleGrad(t, s, coord, ddx, ddy, offset). The frontend emits ONE shared
 // SPIR-V (OpImageSampleExplicitLod with Grad|ConstOffset) to all back-ends; this
@@ -5132,7 +5132,7 @@ test "wgsl: textureGradOffset lowers to textureSampleGrad with the const offset 
 test "wgsl: textureGradOffset with a non-constant offset honest-errors (#170)" {
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRV(alloc,
+        zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(binding = 0) uniform sampler2D s;
             \\layout(location = 0) in vec2 uv;
@@ -5165,12 +5165,12 @@ test "wgsl: textureProjOffset keeps the const offset (#170)" {
 }
 
 // #170: textureOffset with a NON-CONSTANT offset cannot become a SPIR-V
-// ConstOffset (which requires an OpConstantComposite). glslpp must honest-error
+// ConstOffset (which requires an OpConstantComposite). zioshade must honest-error
 // rather than emit invalid SPIR-V / a silently-wrong sample.
 test "wgsl: textureOffset with a non-constant offset honest-errors (#170)" {
     try std.testing.expectError(
         error.SemanticFailed,
-        glslpp.compileToSPIRV(alloc,
+        zioshade.compileToSPIRV(alloc,
             \\#version 450
             \\layout(binding = 0) uniform sampler2D s;
             \\layout(location = 0) in vec2 uv;
@@ -5184,7 +5184,7 @@ test "wgsl: textureOffset with a non-constant offset honest-errors (#170)" {
 // #170: WGSL forbids the filtering textureSample/textureSampleLevel builtins on
 // INTEGER textures (texture_2d<i32>/<u32> are non-filterable) — only textureLoad is
 // allowed. GLSL `texture(isampler2D, uv)` (a normalized-coordinate sample of an
-// integer texture) therefore has no faithful WGSL form. glslpp emitted
+// integer texture) therefore has no faithful WGSL form. zioshade emitted
 // `textureSample(s, s_sampler, uv)` on a `texture_2d<i32>` — naga rejects it ("Entry
 // point invalid") = silent-wrong. It must honest-error instead. (texelFetch on the
 // same isampler2D is unaffected — it lowers to textureLoad, which integer textures
@@ -5198,7 +5198,7 @@ test "wgsl: texture() on an integer sampler honest-errors, not naga-invalid text
         \\void main() { o = vec4(texture(s, uv)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedIntegerTextureSample, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedIntegerTextureSample, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // The texelFetch counterpart MUST still compile: textureLoad is valid on integer
@@ -5212,7 +5212,7 @@ test "wgsl: texelFetch on an integer sampler still lowers to textureLoad (#170)"
         \\void main() { o = vec4(texelFetch(s, ivec2(uv), 0)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureLoad(");
     try nagaValidateOrSkip(wgsl, "isampler-fetch");
@@ -5229,7 +5229,7 @@ test "wgsl: textureProj on an integer sampler honest-errors (#170)" {
         \\void main() { o = vec4(textureProj(s, uv)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedIntegerTextureSample, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedIntegerTextureSample, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: the STRUCT form of GLSL frexp/modf — `frexp(x, e)` with a separate out-param,
@@ -5248,7 +5248,7 @@ test "wgsl: frexp struct-form lowers to .fract/.exp, not ResType._0/._1 (#170)" 
         \\void main() { int e; float m = frexp(x, e); float r = ldexp(m, e); o = vec4(r, float(e), 0.0, 1.0); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "frexp(");
     try assertContains(wgsl, ".fract");
@@ -5266,7 +5266,7 @@ test "wgsl: modf struct-form lowers to .fract/.whole, not ResType._0/._1 (#170)"
         \\void main() { float ip; float fp = modf(x, ip); o = vec4(fp, ip, 0.0, 1.0); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "modf(");
     try assertNotContains(wgsl, "ResType");
@@ -5290,7 +5290,7 @@ test "wgsl: anonymous SSBO block gets a synthesized var name (naga-valid) (#170)
         \\void main() { o = vec4(d[0] + x); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The storage variable must have a name (NOT `var<storage, read_write> : B;`) and
     // the member access must carry the base (NOT a bare `.d[`).
@@ -5317,11 +5317,11 @@ test "wgsl: unbounded descriptor sampler array honest-errors (#170)" {
         \\void main() { o = texture(tex[nonuniformEXT(i)], uv); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedSamplerArray, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: WGSL has no 64-bit float (f64 / GLSL `double`) — not even a core extension.
-// glslpp's type mapping collapsed every OpTypeFloat to f32 AND misread f64 CONSTANTS
+// zioshade's type mapping collapsed every OpTypeFloat to f32 AND misread f64 CONSTANTS
 // (the 64-bit IEEE-754 bit pattern reinterpreted as f32 = garbage — e.g. `1.0e15lf`
 // emitted as ~6.2e-16), so a `double` shader silently computed WRONG values while
 // producing naga-valid output. It must honest-error instead of downgrading. (The
@@ -5334,7 +5334,7 @@ test "wgsl: double (64-bit float) honest-errors instead of silently downgrading 
         \\void main() { double d = double(x) * 1.0e15lf; o = vec4(float(d)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedDoubleType, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedDoubleType, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: WGSL has no 64-bit integer (i64/u64 / GLSL int64_t/uint64_t) in core. Like
@@ -5352,7 +5352,7 @@ test "wgsl: int64 (64-bit integer) honest-errors instead of silently downgrading
         \\void main() { int64_t a = int64_t(x) * 1000000000000L; o = vec4(float(a)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedInt64Type, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedInt64Type, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: GLSL `bitCount` ALWAYS returns a signed int (genIType), even for an unsigned
@@ -5370,7 +5370,7 @@ test "wgsl: bitCount on an unsigned vector wraps to the signed result type (#170
         \\void main() { ivec3 c = bitCount(v); o = vec4(vec3(c), 1.0); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "countOneBits");
     try nagaValidateOrSkip(wgsl, "bitcount-uvec");
@@ -5391,14 +5391,14 @@ test "wgsl: bitfieldExtract on a vector stores the result, not 0 (#170)" {
         \\void main() { ivec2 r = bitfieldExtract(k, 2, 5); o = vec4(vec2(r), 0.0, 1.0); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "extractBits(");
     try nagaValidateOrSkip(wgsl, "bitfield-extract-vec");
 }
 
 // #170: WGSL `@builtin(sample_index)` MUST be `u32`, but GLSL `gl_SampleID` is signed
-// `int`, so glslpp emitted `@builtin(sample_index) gl_SampleID: i32` — naga rejects
+// `int`, so zioshade emitted `@builtin(sample_index) gl_SampleID: i32` — naga rejects
 // ("Built-in type for SampleIndex is invalid. Found Sint"). The existing needs_u32
 // coercion (already applied to vertex_index/instance_index, which WGSL also requires
 // to be u32) must also cover sample_index: declare the entry param `u32` and coerce
@@ -5410,14 +5410,14 @@ test "wgsl: gl_SampleID (sample_index) entry param is u32, not i32 (#170)" {
         \\void main() { o = vec4(float(gl_SampleID)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "@builtin(sample_index)");
     try nagaValidateOrSkip(wgsl, "sample-id");
 }
 
 // #170: WGSL has NO `primitive_id` built-in — the core fragment-input builtins are
-// only position/front_facing/sample_index/sample_mask. glslpp mapped gl_PrimitiveID →
+// only position/front_facing/sample_index/sample_mask. zioshade mapped gl_PrimitiveID →
 // `@builtin(primitive_id)`, which naga rejects ("unknown builtin: `primitive_id`") =
 // silent-wrong (non-validating WGSL). It must honest-error instead.
 test "wgsl: gl_PrimitiveID honest-errors (WGSL has no primitive_id builtin) (#170)" {
@@ -5427,12 +5427,12 @@ test "wgsl: gl_PrimitiveID honest-errors (WGSL has no primitive_id builtin) (#17
         \\void main() { o = vec4(float(gl_PrimitiveID)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: dynamically indexing a `const` array at TWO sites makes glslang emit two
 // distinct OpVariables that share the SAME OpName string ("indexable", the local
-// copy it makes per access). glslpp named both `indexable`, so the WGSL had two
+// copy it makes per access). zioshade named both `indexable`, so the WGSL had two
 // `var indexable: array<f32,5>;` declarations — naga rejects ("redefinition of
 // `indexable`") = silent-wrong. Function-local var names are now deduped (the second
 // becomes `indexable_1`) and the names map updated so its uses resolve to it.
@@ -5449,7 +5449,7 @@ test "wgsl: duplicate glslang OpName for two local vars is deduped (no redefinit
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "dup-local-name");
 }
@@ -5457,9 +5457,9 @@ test "wgsl: duplicate glslang OpName for two local vars is deduped (no redefinit
 // #170: WGSL entry-point inputs/outputs may ONLY be numeric scalars or vectors —
 // a matrix at a @location is rejected by naga ("The type [N] cannot be used for
 // user-defined entry point inputs or outputs. Only numeric scalars and vectors
-// are allowed."). glslpp's generic input-param emitter printed a top-level matrix
+// are allowed."). zioshade's generic input-param emitter printed a top-level matrix
 // varying as `@location(0) m: mat4x4<f32>` = silent-wrong (non-validating WGSL).
-// (spirv-cross flattens a matrix varying into N column @locations; glslpp does not
+// (spirv-cross flattens a matrix varying into N column @locations; zioshade does not
 // reconstruct that, and its sibling guards already honest-error on a matrix MEMBER
 // at a @location, so a top-level matrix input must honest-error too, not emit
 // invalid WGSL.) The frontend never emits a matrix stage input; this is the
@@ -5472,12 +5472,12 @@ test "wgsl: matrix-typed stage input honest-errors (only scalars/vectors at @loc
         \\void main() { o = m * vec4(1.0); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: same rule as the matrix-input case — an ARRAY at a @location is equally
 // invalid WGSL entry IO. A vertex `in vec4 a[2];` attribute is emitted by glslang
-// as a single TypeArray input var (occupying locations 0,1); glslpp's generic
+// as a single TypeArray input var (occupying locations 0,1); zioshade's generic
 // input-param emitter would otherwise print `@location(0) a: array<vec4<f32>, 2>`,
 // which naga rejects. It must honest-error (covers the TypeArray arm of the guard).
 test "wgsl: array-typed stage input honest-errors (only scalars/vectors at @location) (#170)" {
@@ -5487,7 +5487,7 @@ test "wgsl: array-typed stage input honest-errors (only scalars/vectors at @loca
         \\void main() { gl_Position = a[0] + a[1]; }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: the OUTPUT-side symmetry of the array-input guard above. A top-level
@@ -5495,7 +5495,7 @@ test "wgsl: array-typed stage input honest-errors (only scalars/vectors at @loca
 // entry IO. A vertex `out vec4 a[2];` varying is emitted by glslang as a single
 // TypeArray output var; the vertex output-assembly path flattens a top-level
 // MATRIX into N column @locations but deliberately does NOT flatten a top-level
-// array (that would require runtime reconstruction glslpp doesn't implement), so
+// array (that would require runtime reconstruction zioshade doesn't implement), so
 // without the guard the generic emitter would append `@location(0) a: array<...>`
 // to VertexOutput, which naga rejects ("Only numeric scalars and vectors are
 // allowed"). It must honest-error, consistent with the input guard and the
@@ -5508,8 +5508,8 @@ test "wgsl: array-typed stage output honest-errors (only scalars/vectors at @loc
         \\void main() { a[0] = vec4(1.0); gl_Position = vec4(0.0); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "array output") != null);
 }
 
@@ -5517,7 +5517,7 @@ test "wgsl: array-typed stage output honest-errors (only scalars/vectors at @loc
 // names but MISSED predeclared builtin FUNCTION names like `bitcast` and `select`.
 // `bitcast` is a legal GLSL identifier (GLSL has no such builtin), so a GLSL
 // `float bitcast = ...;` was emitted verbatim as `var bitcast: f32;` — and since
-// glslpp lowers floatBitsToInt() to the WGSL `bitcast<i32>(...)` builtin, the
+// zioshade lowers floatBitsToInt() to the WGSL `bitcast<i32>(...)` builtin, the
 // shadowing variable made naga reject the call ("local declaration cannot be
 // called") = silent-wrong. The builtin-function names must be renamed too.
 test "wgsl: a variable named `bitcast` is renamed so the bitcast<T>() builtin still resolves (#170)" {
@@ -5532,7 +5532,7 @@ test "wgsl: a variable named `bitcast` is renamed so the bitcast<T>() builtin st
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // The bitcast<i32>() builtin call must survive (the variable is what gets renamed).
     try assertContains(wgsl, "bitcast<i32>");
@@ -5540,7 +5540,7 @@ test "wgsl: a variable named `bitcast` is renamed so the bitcast<T>() builtin st
 }
 
 // #170: sibling of the bitcast case — a GLSL variable named `select` collides with
-// the WGSL `select(...)` builtin that glslpp emits for OpSelect (here from a
+// the WGSL `select(...)` builtin that zioshade emits for OpSelect (here from a
 // `mix(a, b, bool)`). The variable must be renamed (→ `select_`) so the builtin
 // call still resolves; otherwise naga rejects ("local declaration cannot be called").
 test "wgsl: a variable named `select` is renamed so the select() builtin still resolves (#170)" {
@@ -5555,7 +5555,7 @@ test "wgsl: a variable named `select` is renamed so the select() builtin still r
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "select(");
     try nagaValidateOrSkip(wgsl, "clash-select");
@@ -5564,7 +5564,7 @@ test "wgsl: a variable named `select` is renamed so the select() builtin still r
 // #170: the texture-builtin extension of the bitcast/select rename. The WGSL
 // texture builtins (textureSample, textureLoad, textureDimensions, …) have GLSL
 // counterparts with DIFFERENT names (texture, texelFetch, textureSize), so a GLSL
-// variable can legally be named the WGSL one. glslpp emits the builtin as a call
+// variable can legally be named the WGSL one. zioshade emits the builtin as a call
 // (`textureLoad(...)`), so a `vec4 textureLoad = texelFetch(...)` was emitted as
 // `var textureLoad: vec4f;` and then the texelFetch->textureLoad() call made naga
 // reject ("local declaration cannot be called") = silent-wrong. These names were
@@ -5578,7 +5578,7 @@ test "wgsl: a variable named `textureLoad` is renamed so the textureLoad() built
         \\void main() { vec4 textureLoad = texelFetch(s, p, 0); o = textureLoad; }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureLoad(");
     try nagaValidateOrSkip(wgsl, "clash-textureload");
@@ -5594,14 +5594,14 @@ test "wgsl: a variable named `textureDimensions` is renamed so the builtin still
         \\void main() { ivec2 textureDimensions = textureSize(s, 0); o = vec4(float(textureDimensions.x)); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureDimensions(");
     try nagaValidateOrSkip(wgsl, "clash-texturedims");
 }
 
 // #170: an array of UBO blocks (`uniform U { vec4 color; } us[3];`) is wrapped by
-// glslpp as `struct us_wrapper { values: array<U, 3> }` + `var<uniform> us:
+// zioshade as `struct us_wrapper { values: array<U, 3> }` + `var<uniform> us:
 // us_wrapper` (the float/int bare-array path widens to vec4 with a `._wrapped_`
 // field; the struct-array case falls to a sibling branch). The float/int path
 // remapped the base name so accesses go through the wrapper field, but the
@@ -5617,7 +5617,7 @@ test "wgsl: array of UBO blocks accesses through the wrapper field (#170)" {
         \\void main() { o = us[0].color + us[1].color + us[k % 3].color; }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     // Access must go through the wrapper field, not bare `us[i]`.
     try assertContains(wgsl, ".values[");
@@ -5650,7 +5650,7 @@ test "wgsl: two arrayLength() calls get distinct names (no redefinition) (#170)"
 
 // #170: an ARRAYED storage image (image2DArray) imageLoad/imageStore takes the
 // array layer as the LAST coordinate component in GLSL, but WGSL takes it as a
-// SEPARATE argument: `textureLoad(t, coord.xy, coord.z)`. glslpp emitted
+// SEPARATE argument: `textureLoad(t, coord.xy, coord.z)`. zioshade emitted
 // `textureLoad(uArr, vec3<i32>(...))` (the layer folded into the coordinate) →
 // naga "wrong number of arguments: expected 3, found 2" = silent-wrong. The
 // layer must be split out for both textureLoad and textureStore.
@@ -5666,7 +5666,7 @@ test "wgsl: arrayed storage image load/store splits the array layer arg (#170)" 
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, ".xy,"); // spatial coord split from the layer
     try assertContains(wgsl, ".z)"); // the split-out array layer argument
@@ -5674,7 +5674,7 @@ test "wgsl: arrayed storage image load/store splits the array layer arg (#170)" 
 }
 
 // #170: a MULTISAMPLED storage image (image2DMS) has NO WGSL representation —
-// there is no multisampled storage texture type. glslpp silently dropped the MS
+// there is no multisampled storage texture type. zioshade silently dropped the MS
 // aspect (emitting a plain texture_storage_2d) AND the sample index = silent-wrong.
 // It must honest-error instead.
 test "wgsl: multisampled storage image honest-errors (no WGSL MS storage texture) (#170)" {
@@ -5685,13 +5685,13 @@ test "wgsl: multisampled storage image honest-errors (no WGSL MS storage texture
         \\void main() { o = imageLoad(uImage, ivec2(1, 2), 2); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: a NESTED array of samplers (`sampler1D s[2][2]`) is doubly-unrepresentable
 // in core WGSL (no sampler arrays at all, let alone nested). The hasOpaqueArrayResource
 // guard checked only ONE array level, so the array-of-array-of-sampledimage slipped
-// past: glslpp emitted sample calls referencing an UNDECLARED `s` and a malformed
+// past: zioshade emitted sample calls referencing an UNDECLARED `s` and a malformed
 // `s[0][1]_sampler` (naga "expected )") = silent-wrong. The guard must unwrap EVERY
 // array level and honest-error like the single-level form already does.
 test "wgsl: nested sampler array honest-errors (#170)" {
@@ -5703,7 +5703,7 @@ test "wgsl: nested sampler array honest-errors (#170)" {
         \\void main() { o = texture(s[0][1], c) + texture(s[1][0], c); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedSamplerArray, glslpp.spirvToWGSL(alloc, spirv, .{}));
+    try std.testing.expectError(error.UnsupportedSamplerArray, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #170: an SSBO that is an ARRAY of blocks whose struct holds a runtime-sized
@@ -5711,7 +5711,7 @@ test "wgsl: nested sampler array honest-errors (#170)" {
 // `{ data: array<vec4f> }`) is unrepresentable in core WGSL — a runtime-sized
 // array cannot nest inside a fixed-size array (naga "Base type for the array is
 // invalid"), and there is no core-WGSL dynamically-indexed array of runtime-sized
-// storage buffers. glslpp emitted the naga-rejected nesting = silent-wrong; it
+// storage buffers. zioshade emitted the naga-rejected nesting = silent-wrong; it
 // must honest-error instead. (A PLAIN SSBO with a runtime array still works.)
 test "wgsl: array of SSBO blocks with a runtime-array member honest-errors (#170)" {
     try std.testing.expectError(error.UnsupportedOp, compileCompToWgsl(
@@ -5723,7 +5723,7 @@ test "wgsl: array of SSBO blocks with a runtime-array member honest-errors (#170
         \\}
     ));
     // Pin the error to THIS guard (not some other UnsupportedOp path).
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "runtime-sized array member") != null);
 }
 
@@ -5738,7 +5738,7 @@ test "wgsl: array of SSBO blocks with a runtime-array member honest-errors (#170
 // this location is not permitted") = silent-wrong. Must emit a writable storage
 // buffer. (Distinct from the runtime-array case above, which is genuinely
 // unrepresentable and correctly honest-errors.) Uses glslang SPIR-V because
-// glslpp's own frontend emits the StorageBuffer class, which never hit the bug.
+// zioshade's own frontend emits the StorageBuffer class, which never hit the bug.
 test "wgsl: array of SSBO blocks with only fixed members emits writable storage (#170)" {
     const spirv = compileToSpirv("ssbo_array_fixed",
         \\#version 450
@@ -5750,7 +5750,7 @@ test "wgsl: array of SSBO blocks with only fixed members emits writable storage 
         \\}
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    const wgsl = try glslpp.spirvToWGSL(alloc, spirv, .{});
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<storage") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<uniform") == null);
@@ -5759,7 +5759,7 @@ test "wgsl: array of SSBO blocks with only fixed members emits writable storage 
 
 // #170: a UNIFORM block whose member offsets are not the WGSL-natural ones —
 // a NESTED struct (`Foo foo`) and an array member follow std140 rules that round
-// a struct/array member up to a 16-byte boundary. glslpp emitted the struct with
+// a struct/array member up to a 16-byte boundary. zioshade emitted the struct with
 // NO @align/@size attributes, so naga computes the natural offset (foo at byte 8,
 // right after two i32s) and rejects: "The struct member offset 8 is not a multiple
 // of the required alignment 16" on `var<uniform>` — silent-wrong. The fix reads the
@@ -5803,7 +5803,7 @@ test "wgsl: 2-row matrix in a uniform block honest-errors (#170)" {
         \\layout(location = 0) out vec4 o;
         \\void main() { vec2 r = ubo.m2 * ubo.tail.xy; o = vec4(r, 0.0, 0.0) + ubo.tail; }
     ));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "2-row matrix") != null);
 }
 
@@ -5832,7 +5832,7 @@ test "wgsl: multidim 2-row matrix array in a uniform block honest-errors (#170)"
         \\layout(location = 0) out vec4 o;
         \\void main() { vec2 r = ubo.m[1][2] * ubo.tail.xy; o = vec4(r, 0.0, 0.0) + ubo.tail; }
     ));
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "2-row matrix") != null);
 }
 
@@ -5900,7 +5900,7 @@ test "wgsl: constant shift amount >= 32 is masked so naga accepts it (#170)" {
 // constant over-shift mask. naga then rejects the const over-shift (creation error)
 // — and even an in-range signed shift would be rejected for the i32-typed amount
 // (`>>` needs a u32/vecN<u32> shift count). The arithmetic-shift arm must mask +
-// u32-cast exactly like the logical arms. As of the signedness fix glslpp's
+// u32-cast exactly like the logical arms. As of the signedness fix zioshade's
 // frontend now emits OpShiftRightArithmetic (195) DIRECTLY for a signed `>>` (it
 // previously lowered every `>>` to ShiftRightLogical) — so this exercises the full
 // frontend→WGSL path with no opcode rewrite.
@@ -5915,13 +5915,13 @@ test "wgsl: signed arithmetic constant over-shift is masked + u32-cast (#170)" {
         \\    o = vec4(float(r));
         \\}
     ;
-    const spirv = glslpp.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch return error.SkipZigTest;
+    const spirv = zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch return error.SkipZigTest;
     defer alloc.free(spirv);
     // The signedness fix lowers a signed `>>` to OpShiftRightArithmetic (195)
     // directly — assert exactly one, and NO logical shift (194) for this signed op.
     try std.testing.expectEqual(@as(u32, 1), countSpirvOpcode(spirv, 195));
     try std.testing.expectEqual(@as(u32, 0), countSpirvOpcode(spirv, 194));
-    const wgsl = glslpp.spirvToWGSL(alloc, spirv, .{}) catch return error.SkipZigTest;
+    const wgsl = zioshade.spirvToWGSL(alloc, spirv, .{}) catch return error.SkipZigTest;
     defer alloc.free(wgsl);
     try assertContains(wgsl, "u32(8u)"); // 40 & 31 = 8
     try nagaValidateOrSkip(wgsl, "signed-const-overshift-masked");
@@ -5978,7 +5978,7 @@ test "wgsl: switch-case-body constant over-shift is masked (#170 replay path)" {
 // #170: a std430 (or scalar-layout) push-constant / uniform block with a sub-16
 // array member packs the array TIGHTLY (`float Arr[4]` → ArrayStride 4). WGSL's
 // uniform address space requires every array element stride to be a multiple of
-// 16, and glslpp cannot widen the array to vec4 without reading WRONG DATA from
+// 16, and zioshade cannot widen the array to vec4 without reading WRONG DATA from
 // the host (the host packs at 0,4,8,12 not 0,16,32,48). So the block emitted as
 // `var<uniform>` is naga-rejected ("array stride 4 is not a multiple of 16") at
 // exit 0 = silent-wrong (tests/spirv-cross/push-constant.flatten.vert). It is
@@ -5991,7 +5991,7 @@ test "wgsl: std430 push-constant block with a sub-16 array member honest-errors 
         \\void main() { o = vec4(pc.Arr[2]); }
     ));
     // Pin the error to THIS guard (not some other UnsupportedOp path).
-    const detail = glslpp.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.MissingErrorDetail;
     try std.testing.expect(std.mem.indexOf(u8, detail, "stride") != null);
 }
 
@@ -6103,7 +6103,7 @@ test "wgsl: a module with more than 8 functions does not overflow the func-id li
 // declarations just vanished). A missing include must honest-error, like
 // glslangValidator/glslc, not be silently dropped.
 test "wgsl: an unresolved #include honest-errors instead of being silently skipped (#170)" {
-    try std.testing.expectError(error.PreprocessFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.PreprocessFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\#include "this_file_does_not_exist_zzz.glsl"
         \\layout(location = 0) out vec4 o;
@@ -6113,7 +6113,7 @@ test "wgsl: an unresolved #include honest-errors instead of being silently skipp
 
 // #170: a multi-declarator STRUCT member (`struct Ray { vec3 o, d; };` — two names
 // in one declaration) is valid GLSL (glslang accepts it; tests/spirv-cross/
-// ray_sphere_test.frag uses it), but glslpp's struct parser read only the first
+// ray_sphere_test.frag uses it), but zioshade's struct parser read only the first
 // name and then required a `;`, so the `, d` tripped it and the whole struct was
 // mis-parsed → a downstream InvalidAssignment/TypeMismatch on a valid shader.
 // Each comma-separated declarator must register its own member (with its own
@@ -6161,7 +6161,7 @@ test "wgsl: multi-declarator local of a struct type registers every name (#170)"
 
 // #170: an unsized local array with a sized initializer (`float a[] = float[](1,
 // 2, 3, 4);`) is valid GLSL — glslang infers the length from the initializer.
-// glslpp left the declared type unsized (size 0) so it mismatched the size-4
+// zioshade left the declared type unsized (size 0) so it mismatched the size-4
 // initializer (TypeMismatch) on a valid shader. Infer the length from the init.
 test "wgsl: unsized local array infers its length from the initializer (#170)" {
     const wgsl = try compileToWgsl(
@@ -6196,7 +6196,7 @@ test "wgsl: vecN from array elements stays per-index, not an array swizzle (#170
 }
 
 // #170: a vector constructor that TRUNCATES a larger vector (`vec3(aVec4)` →
-// take the first 3 components) is valid GLSL, but glslpp had no `arg_n > n` case
+// take the first 3 components) is valid GLSL, but zioshade had no `arg_n > n` case
 // in the single-arg vector constructor — the vec4 fell into the scalar-splat
 // path, emitting `composite_construct %float %vec4` (invalid SPIR-V) + splat, so
 // every backend produced `vec3(x,x,x)` and naga rejected the WGSL. The first n
@@ -6232,7 +6232,7 @@ test "wgsl: cross-type vector truncation converts each component (#170)" {
 }
 
 // #170: matrix EXPANSION — `mat4(aMat3)` places the mat3 in the top-left and
-// fills the rest from the identity (valid GLSL). glslpp's matrix-from-matrix
+// fills the rest from the identity (valid GLSL). zioshade's matrix-from-matrix
 // path only handled shrink/equal; for expansion it extracted a source column
 // that doesn't exist (`OpCompositeExtract ... 3` from a 3-column matrix) and
 // used too-short columns — invalid SPIR-V on a valid shader. (Shrink
@@ -6256,7 +6256,7 @@ test "wgsl: matrix expansion mat4(mat3) fills from identity, not OOB (#170)" {
 // #170: GLSL applies implicit scalar conversion when a non-literal argument's type
 // differs from the parameter's (`f(intVar)` to a float param) and when a returned
 // value differs from the function's return type (`return intVar` from a float fn).
-// glslpp passed/returned the int id unconverted → an FMul/composite on an int
+// zioshade passed/returned the int id unconverted → an FMul/composite on an int
 // operand = invalid SPIR-V on a valid shader (int literals already folded).
 test "wgsl: implicit int->float at a function argument is converted (#170)" {
     const wgsl = try compileToWgsl(
@@ -6357,7 +6357,7 @@ test "wgsl: nested local-only structs emit inner before outer (#170)" {
 
 // #170: GLSL builds a matrix column-major from a flat run of scalar/vector
 // components — `mat2(vec4(...))` fills column 0 with (x,y) and column 1 with
-// (z,w). glslpp passed the single vec4 straight into the matrix constructor, so
+// (z,w). zioshade passed the single vec4 straight into the matrix constructor, so
 // it emitted `OpConstantComposite %mat2 %vec4` — ONE constituent where mat2 needs
 // TWO v2 columns = invalid SPIR-V (spirv-val: "Constituent count does not match
 // matrix column count"), and the WGSL came out as `mat2x2f(vec4f(...))` which
@@ -6413,7 +6413,7 @@ test "wgsl: matrix from one vector per column is unchanged (#170)" {
 }
 
 // #170: GLSL `==` / `!=` on an AGGREGATE (struct, array, matrix) compares
-// structurally and returns a scalar bool. glslpp emitted OpIEqual/OpFOrdEqual
+// structurally and returns a scalar bool. zioshade emitted OpIEqual/OpFOrdEqual
 // directly on the struct/array/matrix operand — invalid SPIR-V (spirv-val:
 // "Expected operands to be scalar or vector int/float") and naga-rejected WGSL
 // ("Incompatible operands: Equal(Struct {...})"). Lower to a tree of per-leaf
@@ -6505,7 +6505,7 @@ test "wgsl: matrix equality lowers per-column, not a matrix == (#170)" {
 
 // #170: GLSL implicitly converts the RHS to the lvalue type at a MULTI-component
 // swizzle write — `v.xy = ivec2(...)` converts the ivec2 to vec2 before storing.
-// glslpp fed the unconverted ivec2 straight into the OpVectorShuffle that merges
+// zioshade fed the unconverted ivec2 straight into the OpVectorShuffle that merges
 // it with the float vector `v`, mixing int and float components = invalid SPIR-V
 // (spirv-val: "The Component Type of Vector 2 must be the same as ResultType") and
 // naga-rejected WGSL. The single-component path (`v.x = intVar`) already converted;
@@ -6527,7 +6527,7 @@ test "wgsl: multi-component swizzle write converts a cross-type RHS (#170)" {
 
 // #170: the same implicit conversion is needed at a multi-component swizzle
 // COMPOUND assignment — `v.xy += ivec2(...)` converts the ivec2 to vec2 before
-// the add. glslpp applied the float op (fadd) directly to the unconverted ivec2
+// the add. zioshade applied the float op (fadd) directly to the unconverted ivec2
 // operand = invalid SPIR-V ("Expected arithmetic operands to be of Result Type").
 // Sibling of the plain swizzle-write conversion fix.
 test "wgsl: multi-component swizzle compound-assign converts a cross-type vector RHS (#170)" {
@@ -6601,7 +6601,7 @@ test "wgsl: matrix multiply-assign by an int scalar converts then scales (#170)"
 }
 
 // #170: binary `mat / scalar` divides every component by the scalar, but SPIR-V
-// has no matrix OpFDiv — glslpp emitted OpFDiv on the matrix operand = invalid
+// has no matrix OpFDiv — zioshade emitted OpFDiv on the matrix operand = invalid
 // SPIR-V ("Expected floating scalar or vector type") and naga-rejected WGSL
 // (`mat2x2 / f32`). Lower as `mat * (1.0/scalar)` via OpMatrixTimesScalar (the
 // binary analog of the `mat /= scalar` compound fix; glslang lowers it the same).
@@ -6637,7 +6637,7 @@ test "wgsl: binary matrix divided by an int scalar converts then scales (#170)" 
 
 // #170: component-wise `mat + scalar` / `mat - scalar` / `scalar - mat` / `scalar
 // / mat` apply the scalar to every matrix component (valid GLSL), but SPIR-V has
-// no matrix OpFAdd/OpFSub/OpFDiv with a scalar operand — glslpp emitted those on a
+// no matrix OpFAdd/OpFSub/OpFDiv with a scalar operand — zioshade emitted those on a
 // (matrix, scalar) pair = invalid SPIR-V and naga-rejected WGSL. Splat the scalar
 // into a matrix and reuse the column-wise matrix-matrix op. (`mat * scalar` and
 // `mat / scalar` are the OpMatrixTimesScalar family, handled separately.)
@@ -6703,7 +6703,7 @@ test "wgsl: matrix plus an int scalar converts then splats (#170)" {
 
 // #170: compound `mat += scalar` / `mat -= scalar` apply the scalar to every
 // component (valid GLSL), but SPIR-V has no matrix OpFAdd/OpFSub with a scalar
-// operand — glslpp emitted those on a (matrix, scalar) pair = invalid SPIR-V and
+// operand — zioshade emitted those on a (matrix, scalar) pair = invalid SPIR-V and
 // naga-rejected WGSL. The compound analog of the binary `mat ± scalar` splat:
 // splat the scalar into a matrix and reuse the column-wise matrix-matrix add/sub.
 test "wgsl: matrix plus-assign a scalar splats and adds component-wise (#170)" {
@@ -6738,7 +6738,7 @@ test "wgsl: matrix minus-assign an int scalar converts then splats (#170)" {
 
 // #170: a multi-component swizzle WRITE whose base is an addressable lvalue that
 // is NOT a bare identifier (`a[i].yz = ...` on an array element, `s.v.xy = ...` on
-// a struct member) is valid GLSL, but glslpp's plain swizzle-write path only
+// a struct member) is valid GLSL, but zioshade's plain swizzle-write path only
 // handled bare-identifier bases — anything else fell through to a generic lvalue
 // assignment that cannot address a multi-component swizzle (error.InvalidAssignment),
 // wrongly rejecting valid GLSL. Take a pointer to the base vector via analyzeLValue
@@ -6800,7 +6800,7 @@ test "wgsl: comma operator in an initializer yields the last operand (#170)" {
 }
 
 // #170: a const-qualified integer global used as an array size (`const int N = 3;
-// float a[N];`) is valid, common GLSL, but glslpp's array-size resolver only
+// float a[N];`) is valid, common GLSL, but zioshade's array-size resolver only
 // handled integer literals and gl_WorkGroupSize (and early-returned for any
 // non-compute stage that has no local_size) — a const-global name failed with
 // SemanticFailed, wrongly rejecting valid GLSL. Resolve the name to its const
@@ -6878,7 +6878,7 @@ test "wgsl: an array size expression starting with a literal is resolved (#170)"
 
 // #170: the C preprocessor expands a function-like macro's arguments BEFORE
 // substituting them, so a macro call used as an argument (`ADD(SQ(t), 1.0)`)
-// expands the inner `SQ(t)` first. glslpp substituted argument tokens raw, so the
+// expands the inner `SQ(t)` first. zioshade substituted argument tokens raw, so the
 // nested `SQ(t)` was left unexpanded and reached the parser as a call to an
 // undefined `SQ` (UndeclaredIdentifier) — valid GLSL wrongly rejected. A single
 // (non-nested) function macro already worked.
@@ -6900,7 +6900,7 @@ test "wgsl: a function-like macro call used as a macro argument is expanded (#17
 
 // #170: an object-like macro whose body is itself a macro (`#define A B` /
 // `#define B 5.0`, or `#define SQT SQ(2.0)`) must have its replacement RESCANNED
-// for further macros — the C preprocessor re-expands the result. glslpp emitted
+// for further macros — the C preprocessor re-expands the result. zioshade emitted
 // the object-macro body raw, so `A` reached the parser as the undefined identifier
 // `B` (and `SQT` as a call to undefined `SQ`), wrongly rejecting valid GLSL. Also,
 // `#define H (W/2)` (a SPACE before the `(`) is an object macro whose body is
@@ -6931,7 +6931,7 @@ test "wgsl: an object macro whose body is another macro is rescanned (#170)" {
 
 // #170: a function-like macro's replacement list must also be RESCANNED for
 // further macros — `#define WRAP(z) ADD(z, 1.0)` expands to `ADD(t, 1.0)`, and
-// that `ADD(...)` must then expand too. glslpp emitted the substituted body raw,
+// that `ADD(...)` must then expand too. zioshade emitted the substituted body raw,
 // so the body's `ADD` call reached the parser undefined, wrongly rejecting valid
 // GLSL. (The object-macro body rescan and argument pre-expansion landed earlier;
 // this completes the rescan for the function-macro body.)
