@@ -918,7 +918,7 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
 
     var out_param_info = std.AutoHashMap(u32, std.ArrayList(usize)).init(aa);
     defer { var it = out_param_info.iterator(); while(it.next())|e| e.value_ptr.deinit(aa); out_param_info.deinit(); }
-    detectOutParams(&module, entry_id, &out_param_info, aa);
+    common.detectOutParams(module.instructions, module.id_defs, entry_id, &out_param_info, aa);
 
     for (func_ids.items) |fid| { if (fid == entry_id) continue; try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, options.version); }
     try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, options.version);
@@ -1186,16 +1186,6 @@ fn emitOneStructForwardDecl(m: *const ParsedModule, names: *std.AutoHashMap(u32,
     return common.commonEmitOneStructForwardDecl(m, names, type_id, w, alloc, emitted, emitted_names, glslType, getMemberName);
 }
 
-fn detectOutParams(m: *const ParsedModule, entry_id: u32, opi: *std.AutoHashMap(u32, std.ArrayList(usize)), alloc: std.mem.Allocator) void {
-    const fi = if (entry_id < m.id_defs.len) m.id_defs[entry_id] orelse return else return;
-    var ov = std.AutoHashMap(u32, void).init(alloc); defer ov.deinit();
-    for (m.instructions) |inst| { if (inst.op == .Variable and inst.words.len >= 4) { const sc: spirv.StorageClass = @enumFromInt(inst.words[3]); if (sc == .Output) ov.put(inst.words[2], {}) catch {}; } }
-    var lfo = std.AutoHashMap(u32, void).init(alloc); defer lfo.deinit();
-    for (m.instructions) |inst| { if (inst.op == .Load and inst.words.len >= 4) { if (ov.contains(inst.words[3])) lfo.put(inst.words[2], {}) catch {}; } }
-    var idx = fi + 1;
-    while (idx < m.instructions.len) : (idx += 1) { const inst = m.instructions[idx]; if (inst.op == .FunctionEnd) break; if (inst.op != .FunctionCall or inst.words.len < 4) continue; const cfid = inst.words[3]; for (inst.words[4..], 0..) |aid, pidx| { if (ov.contains(aid) or lfo.contains(aid)) { const gop = opi.getOrPut(cfid) catch continue; if(!gop.found_existing) gop.value_ptr.* = std.ArrayList(usize).initCapacity(alloc, 4) catch continue; gop.value_ptr.append(alloc, pidx) catch {}; } } }
-}
-
 // ---- Std450 → GLSL function name mapping ----
 fn std450ToGlsl(val: u32) ?[]const u8 {
     return switch (val) {
@@ -1299,39 +1289,14 @@ fn emitFunction(
         }
     }
 
-    // Out-param detection: Variable + Store(param) pattern
-    var out_param_var_ids = std.AutoHashMap(u32, u32).init(alloc);
-    defer out_param_var_ids.deinit();
-    {
-        var si = func_idx + 1;
-        while (si < m.instructions.len) : (si += 1) {
-            const scan = m.instructions[si];
-            if (scan.op == .FunctionEnd) break;
-            if (scan.op == .Label or scan.op == .FunctionParameter) continue;
-            if (scan.op == .Variable and scan.words.len >= 4) {
-                const sc: spirv.StorageClass = @enumFromInt(scan.words[3]);
-                if (sc == .Function) {
-                    const vid = scan.words[2];
-                    if (si + 1 < m.instructions.len) {
-                        const next = m.instructions[si + 1];
-                        if (next.op == .Store and next.words.len >= 3 and next.words[1] == vid) {
-                            const sv = next.words[2];
-                            for (param_ids.items) |pid| {
-                                if (pid == sv) {
-                                    out_param_var_ids.put(pid, vid) catch {};
-                                    const pn = names.get(pid) orelse "p";
-                                    const pa = alloc.dupe(u8, pn) catch continue;
-                                    if (names.fetchPut(vid, pa) catch null) |old| alloc.free(old.value);
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            if (scan.op != .Variable and scan.op != .Store) break;
-        }
-    }
+    // #414: out/inout params are recognized by their SPIR-V type ONLY (a
+    // pointer FunctionParameter, the frontend's GLSL out/inout lowering). The
+    // former `Variable + Store(param)` prologue heuristic misread GLSL's
+    // by-value copy of an `in` param into a mutable local (`float d = p;`) as
+    // an out param: `out` signature (argument value never arrives), the local
+    // aliased to the param name (a redefinition glslang rejects), and a
+    // self-assign of an undefined value. A by-value param can never write back
+    // to the caller, so that promotion was silent-wrong by construction.
 
     // Call-site out-param detection
     // For each FunctionCall in this function, check if arguments match out-param patterns
@@ -1353,8 +1318,6 @@ fn emitFunction(
                 if (arg_def.words.len < 4) continue;
                 const asc: spirv.StorageClass = @enumFromInt(arg_def.words[3]);
                 if (asc != .Function) continue;
-                // Don't rename if this variable already got a name from definition-level detection
-                if (out_param_var_ids.contains(arg_id)) continue;
                 // Get the parameter name from the called function
                 const called_param_ids = blk: {
                     var cpi = std.ArrayList(u32).initCapacity(alloc, 4) catch break :blk &.{};
@@ -1450,17 +1413,17 @@ fn emitFunction(
         const pn = names.get(pid) orelse "p";
         const pti = getDef(m, pi.words[1]);
         var is_out = false;
+        var is_ptr = false;
         var itid = pi.words[1];
         if (pti) |pt| {
             if (pt.op == .TypePointer and pt.words.len > 3) {
                 itid = pt.words[3];
+                is_ptr = true;
             }
         }
-        if (out_param_var_ids.contains(pid)) {
-            is_out = true;
-            itid = pi.words[1];
-        }
-        if (!is_out) {
+        // #414: only a POINTER param can be an out param; a by-value param is
+        // a read-only copy and must keep its plain value signature.
+        if (is_ptr) {
             if (opi.get(func_id)) |oindices| {
                 for (oindices.items) |oi| {
                     if (oi == i) {
