@@ -17,6 +17,14 @@ pub threadlocal var last_error_inner: []const u8 = "";
 pub threadlocal var last_error_line: u32 = 0;
 pub threadlocal var last_error_column: u32 = 0;
 
+/// Upper bound on the element count of a fixed-size array that may be lowered
+/// into per-element IR (currently wholesale array equality in
+/// `emitAggregateEqual`). Above this, the unrolled IR would be pathological, so
+/// the operation is an honest error rather than an out-of-memory crash. 1M keeps
+/// every realistic shader well within bounds while capping a hostile
+/// `float a[100000000]; a == b;` at a bounded, fast rejection.
+pub const max_aggregate_elements: u32 = 1_000_000;
+
 /// Stable backing storage for the error-context strings. `last_error_ctx` /
 /// `last_error_inner` are usually slices into the source the parser read. When
 /// that source is a transient buffer the compiler allocates and frees on return
@@ -1388,6 +1396,15 @@ const Analyzer = struct {
         }
         // Array → AND of per-element equality.
         if (ty == .array) {
+            // Elementwise array equality unrolls into O(size) IR. A hostile
+            // `float a[100000000]; a == b;` would emit a hundred million
+            // comparisons and exhaust memory. Reject an absurd fixed size before
+            // emitting any IR — an honest error, not an OOM. The cap is far above
+            // any realistic array a shader would compare wholesale.
+            if (ty.array.size > max_aggregate_elements) {
+                last_error_ctx = "array-too-large-for-equality";
+                return error.SemanticFailed;
+            }
             const elem = ty.array.base.*;
             var acc: ?u32 = null;
             var i: u32 = 0;

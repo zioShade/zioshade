@@ -955,8 +955,11 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     if (words[0] != spirv.MAGIC) return error.InvalidSpirvMagic;
     var instructions = std.ArrayList(Instruction).initCapacity(alloc, words.len / 4) catch return error.OutOfMemory;
     errdefer instructions.deinit(alloc);
-    // Use flat array for ID lookups — O(1) without hashing
+    // Use flat array for ID lookups — O(1) without hashing. Reject an absurd id
+    // bound first: a hostile ~4-billion bound would make this allocation and its
+    // zero-fill hang. A real module never has more ids than words.
     const bound = if (words.len > 3) words[3] else 0;
+    if (bound > words.len) return error.InvalidSpirv;
     const id_defs = try alloc.alloc(?usize, bound);
     @memset(id_defs, null);
     var i: usize = 5;

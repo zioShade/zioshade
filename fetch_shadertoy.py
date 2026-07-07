@@ -14,7 +14,13 @@ import time
 import urllib.request
 import urllib.error
 
-SHADERTOY_API_KEY = "BHd8dM"  # Public demo key
+SHADERTOY_API_KEY = os.environ.get("SHADERTOY_API_KEY")
+if not SHADERTOY_API_KEY:
+    sys.exit(
+        "error: SHADERTOY_API_KEY is not set.\n"
+        "Get a key from https://www.shadertoy.com/howto#q2 and export it:\n"
+        "  export SHADERTOY_API_KEY=your_key_here"
+    )
 SHADERTOY_API_URL = "https://www.shadertoy.com/api/v1/shaders/{}"
 
 # Diverse set of popular Shadertoy shaders covering different feature sets:

@@ -354,6 +354,13 @@ pub fn compileToSPIRV(
         last_compile_detail = .preprocess_failed;
         return error.PreprocessFailed;
     }
+    // A macro fan-out that exceeded the expansion budget is likewise an honest
+    // error, not a silent half-expansion (the `catch tokens` fallback would
+    // otherwise compile the un-expanded source).
+    if (pp.expansion_budget_exceeded) {
+        last_compile_detail = .preprocess_failed;
+        return error.PreprocessFailed;
+    }
 
     // The parser reads token text by offset from the source; synthetic preprocessor
     // tokens (## paste, # stringify, __LINE__, __VERSION__) carry offsets past the
@@ -537,6 +544,13 @@ pub fn compileToSPIRVNoOpt(
         last_compile_detail = .preprocess_failed;
         return error.PreprocessFailed;
     }
+    // A macro fan-out that exceeded the expansion budget is likewise an honest
+    // error, not a silent half-expansion (the `catch tokens` fallback would
+    // otherwise compile the un-expanded source).
+    if (pp.expansion_budget_exceeded) {
+        last_compile_detail = .preprocess_failed;
+        return error.PreprocessFailed;
+    }
 
     // Read the extended source so synthetic preprocessor tokens (## paste, # stringify,
     // __LINE__, __VERSION__), whose offsets point past the original source into the
@@ -616,6 +630,13 @@ pub fn compileToSPIRVStrict(
     defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
     // An unresolved #include is an honest error, not a silent skip (#170).
     if (pp.unresolved_include) {
+        last_compile_detail = .preprocess_failed;
+        return error.PreprocessFailed;
+    }
+    // A macro fan-out that exceeded the expansion budget is likewise an honest
+    // error, not a silent half-expansion (the `catch tokens` fallback would
+    // otherwise compile the un-expanded source).
+    if (pp.expansion_budget_exceeded) {
         last_compile_detail = .preprocess_failed;
         return error.PreprocessFailed;
     }
@@ -816,12 +837,18 @@ pub fn linkSPIRVModules(alloc: std.mem.Allocator, modules: []const []const u32) 
     var id_offsets = try alloc.alloc(u32, modules.len);
     defer alloc.free(id_offsets);
 
+    // The first module must have a header (magic, version, gen, bound, schema);
+    // reading its bound word without a length guard was an out-of-bounds read on
+    // a truncated module.
+    if (modules[0].len < 4) return error.CodegenFailed;
     var next_id: u32 = modules[0][3]; // bound of first module
     id_offsets[0] = 0;
     for (1..modules.len) |i| {
         id_offsets[i] = next_id;
         if (modules[i].len >= 4) {
-            next_id += modules[i][3]; // add bound of this module
+            // Summing bounds can overflow u32 on hostile input; a wrapping add
+            // would corrupt the relocation. Fail honestly instead.
+            next_id = std.math.add(u32, next_id, modules[i][3]) catch return error.CodegenFailed;
         }
     }
 
@@ -1549,4 +1576,76 @@ test "compileGlslToWgsl basic" {
     defer alloc.free(wgsl);
     try std.testing.expect(wgsl.len > 0);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@fragment") != null);
+}
+
+// ─── Hostile-input hardening regression tests (Wave 1) ───────────────
+//
+// Each exercises a previously crashing / hanging class on the saved probe
+// shapes. Success = an honest error (or valid output), never a panic/hang.
+
+test "hostile C5: wholesale equality of an absurd array is an honest error, not OOM" {
+    // Mirrors probe/repro_arreq.frag.
+    const alloc = std.testing.allocator;
+    const source =
+        \\void main(){ float a[100000000]; float b[100000000]; if (a==b) gl_FragDepth=1.0; }
+    ;
+    try std.testing.expectError(error.SemanticFailed, compileToSPIRV(alloc, source, .{ .stage = .fragment }));
+}
+
+test "hostile C1: the long-name repro compiles instead of overflowing the name buffer" {
+    // probe/repro_longname.frag's 401-char member name used to overflow a 256-byte
+    // codegen stack buffer. It is legal GLSL (under the lexer's 1024 cap), so it
+    // must now compile to valid SPIR-V.
+    const alloc = std.testing.allocator;
+    const source = try alloc.dupeZ(u8, @embedFile("testdata/hostile_longname.frag"));
+    defer alloc.free(source);
+    const words = try compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(words);
+    try std.testing.expectEqual(@as(u32, spirv.MAGIC), words[0]);
+}
+
+test "hostile C2: garbage SPIR-V is rejected by every backend, no hang" {
+    // probe/garbage.spv: a ~4-billion id bound whose id_defs zero-fill used to
+    // touch tens of gigabytes and hang. All four backends must honest-error.
+    const alloc = std.testing.allocator;
+    const bytes = @embedFile("testdata/hostile_garbage.spv");
+    const words = try alloc.alloc(u32, bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), bytes[0 .. words.len * 4]);
+
+    try std.testing.expectError(error.InvalidSpirv, spirvToHLSL(alloc, words, .{}));
+    try std.testing.expectError(error.InvalidSpirv, spirvToMSL(alloc, words, .{}));
+    try std.testing.expectError(error.InvalidSpirv, spirvToWGSL(alloc, words, .{}));
+    try std.testing.expectError(error.InvalidSpirv, spirvToGLSL(alloc, words, .{}));
+}
+
+test "hostile C2: malformed function SPIR-V does not crash any backend" {
+    // probe/crash_hlsl.spv: an output-variable id past the module bound plus an
+    // absurd access-chain index used to drive out-of-bounds reads and null
+    // derefs in emitFunction. Every backend must return WITHOUT panicking; a
+    // value or an honest error are both acceptable.
+    const alloc = std.testing.allocator;
+    const bytes = @embedFile("testdata/hostile_crash_hlsl.spv");
+    const words = try alloc.alloc(u32, bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), bytes[0 .. words.len * 4]);
+
+    inline for (.{ spirvToHLSL, spirvToMSL, spirvToWGSL, spirvToGLSL }) |backend| {
+        if (backend(alloc, words, .{})) |out| {
+            alloc.free(out);
+        } else |_| {}
+    }
+}
+
+test "hostile: linkSPIRVModules guards a short first module and a bound overflow" {
+    const alloc = std.testing.allocator;
+    // First module shorter than the 4-word header prefix must not read words[3].
+    const short = [_]u32{ spirv.MAGIC, 0, 0 };
+    const other = [_]u32{ spirv.MAGIC, 0, 0, 1, 0 };
+    try std.testing.expectError(error.CodegenFailed, linkSPIRVModules(alloc, &.{ short[0..], other[0..] }));
+
+    // Two modules whose bounds sum past u32 must fail rather than wrap.
+    const big_a = [_]u32{ spirv.MAGIC, 0, 0, 0xFFFF_FFFF, 0 };
+    const big_b = [_]u32{ spirv.MAGIC, 0, 0, 0x10, 0 };
+    try std.testing.expectError(error.CodegenFailed, linkSPIRVModules(alloc, &.{ big_a[0..], big_b[0..] }));
 }
