@@ -1,6 +1,13 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 pub fn build(b: *std.Build) void {
+    // Fail with one actionable line on unsupported Zig versions rather than a
+    // cryptic linkLibrary/stdlib error deep in the build. zioshade pins 0.15.2.
+    if (builtin.zig_version.minor != 15) {
+        @compileError("zioshade requires Zig 0.15.2. See the README (mise install, or ziglang.org/download/0.15.2). 0.16 support is tracked in the issue tracker.");
+    }
+
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
@@ -35,8 +42,10 @@ pub fn build(b: *std.Build) void {
         .name = "zioshade",
         .root_module = cli_mod,
     });
-    b.installArtifact(cli_exe);
-    cli_step.dependOn(&cli_exe.step);
+    // Install the CLI so `zig build cli` actually produces zig-out/bin/zioshade
+    // (a bare dependency on the compile step builds it but never copies it out).
+    const cli_install = b.addInstallArtifact(cli_exe, .{});
+    cli_step.dependOn(&cli_install.step);
 
     // C ABI libraries (M7.2) — build with: zig build c-lib
     //

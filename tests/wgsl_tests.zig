@@ -289,7 +289,13 @@ fn spirvHasDecoration(words: []const u32, decoration: u32) bool {
 
 fn runWgslTest(test_case: ShaderTest) !void {
     const spirv = compileToSpirv(test_case.name, test_case.source) catch |err| {
-        std.debug.print("FAIL [{s}]: glslang failed: {}\n", .{ test_case.name, err });
+        // A missing glslang oracle is a skip, not a failure: label it as such so
+        // a fresh `zig build test` (which still exits 0) does not look broken.
+        if (err == error.SkipZigTest) {
+            std.debug.print("SKIP [{s}]: glslang oracle unavailable\n", .{test_case.name});
+        } else {
+            std.debug.print("FAIL [{s}]: glslang failed: {}\n", .{ test_case.name, err });
+        }
         return err;
     };
     defer alloc.free(spirv);

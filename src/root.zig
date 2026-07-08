@@ -1145,10 +1145,14 @@ pub fn compileToSPIRVWithDiagnostics(
         // that the sink already surfaced per-statement.
         if (diagnostics.items.len == 0) {
             const detail = last_compile_detail orelse return result;
-            const msg = std.fmt.allocPrint(alloc, "{s}: {s}", .{
-                @tagName(detail),
-                if (semantic.last_error_inner.len > 0) semantic.last_error_inner else semantic.last_error_ctx,
-            }) catch "unknown error";
+            const ctx = if (semantic.last_error_inner.len > 0) semantic.last_error_inner else semantic.last_error_ctx;
+            // Never emit a dangling `semantic_failed: ` with nothing after the
+            // colon: when no construct/context was captured, describe the phase
+            // (the category) so the diagnostic still carries a real message.
+            const msg = if (ctx.len > 0)
+                std.fmt.allocPrint(alloc, "{s}: {s}", .{ @tagName(detail), ctx }) catch "unknown error"
+            else
+                std.fmt.allocPrint(alloc, "{s} (no specific location; compile with the library diagnostics API for details)", .{@tagName(detail)}) catch "unknown error";
 
             try diagnostics.append(alloc, .{
                 .kind = .@"error",

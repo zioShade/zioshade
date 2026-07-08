@@ -308,7 +308,7 @@ wintty compiles ~10 shaders at startup:
 
 ## Roadmap
 
-A comprehensive plan to close the remaining gaps and reach drop-in parity with glslang + SPIRV-Cross is documented at [`docs/roadmap/2026-05-26-drop-in-replacement-plan.md`](roadmap/2026-05-26-drop-in-replacement-plan.md). It is organized as 8 TDD milestones (~50 bite-sized tasks) and estimated at 2–3 weeks of focused work.
+A comprehensive plan to close the remaining gaps and reach drop-in parity with glslang + SPIRV-Cross is maintained as an internal planning document (not published in this repo). It is organized as 8 TDD milestones (~50 bite-sized tasks) and estimated at 2-3 weeks of focused work.
 
 ## Other gaps flagged during pre-release audit
 
