@@ -808,8 +808,8 @@ pub fn build(b: *std.Build) void {
     lib_bench_exe.linkLibC();
     lib_bench_exe.addLibraryPath(.{ .cwd_relative = spvc_lib });
     for ([_][]const u8{
-        "spirv-cross-c",    "spirv-cross-core", "spirv-cross-glsl", "spirv-cross-hlsl",
-        "spirv-cross-msl",  "spirv-cross-cpp",  "spirv-cross-reflect", "spirv-cross-util",
+        "spirv-cross-c",   "spirv-cross-core", "spirv-cross-glsl",    "spirv-cross-hlsl",
+        "spirv-cross-msl", "spirv-cross-cpp",  "spirv-cross-reflect", "spirv-cross-util",
     }) |l| lib_bench_exe.linkSystemLibrary(l);
     const run_lib_bench = b.addRunArtifact(lib_bench_exe);
     if (b.args) |a| for (a) |arg| run_lib_bench.addArg(arg);
@@ -853,28 +853,26 @@ pub fn build(b: *std.Build) void {
     const validate_hlsl_step = b.step("validate-hlsl", "Validate wintty shader HLSL output with DXC");
     const dxc_run = b.addSystemCommand(&.{"dxc"});
     dxc_run.addArgs(&.{
-        "-T", "ps_6_0",
-        "-E", "main",
-        "-Wno-ignored-attributes",
-        "tests/wintty/crt_output.hlsl",
+        "-T",                      "ps_6_0",
+        "-E",                      "main",
+        "-Wno-ignored-attributes", "tests/wintty/crt_output.hlsl",
     });
     validate_hlsl_step.dependOn(&dxc_run.step);
 
     // Validate focus shader too
     const dxc_focus = b.addSystemCommand(&.{"dxc"});
     dxc_focus.addArgs(&.{
-        "-T", "ps_6_0",
-        "-E", "main",
-        "-Wno-ignored-attributes",
-        "tests/wintty/focus_output.hlsl",
+        "-T",                      "ps_6_0",
+        "-E",                      "main",
+        "-Wno-ignored-attributes", "tests/wintty/focus_output.hlsl",
     });
     validate_hlsl_step.dependOn(&dxc_focus.step);
 
     // glslangValidator GLSL validation — run with: zig build validate-glsl
     const validate_glsl_step = b.step("validate-glsl", "Validate wintty shader GLSL output with glslangValidator");
-    const glsl_val_crt = b.addSystemCommand(&.{"glslangValidator", "-S", "frag", "tests/wintty/crt_output.glsl"});
+    const glsl_val_crt = b.addSystemCommand(&.{ "glslangValidator", "-S", "frag", "tests/wintty/crt_output.glsl" });
     validate_glsl_step.dependOn(&glsl_val_crt.step);
-    const glsl_val_focus = b.addSystemCommand(&.{"glslangValidator", "-S", "frag", "tests/wintty/focus_output.glsl"});
+    const glsl_val_focus = b.addSystemCommand(&.{ "glslangValidator", "-S", "frag", "tests/wintty/focus_output.glsl" });
     validate_glsl_step.dependOn(&glsl_val_focus.step);
 
     // Run all validations — run with: zig build validate
@@ -1030,4 +1028,44 @@ pub fn build(b: *std.Build) void {
         const ex_install = b.addInstallArtifact(ex_exe, .{});
         examples_step.dependOn(&ex_install.step);
     }
+
+    // WASM playground module — build with: zig build wasm
+    //
+    // Compiles the library plus the thin C-ABI shim in src/wasm.zig to a
+    // freestanding wasm32 module for the browser playground under web/. The
+    // module has no entry point (it is a library the JS host drives) and no
+    // libc; std.heap.wasm_allocator backs all allocation.
+    //
+    // We pin the target and optimize mode rather than reading the standard
+    // options because a playground wants a small, reproducible artifact
+    // regardless of how the host `zig build` was invoked. build.zig.zon stays
+    // dependency-free: this is pure vanilla std.Build.
+    const wasm_step = b.step("wasm", "Build the WASM playground module (web/) targeting wasm32-freestanding");
+    const wasm_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const wasm_lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/root.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    const wasm_mod = b.createModule(.{
+        .root_source_file = b.path("src/wasm.zig"),
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    });
+    wasm_mod.addImport("zioshade", wasm_lib_mod);
+    const wasm_exe = b.addExecutable(.{
+        .name = "zioshade-playground",
+        .root_module = wasm_mod,
+    });
+    // A wasm reactor module: no `main`, only the exported C-ABI functions.
+    wasm_exe.entry = .disabled;
+    // Keep the `export fn` symbols in the final binary so the JS host can
+    // import them.
+    wasm_exe.rdynamic = true;
+    // Install the .wasm into zig-out/bin/ so it can be copied next to web/.
+    const wasm_install = b.addInstallArtifact(wasm_exe, .{});
+    wasm_step.dependOn(&wasm_install.step);
 }
