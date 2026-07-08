@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 const std = @import("std");
+const builtin = @import("builtin");
 const lexer = @import("lexer.zig");
 
 pub const Preprocessor = struct {
@@ -426,37 +427,43 @@ pub const Preprocessor = struct {
             return reader(path);
         }
 
-        // Try relative to source file
-        if (!is_system and self.source_file_path.len > 0) {
-            var dir_end = self.source_file_path.len;
-            while (dir_end > 0 and self.source_file_path[dir_end - 1] != '/' and self.source_file_path[dir_end - 1] != '\\') dir_end -= 1;
-            const dir_part = self.source_file_path[0..dir_end];
+        // Filesystem-backed include resolution. Freestanding targets (the wasm
+        // playground) have no std.fs/std.posix, so we compile these branches out
+        // there: on wasm, includes must come through the `file_reader` callback
+        // above, not from disk. Everywhere else the disk fallbacks stay.
+        if (builtin.os.tag != .freestanding) {
+            // Try relative to source file
+            if (!is_system and self.source_file_path.len > 0) {
+                var dir_end = self.source_file_path.len;
+                while (dir_end > 0 and self.source_file_path[dir_end - 1] != '/' and self.source_file_path[dir_end - 1] != '\\') dir_end -= 1;
+                const dir_part = self.source_file_path[0..dir_end];
 
-            var full_path_buf: [4096]u8 = undefined;
-            const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}{s}", .{ dir_part, path }) catch return error.FileNotFound;
+                var full_path_buf: [4096]u8 = undefined;
+                const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}{s}", .{ dir_part, path }) catch return error.FileNotFound;
 
-            const file = std.fs.cwd().openFile(full_path, .{}) catch return error.FileNotFound;
-            defer file.close();
-            const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
-            // Null-terminate for lexer
-            const z = try self.alloc.dupeZ(u8, raw);
-            self.alloc.free(raw);
-            try self.included_sources.append(self.alloc, z);
-            return z;
-        }
+                const file = std.fs.cwd().openFile(full_path, .{}) catch return error.FileNotFound;
+                defer file.close();
+                const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+                // Null-terminate for lexer
+                const z = try self.alloc.dupeZ(u8, raw);
+                self.alloc.free(raw);
+                try self.included_sources.append(self.alloc, z);
+                return z;
+            }
 
-        // Try include paths
-        for (self.include_paths) |inc_path| {
-            var full_path_buf: [4096]u8 = undefined;
-            const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
+            // Try include paths
+            for (self.include_paths) |inc_path| {
+                var full_path_buf: [4096]u8 = undefined;
+                const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
 
-            const file = std.fs.cwd().openFile(full_path, .{}) catch continue;
-            defer file.close();
-            const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
-            const z = try self.alloc.dupeZ(u8, raw);
-            self.alloc.free(raw);
-            try self.included_sources.append(self.alloc, z);
-            return z;
+                const file = std.fs.cwd().openFile(full_path, .{}) catch continue;
+                defer file.close();
+                const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+                const z = try self.alloc.dupeZ(u8, raw);
+                self.alloc.free(raw);
+                try self.included_sources.append(self.alloc, z);
+                return z;
+            }
         }
 
         return error.FileNotFound;
