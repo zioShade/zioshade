@@ -242,74 +242,199 @@ fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch (op) {
         // Types: result at word[1]
-        .TypeVoid, .TypeBool, .TypeInt, .TypeFloat, .TypeVector, .TypeMatrix,
-        .TypeImage, .TypeSampler, .TypeSampledImage, .TypeArray, .TypeRuntimeArray,
-        .TypeStruct, .TypePointer, .TypeFunction, .TypeForwardPointer,
-        .TypeAccelerationStructureKHR, .TypeRayQueryKHR, .TypeTensorARM,
+        .TypeVoid,
+        .TypeBool,
+        .TypeInt,
+        .TypeFloat,
+        .TypeVector,
+        .TypeMatrix,
+        .TypeImage,
+        .TypeSampler,
+        .TypeSampledImage,
+        .TypeArray,
+        .TypeRuntimeArray,
+        .TypeStruct,
+        .TypePointer,
+        .TypeFunction,
+        .TypeForwardPointer,
+        .TypeAccelerationStructureKHR,
+        .TypeRayQueryKHR,
+        .TypeTensorARM,
         => if (words.len > 1) words[1] else null,
 
         // Constants: type=word[1], result=word[2]
-        .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite,
-        .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
-        .SpecConstantComposite, .SpecConstantOp, .Undef,
+        .ConstantTrue,
+        .ConstantFalse,
+        .Constant,
+        .ConstantComposite,
+        .SpecConstant,
+        .SpecConstantTrue,
+        .SpecConstantFalse,
+        .SpecConstantComposite,
+        .SpecConstantOp,
+        .Undef,
         => if (words.len > 2) words[2] else null,
 
         // Variable/Function/Param: type=word[1], result=word[2]
-        .Variable, .Function, .FunctionParameter,
+        .Variable,
+        .Function,
+        .FunctionParameter,
         => if (words.len > 2) words[2] else null,
 
         // Most computation ops: type=word[1], result=word[2]
-        .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert,
-        .VectorShuffle, .SampledImage, .ImageSampleImplicitLod,
-        .ImageSampleExplicitLod, .ImageFetch, .ImageGather,
-        .ImageQuerySizeLod, .ImageQuerySize,
-        .ImageTexelPointer, .FunctionCall,
-        .CopyObject, .Phi,
-        .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
-        .UConvert, .SConvert, .FConvert, .Bitcast,
-        .SNegate, .FNegate,
-        .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul,
-        .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod,
-        .VectorTimesScalar, .MatrixTimesScalar,
-        .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix,
-        .Dot, .Transpose, .OuterProduct,
-        .Select, .LogicalOr, .LogicalAnd, .LogicalNot,
-        .IEqual, .INotEqual,
-        .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual,
-        .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual,
-        .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan,
-        .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan,
-        .FUnordLessThanEqual, .FUnordGreaterThanEqual,
-        .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical,
-        .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not,
-        .IsNan, .IsInf, .All, .Any,
-        .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine,
-        .DPdxCoarse, .DPdyCoarse, .FwidthCoarse,
+        .Load,
+        .AccessChain,
+        .CompositeConstruct,
+        .CompositeExtract,
+        .CompositeInsert,
+        .VectorShuffle,
+        .SampledImage,
+        .ImageSampleImplicitLod,
+        .ImageSampleExplicitLod,
+        .ImageFetch,
+        .ImageGather,
+        .ImageQuerySizeLod,
+        .ImageQuerySize,
+        .ImageTexelPointer,
+        .FunctionCall,
+        .CopyObject,
+        .Phi,
+        .ConvertFToS,
+        .ConvertSToF,
+        .ConvertUToF,
+        .ConvertFToU,
+        .UConvert,
+        .SConvert,
+        .FConvert,
+        .Bitcast,
+        .SNegate,
+        .FNegate,
+        .IAdd,
+        .FAdd,
+        .ISub,
+        .FSub,
+        .IMul,
+        .FMul,
+        .UDiv,
+        .SDiv,
+        .FDiv,
+        .UMod,
+        .SRem,
+        .SMod,
+        .FRem,
+        .FMod,
+        .VectorTimesScalar,
+        .MatrixTimesScalar,
+        .VectorTimesMatrix,
+        .MatrixTimesVector,
+        .MatrixTimesMatrix,
+        .Dot,
+        .Transpose,
+        .OuterProduct,
+        .Select,
+        .LogicalOr,
+        .LogicalAnd,
+        .LogicalNot,
+        .IEqual,
+        .INotEqual,
+        .UGreaterThan,
+        .SGreaterThan,
+        .UGreaterThanEqual,
+        .SGreaterThanEqual,
+        .ULessThan,
+        .SLessThan,
+        .ULessThanEqual,
+        .SLessThanEqual,
+        .FOrdEqual,
+        .FOrdNotEqual,
+        .FOrdLessThan,
+        .FOrdGreaterThan,
+        .FOrdLessThanEqual,
+        .FOrdGreaterThanEqual,
+        .FUnordEqual,
+        .FUnordNotEqual,
+        .FUnordLessThan,
+        .FUnordGreaterThan,
+        .FUnordLessThanEqual,
+        .FUnordGreaterThanEqual,
+        .ShiftRightLogical,
+        .ShiftRightArithmetic,
+        .ShiftLeftLogical,
+        .BitwiseOr,
+        .BitwiseXor,
+        .BitwiseAnd,
+        .Not,
+        .IsNan,
+        .IsInf,
+        .All,
+        .Any,
+        .DPdx,
+        .DPdy,
+        .Fwidth,
+        .DPdxFine,
+        .DPdyFine,
+        .FwidthFine,
+        .DPdxCoarse,
+        .DPdyCoarse,
+        .FwidthCoarse,
         .VectorExtractDynamic,
-        .ExtInst, .OpImage,
-        .AtomicIAdd, .AtomicISub, .AtomicExchange,
-        .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax,
-        .AtomicAnd, .AtomicOr, .AtomicXor,
-        .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod,
-        .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod,
-        .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples,
-        .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT,
+        .ExtInst,
+        .OpImage,
+        .AtomicIAdd,
+        .AtomicISub,
+        .AtomicExchange,
+        .AtomicSMin,
+        .AtomicUMin,
+        .AtomicSMax,
+        .AtomicUMax,
+        .AtomicAnd,
+        .AtomicOr,
+        .AtomicXor,
+        .ImageSampleDrefImplicitLod,
+        .ImageSampleDrefExplicitLod,
+        .ImageSampleProjImplicitLod,
+        .ImageSampleProjExplicitLod,
+        .ImageDrefGather,
+        .ImageQueryLod,
+        .ImageQueryLevels,
+        .ImageQuerySamples,
+        .ImageRead,
+        .AtomicCompareExchange,
+        .AtomicFAddEXT,
         .ArrayLength,
-        .BitReverse, .BitCount,
-        .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract,
-        .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual,
-        .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst,
+        .BitReverse,
+        .BitCount,
+        .BitFieldInsert,
+        .BitFieldSExtract,
+        .BitFieldUExtract,
+        .GroupNonUniformElect,
+        .GroupNonUniformAll,
+        .GroupNonUniformAny,
+        .GroupNonUniformAllEqual,
+        .GroupNonUniformBroadcast,
+        .GroupNonUniformBroadcastFirst,
         .GroupNonUniformBallot,
-        .GroupNonUniformIAdd, .GroupNonUniformFAdd,
-        .GroupNonUniformIMul, .GroupNonUniformFMul,
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin,
-        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax,
-        .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor,
-        .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr,
-        .GroupNonUniformShuffle, .GroupNonUniformShuffleXor,
-        .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown,
-        .SubgroupAllKHR, .SubgroupAnyKHR,
+        .GroupNonUniformIAdd,
+        .GroupNonUniformFAdd,
+        .GroupNonUniformIMul,
+        .GroupNonUniformFMul,
+        .GroupNonUniformSMin,
+        .GroupNonUniformUMin,
+        .GroupNonUniformFMin,
+        .GroupNonUniformSMax,
+        .GroupNonUniformUMax,
+        .GroupNonUniformFMax,
+        .GroupNonUniformBitwiseAnd,
+        .GroupNonUniformBitwiseOr,
+        .GroupNonUniformBitwiseXor,
+        .GroupNonUniformLogicalAnd,
+        .GroupNonUniformLogicalOr,
+        .GroupNonUniformShuffle,
+        .GroupNonUniformShuffleXor,
+        .GroupNonUniformShuffleUp,
+        .GroupNonUniformShuffleDown,
+        .SubgroupAllKHR,
+        .SubgroupAnyKHR,
         => if (words.len > 2) words[2] else null,
 
         else => null,
@@ -344,9 +469,20 @@ fn sampledImageDim(module: *const ParsedModule, image_value_id: u32) u32 {
 fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(module, id) orelse return null;
     return switch (inst.op) {
-        .TypeVoid, .TypeBool, .TypeInt, .TypeFloat, .TypeVector, .TypeMatrix,
-        .TypeImage, .TypeSampler, .TypeSampledImage, .TypeArray, .TypeRuntimeArray,
-        .TypeStruct, .TypePointer, .TypeFunction,
+        .TypeVoid,
+        .TypeBool,
+        .TypeInt,
+        .TypeFloat,
+        .TypeVector,
+        .TypeMatrix,
+        .TypeImage,
+        .TypeSampler,
+        .TypeSampledImage,
+        .TypeArray,
+        .TypeRuntimeArray,
+        .TypeStruct,
+        .TypePointer,
+        .TypeFunction,
         => null,
         else => if (inst.words.len > 1) inst.words[1] else null,
     };
@@ -881,7 +1017,7 @@ pub fn spirvToHLSL(
         } else if (type_inst.op == .TypeStruct) {
             // static const StructType name = {comp0, comp1, ...}
             const struct_name = names.get(type_id) orelse "Struct";
-            try w.print("static const {s} {s} = {{", .{struct_name, name});
+            try w.print("static const {s} {s} = {{", .{ struct_name, name });
             for (inst.words[3..], 0..) |comp_id, i| {
                 if (i > 0) try w.writeAll(", ");
                 const comp_name = names.get(comp_id) orelse "0";
@@ -934,7 +1070,11 @@ pub fn spirvToHLSL(
                 }
             }
         }
-        const MRTSort = struct { fn lessThan(_: void, a: MRTVar, b: MRTVar) bool { return a.location < b.location; } };
+        const MRTSort = struct {
+            fn lessThan(_: void, a: MRTVar, b: MRTVar) bool {
+                return a.location < b.location;
+            }
+        };
         std.sort.insertion(MRTVar, mrt_vars.items, {}, MRTSort.lessThan);
         // Emit the struct with SV_Target semantics
         try w.writeAll("struct _MRT_OUT\n{\n");
@@ -1027,7 +1167,7 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
                     // Build: typeN(comp0, comp1, ...)
                     var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
                     defer buf.deinit(alloc);
-                    buf.print(alloc, "{s}{d}(", .{scalar_type, count}) catch continue;
+                    buf.print(alloc, "{s}{d}(", .{ scalar_type, count }) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
                         if (i > 0) buf.appendSlice(alloc, ", ") catch continue;
                         const comp_name = names.get(comp_id) orelse "0.0";
@@ -1281,7 +1421,12 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
     if (inst.op != .TypeImage or inst.words.len < 4) return "Texture2D";
 
     const dim: enum(u32) {
-        Dim1D = 0, Dim2D = 1, Dim3D = 2, DimCube = 3, DimBuffer = 5, _,
+        Dim1D = 0,
+        Dim2D = 1,
+        Dim3D = 2,
+        DimCube = 3,
+        DimBuffer = 5,
+        _,
     } = @enumFromInt(inst.words[3]);
 
     // OpTypeImage layout: header, result_id, Sampled_Type, Dim, Depth, Arrayed, MS, Sampled, ImageFormat
@@ -1309,21 +1454,30 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
                 .{ "RWTexture1D<int>", "RWTexture2D<int>", "RWTexture3D<int>", "RWTexture2DArray<int>", "RWBuffer<int>" },
                 .{ "RWTexture1D<uint>", "RWTexture2D<uint>", "RWTexture3D<uint>", "RWTexture2DArray<uint>", "RWBuffer<uint>" },
             };
-            const int_idx: usize = switch (int_type) { .int => 0, .uint => 1 };
+            const int_idx: usize = switch (int_type) {
+                .int => 0,
+                .uint => 1,
+            };
             const dim_idx: usize = switch (dim) {
-                .Dim1D => 0, .Dim2D => if (is_arrayed) 3 else 1, .Dim3D => 2,
-                .DimBuffer => 4, else => 1,
+                .Dim1D => 0,
+                .Dim2D => if (is_arrayed) 3 else 1,
+                .Dim3D => 2,
+                .DimBuffer => 4,
+                else => 1,
             };
             return scalar_or_vec[int_idx][dim_idx];
         }
         // Float storage textures
         const rw_float_types = [5][]const u8{
-            "RWTexture1D<float4>", "RWTexture2D<float4>", "RWTexture3D<float4>",
+            "RWTexture1D<float4>",      "RWTexture2D<float4>", "RWTexture3D<float4>",
             "RWTexture2DArray<float4>", "RWBuffer<float4>",
         };
         const dim_idx: usize = switch (dim) {
-            .Dim1D => 0, .Dim2D => if (is_arrayed) 3 else 1, .Dim3D => 2,
-            .DimBuffer => 4, else => 1,
+            .Dim1D => 0,
+            .Dim2D => if (is_arrayed) 3 else 1,
+            .Dim3D => 2,
+            .DimBuffer => 4,
+            else => 1,
         };
         return rw_float_types[dim_idx];
     }
@@ -1352,7 +1506,10 @@ fn hlslTextureTypeFromImage(module: *const ParsedModule, image_type_id: u32) []c
             .{ "Texture1D<int4>", "Texture1DArray<int4>", "Texture2D<int4>", "Texture2DArray<int4>", "TextureCube<int4>", "TextureCubeArray<int4>", "Texture3D<int4>", "Buffer<int4>" },
             .{ "Texture1D<uint4>", "Texture1DArray<uint4>", "Texture2D<uint4>", "Texture2DArray<uint4>", "TextureCube<uint4>", "TextureCubeArray<uint4>", "Texture3D<uint4>", "Buffer<uint4>" },
         };
-        const int_idx: usize = switch (int_type) { .int => 0, .uint => 1 };
+        const int_idx: usize = switch (int_type) {
+            .int => 0,
+            .uint => 1,
+        };
         const dim_idx: usize = @intFromEnum(key);
         return int_types[int_idx][dim_idx];
     }
@@ -3210,10 +3367,32 @@ fn emitWhileLoopHLSL(
                 const nfl = if (binst.words.len > 3) binst.words[3] else null;
                 const nml = bc_merge_map.get(bi);
                 // Check if true/false labels are trivial continue/break
-                const tl_is_trivial_continue = blk: { if (ntl == cont_lbl) break :blk true; const tli = label_map.get(ntl) orelse break :blk false; if (tli + 2 < module.instructions.len and module.instructions[tli].op == .Label and module.instructions[tli + 1].op == .Branch and module.instructions[tli + 1].words.len > 1 and module.instructions[tli + 1].words[1] == cont_lbl) break :blk true; break :blk false; };
-                const fl_is_trivial_continue = blk: { if (nfl == null) break :blk false; if (nfl.? == cont_lbl) break :blk true; const fli = label_map.get(nfl.?) orelse break :blk false; if (fli + 2 < module.instructions.len and module.instructions[fli].op == .Label and module.instructions[fli + 1].op == .Branch and module.instructions[fli + 1].words.len > 1 and module.instructions[fli + 1].words[1] == cont_lbl) break :blk true; break :blk false; };
-                const tl_is_trivial_break = blk: { if (ntl == merge_lbl) break :blk true; const tli2 = label_map.get(ntl) orelse break :blk false; if (tli2 + 2 < module.instructions.len and module.instructions[tli2].op == .Label and module.instructions[tli2 + 1].op == .Branch and module.instructions[tli2 + 1].words.len > 1 and module.instructions[tli2 + 1].words[1] == merge_lbl) break :blk true; break :blk false; };
-                const fl_is_trivial_break = blk: { if (nfl == null) break :blk false; if (nfl.? == merge_lbl) break :blk true; const fli2 = label_map.get(nfl.?) orelse break :blk false; if (fli2 + 2 < module.instructions.len and module.instructions[fli2].op == .Label and module.instructions[fli2 + 1].op == .Branch and module.instructions[fli2 + 1].words.len > 1 and module.instructions[fli2 + 1].words[1] == merge_lbl) break :blk true; break :blk false; };
+                const tl_is_trivial_continue = blk: {
+                    if (ntl == cont_lbl) break :blk true;
+                    const tli = label_map.get(ntl) orelse break :blk false;
+                    if (tli + 2 < module.instructions.len and module.instructions[tli].op == .Label and module.instructions[tli + 1].op == .Branch and module.instructions[tli + 1].words.len > 1 and module.instructions[tli + 1].words[1] == cont_lbl) break :blk true;
+                    break :blk false;
+                };
+                const fl_is_trivial_continue = blk: {
+                    if (nfl == null) break :blk false;
+                    if (nfl.? == cont_lbl) break :blk true;
+                    const fli = label_map.get(nfl.?) orelse break :blk false;
+                    if (fli + 2 < module.instructions.len and module.instructions[fli].op == .Label and module.instructions[fli + 1].op == .Branch and module.instructions[fli + 1].words.len > 1 and module.instructions[fli + 1].words[1] == cont_lbl) break :blk true;
+                    break :blk false;
+                };
+                const tl_is_trivial_break = blk: {
+                    if (ntl == merge_lbl) break :blk true;
+                    const tli2 = label_map.get(ntl) orelse break :blk false;
+                    if (tli2 + 2 < module.instructions.len and module.instructions[tli2].op == .Label and module.instructions[tli2 + 1].op == .Branch and module.instructions[tli2 + 1].words.len > 1 and module.instructions[tli2 + 1].words[1] == merge_lbl) break :blk true;
+                    break :blk false;
+                };
+                const fl_is_trivial_break = blk: {
+                    if (nfl == null) break :blk false;
+                    if (nfl.? == merge_lbl) break :blk true;
+                    const fli2 = label_map.get(nfl.?) orelse break :blk false;
+                    if (fli2 + 2 < module.instructions.len and module.instructions[fli2].op == .Label and module.instructions[fli2 + 1].op == .Branch and module.instructions[fli2 + 1].words.len > 1 and module.instructions[fli2 + 1].words[1] == merge_lbl) break :blk true;
+                    break :blk false;
+                };
                 if (nml) |nmv| {
                     const nhe = nfl != null and nfl.? != nmv;
                     if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
@@ -3689,16 +3868,14 @@ fn emitInstruction(
             if (is_vec_cond) {
                 // DXC requires select() for vector conditions
                 try w.print("    {s} {s} = select({s}, {s}, {s});\n", .{
-                    rt, names.get(inst.words[2]) orelse "v",
-                    names.get(inst.words[3]) orelse "c",
-                    names.get(inst.words[4]) orelse "t",
+                    rt,                                  names.get(inst.words[2]) orelse "v",
+                    names.get(inst.words[3]) orelse "c", names.get(inst.words[4]) orelse "t",
                     names.get(inst.words[5]) orelse "f",
                 });
             } else {
                 try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{
-                    rt, names.get(inst.words[2]) orelse "v",
-                    names.get(inst.words[3]) orelse "c",
-                    names.get(inst.words[4]) orelse "t",
+                    rt,                                  names.get(inst.words[2]) orelse "v",
+                    names.get(inst.words[3]) orelse "c", names.get(inst.words[4]) orelse "t",
                     names.get(inst.words[5]) orelse "f",
                 });
             }
@@ -3814,7 +3991,11 @@ fn emitInstruction(
 
                 if (is_current_vec) {
                     try w.writeAll(switch (index) {
-                        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => ".x",
                     });
                 } else {
                     // Use named member for structs; matrices index a column via [n].
@@ -3877,7 +4058,11 @@ fn emitInstruction(
 
                 if (is_current_vec) {
                     try w.writeAll(switch (index) {
-                        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => ".x",
                     });
                 } else {
                     // Use named member for structs; matrices index a column via [n].
@@ -4118,7 +4303,11 @@ fn emitInstruction(
                 const ct_inst = getDef(module, ct);
                 if (ct_inst) |ci| {
                     if (ci.op == .TypeVector and ci.words.len > 3) {
-                        break :blk switch (ci.words[3]) { 3 => ".z", 4 => ".w", else => ".z" };
+                        break :blk switch (ci.words[3]) {
+                            3 => ".z",
+                            4 => ".w",
+                            else => ".z",
+                        };
                     }
                 }
                 break :blk ".z";
@@ -4138,7 +4327,11 @@ fn emitInstruction(
                 const ct_inst = getDef(module, ct);
                 if (ct_inst) |ci| {
                     if (ci.op == .TypeVector and ci.words.len > 3) {
-                        break :blk switch (ci.words[3]) { 3 => ".z", 4 => ".w", else => ".z" };
+                        break :blk switch (ci.words[3]) {
+                            3 => ".z",
+                            4 => ".w",
+                            else => ".z",
+                        };
                     }
                 }
                 break :blk ".z";
@@ -4166,7 +4359,11 @@ fn emitInstruction(
                 const ct_inst = getDef(module, ct);
                 if (ct_inst) |ci| {
                     if (ci.op == .TypeVector and ci.words.len > 3) {
-                        break :blk switch (ci.words[3]) { 3 => ".z", 4 => ".w", else => ".z" };
+                        break :blk switch (ci.words[3]) {
+                            3 => ".z",
+                            4 => ".w",
+                            else => ".z",
+                        };
                     }
                 }
                 break :blk ".z";
@@ -4353,7 +4550,7 @@ fn emitInstruction(
             // Strip _sampler suffix to get texture name
             var tex_name: []const u8 = img_name;
             if (std.mem.endsWith(u8, img_name, "_sampler")) {
-                tex_name = img_name[0..img_name.len - "_sampler".len];
+                tex_name = img_name[0 .. img_name.len - "_sampler".len];
             }
             const result_name = names.get(inst.words[2]) orelse "v";
             // Determine result rank from the result type (1=scalar, 2, or 3).
@@ -4379,7 +4576,7 @@ fn emitInstruction(
             const img_name = names.get(inst.words[3]) orelse "tex";
             var tex_name: []const u8 = img_name;
             if (std.mem.endsWith(u8, img_name, "_sampler")) {
-                tex_name = img_name[0..img_name.len - "_sampler".len];
+                tex_name = img_name[0 .. img_name.len - "_sampler".len];
             }
             const result_name = names.get(inst.words[2]) orelse "v";
             const rt_inst = getDef(module, inst.words[1]);
@@ -4588,142 +4785,142 @@ fn emitInstruction(
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformAny => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformAllEqual => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAllEqual({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveAllEqual({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformBroadcast => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const lane = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, {s});\n", .{rtt, rn, val, lane});
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, {s});\n", .{ rtt, rn, val, lane });
         },
         .GroupNonUniformBroadcastFirst => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveReadLaneFirst({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveReadLaneFirst({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformBallot => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBallot({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveBallot({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformShuffle => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const lane = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, {s});\n", .{rtt, rn, val, lane});
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, {s});\n", .{ rtt, rn, val, lane });
         },
         .GroupNonUniformShuffleXor => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const mask = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID ^ {s});\n", .{rtt, rn, val, mask});
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID ^ {s});\n", .{ rtt, rn, val, mask });
         },
         .GroupNonUniformShuffleUp => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const delta = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID - {s});\n", .{rtt, rn, val, delta});
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID - {s});\n", .{ rtt, rn, val, delta });
         },
         .GroupNonUniformShuffleDown => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const delta = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID + {s});\n", .{rtt, rn, val, delta});
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID + {s});\n", .{ rtt, rn, val, delta });
         },
         .GroupNonUniformIAdd => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformFAdd => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformIMul => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformFMul => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveMin({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveMin({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveMax({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveMax({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformBitwiseAnd => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitAnd({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveBitAnd({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformBitwiseOr => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitOr({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveBitOr({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformBitwiseXor => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitXor({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveBitXor({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformLogicalAnd => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{ rtt, rn, val });
         },
         .GroupNonUniformLogicalOr => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{rtt, rn, val});
+            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{ rtt, rn, val });
         },
         .SubgroupAllKHR => {
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[3]) orelse "x";
-            try w.print("    bool {s} = WaveActiveAllTrue({s});\n", .{rn, val});
+            try w.print("    bool {s} = WaveActiveAllTrue({s});\n", .{ rn, val });
         },
         .SubgroupAnyKHR => {
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[3]) orelse "x";
-            try w.print("    bool {s} = WaveActiveAnyTrue({s});\n", .{rn, val});
+            try w.print("    bool {s} = WaveActiveAnyTrue({s});\n", .{ rn, val });
         },
 
         // Skip non-code-emitting ops
@@ -4793,7 +4990,7 @@ fn emitInstruction(
                 if (inst.words.len >= 3) {
                     const vc = idToExpr(module, names, inst.words[1], alloc);
                     const pc = idToExpr(module, names, inst.words[2], alloc);
-                    try w.print("    SetMeshOutputCounts({s}, {s});\n", .{vc, pc});
+                    try w.print("    SetMeshOutputCounts({s}, {s});\n", .{ vc, pc });
                 }
                 return;
             }
@@ -4803,7 +5000,7 @@ fn emitInstruction(
                     const y = idToExpr(module, names, inst.words[2], alloc);
                     const z = idToExpr(module, names, inst.words[3], alloc);
                     const p = idToExpr(module, names, inst.words[4], alloc);
-                    try w.print("    DispatchMesh({s}, {s}, {s}, {s});\n", .{x, y, z, p});
+                    try w.print("    DispatchMesh({s}, {s}, {s}, {s});\n", .{ x, y, z, p });
                 }
                 return;
             }
@@ -4821,7 +5018,7 @@ fn emitInstruction(
                     const dir = idToExpr(module, names, inst.words[9], alloc);
                     const t_max = idToExpr(module, names, inst.words[10], alloc);
                     const payload = idToExpr(module, names, inst.words[11], alloc);
-                    try w.print("    TraceRay({s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s});\n", .{accel, flags, mask, sbt_off, sbt_stride, miss, origin, t_min, dir, t_max, payload});
+                    try w.print("    TraceRay({s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s}, {s});\n", .{ accel, flags, mask, sbt_off, sbt_stride, miss, origin, t_min, dir, t_max, payload });
                 }
                 return;
             }
@@ -4829,7 +5026,7 @@ fn emitInstruction(
                 if (inst.words.len >= 5) {
                     const hit_t = idToExpr(module, names, inst.words[3], alloc);
                     const hit_kind = idToExpr(module, names, inst.words[4], alloc);
-                    try w.print("    ReportHit({s}, {s});\n", .{hit_t, hit_kind});
+                    try w.print("    ReportHit({s}, {s});\n", .{ hit_t, hit_kind });
                 }
                 return;
             }
@@ -4845,7 +5042,7 @@ fn emitInstruction(
                 if (inst.words.len >= 3) {
                     const sbt = idToExpr(module, names, inst.words[1], alloc);
                     const data = idToExpr(module, names, inst.words[2], alloc);
-                    try w.print("    CallShader({s}, {s});\n", .{sbt, data});
+                    try w.print("    CallShader({s}, {s});\n", .{ sbt, data });
                 }
                 return;
             }
@@ -4856,7 +5053,11 @@ fn emitInstruction(
 
 fn swizzleChar(index: u32) []const u8 {
     return switch (index) {
-        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+        0 => ".x",
+        1 => ".y",
+        2 => ".z",
+        3 => ".w",
+        else => ".x",
     };
 }
 
@@ -5032,7 +5233,13 @@ fn writeMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
             const val = def.?.words[3];
             if (ti != null and ti.?.op == .TypeVector) {
-                try w.writeAll(switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                try w.writeAll(switch (val) {
+                    0 => ".x",
+                    1 => ".y",
+                    2 => ".z",
+                    3 => ".w",
+                    else => ".x",
+                });
                 cur_type = ti.?.words[2];
             } else {
                 try w.print("[{d}]", .{val});
@@ -5054,7 +5261,13 @@ fn appendMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
         if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
             const val = def.?.words[3];
             if (ti != null and ti.?.op == .TypeVector) {
-                try buf.appendSlice(alloc, switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                try buf.appendSlice(alloc, switch (val) {
+                    0 => ".x",
+                    1 => ".y",
+                    2 => ".z",
+                    3 => ".w",
+                    else => ".x",
+                });
                 cur_type = ti.?.words[2];
             } else {
                 try buf.print(alloc, "[{d}]", .{val});
@@ -5069,7 +5282,10 @@ fn appendMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
 
 fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, w: anytype) !void {
     const base_name_raw = names.get(base_id) orelse "base";
-    if (indices.len == 0) { try w.writeAll(base_name_raw); return; }
+    if (indices.len == 0) {
+        try w.writeAll(base_name_raw);
+        return;
+    }
 
     // A cbuffer matrix is stored as the logical matrix M, but HLSL `m[i]`
     // selects a ROW where GLSL/SPIR-V selects a COLUMN — transpose the read.
@@ -5152,9 +5368,18 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
             if (idx_inst) |def| {
                 if (def.op == .Constant and def.words.len > 3) {
                     const val = def.words[3];
-                    const is_vector = if (cur_type) |tid| blk: { const ti = getDef(module, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                    const is_vector = if (cur_type) |tid| blk: {
+                        const ti = getDef(module, tid);
+                        break :blk ti != null and ti.?.op == .TypeVector;
+                    } else false;
                     if (is_vector) {
-                        try w.writeAll(switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                        try w.writeAll(switch (val) {
+                            0 => ".x",
+                            1 => ".y",
+                            2 => ".z",
+                            3 => ".w",
+                            else => ".x",
+                        });
                     } else {
                         var used_name = false;
                         if (cur_type) |tid| {
@@ -5173,10 +5398,15 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     if (cur_type) |tid| {
                         const ti = getDef(module, tid);
                         if (ti) |tinst| {
-                            if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
-                            else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
-                            else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
-                            else { cur_type = null; }
+                            if (tinst.op == .TypeVector) {
+                                cur_type = tinst.words[2];
+                            } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
+                                cur_type = tinst.words[val + 2];
+                            } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                                cur_type = tinst.words[2];
+                            } else {
+                                cur_type = null;
+                            }
                         }
                     }
                 } else {
@@ -5184,8 +5414,11 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     if (cur_type) |tid| {
                         const ti = getDef(module, tid);
                         if (ti) |tinst| {
-                            if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
-                            else { cur_type = null; }
+                            if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                                cur_type = tinst.words[2];
+                            } else {
+                                cur_type = null;
+                            }
                         }
                     }
                 }
@@ -5204,9 +5437,18 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
                 const val = def.words[3];
-                const is_vector = if (cur_type) |tid| blk: { const ti = getDef(module, tid); break :blk ti != null and ti.?.op == .TypeVector; } else false;
+                const is_vector = if (cur_type) |tid| blk: {
+                    const ti = getDef(module, tid);
+                    break :blk ti != null and ti.?.op == .TypeVector;
+                } else false;
                 if (is_vector) {
-                    try w.writeAll(switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                    try w.writeAll(switch (val) {
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => ".x",
+                    });
                 } else if (base_is_cb and first_member) {
                     var mname_buf: [32]u8 = undefined;
                     var used_name = false;
@@ -5215,12 +5457,12 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                         if (ti) |tinst| {
                             if (tinst.op == .TypeStruct) {
                                 const mname = hlslGetMemberName(module, tid, val, &mname_buf);
-                                try w.print("{s}_{s}", .{cb_prefix, mname});
+                                try w.print("{s}_{s}", .{ cb_prefix, mname });
                                 used_name = true;
                             }
                         }
                     }
-                    if (!used_name) try w.print("{s}_m{d}", .{cb_prefix, val});
+                    if (!used_name) try w.print("{s}_m{d}", .{ cb_prefix, val });
                     first_member = false;
                 } else {
                     // Use member name for structs, [index] for arrays
@@ -5241,10 +5483,15 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                 if (cur_type) |tid| {
                     const ti = getDef(module, tid);
                     if (ti) |tinst| {
-                        if (tinst.op == .TypeVector) { cur_type = tinst.words[2]; }
-                        else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur_type = tinst.words[val + 2]; }
-                        else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
-                        else { cur_type = null; }
+                        if (tinst.op == .TypeVector) {
+                            cur_type = tinst.words[2];
+                        } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
+                            cur_type = tinst.words[val + 2];
+                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                            cur_type = tinst.words[2];
+                        } else {
+                            cur_type = null;
+                        }
                     }
                 }
             } else {
@@ -5252,8 +5499,11 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                 if (cur_type) |tid| {
                     const ti = getDef(module, tid);
                     if (ti) |tinst| {
-                        if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
-                        else { cur_type = null; }
+                        if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                            cur_type = tinst.words[2];
+                        } else {
+                            cur_type = null;
+                        }
                     }
                 }
             }
@@ -5262,8 +5512,11 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
             if (cur_type) |tid| {
                 const ti = getDef(module, tid);
                 if (ti) |tinst| {
-                    if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur_type = tinst.words[2]; }
-                    else { cur_type = null; }
+                    if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        cur_type = tinst.words[2];
+                    } else {
+                        cur_type = null;
+                    }
                 }
             }
         }
@@ -5377,9 +5630,18 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
             if (idx_inst) |def| {
                 if (def.op == .Constant and def.words.len > 3) {
                     const val = def.words[3];
-                    const is_vector = if (cur) |tid| blk2: { const ti = getDef(module, tid); break :blk2 ti != null and ti.?.op == .TypeVector; } else false;
+                    const is_vector = if (cur) |tid| blk2: {
+                        const ti = getDef(module, tid);
+                        break :blk2 ti != null and ti.?.op == .TypeVector;
+                    } else false;
                     if (is_vector) {
-                        try buf.appendSlice(alloc, switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                        try buf.appendSlice(alloc, switch (val) {
+                            0 => ".x",
+                            1 => ".y",
+                            2 => ".z",
+                            3 => ".w",
+                            else => ".x",
+                        });
                     } else {
                         var used_name = false;
                         if (cur) |tid| {
@@ -5398,10 +5660,15 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     if (cur) |tid| {
                         const ti = getDef(module, tid);
                         if (ti) |tinst| {
-                            if (tinst.op == .TypeVector) { cur = tinst.words[2]; }
-                            else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) { cur = tinst.words[val + 2]; }
-                            else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur = tinst.words[2]; }
-                            else { cur = null; }
+                            if (tinst.op == .TypeVector) {
+                                cur = tinst.words[2];
+                            } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
+                                cur = tinst.words[val + 2];
+                            } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                                cur = tinst.words[2];
+                            } else {
+                                cur = null;
+                            }
                         }
                     }
                 } else {
@@ -5409,8 +5676,11 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     if (cur) |tid| {
                         const ti = getDef(module, tid);
                         if (ti) |tinst| {
-                            if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) { cur = tinst.words[2]; }
-                            else { cur = null; }
+                            if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                                cur = tinst.words[2];
+                            } else {
+                                cur = null;
+                            }
                         }
                     }
                 }
@@ -5444,7 +5714,11 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
 
                 if (is_vector) {
                     try buf.appendSlice(alloc, switch (val) {
-                        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => ".x",
                     });
                 } else if (base_is_cbuffer and first_member) {
                     // Cbuffer members use cbufferName_memberName prefix
@@ -5630,7 +5904,7 @@ fn resolvePointeeType(module: *const ParsedModule, id: u32) ?u32 {
 fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
     const rt = try hlslType(module, inst.words[1], names, alloc);
     try w.print("    {s} {s} = {s} {s} {s};\n", .{
-        rt, names.get(inst.words[2]) orelse "v",
+        rt,                                  names.get(inst.words[2]) orelse "v",
         names.get(inst.words[3]) orelse "a", op,
         names.get(inst.words[4]) orelse "b",
     });
@@ -5736,9 +6010,9 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 2 => "round", // RoundEven — HLSL round() rounds to even
                 3 => "trunc",
                 4 => "abs",
-                5 => "abs",        // SAbs
+                5 => "abs", // SAbs
                 6 => "sign",
-                7 => "sign",       // SSign (sign for signed ints)
+                7 => "sign", // SSign (sign for signed ints)
                 8 => "floor",
                 9 => "ceil",
                 10 => "fract",
@@ -5763,43 +6037,53 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 29 => "exp2",
                 30 => "log2",
                 31 => "sqrt",
-                32 => "rsqrt",     // InverseSqrt
+                32 => "rsqrt", // InverseSqrt
                 33 => "determinant",
-                34 => "mul",       // matrixCompMult - component-wise multiply
-                35 => "modf",      // Modf (scalar return, pointer out-param)
-                36 => "modf",       // ModfStruct (struct return)
-                37 => "min",       // FMin
-                38 => "min",       // UMin
-                39 => "min",       // SMin
-                40 => "max",       // FMax
-                41 => "max",       // UMax
-                42 => "max",       // SMax
-                43 => "clamp",     // FClamp
-                44 => "clamp",     // UClamp
-                45 => "clamp",     // SClamp
-                46 => "lerp",      // FMix / mix
+                34 => "mul", // matrixCompMult - component-wise multiply
+                35 => "modf", // Modf (scalar return, pointer out-param)
+                36 => "modf", // ModfStruct (struct return)
+                37 => "min", // FMin
+                38 => "min", // UMin
+                39 => "min", // SMin
+                40 => "max", // FMax
+                41 => "max", // UMax
+                42 => "max", // SMax
+                43 => "clamp", // FClamp
+                44 => "clamp", // UClamp
+                45 => "clamp", // SClamp
+                46 => "lerp", // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
-                50 => "mad",       // FMA (fused multiply-add) — HLSL uses mad for float
-                51 => "frexp",     // Frexp (scalar return, pointer out-param)
-                52 => "frexp",     // FrexpStruct (struct return - intercepted)
-                53 => "ldexp",     // Ldexp
-                66 => "length",    // Length
-                67 => "distance",  // Distance
-                68 => "cross",     // Cross
+                50 => "mad", // FMA (fused multiply-add) — HLSL uses mad for float
+                51 => "frexp", // Frexp (scalar return, pointer out-param)
+                52 => "frexp", // FrexpStruct (struct return - intercepted)
+                53 => "ldexp", // Ldexp
+                66 => "length", // Length
+                67 => "distance", // Distance
+                68 => "cross", // Cross
                 69 => "normalize", // Normalize
                 70 => "faceforward", // FaceForward (HLSL intrinsic)
-                71 => "reflect",   // Reflect
-                72 => "refract",   // Refract
+                71 => "reflect", // Reflect
+                72 => "refract", // Refract
                 73 => "firstbitlow", // FindILsb → HLSL firstbitlow
                 74 => "firstbithigh", // FindSMsb → HLSL firstbithigh
                 75 => "firstbithigh", // FindUMsb → HLSL firstbithigh
-                79 => "min", 80 => "max", 81 => "clamp",
-                54 => "pack_snorm4x8", 55 => "pack_unorm4x8",
-                56 => "pack_snorm2x16", 57 => "pack_unorm2x16", 58 => "pack_half2x16",
-                60 => "unpack_snorm2x16", 61 => "unpack_unorm2x16", 62 => "unpack_half2x16",
-                63 => "unpack_snorm4x8", 64 => "unpack_unorm4x8",
-                76 => "EvaluateAttributeAtCentroid", 77 => "EvaluateAttributeAtSample", 78 => "EvaluateAttributeSnapped",
+                79 => "min",
+                80 => "max",
+                81 => "clamp",
+                54 => "pack_snorm4x8",
+                55 => "pack_unorm4x8",
+                56 => "pack_snorm2x16",
+                57 => "pack_unorm2x16",
+                58 => "pack_half2x16",
+                60 => "unpack_snorm2x16",
+                61 => "unpack_unorm2x16",
+                62 => "unpack_half2x16",
+                63 => "unpack_snorm4x8",
+                64 => "unpack_unorm4x8",
+                76 => "EvaluateAttributeAtCentroid",
+                77 => "EvaluateAttributeAtSample",
+                78 => "EvaluateAttributeSnapped",
                 else => null,
             };
         },
@@ -5822,5 +6106,3 @@ fn idToExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
-
-

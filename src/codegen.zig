@@ -42,7 +42,7 @@ pub fn generate(
     glsl_version: u32,
     is_essl: bool,
     default_layout: LayoutKind,
-) error{OutOfMemory, CodegenFailed}![]const u32 {
+) error{ OutOfMemory, CodegenFailed }![]const u32 {
     return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, default_layout, false);
 }
 
@@ -54,7 +54,7 @@ pub fn generateNoOpt(
     glsl_version: u32,
     is_essl: bool,
     default_layout: LayoutKind,
-) error{OutOfMemory, CodegenFailed}![]const u32 {
+) error{ OutOfMemory, CodegenFailed }![]const u32 {
     return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, default_layout, true);
 }
 
@@ -67,7 +67,7 @@ fn generateInternal(
     is_essl: bool,
     default_layout: LayoutKind,
     no_opt: bool,
-) error{OutOfMemory, CodegenFailed}![]const u32 {
+) error{ OutOfMemory, CodegenFailed }![]const u32 {
     var cg = Codegen{
         .alloc = alloc,
         .module = module,
@@ -352,7 +352,6 @@ fn generateInternal(
     const result = compact_ids.compactIds(alloc, preheadered) catch return preheadered;
     if (result.ptr != preheadered.ptr) alloc.free(preheadered);
     return result;
-
 }
 
 /// Dedup key for an OpTypeArray in `emitted_array_types`. Folds the effective
@@ -536,7 +535,8 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_BaryCoordEXT") or
                 std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspEXT")) bary.used = true;
             if (std.mem.eql(u8, global.name, "gl_BaryCoordNV") or
-                std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspNV")) {
+                std.mem.eql(u8, global.name, "gl_BaryCoordNoPerspNV"))
+            {
                 bary.used = true;
                 bary.nv = true;
             }
@@ -555,7 +555,8 @@ const Codegen = struct {
             if (std.mem.eql(u8, global.name, "gl_SampleID") or
                 std.mem.eql(u8, global.name, "gl_SamplePosition") or
                 std.mem.eql(u8, global.name, "gl_SampleMaskIn") or
-                std.mem.eql(u8, global.name, "gl_SampleMask")) {
+                std.mem.eql(u8, global.name, "gl_SampleMask"))
+            {
                 has_sample_builtins = true;
                 break;
             }
@@ -587,7 +588,8 @@ const Codegen = struct {
             try self.emitWord(@intFromEnum(spirv.Capability.mesh_shading_ext));
         }
         if (self.stage == .raygen or self.stage == .closesthit or self.stage == .miss or
-            self.stage == .intersection or self.stage == .anyhit or self.stage == .callable) {
+            self.stage == .intersection or self.stage == .anyhit or self.stage == .callable)
+        {
             try self.emitWord(spirv.encodeInstructionHeader(2, @intFromEnum(spirv.Op.Capability)));
             try self.emitWord(@intFromEnum(spirv.Capability.ray_tracing_khr));
         }
@@ -707,8 +709,10 @@ const Codegen = struct {
         for (self.module.functions) |func| {
             for (func.body) |inst| {
                 switch (inst.tag) {
-                    .image_query_size, .image_query_size_lod,
-                    .image_query_levels, .image_query_samples,
+                    .image_query_size,
+                    .image_query_size_lod,
+                    .image_query_levels,
+                    .image_query_samples,
                     .image_query_lod,
                     => has_image_query = true,
                     .derivative => has_derivative_control = true,
@@ -743,8 +747,7 @@ const Codegen = struct {
                     has_storage_image_ms = true;
                 },
                 .image2d_ms, .sampler2d_ms, .isampler2d_ms, .usampler2d_ms => has_storage_image_ms = true,
-                .sampler_cube_array, .sampler_cube_array_shadow, .isampler_cube_array, .usampler_cube_array,
-                .image_cube_array, .iimage_cube_array, .uimage_cube_array => has_cube_array = true,
+                .sampler_cube_array, .sampler_cube_array_shadow, .isampler_cube_array, .usampler_cube_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array => has_cube_array = true,
                 else => {},
             }
         }
@@ -930,7 +933,10 @@ const Codegen = struct {
         var needs_tensor_cap = self.module.uses_arm_tensors;
         if (!needs_tensor_cap) {
             for (self.module.globals) |global| {
-                if (global.ty == .tensor_arm) { needs_tensor_cap = true; break; }
+                if (global.ty == .tensor_arm) {
+                    needs_tensor_cap = true;
+                    break;
+                }
             }
         }
         if (needs_tensor_cap) {
@@ -957,18 +963,7 @@ const Codegen = struct {
     }
     fn isTextureType(self: *Codegen, ty: ast.Type) bool {
         return switch (ty) {
-            .texture2d_plain, .texture3d_plain, .texture_cube_plain,
-            .texture2d_array_plain, .texture2d_ms_plain,
-            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d,
-            .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer,
-            .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow,
-            .sampler2d_array_shadow, .sampler_cube_array_shadow,
-            .sampler_cube, .sampler_cube_array, .sampler_plain,
-            .image2d, .iimage2d, .uimage2d, .image1d, .iimage1d, .uimage1d,
-            .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube,
-            .image2d_array, .iimage2d_array, .uimage2d_array,
-            .image_cube_array, .iimage_cube_array, .uimage_cube_array,
-            .image_buffer, .image2d_ms, .image2d_ms_array => true,
+            .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .sampler_cube_array, .sampler_plain, .image2d, .iimage2d, .uimage2d, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .image_buffer, .image2d_ms, .image2d_ms_array => true,
             .named => false, // struct types are not textures
             .array => |arr| self.isTextureType(arr.base.*),
             else => false,
@@ -1117,7 +1112,10 @@ const Codegen = struct {
         var needs_tensor_ext = self.module.uses_arm_tensors;
         if (!needs_tensor_ext) {
             for (self.module.globals) |global| {
-                if (global.ty == .tensor_arm) { needs_tensor_ext = true; break; }
+                if (global.ty == .tensor_arm) {
+                    needs_tensor_ext = true;
+                    break;
+                }
             }
         }
         if (needs_tensor_ext) {
@@ -1505,14 +1503,45 @@ const Codegen = struct {
     /// supplied (caller emits 0 in that case).
     fn imageFormatToSpv(f: ast.ImageFormat) u32 {
         return switch (f) {
-            .rgba32f => 1, .rgba16f => 2, .r32f => 3, .rgba8 => 4, .rgba8_snorm => 5,
-            .rg32f => 6, .rg16f => 7, .r11f_g11f_b10f => 8, .r16f => 9, .rgba16 => 10,
-            .rgb10_a2 => 11, .rg16 => 12, .rg8 => 13, .r16 => 14, .r8 => 15,
-            .rgba16_snorm => 16, .rg16_snorm => 17, .rg8_snorm => 18, .r16_snorm => 19, .r8_snorm => 20,
-            .rgba32i => 21, .rgba16i => 22, .rgba8i => 23, .r32i => 24, .rg32i => 25,
-            .rg16i => 26, .rg8i => 27, .r16i => 28, .r8i => 29,
-            .rgba32ui => 30, .rgba16ui => 31, .rgba8ui => 32, .r32ui => 33, .rgb10_a2ui => 34,
-            .rg32ui => 35, .rg16ui => 36, .rg8ui => 37, .r16ui => 38, .r8ui => 39,
+            .rgba32f => 1,
+            .rgba16f => 2,
+            .r32f => 3,
+            .rgba8 => 4,
+            .rgba8_snorm => 5,
+            .rg32f => 6,
+            .rg16f => 7,
+            .r11f_g11f_b10f => 8,
+            .r16f => 9,
+            .rgba16 => 10,
+            .rgb10_a2 => 11,
+            .rg16 => 12,
+            .rg8 => 13,
+            .r16 => 14,
+            .r8 => 15,
+            .rgba16_snorm => 16,
+            .rg16_snorm => 17,
+            .rg8_snorm => 18,
+            .r16_snorm => 19,
+            .r8_snorm => 20,
+            .rgba32i => 21,
+            .rgba16i => 22,
+            .rgba8i => 23,
+            .r32i => 24,
+            .rg32i => 25,
+            .rg16i => 26,
+            .rg8i => 27,
+            .r16i => 28,
+            .r8i => 29,
+            .rgba32ui => 30,
+            .rgba16ui => 31,
+            .rgba8ui => 32,
+            .r32ui => 33,
+            .rgb10_a2ui => 34,
+            .rg32ui => 35,
+            .rg16ui => 36,
+            .rg8ui => 37,
+            .r16ui => 38,
+            .r8ui => 39,
         };
     }
 
@@ -1717,15 +1746,7 @@ const Codegen = struct {
                 try self.emitTypeWord(id);
                 try self.emitTypeWord(64);
             },
-            .vec2, .vec3, .vec4,
-            .ivec2, .ivec3, .ivec4,
-            .bvec2, .bvec3, .bvec4,
-            .uvec2, .uvec3, .uvec4,
-            .i8vec2, .i8vec3, .i8vec4,
-            .u8vec2, .u8vec3, .u8vec4,
-            .i16vec2, .i16vec3, .i16vec4,
-            .u16vec2, .u16vec3, .u16vec4,
-            .f16vec2, .f16vec3, .f16vec4 => {
+            .vec2, .vec3, .vec4, .ivec2, .ivec3, .ivec4, .bvec2, .bvec3, .bvec4, .uvec2, .uvec3, .uvec4, .i8vec2, .i8vec3, .i8vec4, .u8vec2, .u8vec3, .u8vec4, .i16vec2, .i16vec3, .i16vec4, .u16vec2, .u16vec3, .u16vec4, .f16vec2, .f16vec3, .f16vec4 => {
                 const elem_type = try self.ensureType(ty.elementType());
                 const count = ty.numComponents();
                 try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeVector)));
@@ -1733,9 +1754,7 @@ const Codegen = struct {
                 try self.emitTypeWord(elem_type);
                 try self.emitTypeWord(count);
             },
-            .mat2, .mat2x2, .mat2x3, .mat2x4,
-            .mat3x2, .mat3, .mat3x3, .mat3x4,
-            .mat4x2, .mat4x3, .mat4, .mat4x4 => {
+            .mat2, .mat2x2, .mat2x3, .mat2x4, .mat3x2, .mat3, .mat3x3, .mat3x4, .mat4x2, .mat4x3, .mat4, .mat4x4 => {
                 const col_type = try self.ensureType(ty.columnType());
                 const num_cols = ty.numColumns();
                 try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeMatrix)));
@@ -2290,7 +2309,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(1); // Dim = 2D
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 self.sampled_image_int_inner_id = image_id;
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
@@ -2304,7 +2327,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(1); // Dim = 2D
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 self.sampled_image_uint_inner_id = image_id;
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
@@ -2318,7 +2345,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(2); // Dim = 3D
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2331,7 +2362,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(2); // Dim = 3D
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2344,7 +2379,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(3); // Dim = Cube
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2357,7 +2396,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(3); // Dim = Cube
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2372,7 +2415,9 @@ const Codegen = struct {
                 try self.emitTypeWord(1); // Dim = 2D
                 try self.emitTypeWord(0); // Not depth
                 try self.emitTypeWord(1); // Arrayed = 1
-                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2385,7 +2430,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(1); // Dim = 2D
-                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2397,7 +2446,12 @@ const Codegen = struct {
                 try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
-                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2409,7 +2463,12 @@ const Codegen = struct {
                 try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
-                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2421,7 +2480,12 @@ const Codegen = struct {
                 try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
-                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2433,7 +2497,12 @@ const Codegen = struct {
                 try self.emitTypeWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.TypeImage)));
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
-                try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2446,7 +2515,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(3); // Dim = Cube
-                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2459,7 +2532,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(3); // Dim = Cube
-                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2472,7 +2549,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(0); // Dim = 1D
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2485,7 +2566,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(0); // Dim = 1D
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2498,7 +2583,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(0); // Dim = 1D
-                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2511,7 +2600,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(0); // Dim = 1D
-                try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2524,7 +2617,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(5); // Dim = Buffer
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2537,7 +2634,11 @@ const Codegen = struct {
                 try self.emitTypeWord(image_id);
                 try self.emitTypeWord(base_id);
                 try self.emitTypeWord(5); // Dim = Buffer
-                try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(0); try self.emitTypeWord(1); try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(0);
+                try self.emitTypeWord(1);
+                try self.emitTypeWord(0);
                 try self.sampled_image_inner_by_type.put(self.alloc, std.meta.activeTag(ty), image_id); // inner image for OpImage extraction (#188)
                 try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeSampledImage)));
                 try self.emitTypeWord(id);
@@ -2676,8 +2777,7 @@ const Codegen = struct {
                     if (!std.mem.eql(u8, global.ty.named, name)) continue;
                     needs_block = true;
                     if (global.layout) |l| {
-                        if (l.std430) block_layout = .std430
-                        else if (l.std140) block_layout = .std140;
+                        if (l.std430) block_layout = .std430 else if (l.std140) block_layout = .std140;
                         block_row_major = l.row_major;
                     }
                     break;
@@ -3451,14 +3551,7 @@ const Codegen = struct {
             const TypeTagInner = @typeInfo(ast.Type).@"union".tag_type.?;
             const tag_inner: TypeTagInner = @enumFromInt(sc.type_tag);
             const is_composite = switch (tag_inner) {
-                .vec2, .vec3, .vec4,
-                .ivec2, .ivec3, .ivec4,
-                .uvec2, .uvec3, .uvec4,
-                .bvec2, .bvec3, .bvec4,
-                .mat2, .mat3, .mat4,
-                .mat2x2, .mat2x3, .mat2x4,
-                .mat3x2, .mat3x3, .mat3x4,
-                .mat4x2, .mat4x3, .mat4x4 => true,
+                .vec2, .vec3, .vec4, .ivec2, .ivec3, .ivec4, .uvec2, .uvec3, .uvec4, .bvec2, .bvec3, .bvec4, .mat2, .mat3, .mat4, .mat2x2, .mat2x3, .mat2x4, .mat3x2, .mat3x3, .mat3x4, .mat4x2, .mat4x3, .mat4x4 => true,
                 else => false,
             };
             if (is_composite) continue; // emitted later via decoration_section
@@ -3569,18 +3662,9 @@ const Codegen = struct {
         // Scalar layout: alignment of any type is the alignment of its scalar component.
         // No 16-byte rounding, no vec3-to-vec4 padding.
         return switch (ty) {
-            .int8, .uint8,
-            .i8vec2, .u8vec2, .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 1,
-            .int16, .uint16, .float16,
-            .i16vec2, .u16vec2, .f16vec2,
-            .i16vec3, .u16vec3, .f16vec3,
-            .i16vec4, .u16vec4, .f16vec4 => 2,
-            .float, .int, .uint, .bool,
-            .vec2, .ivec2, .uvec2,
-            .vec3, .ivec3, .uvec3,
-            .vec4, .ivec4, .uvec4,
-            .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
-            .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 4,
+            .int8, .uint8, .i8vec2, .u8vec2, .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 1,
+            .int16, .uint16, .float16, .i16vec2, .u16vec2, .f16vec2, .i16vec3, .u16vec3, .f16vec3, .i16vec4, .u16vec4, .f16vec4 => 2,
+            .float, .int, .uint, .bool, .vec2, .ivec2, .uvec2, .vec3, .ivec3, .uvec3, .vec4, .ivec4, .uvec4, .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4, .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 4,
             .array => |arr| self.layoutAlignmentScalar(arr.base.*),
             .named => |name| blk: {
                 const td = self.module.types.get(name) orelse break :blk 4;
@@ -3607,25 +3691,24 @@ const Codegen = struct {
 
     fn layoutAlignmentStd430(self: *Codegen, ty: ast.Type) u32 {
         return switch (ty) {
-                .int8, .uint8 => 1,
-                .int16, .uint16, .float16 => 2,
-                .i8vec2, .u8vec2 => 2,
-                .i16vec2, .u16vec2, .f16vec2 => 4,
-                .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 4,
-                .i16vec3, .u16vec3, .f16vec3, .i16vec4, .u16vec4, .f16vec4 => 8,
-                .float, .int, .uint, .bool => 4,
-                .vec2, .ivec2, .uvec2 => 8,
-                .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
-                // Matrix alignment = stride of its stored vector (column for col_major,
-                // row for row_major). std430 2-component vectors align to 8, not 16.
-                .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
-                .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => blk: {
-                    const span = if (self.default_row_major)
-                        self.matrixColumnCount(ty)
-                    else
-                        self.matrixRowCount(ty);
-                    break :blk self.matrixMemberStride(span, .std430);
-                },
+            .int8, .uint8 => 1,
+            .int16, .uint16, .float16 => 2,
+            .i8vec2, .u8vec2 => 2,
+            .i16vec2, .u16vec2, .f16vec2 => 4,
+            .i8vec3, .u8vec3, .i8vec4, .u8vec4 => 4,
+            .i16vec3, .u16vec3, .f16vec3, .i16vec4, .u16vec4, .f16vec4 => 8,
+            .float, .int, .uint, .bool => 4,
+            .vec2, .ivec2, .uvec2 => 8,
+            .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
+            // Matrix alignment = stride of its stored vector (column for col_major,
+            // row for row_major). std430 2-component vectors align to 8, not 16.
+            .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4, .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => blk: {
+                const span = if (self.default_row_major)
+                    self.matrixColumnCount(ty)
+                else
+                    self.matrixRowCount(ty);
+                break :blk self.matrixMemberStride(span, .std430);
+            },
             .array => |arr| self.layoutAlignmentStd430(arr.base.*), // std430: array alignment = element alignment
             .named => |name| blk: {
                 // Struct alignment = max alignment of its members
@@ -3653,8 +3736,7 @@ const Codegen = struct {
             .float, .int, .uint, .bool => 4,
             .vec2, .ivec2, .uvec2 => 8,
             .vec3, .vec4, .ivec3, .ivec4, .uvec3, .uvec4 => 16,
-            .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4,
-            .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
+            .mat2, .mat2x2, .mat3, .mat3x3, .mat4, .mat4x4, .mat2x3, .mat2x4, .mat3x2, .mat3x4, .mat4x2, .mat4x3 => 16,
             .array => 16, // std140: array alignment is vec4 (16)
             .named => |name| blk: {
                 // Struct alignment = max alignment of its members
@@ -3701,9 +3783,7 @@ const Codegen = struct {
             // the stored vectors are columns (span = rows); for row_major they are
             // rows (span = cols). matrixMemberStride encodes the per-layout column
             // alignment, so size stays consistent with the MatrixStride decoration.
-            .mat2, .mat2x2, .mat2x3, .mat2x4,
-            .mat3, .mat3x2, .mat3x3, .mat3x4,
-            .mat4, .mat4x2, .mat4x3, .mat4x4 => blk: {
+            .mat2, .mat2x2, .mat2x3, .mat2x4, .mat3, .mat3x2, .mat3x3, .mat3x4, .mat4, .mat4x2, .mat4x3, .mat4x4 => blk: {
                 const cols = self.matrixColumnCount(ty);
                 const rows = self.matrixRowCount(ty);
                 const vec_count = if (self.default_row_major) rows else cols;
@@ -3723,14 +3803,14 @@ const Codegen = struct {
                 // the size recursion misses and returns 0 — the member after a
                 // nested struct then never advances and overlaps it (#181).
                 const type_id = self.resolveLayoutTypeId(name) orelse {
-                        // Both maps missed: the struct's type was never emitted
-                        // before its layout was computed. Returning 0 here is the
-                        // silent-wrong default that #181 was about — make it loud
-                        // so a future regression is a visible warning, not a
-                        // mislaid member that overlaps the next one.
-                        std.log.warn("codegen.layoutSize: struct '{s}' not in emitted type maps; size defaults to 0 (member following it will overlap)", .{name});
-                        break :blk 0;
-                    };
+                    // Both maps missed: the struct's type was never emitted
+                    // before its layout was computed. Returning 0 here is the
+                    // silent-wrong default that #181 was about — make it loud
+                    // so a future regression is a visible warning, not a
+                    // mislaid member that overlaps the next one.
+                    std.log.warn("codegen.layoutSize: struct '{s}' not in emitted type maps; size defaults to 0 (member following it will overlap)", .{name});
+                    break :blk 0;
+                };
                 if (self.layout_visited.contains(type_id)) break :blk 8; // Self-referential: treat as pointer (8 bytes)
                 self.layout_visited.put(self.alloc, type_id, {}) catch break :blk 0;
                 var sz: u32 = 0;
@@ -3847,9 +3927,7 @@ const Codegen = struct {
     fn isMatrixType(self: *Codegen, ty: ast.Type) bool {
         _ = self;
         return switch (ty) {
-            .mat2, .mat2x2, .mat2x3, .mat2x4,
-            .mat3, .mat3x2, .mat3x3, .mat3x4,
-            .mat4, .mat4x2, .mat4x3, .mat4x4 => true,
+            .mat2, .mat2x2, .mat2x3, .mat2x4, .mat3, .mat3x2, .mat3x3, .mat3x4, .mat4, .mat4x2, .mat4x3, .mat4x4 => true,
             else => false,
         };
     }
@@ -4747,7 +4825,12 @@ const Codegen = struct {
                                 .bvec4 => 4,
                                 else => unreachable,
                             };
-                            const uvec_type_id = try self.ensureType(switch (original_ty) { .bvec2 => ast.Type.uvec2, .bvec3 => ast.Type.uvec3, .bvec4 => ast.Type.uvec4, else => unreachable });
+                            const uvec_type_id = try self.ensureType(switch (original_ty) {
+                                .bvec2 => ast.Type.uvec2,
+                                .bvec3 => ast.Type.uvec3,
+                                .bvec4 => ast.Type.uvec4,
+                                else => unreachable,
+                            });
                             const bvec_type_id = try self.ensureType(original_ty);
                             const uint_0 = try self.emitIntConstant(0);
                             // Load as uvec into temp
@@ -4824,7 +4907,12 @@ const Codegen = struct {
                                 .bvec4 => 4,
                                 else => unreachable,
                             };
-                            const uvec_type_id = try self.ensureType(switch (original_ty) { .bvec2 => ast.Type.uvec2, .bvec3 => ast.Type.uvec3, .bvec4 => ast.Type.uvec4, else => unreachable });
+                            const uvec_type_id = try self.ensureType(switch (original_ty) {
+                                .bvec2 => ast.Type.uvec2,
+                                .bvec3 => ast.Type.uvec3,
+                                .bvec4 => ast.Type.uvec4,
+                                else => unreachable,
+                            });
                             const uint_0 = try self.emitIntConstant(0);
                             const uint_1 = try self.emitIntConstant(1);
                             // Create uvec_0 and uvec_1 constants
@@ -5546,43 +5634,43 @@ const Codegen = struct {
                     try self.emitWord(coord_id);
                     try self.emitWord(dref_id);
                 } else {
-                const coord_id = self.operandId(resolved, 1);
-                const dref = try self.emitDrefAndShrunkCoord(inst.ty, coord_id);
-                const dref_id = dref.dref_id;
-                const shrunk_coord_id = dref.shrunk_coord_id;
-                // Emit the Dref instruction
-                if (resolved.operands.len >= 4) {
-                    // textureOffset(shadow, coord, offset, bias) → Bias|ConstOffset
-                    const offset_id = self.operandId(resolved, 2);
-                    const bias_id = self.operandId(resolved, 3);
-                    try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
-                    try self.emitWord(result_type_id);
-                    try self.emitWord(result_id);
-                    try self.emitWord(sampled_image_id);
-                    try self.emitWord(shrunk_coord_id);
-                    try self.emitWord(dref_id);
-                    try self.emitWord(9); // Image Operand Bias|ConstOffset (bit 0 | bit 3)
-                    try self.emitWord(bias_id);
-                    try self.emitWord(offset_id);
-                } else if (resolved.operands.len >= 3 and inst.ty != .sampler_cube_array_shadow) {
-                    // texture(shadow, coord, bias) → Bias
-                    const bias_id = self.operandId(resolved, 2);
-                    try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
-                    try self.emitWord(result_type_id);
-                    try self.emitWord(result_id);
-                    try self.emitWord(sampled_image_id);
-                    try self.emitWord(shrunk_coord_id);
-                    try self.emitWord(dref_id);
-                    try self.emitWord(1); // Image Operand Bias (bit 0)
-                    try self.emitWord(bias_id);
-                } else {
-                    try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
-                    try self.emitWord(result_type_id);
-                    try self.emitWord(result_id);
-                    try self.emitWord(sampled_image_id);
-                    try self.emitWord(shrunk_coord_id);
-                    try self.emitWord(dref_id);
-                }
+                    const coord_id = self.operandId(resolved, 1);
+                    const dref = try self.emitDrefAndShrunkCoord(inst.ty, coord_id);
+                    const dref_id = dref.dref_id;
+                    const shrunk_coord_id = dref.shrunk_coord_id;
+                    // Emit the Dref instruction
+                    if (resolved.operands.len >= 4) {
+                        // textureOffset(shadow, coord, offset, bias) → Bias|ConstOffset
+                        const offset_id = self.operandId(resolved, 2);
+                        const bias_id = self.operandId(resolved, 3);
+                        try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
+                        try self.emitWord(result_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(sampled_image_id);
+                        try self.emitWord(shrunk_coord_id);
+                        try self.emitWord(dref_id);
+                        try self.emitWord(9); // Image Operand Bias|ConstOffset (bit 0 | bit 3)
+                        try self.emitWord(bias_id);
+                        try self.emitWord(offset_id);
+                    } else if (resolved.operands.len >= 3 and inst.ty != .sampler_cube_array_shadow) {
+                        // texture(shadow, coord, bias) → Bias
+                        const bias_id = self.operandId(resolved, 2);
+                        try self.emitWord(spirv.encodeInstructionHeader(8, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
+                        try self.emitWord(result_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(sampled_image_id);
+                        try self.emitWord(shrunk_coord_id);
+                        try self.emitWord(dref_id);
+                        try self.emitWord(1); // Image Operand Bias (bit 0)
+                        try self.emitWord(bias_id);
+                    } else {
+                        try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ImageSampleDrefImplicitLod)));
+                        try self.emitWord(result_type_id);
+                        try self.emitWord(result_id);
+                        try self.emitWord(sampled_image_id);
+                        try self.emitWord(shrunk_coord_id);
+                        try self.emitWord(dref_id);
+                    }
                 }
             },
             .image_sample_dref_explicit_lod => {
@@ -6413,16 +6501,16 @@ const Codegen = struct {
             .trace_ray => {
                 // OpTraceRayKHR <accel> <ray_flags> <cull_mask> <sbt_offset> <sbt_stride> <miss_index> <origin> <t_min> <direction> <t_max> <payload>
                 try self.emitWord(spirv.encodeInstructionHeader(12, @intFromEnum(spirv.Op.TraceRayKHR)));
-                try self.emitWord(self.operandId(resolved, 0));  // acceleration structure
-                try self.emitWord(self.operandId(resolved, 1));  // ray flags
-                try self.emitWord(self.operandId(resolved, 2));  // cull mask
-                try self.emitWord(self.operandId(resolved, 3));  // SBT offset
-                try self.emitWord(self.operandId(resolved, 4));  // SBT stride
-                try self.emitWord(self.operandId(resolved, 5));  // miss index
-                try self.emitWord(self.operandId(resolved, 6));  // origin
-                try self.emitWord(self.operandId(resolved, 7));  // tMin
-                try self.emitWord(self.operandId(resolved, 8));  // direction
-                try self.emitWord(self.operandId(resolved, 9));  // tMax
+                try self.emitWord(self.operandId(resolved, 0)); // acceleration structure
+                try self.emitWord(self.operandId(resolved, 1)); // ray flags
+                try self.emitWord(self.operandId(resolved, 2)); // cull mask
+                try self.emitWord(self.operandId(resolved, 3)); // SBT offset
+                try self.emitWord(self.operandId(resolved, 4)); // SBT stride
+                try self.emitWord(self.operandId(resolved, 5)); // miss index
+                try self.emitWord(self.operandId(resolved, 6)); // origin
+                try self.emitWord(self.operandId(resolved, 7)); // tMin
+                try self.emitWord(self.operandId(resolved, 8)); // direction
+                try self.emitWord(self.operandId(resolved, 9)); // tMax
                 try self.emitWord(self.operandId(resolved, 10)); // payload
             },
             .begin_invocation_interlock => {

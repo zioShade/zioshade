@@ -27,7 +27,9 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
 
     var p: u32 = 5;
     while (p < words.len) {
-        const h = words[p]; const wc: u32 = h >> 16; const op: u16 = @truncate(h & 0xFFFF);
+        const h = words[p];
+        const wc: u32 = h >> 16;
+        const op: u16 = @truncate(h & 0xFFFF);
         if (wc == 0) break;
         const ie = p + wc;
         if (ie > words.len) break;
@@ -43,16 +45,28 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
             var in_entry = true;
             var fp: u32 = ie;
             while (fp < words.len) {
-                const fh = words[fp]; const fwc: u32 = fh >> 16; const fop: u16 = @truncate(fh & 0xFFFF);
+                const fh = words[fp];
+                const fwc: u32 = fh >> 16;
+                const fop: u16 = @truncate(fh & 0xFFFF);
                 if (fwc == 0) break;
                 const fie = fp + fwc;
                 if (fie > words.len) break;
-                if (fop == 56) { fend = fie; break; }
+                if (fop == 56) {
+                    fend = fie;
+                    break;
+                }
                 if (fop == 55 and fwc >= 3) try params.append(alloc, words[fp + 2]);
-                if (fop == 248) { n_blk += 1; if (lbl_pos == 0) lbl_pos = fp; in_entry = (n_blk == 1); }
+                if (fop == 248) {
+                    n_blk += 1;
+                    if (lbl_pos == 0) lbl_pos = fp;
+                    in_entry = (n_blk == 1);
+                }
                 if (fop == 59 and in_entry and fwc >= 4 and words[fp + 3] == 7) has_fvars = true;
                 if (fop == 249 or fop == 250 or fop == 251) in_entry = false;
-                if (fop == 254 and fwc >= 2) { n_ret += 1; ret_id = words[fp + 1]; }
+                if (fop == 254 and fwc >= 2) {
+                    n_ret += 1;
+                    ret_id = words[fp + 1];
+                }
                 fp = fie;
             }
             const ba: u32 = if (lbl_pos > 0) lbl_pos + (words[lbl_pos] >> 16) else fend;
@@ -69,7 +83,9 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     defer eps.deinit(alloc);
     p = 5;
     while (p < words.len) {
-        const h = words[p]; const wc: u32 = h >> 16; const op: u16 = @truncate(h & 0xFFFF);
+        const h = words[p];
+        const wc: u32 = h >> 16;
+        const op: u16 = @truncate(h & 0xFFFF);
         if (wc == 0) break;
         if (op == 15 and wc >= 3) try eps.put(alloc, words[p + 2], {});
         p += wc;
@@ -81,7 +97,9 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     defer csites.deinit(alloc);
     p = 5;
     while (p < words.len) {
-        const h = words[p]; const wc: u32 = h >> 16; const op: u16 = @truncate(h & 0xFFFF);
+        const h = words[p];
+        const wc: u32 = h >> 16;
+        const op: u16 = @truncate(h & 0xFFFF);
         if (wc == 0) break;
         if (op == 57 and wc >= 4) {
             const callee = words[p + 3];
@@ -116,10 +134,15 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     defer callee_defs.deinit(alloc);
     var bp2: u32 = fi.body_after_entry;
     while (bp2 < fi.body_end) {
-        const bh = words[bp2]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+        const bh = words[bp2];
+        const bwc: u32 = bh >> 16;
+        const bop: u16 = @truncate(bh & 0xFFFF);
         if (bwc == 0) break;
         const bie = bp2 + bwc;
-        const info = compact_ids.getOpInfo(bop) orelse { bp2 = bie; continue; };
+        const info = compact_ids.getOpInfo(bop) orelse {
+            bp2 = bie;
+            continue;
+        };
         if (info.fixed == 2 and bwc >= 3) try callee_defs.put(alloc, words[bp2 + 2], {});
         if (info.fixed == 3 and bwc >= 2) try callee_defs.put(alloc, words[bp2 + 1], {});
         bp2 = bie;
@@ -132,17 +155,36 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     var pos3: u32 = 5;
     var in_callee_check = false;
     while (pos3 < words.len) {
-        const hdr2 = words[pos3]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+        const hdr2 = words[pos3];
+        const wc2: u32 = hdr2 >> 16;
+        const op2: u16 = @truncate(hdr2 & 0xFFFF);
         if (wc2 == 0) break;
         const ie2 = pos3 + wc2;
         if (ie2 > words.len) break;
-        if (op2 == 54 and wc2 >= 5 and words[pos3 + 2] == fi.id) { in_callee_check = true; pos3 = ie2; continue; }
-        if (in_callee_check and op2 == 56) { in_callee_check = false; pos3 = ie2; continue; }
-        if (in_callee_check) { pos3 = ie2; continue; }
+        if (op2 == 54 and wc2 >= 5 and words[pos3 + 2] == fi.id) {
+            in_callee_check = true;
+            pos3 = ie2;
+            continue;
+        }
+        if (in_callee_check and op2 == 56) {
+            in_callee_check = false;
+            pos3 = ie2;
+            continue;
+        }
+        if (in_callee_check) {
+            pos3 = ie2;
+            continue;
+        }
         // Skip OpName/OpMemberName (debug info) — safe to remove later
-        if (op2 == 5 or op2 == 6) { pos3 = ie2; continue; }
+        if (op2 == 5 or op2 == 6) {
+            pos3 = ie2;
+            continue;
+        }
         // Skip the call site itself — it references callee's function ID which is expected
-        if (pos3 == cpos) { pos3 = ie2; continue; }
+        if (pos3 == cpos) {
+            pos3 = ie2;
+            continue;
+        }
         // Check operands of non-callee instructions
         for (0..wc2) |i| {
             if (i == 0) continue; // skip header
@@ -164,10 +206,15 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
 
     var bp: u32 = fi.body_after_entry;
     while (bp < fi.body_end) {
-        const bh = words[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+        const bh = words[bp];
+        const bwc: u32 = bh >> 16;
+        const bop: u16 = @truncate(bh & 0xFFFF);
         if (bwc == 0) break;
         const bie = bp + bwc;
-        const info = compact_ids.getOpInfo(bop) orelse { bp = bie; continue; };
+        const info = compact_ids.getOpInfo(bop) orelse {
+            bp = bie;
+            continue;
+        };
         if (info.fixed == 2 and bwc >= 3) {
             const rid = words[bp + 2];
             if (rid != fi.ret_id) {
@@ -193,7 +240,9 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
         var caller_lbl: u32 = 0;
         var scan: u32 = 5;
         while (scan < words.len) {
-            const sh = words[scan]; const swc: u32 = sh >> 16; const sop: u16 = @truncate(sh & 0xFFFF);
+            const sh = words[scan];
+            const swc: u32 = sh >> 16;
+            const sop: u16 = @truncate(sh & 0xFFFF);
             if (swc == 0) break;
             const sie = scan + swc;
             if (sie > words.len) break;
@@ -203,7 +252,9 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
         }
         var fp3: u32 = fi.start;
         while (fp3 < fi.body_after_entry) {
-            const fh3 = words[fp3]; const fwc3: u32 = fh3 >> 16; const fop3: u16 = @truncate(fh3 & 0xFFFF);
+            const fh3 = words[fp3];
+            const fwc3: u32 = fh3 >> 16;
+            const fop3: u16 = @truncate(fh3 & 0xFFFF);
             if (fwc3 == 0) break;
             const fie3 = fp3 + fwc3;
             if (fop3 == 248 and fwc3 >= 2) {
@@ -224,21 +275,36 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
     p = 5;
     var in_callee = false;
     while (p < words.len) {
-        const h = words[p]; const wc: u32 = h >> 16; const op: u16 = @truncate(h & 0xFFFF);
+        const h = words[p];
+        const wc: u32 = h >> 16;
+        const op: u16 = @truncate(h & 0xFFFF);
         if (wc == 0) break;
         const ie = p + wc;
         if (ie > words.len) break;
 
         // Skip callee function definition
-        if (op == 54 and wc >= 5 and words[p + 2] == fi.id) { in_callee = true; p = ie; continue; }
-        if (in_callee and op == 56) { in_callee = false; p = ie; continue; }
-        if (in_callee) { p = ie; continue; }
+        if (op == 54 and wc >= 5 and words[p + 2] == fi.id) {
+            in_callee = true;
+            p = ie;
+            continue;
+        }
+        if (in_callee and op == 56) {
+            in_callee = false;
+            p = ie;
+            continue;
+        }
+        if (in_callee) {
+            p = ie;
+            continue;
+        }
 
         // At call site: emit inlined body
         if (p == cpos) {
             bp = fi.body_after_entry;
             while (bp < fi.body_end) {
-                const bh = words[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+                const bh = words[bp];
+                const bwc: u32 = bh >> 16;
+                const bop: u16 = @truncate(bh & 0xFFFF);
                 if (bwc == 0) break;
                 const bie = bp + bwc;
 
@@ -264,7 +330,9 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
             // Emit caller's remaining instructions in this block
             p = cpos + cwc;
             while (p < words.len) {
-                const h2 = words[p]; const wc2: u32 = h2 >> 16; const op2: u16 = @truncate(h2 & 0xFFFF);
+                const h2 = words[p];
+                const wc2: u32 = h2 >> 16;
+                const op2: u16 = @truncate(h2 & 0xFFFF);
                 if (wc2 == 0) break;
                 const ie2 = p + wc2;
                 if (ie2 > words.len) break;
@@ -276,7 +344,10 @@ pub fn inlineMultiBlock(alloc: std.mem.Allocator, words: []const u32) error{OutO
         }
 
         // Skip OpName/OpMemberName for callee and its internal IDs
-        if ((op == 5 or op == 6) and wc >= 3 and callee_defs.contains(words[p + 1])) { p = ie; continue; }
+        if ((op == 5 or op == 6) and wc >= 3 and callee_defs.contains(words[p + 1])) {
+            p = ie;
+            continue;
+        }
 
         try out.appendSlice(alloc, words[p..ie]);
         p = ie;
@@ -296,7 +367,8 @@ fn emitRemap(
     call_rid: u32,
     idmap: *const std.AutoHashMapUnmanaged(u32, u32),
 ) !void {
-    const bh = words[start]; const bop: u16 = @truncate(bh & 0xFFFF);
+    const bh = words[start];
+    const bop: u16 = @truncate(bh & 0xFFFF);
     const info = compact_ids.getOpInfo(bop) orelse {
         try out.append(alloc, bh);
         var wi: u32 = start + 1;
@@ -312,9 +384,17 @@ fn emitRemap(
 
     switch (info.fixed) {
         0 => {},
-        1 => { if (wi < end) { try out.append(alloc, words[wi]); wi += 1; } },
+        1 => {
+            if (wi < end) {
+                try out.append(alloc, words[wi]);
+                wi += 1;
+            }
+        },
         2 => {
-            if (wi < end) { try out.append(alloc, words[wi]); wi += 1; }
+            if (wi < end) {
+                try out.append(alloc, words[wi]);
+                wi += 1;
+            }
             if (wi < end) {
                 const rid = words[wi];
                 try out.append(alloc, if (rid == ret_id) call_rid else (idmap.get(rid) orelse rid));
@@ -334,32 +414,64 @@ fn emitRemap(
     for (info.ops) |ch| {
         if (wi >= end) break;
         switch (ch) {
-            'i' => { const w = words[wi]; try out.append(alloc, idmap.get(w) orelse w); wi += 1; },
-            'l' => { try out.append(alloc, words[wi]); wi += 1; },
-            'I' => { while (wi < end) : (wi += 1) { const w = words[wi]; try out.append(alloc, idmap.get(w) orelse w); } },
-            'L', 's' => { while (wi < end) : (wi += 1) try out.append(alloc, words[wi]); },
+            'i' => {
+                const w = words[wi];
+                try out.append(alloc, idmap.get(w) orelse w);
+                wi += 1;
+            },
+            'l' => {
+                try out.append(alloc, words[wi]);
+                wi += 1;
+            },
+            'I' => {
+                while (wi < end) : (wi += 1) {
+                    const w = words[wi];
+                    try out.append(alloc, idmap.get(w) orelse w);
+                }
+            },
+            'L', 's' => {
+                while (wi < end) : (wi += 1) try out.append(alloc, words[wi]);
+            },
             'M' => {
-                if (wi < end) { try out.append(alloc, words[wi]); wi += 1; }
-                while (wi < end) : (wi += 1) { const w = words[wi]; try out.append(alloc, idmap.get(w) orelse w); }
+                if (wi < end) {
+                    try out.append(alloc, words[wi]);
+                    wi += 1;
+                }
+                while (wi < end) : (wi += 1) {
+                    const w = words[wi];
+                    try out.append(alloc, idmap.get(w) orelse w);
+                }
             },
             'W' => {
                 while (wi + 1 < end) {
                     try out.append(alloc, words[wi]); // literal
                     wi += 1;
-                    { const w = words[wi]; try out.append(alloc, idmap.get(w) orelse w); } // target
+                    {
+                        const w = words[wi];
+                        try out.append(alloc, idmap.get(w) orelse w);
+                    } // target
                     wi += 1;
                 }
-                if (wi < end) { try out.append(alloc, words[wi]); wi += 1; }
+                if (wi < end) {
+                    try out.append(alloc, words[wi]);
+                    wi += 1;
+                }
             },
             'E' => {
                 var in_str = true;
                 while (wi < end and in_str) : (wi += 1) {
-                    const w = words[wi]; try out.append(alloc, w);
+                    const w = words[wi];
+                    try out.append(alloc, w);
                     if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
                 }
-                while (wi < end) : (wi += 1) { const w = words[wi]; try out.append(alloc, idmap.get(w) orelse w); }
+                while (wi < end) : (wi += 1) {
+                    const w = words[wi];
+                    try out.append(alloc, idmap.get(w) orelse w);
+                }
             },
-            else => { while (wi < end) : (wi += 1) try out.append(alloc, words[wi]); },
+            else => {
+                while (wi < end) : (wi += 1) try out.append(alloc, words[wi]);
+            },
         }
     }
     while (wi < end) : (wi += 1) try out.append(alloc, words[wi]);
