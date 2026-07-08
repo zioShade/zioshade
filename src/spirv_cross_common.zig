@@ -45,7 +45,13 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         return error.OutOfMemory;
     errdefer instructions.deinit(alloc);
 
+    // `words[3]` is the id bound; `id_defs` is sized to it. A hostile module can
+    // set an absurd bound (e.g. 0xFFFFFFFF) that would make this allocation and
+    // its @memset touch tens of gigabytes and hang. Every result id is defined by
+    // at least a two-word instruction, so a legitimate module's bound never
+    // exceeds its word count. Reject anything larger as malformed.
     const bound = if (words.len > 3) words[3] else 0;
+    if (bound > words.len) return error.InvalidSpirv;
     const id_defs = try alloc.alloc(?usize, bound);
     @memset(id_defs, null);
 

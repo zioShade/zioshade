@@ -17,6 +17,22 @@ pub threadlocal var last_error_inner: []const u8 = "";
 pub threadlocal var last_error_line: u32 = 0;
 pub threadlocal var last_error_column: u32 = 0;
 
+/// Upper bound on the element count of a fixed-size array that may be lowered
+/// into per-element IR (currently wholesale array equality in
+/// `emitAggregateEqual`). Above this, the unrolled IR would be pathological, so
+/// the operation is an honest error rather than an out-of-memory crash. 1M keeps
+/// every realistic shader well within bounds while capping a hostile
+/// `float a[100000000]; a == b;` at a bounded, fast rejection.
+pub const max_aggregate_elements: u32 = 1_000_000;
+
+/// Maximum recursive-descent depth of analyzeExpression. A flat operator chain
+/// (`a+a+a+...`) parses iteratively but yields a left-leaning AST that this
+/// walker descends recursively. In ReleaseSafe (larger frames, so it crashes
+/// sooner than ReleaseFast) ~500 levels are fine and ~1000 exhaust the native
+/// stack, so 400 is safely below the crash point for both build modes and far
+/// above any real single expression.
+pub const max_expr_depth: u32 = 400;
+
 /// Stable backing storage for the error-context strings. `last_error_ctx` /
 /// `last_error_inner` are usually slices into the source the parser read. When
 /// that source is a transient buffer the compiler allocates and frees on return
@@ -613,6 +629,13 @@ const Analyzer = struct {
     // Function overloads: maps function name to list of (param_types, ir_id)
     overloads: std.StringHashMapUnmanaged(std.ArrayListUnmanaged(OverloadEntry)),
     tolerate_errors: bool = false,
+    // Recursive-descent depth of analyzeExpression. The binary-operator parsers
+    // are iterative (while loops), so a flat chain like `a+a+a+...` parses without
+    // recursion but builds a deeply left-leaning AST; analyzeExpression is the
+    // first walker to recurse over it, so an unguarded ~1000-deep chain exhausts
+    // the native stack (uncatchable SIGSEGV in ReleaseFast). Capping the walk here
+    // rejects the pathological input as an honest error before any deeper pass.
+    expr_depth: u32 = 0,
     stage: ?@import("root.zig").Stage = null,
     has_returned: bool = false, // Dead code suppression after return
     current_return_type: ast.Type = .void, // return type of the function being analyzed (for `return` value conversion)
@@ -1388,6 +1411,15 @@ const Analyzer = struct {
         }
         // Array → AND of per-element equality.
         if (ty == .array) {
+            // Elementwise array equality unrolls into O(size) IR. A hostile
+            // `float a[100000000]; a == b;` would emit a hundred million
+            // comparisons and exhaust memory. Reject an absurd fixed size before
+            // emitting any IR — an honest error, not an OOM. The cap is far above
+            // any realistic array a shader would compare wholesale.
+            if (ty.array.size > max_aggregate_elements) {
+                last_error_ctx = "array-too-large-for-equality";
+                return error.SemanticFailed;
+            }
             const elem = ty.array.base.*;
             var acc: ?u32 = null;
             var i: u32 = 0;
@@ -4397,6 +4429,20 @@ const Analyzer = struct {
     }
 
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
+        // Guard the recursive walk against a pathologically deep expression tree
+        // (e.g. a flat `a+a+a+...` chain, which the iterative binary parsers build
+        // without recursing). max_expr_depth is far above any real shader and far
+        // below the native-stack crash threshold, so valid input is unaffected.
+        self.expr_depth += 1;
+        defer self.expr_depth -= 1;
+        if (self.expr_depth > max_expr_depth) {
+            last_error_ctx = "expression-nests-too-deeply";
+            if (last_error_line == 0) {
+                last_error_line = node.loc.line;
+                last_error_column = node.loc.column;
+            }
+            return error.SemanticFailed;
+        }
         errdefer {
             if (last_error_inner.len == 0) {
                 last_error_inner = switch (node.tag) {

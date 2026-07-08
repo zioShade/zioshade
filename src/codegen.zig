@@ -3143,39 +3143,51 @@ const Codegen = struct {
         try self.emitStringLiteral(name);
     }
 
+    /// Upper bound on the byte length of an identifier emitted into the SPIR-V
+    /// name section. The lexer already rejects identifiers longer than
+    /// `lexer.max_identifier_len` (1024), so valid input is never truncated;
+    /// this clamp is defense in depth against a synthetic name reaching here and
+    /// both overflowing the stack buffer (the historical corruption) and blowing
+    /// the u16 instruction word count.
+    const max_name_bytes: usize = lexer.max_identifier_len;
+
     // Name section variants (for struct types emitted during ensureType)
-    fn emitNameSectionName(self: *Codegen, id: u32, name: []const u8) !void {
+    fn emitNameSectionName(self: *Codegen, id: u32, name_in: []const u8) !void {
+        const name = if (name_in.len > max_name_bytes) name_in[0..max_name_bytes] else name_in;
         const word_count: u16 = 2 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
         try self.name_section.append(self.alloc, spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.Name)));
         try self.name_section.append(self.alloc, id);
-        // String literal to name_section
-        var buf: [256]u8 = undefined;
-        const encoded = self.encodeStringLiteral(name, &buf);
-        try self.name_section.appendSlice(self.alloc, encoded);
+        try self.encodeStringLiteralToNameSection(name);
     }
 
-    fn emitNameSectionMemberName(self: *Codegen, type_id: u32, member_index: u32, name: []const u8) !void {
+    fn emitNameSectionMemberName(self: *Codegen, type_id: u32, member_index: u32, name_in: []const u8) !void {
+        const name = if (name_in.len > max_name_bytes) name_in[0..max_name_bytes] else name_in;
         const word_count: u16 = 3 + @as(u16, @intCast(std.math.divCeil(usize, name.len + 1, 4) catch unreachable));
         try self.name_section.append(self.alloc, spirv.encodeInstructionHeader(word_count, @intFromEnum(spirv.Op.MemberName)));
         try self.name_section.append(self.alloc, type_id);
         try self.name_section.append(self.alloc, member_index);
-        var buf: [256]u8 = undefined;
-        const encoded = self.encodeStringLiteral(name, &buf);
-        try self.name_section.appendSlice(self.alloc, encoded);
+        try self.encodeStringLiteralToNameSection(name);
     }
 
-    fn encodeStringLiteral(self: *Codegen, str: []const u8, buf: []u8) []u32 {
-        _ = self;
-        const total_bytes = str.len + 1; // include null terminator
-        const word_count = std.math.divCeil(usize, total_bytes, 4) catch unreachable;
-        @memcpy(buf[0..str.len], str);
-        buf[str.len] = 0; // null terminator
-        // Pad remaining bytes to 0
-        const padded_len = word_count * 4;
-        for (str.len + 1..padded_len) |i| buf[i] = 0;
-        // Convert to u32 words
-        const words = @as([*]u32, @ptrCast(@alignCast(buf.ptr)))[0..word_count];
-        return words;
+    /// Encode `str` as a SPIR-V string literal (little-endian, NUL-terminated,
+    /// zero-padded to a word boundary) directly into `name_section`. Streams
+    /// word by word so there is no fixed-size stack buffer to overflow; the
+    /// caller must have already clamped `str` to `max_name_bytes`.
+    fn encodeStringLiteralToNameSection(self: *Codegen, str: []const u8) !void {
+        var i: usize = 0;
+        while (i < str.len) : (i += 4) {
+            var word: u32 = 0;
+            var j: usize = 0;
+            while (j < 4 and i + j < str.len) : (j += 1) {
+                word |= @as(u32, str[i + j]) << @intCast(j * 8);
+            }
+            try self.name_section.append(self.alloc, word);
+        }
+        // A NUL terminator word is required when the byte length is a multiple
+        // of 4 (otherwise the terminator already fits in the last partial word).
+        if (str.len % 4 == 0) {
+            try self.name_section.append(self.alloc, 0);
+        }
     }
 
     fn emitDecorations(self: *Codegen) !void {
