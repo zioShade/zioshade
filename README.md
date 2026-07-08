@@ -35,31 +35,46 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 
 ## Quick Start
 
+### Step 0: Toolchain
+
+zioshade requires **Zig 0.15.2** (the system Zig on most machines is newer and will not build it). Pick one:
+
+```bash
+# Option A — mise (honors the pinned .mise.toml in this repo)
+mise trust && mise install
+
+# Option B — manual: download Zig 0.15.2 and put it on your PATH
+#   https://ziglang.org/download/0.15.2/
+# or use zigup:  zigup 0.15.2
+```
+
+If you used mise, prefix the build commands below with `mise exec --` (for example `mise exec -- zig build cli`). If you installed Zig 0.15.2 directly, plain `zig` works.
+
 ### CLI
 
 ```bash
 zig build cli
 
-# GLSL → SPIR-V
-zig-out/bin/zioshade compile shader.frag -o shader.spv
+# GLSL → SPIR-V (examples/shader.frag ships with the repo)
+zig-out/bin/zioshade compile examples/shader.frag -o shader.spv
 
 # Cross-compile to a backend
-zig-out/bin/zioshade hlsl shader.frag -o shader.hlsl
-zig-out/bin/zioshade glsl shader.frag -o shader.glsl
-zig-out/bin/zioshade msl  shader.frag -o shader.msl
-zig-out/bin/zioshade wgsl shader.frag -o shader.wgsl
+zig-out/bin/zioshade hlsl examples/shader.frag -o shader.hlsl
+zig-out/bin/zioshade glsl examples/shader.frag -o shader.glsl
+zig-out/bin/zioshade msl  examples/shader.frag -o shader.msl
+zig-out/bin/zioshade wgsl examples/shader.frag -o shader.wgsl
 
 # With preprocessor defines and include paths
-zig-out/bin/zioshade wgsl shader.frag -DDEBUG=1 -DQUALITY=3 -I src/shaders/
+zig-out/bin/zioshade wgsl examples/shader.frag -DDEBUG=1 -DQUALITY=3 -I src/shaders/
 
 # Select entry point for multi-kernel SPIR-V
 zig-out/bin/zioshade wgsl module.spv --entry-point compute_blur
 
 # Read from stdin
-cat shader.frag | zig-out/bin/zioshade wgsl --stdin
+cat examples/shader.frag | zig-out/bin/zioshade wgsl --stdin
 
 # HLSL with a specific shader model
-zig-out/bin/zioshade hlsl shader.frag --shader-model 50
+zig-out/bin/zioshade hlsl examples/shader.frag --shader-model 50
 
 # Reflect a SPIR-V binary
 zig-out/bin/zioshade reflect shader.spv
@@ -108,8 +123,8 @@ const hlsl_one = try zioshade.compileGlslToHlsl(alloc, source, .fragment);
 const msl_one  = try zioshade.compileGlslToMsl(alloc, source, .fragment);
 const wgsl_one = try zioshade.compileGlslToWgsl(alloc, source, .fragment);
 
-// Reflection
-const resources = try zioshade.reflectSPIRV(alloc, spirv);
+// Reflection (deinit takes *ShaderResources, so bind with `var`)
+var resources = try zioshade.reflectSPIRV(alloc, spirv);
 defer resources.deinit(alloc);
 for (resources.uniform_buffers) |ubo| {
     std.debug.print("UBO: {s} (set={d}, binding={d})\n", .{ ubo.name, ubo.set, ubo.binding });
@@ -223,7 +238,7 @@ zig build conformance      # spirv-val conformance suite (needs spirv-val on PAT
 zig build fuzz -- --count N  # Fuzzer (headline: 1,000,000 clean via `just fuzz-million`)
 ```
 
-Requires **Zig 0.15.2** (managed via [mise](https://mise.jdx.dev) if `.mise.toml` is honored).
+All commands require **Zig 0.15.2** (see [Step 0: Toolchain](#step-0-toolchain) above): either `mise install` then `mise exec -- zig ...`, or a direct 0.15.2 install from [ziglang.org/download/0.15.2](https://ziglang.org/download/0.15.2/).
 
 ## Contributing
 

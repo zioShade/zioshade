@@ -230,7 +230,12 @@ const CompareResult = struct {
 fn compareShader(allocator: std.mem.Allocator, name: []const u8, source: [:0]const u8, stage: zioshade.Stage) !CompareResult {
     // Step 1: GLSL → SPIR-V via glslang (shared between both)
     const spirv = compileToSpirvViaGlslang(allocator, source, stage) catch |err| {
-        std.debug.print("  [{s}] glslang failed: {}\n", .{ name, err });
+        // Missing glslang oracle is a skip, not a failure: label it accordingly.
+        if (err == error.SkipZigTest) {
+            std.debug.print("  SKIP [{s}]: glslang oracle unavailable\n", .{name});
+        } else {
+            std.debug.print("  [{s}] glslang failed: {}\n", .{ name, err });
+        }
         return err;
     };
     defer allocator.free(spirv);

@@ -6,8 +6,9 @@ set dotenv-load := false
 
 # zig wrapper — ensures Zig 0.15.2 via mise
 zig := "mise exec -- zig"
-# DXC (HLSL oracle). Override: `just dxc="C:/path/to/dxc.exe" hlsl-dxc`.
-dxc := "C:/Program Files (x86)/Windows Kits/10/bin/10.0.26100.0/x64/dxc.exe"
+# DXC (HLSL oracle). Defaults to `dxc` on PATH so non-Windows recipes don't
+# explode; override with $ZIOSHADE_DXC or `just dxc="C:/path/to/dxc.exe" hlsl-dxc`.
+dxc := env_var_or_default("ZIOSHADE_DXC", "dxc")
 
 # ── default ──────────────────────────────────────────────────────────
 
