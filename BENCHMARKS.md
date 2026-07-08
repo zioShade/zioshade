@@ -38,7 +38,19 @@ This benchmark intentionally measures **realistic integration cost**, not raw al
 
 This matches how most build pipelines actually integrate the C++ toolchain — `cmake` rules, `make` recipes, Cargo `build.rs`, and Bazel actions all spawn `glslangValidator` per shader. Even pipeline DAGs that batch shaders pay the per-batch process cost.
 
-**What this does *not* benchmark:** linking `libglslang.a` + `libspirv-cross.a` into your binary and calling them in-process. That would close most of the workflow gap, leaving the algorithmic difference (which we expect to be much smaller). A real library-vs-library comparison requires either pulling in a C++ toolchain build, or shipping prebuilt static libs — neither is in scope for this repo today. **The 150–265× number is honestly framed as a workflow win, not an algorithm win.**
+**What this does *not* benchmark:** linking `libglslang.a` + `libspirv-cross.a` into your binary and calling them in-process. That closes most of the workflow gap and leaves the algorithmic difference, which is much smaller. The cross-compiler half of that honest comparison is published below (see [Library-vs-library](#library-vs-library-in-process-honest)); the front-end half (zioshade vs `libglslang.a` for GLSL to SPIR-V) is not wired yet. **The 150–265× number is honestly framed as a workflow win, not an algorithm win.**
+
+## Library-vs-library (in-process, honest)
+
+The `just lib-bench` step links **SPIRV-Cross in-process** through its C API (from the Vulkan SDK static libs) and times zioshade against it on the *same* SPIR-V input across SPIR-V to GLSL / HLSL / MSL. No subprocess, no process-spawn advantage: both sides are plain in-process parse-and-emit on identical bytes.
+
+- zioshade is roughly **1.4-1.6x faster on the median cell**.
+- Roughly at parity on a trivial GLSL shader (~0.6x) and up to ~2.6x faster on math / control-flow-heavy MSL.
+- Numbers are machine-relative; rerun locally. This covers the **cross-compiler** direction only. A zioshade-vs-`libglslang.a` in-process comparison for the GLSL to SPIR-V front-end is still on the roadmap.
+
+> **Reproduce:** `just lib-bench` (or `zig build lib-bench -- --iters N`). Requires the SPIRV-Cross static libs from the Vulkan SDK on the link path.
+
+This is the honest headline for raw compiler throughput. The 150-265x workflow figure above answers a different, equally real question: what a build pipeline actually pays when it spawns the C++ CLIs per shader.
 
 ## Methodology
 
