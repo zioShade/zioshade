@@ -7,7 +7,15 @@ const semantic = @import("semantic.zig");
 pub const Error = error{
     OutOfMemory,
     UnexpectedToken,
+    RecursionLimitExceeded,
 };
+
+/// Maximum recursive descent depth. Hostile input like `((((((…))))))` or
+/// `{{{{{…}}}}}` nests thousands of levels deep and would otherwise overflow
+/// the native stack (a hard SIGSEGV the panic handler cannot even report).
+/// Beyond this cap the parser returns `error.RecursionLimitExceeded`, an honest
+/// failure. 256 comfortably exceeds any hand-written shader's real nesting.
+pub const max_parse_depth: u32 = 256;
 
 /// Parse a standalone GLSL expression from source `text` into an AST node.
 /// `alloc` is used for ALL allocations (lexing, nodes, heap children/types) —
@@ -205,6 +213,27 @@ const Parser = struct {
     /// grammar + oracle. Widening the net is future work. The error location is
     /// captured via `recordErrorLoc`.
     fatal_parse_error: bool = false,
+
+    /// Current recursive-descent depth. Incremented by `enterRecursion` at every
+    /// recursive entry point and decremented on the way out. See `max_parse_depth`.
+    depth: u32 = 0,
+
+    // ── Recursion guard ───────────────────────────────────────
+
+    /// Enter a recursive descent level. Returns `error.RecursionLimitExceeded`
+    /// once the depth cap is hit so a pathologically nested shader fails honestly
+    /// instead of overflowing the stack. Pair with `defer self.leaveRecursion()`.
+    fn enterRecursion(self: *Parser) Error!void {
+        self.depth += 1;
+        if (self.depth > max_parse_depth) {
+            self.recordErrorLoc();
+            return error.RecursionLimitExceeded;
+        }
+    }
+
+    fn leaveRecursion(self: *Parser) void {
+        self.depth -= 1;
+    }
 
     // ── Navigation ────────────────────────────────────────────
 
@@ -1303,6 +1332,8 @@ const Parser = struct {
     // ── Statements ────────────────────────────────────────────
 
     fn parseBlock(self: *Parser) Error![]const ast.Node {
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         _ = try self.expect(.l_brace);
         var stmts = std.ArrayListUnmanaged(ast.Node).empty;
         errdefer {
@@ -1310,7 +1341,11 @@ const Parser = struct {
             stmts.deinit(self.alloc);
         }
         while (self.current().tag != .r_brace and self.current().tag != .eof) {
-            const stmt = self.parseStatement() catch {
+            const stmt = self.parseStatement() catch |err| {
+                // A depth-limit or OOM failure is not something error recovery can
+                // paper over: re-raise it so the compile fails honestly instead of
+                // spinning in synchronize() at the recursion ceiling.
+                if (err == error.RecursionLimitExceeded or err == error.OutOfMemory) return err;
                 self.synchronize();
                 continue;
             };
@@ -1321,6 +1356,8 @@ const Parser = struct {
     }
 
     fn parseStatement(self: *Parser) Error!ast.Node {
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         const cur = self.current().tag;
 
         // Skip preprocessor directives inside function bodies
@@ -1753,6 +1790,8 @@ const Parser = struct {
 
     /// Parse comma expression (for for-loop update/condition)
     fn parseCommaExpression(self: *Parser) Error!ast.Node {
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         const expr = try self.parseAssignment();
         if (self.current().tag != .comma) return expr;
         var children = std.ArrayListUnmanaged(ast.Node).empty;
@@ -1770,6 +1809,11 @@ const Parser = struct {
     }
 
     fn parseAssignment(self: *Parser) Error!ast.Node {
+        // Right-associative: `x = x = x = …` recurses through parseAssignment
+        // itself, and this cycle does not pass through parseUnary each level, so
+        // it needs its own guard or a hostile chain overflows the stack.
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         const lhs = try self.parseTernary();
 
         const AssignInfo = struct {
@@ -1805,6 +1849,11 @@ const Parser = struct {
     }
 
     fn parseTernary(self: *Parser) Error!ast.Node {
+        // Both the then-branch (`a ? a ? a ? … : … : …`) and the right-recursive
+        // else-branch (`a ? b : a ? b : …`) nest through parseTernary without
+        // passing parseUnary each level, so this needs its own depth guard.
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         const cond = try self.parseLogicalOr();
         if (self.current().tag == .question) {
             _ = self.advance();
@@ -1939,6 +1988,8 @@ const Parser = struct {
     }
 
     fn parseUnary(self: *Parser) Error!ast.Node {
+        try self.enterRecursion();
+        defer self.leaveRecursion();
         switch (self.current().tag) {
             .minus => {
                 const tok = self.advance();
@@ -2672,4 +2723,78 @@ test "parse complex shader with chained ops" {
     const ctor = color_decl.data.children[0];
     try std.testing.expectEqual(ast.Node.Tag.type_constructor, ctor.tag);
     try std.testing.expectEqual(@as(usize, 4), ctor.data.children.len);
+}
+
+test "hostile: deeply nested parentheses return an honest error, not a stack overflow" {
+    // Mirrors probe/repro_parens.frag: `void main(){float x = ((((...))))}`.
+    // Without a recursion cap this overflowed the native stack (a bare SIGSEGV
+    // the panic handler could not even report).
+    const alloc = std.testing.allocator;
+    const n = max_parse_depth + 50;
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "void main(){float x = ");
+    try buf.appendNTimes(alloc, '(', n);
+    try buf.appendSlice(alloc, "1.0");
+    try buf.appendNTimes(alloc, ')', n);
+    try buf.appendSlice(alloc, ";}");
+    const src = try alloc.dupeZ(u8, buf.items);
+    defer alloc.free(src);
+    const tokens = try lexer.tokenize(alloc, src);
+    defer alloc.free(tokens);
+    try std.testing.expectError(error.RecursionLimitExceeded, parse(alloc, src, tokens));
+}
+
+test "hostile: deeply nested ternary returns an honest error, not a stack overflow" {
+    // Mirrors probe/tern.frag: a right-recursive `1>0?1.0:1>0?1.0:…` chain nests
+    // through parseTernary without ever re-entering parseUnary, so before the
+    // parseTernary guard existed this overflowed the native stack (SIGSEGV).
+    const alloc = std.testing.allocator;
+    const n = max_parse_depth + 50;
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "void main(){ float x = ");
+    var i: usize = 0;
+    while (i < n) : (i += 1) try buf.appendSlice(alloc, "1>0?1.0:");
+    try buf.appendSlice(alloc, "1.0; }");
+    const src = try alloc.dupeZ(u8, buf.items);
+    defer alloc.free(src);
+    const tokens = try lexer.tokenize(alloc, src);
+    defer alloc.free(tokens);
+    try std.testing.expectError(error.RecursionLimitExceeded, parse(alloc, src, tokens));
+}
+
+test "hostile: deeply nested assignment chain returns an honest error, not a stack overflow" {
+    // `x = x = x = … = 1.0` recurses through parseAssignment right-associatively,
+    // a cycle that does not pass parseUnary each level; before its guard this
+    // overflowed the native stack.
+    const alloc = std.testing.allocator;
+    const n = max_parse_depth + 50;
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "void main(){ float x; x = ");
+    var i: usize = 0;
+    while (i < n) : (i += 1) try buf.appendSlice(alloc, "x = ");
+    try buf.appendSlice(alloc, "1.0; }");
+    const src = try alloc.dupeZ(u8, buf.items);
+    defer alloc.free(src);
+    const tokens = try lexer.tokenize(alloc, src);
+    defer alloc.free(tokens);
+    try std.testing.expectError(error.RecursionLimitExceeded, parse(alloc, src, tokens));
+}
+
+test "hostile: deeply nested braces return an honest error, not a stack overflow" {
+    // Mirrors probe/repro_braces.frag: `void main(){{{{...}}}}`.
+    const alloc = std.testing.allocator;
+    const n = max_parse_depth + 50;
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "void main()");
+    try buf.appendNTimes(alloc, '{', n);
+    try buf.appendNTimes(alloc, '}', n);
+    const src = try alloc.dupeZ(u8, buf.items);
+    defer alloc.free(src);
+    const tokens = try lexer.tokenize(alloc, src);
+    defer alloc.free(tokens);
+    try std.testing.expectError(error.RecursionLimitExceeded, parse(alloc, src, tokens));
 }
