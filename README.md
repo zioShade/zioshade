@@ -29,11 +29,11 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 
 | Metric | Value |
 |---|---|
-| Conformance | **2104 PASS, 0 FP-regression** (`zig build strict-gate`); 11 known-unsupported constructs honest-error as XFAIL (documented rejections, not failures — see `KNOWN_UNSUPPORTED` in `tests/runner.zig`). Full spirv-val-validated counts are the single source of truth in [docs/STATUS.md](docs/STATUS.md) |
+| Conformance | **2104 PASS, 0 FP-regression** (`zig build strict-gate`); 11 known-unsupported constructs honest-error as XFAIL (documented rejections, not failures; see `KNOWN_UNSUPPORTED` in `tests/runner.zig`). Full spirv-val-validated counts are the single source of truth in [docs/STATUS.md](docs/STATUS.md) |
 | External DXC SPIR-V fixtures | **47 / 51** compile to DXIL (4 limited by DXC's SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | **470 / 470** |
 | Fuzzer iterations | Structured-GLSL fuzzer clean over **1,000,000** iterations — reproduce with `just fuzz-million` (ad-hoc runs: `zig build fuzz -- --count N`) |
-| CI | 3-OS GitHub Actions matrix (`.github/workflows/ci.yml`): build/test, `zig fmt` gate, spirv-val conformance, fuzz smoke, C-ABI smoke — status in the badge above |
+| CI | 3-OS GitHub Actions matrix (`.github/workflows/ci.yml`): build/test, `zig fmt` gate, spirv-val conformance, fuzz smoke, C-ABI smoke; status in the badge above |
 | Production use | Extracted from [wintty](https://github.com/deblasis/wintty) (GPU-accelerated terminal); the integration PR is in flight |
 
 ## Quick Start

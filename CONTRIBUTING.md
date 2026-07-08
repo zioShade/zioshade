@@ -34,7 +34,7 @@ Thank you for considering a contribution! zioshade is a young, single-contributo
 
 ## Style
 
-- Match the existing code. Run `zig fmt src` before committing — CI **enforces** it with a `zig fmt --check src` gate, so unformatted code fails the build.
+- Match the existing code. Run `zig fmt src` before committing; CI **enforces** it with a `zig fmt --check src` gate, so unformatted code fails the build.
 - Prefer adding fixtures in `tests/conformance/stress/<name>.{f,v,c}.glsl` over inline test strings for new shader features.
 - No `@panic` in user-reachable code paths — surface errors through the `Diagnostic` collector or return `error.Foo`.
 - Keep `std.debug.print` out of release code. Use `std.log.{warn,err,debug}` so callers can route it.

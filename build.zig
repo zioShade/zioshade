@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
     const cli_install = b.addInstallArtifact(cli_exe, .{});
     cli_step.dependOn(&cli_install.step);
 
-    // Release matrix — build with: zig build release
+    // Release matrix. Build with: zig build release
     //
     // Cross-compiles the CLI for the four shipping targets into
     // zig-out/release/<triple>/. Pure vanilla std.Build: no external
@@ -59,7 +59,7 @@ pub fn build(b: *std.Build) void {
     //
     // NOTE (portfolio cross-reference): this hand-written per-target loop is
     // exactly the boilerplate a ziobuild `releases()` helper collapses to a
-    // single call. We keep it hand-written on purpose — adding ziobuild would
+    // single call. We keep it hand-written on purpose: adding ziobuild would
     // reintroduce a build-graph dependency this project deliberately avoids.
     const release_step = b.step("release", "Cross-compile the CLI for all shipping targets into zig-out/release/");
     const release_targets = .{

@@ -57,7 +57,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 2104 PASS / 0 FP-regression / 11 XFAIL (honest rejections) — exits 0; counts in `docs/STATUS.md` | ✅ |
+| spirv-val conformance | Reference | 2104 PASS / 0 FP-regression / 11 XFAIL (honest rejections), exits 0; counts in `docs/STATUS.md` | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
 
@@ -167,7 +167,7 @@ DXC and the Metal compiler are **platform SDK tools** that produce GPU-specific 
 
 ### 3.1 SPIR-V Validation
 
-Runnable fixtures pass `spirv-val` — the official SPIR-V validator (see `docs/STATUS.md`, the single source of truth for counts; `zig build strict-gate` reports **2104 PASS / 0 FP-regression / 11 XFAIL**). 11 known-unsupported fixtures are **honestly rejected** as `error.SemanticFailed` (XFAIL) instead of silently emitting hollow SPIR-V. The suite exits **0**. The 11 XFAIL fixtures (the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig`) cover: 64-bit int/float types (`fp64`, `int64`, `spv.double`), OpExtInst new-form texture builtins (`newTexture`, `spv.newTexture`), AMD/NV extensions (`gcn_shader`, `shader_ballot`, `spv.nvAtomicFp16Vec`), the clock extension (`shader-clock`), arrays-of-arrays (`spv.AofA`), and `struct-material`. (`extended-arithmetic`, `image-query`, `ray_sphere_test`, and `spec-constant-work-group-size` were previously XFAIL but now **pass**.) These are expected honest rejections, not regressions.
+Runnable fixtures pass `spirv-val`, the official SPIR-V validator (see `docs/STATUS.md`, the single source of truth for counts; `zig build strict-gate` reports **2104 PASS / 0 FP-regression / 11 XFAIL**). 11 known-unsupported fixtures are **honestly rejected** as `error.SemanticFailed` (XFAIL) instead of silently emitting hollow SPIR-V. The suite exits **0**. The 11 XFAIL fixtures (the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig`) cover: 64-bit int/float types (`fp64`, `int64`, `spv.double`), OpExtInst new-form texture builtins (`newTexture`, `spv.newTexture`), AMD/NV extensions (`gcn_shader`, `shader_ballot`, `spv.nvAtomicFp16Vec`), the clock extension (`shader-clock`), arrays-of-arrays (`spv.AofA`), and `struct-material`. (`extended-arithmetic`, `image-query`, `ray_sphere_test`, and `spec-constant-work-group-size` were previously XFAIL but now **pass**.) These are expected honest rejections, not regressions.
 
 ### 3.2 DXC Validation
 
