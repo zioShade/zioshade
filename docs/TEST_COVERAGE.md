@@ -14,7 +14,7 @@ What `zig build conformance` actually validates: every shader listed below is co
 | **`tessellation`** | [`tests/tessellation/`](../tests/tessellation/) | 13 | Hand-authored | TCS + TES pairs, patch quads/triangles, `gl_TessLevel*`, control-point I/O. |
 | **`mesh_task`** | [`tests/mesh_task/`](../tests/mesh_task/) | 4 | Hand-authored | `EXT_mesh_shader` task + mesh stages. |
 | **`ray_tracing`** | [`tests/ray_tracing/`](../tests/ray_tracing/) | 3 | Hand-authored | Raygen / closest-hit / miss; `KHR_ray_tracing_pipeline` types. |
-| **`conformance/stress`** | [`tests/conformance/stress/`](../tests/conformance/stress/) | 457 | Authored to lock in fixed-bug behaviour | Topic-by-topic regression cases — see breakdown below. |
+| **`conformance/stress`** | [`tests/conformance/stress/`](../tests/conformance/stress/) | 457 | Authored to lock in fixed-bug behaviour | Topic-by-topic regression cases - see breakdown below. |
 
 The conformance runner ([`tests/runner.zig`](../tests/runner.zig)) walks each suite, skips include-only fixtures and known-bad-input markers (`.error.`, `.asm.`, `link.`, `.nocompat.`), and reports PASS / FAIL / SKIP per suite plus a grand total.
 
@@ -39,7 +39,7 @@ Auto-categorized from filename keywords ([scripts/categorize_stress.py](../scrip
 |  8 | Geometry / vertex specifics | `vertex_pts.vert`, `tcs_quads2.tesc`, `tese_bilinear.tese`, `depth_write.frag` |
 |  3 | Memory / load–store / aliasing | `branch_store_fwd.frag`, `addr_alias.frag`, `load_after_store.frag` |
 
-Each stress case is a single-purpose shader that, when broken in zioshade, would have caused a specific regression (incorrect output, `spirv-val` failure, or backend emit error). New cases are added every time a bug is fixed in zioshade's emitter — see commit history.
+Each stress case is a single-purpose shader that, when broken in zioshade, would have caused a specific regression (incorrect output, `spirv-val` failure, or backend emit error). New cases are added every time a bug is fixed in zioshade's emitter - see commit history.
 
 ## Backend-specific coverage
 
@@ -50,7 +50,7 @@ Each stress case is a single-purpose shader that, when broken in zioshade, would
 | **MSL backend** | `zig build test` (108 msl-tests) + cross-compile of every stress fixture | 108 + 457 |
 | **GLSL round-trip** | `zig build test` (122 glsl-tests) + reference suite | 122 |
 | **WGSL backend** | `zig build test` (20 wgsl-tests) + WGSL-prefixed stress fixtures (321 cases under `tests/conformance/stress/wgsl_*`) | 20 + 321 |
-| **`naga` validation of WGSL output** | `zig build test-realworld` — separate step; not part of `zig build conformance`. See `tests/realworld_tests.zig` and the [real-world corpus snapshot](./realworld-corpus.md). | 13 hand-authored shaders, exercises all 4 backends + naga |
+| **`naga` validation of WGSL output** | `zig build test-realworld` - separate step; not part of `zig build conformance`. See `tests/realworld_tests.zig` and the [real-world corpus snapshot](./realworld-corpus.md). | 13 hand-authored shaders, exercises all 4 backends + naga |
 
 ## Reproducibility
 

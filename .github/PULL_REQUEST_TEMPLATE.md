@@ -17,4 +17,4 @@ What problem this solves or what capability it adds. Link to an issue if applica
 
 ## Notes for the reviewer
 
-Anything worth calling out — known limitations, follow-ups, perf considerations.
+Anything worth calling out - known limitations, follow-ups, perf considerations.
