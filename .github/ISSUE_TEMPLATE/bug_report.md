@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Something went wrong — wrong output, crash, or unexpected diagnostic.
+about: Something went wrong - wrong output, crash, or unexpected diagnostic.
 title: ''
 labels: bug
 assignees: ''
