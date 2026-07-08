@@ -2,7 +2,10 @@
 
 **zioshade** (formerly glslpp), a pure-Zig shading-language compiler: GLSL to SPIR-V to HLSL / MSL / GLSL / WGSL.
 
+[![CI](https://github.com/deblasis/zioshade/actions/workflows/ci.yml/badge.svg)](https://github.com/deblasis/zioshade/actions/workflows/ci.yml)
 [![Sponsor](https://img.shields.io/github/sponsors/deblasis)](https://github.com/sponsors/deblasis)
+
+> **Requires Zig 0.15.2**; 0.16 support is tracked in [#424](https://github.com/deblasis/zioshade/issues/424).
 
 Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated terminal emulator, to replace ~60 MB of glslang + SPIRV-Cross C++ dependencies in a single Zig module. No C++ runtime. No system dependencies. No DLL isolation hacks.
 
@@ -26,12 +29,12 @@ Extracted from [wintty](https://github.com/deblasis/wintty), a GPU-accelerated t
 
 | Metric | Value |
 |---|---|
-| `spirv-val` conformance | **2076 PASS, 0 spirv-val failures** (`zig build conformance`); 14 known-unsupported constructs honest-error as XFAIL (documented rejections, not failures — see `KNOWN_UNSUPPORTED` in `tests/runner.zig`), 8 skipped, 2098 total — see [docs/STATUS.md](docs/STATUS.md) (generated source of truth) |
+| Conformance | **2104 PASS, 0 FP-regression** (`zig build strict-gate`); 11 known-unsupported constructs honest-error as XFAIL (documented rejections, not failures — see `KNOWN_UNSUPPORTED` in `tests/runner.zig`). Full spirv-val-validated counts are the single source of truth in [docs/STATUS.md](docs/STATUS.md) |
 | External DXC SPIR-V fixtures | **47 / 51** compile to DXIL (4 limited by DXC's SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | **470 / 470** |
 | Fuzzer iterations | Structured-GLSL fuzzer clean over **1,000,000** iterations — reproduce with `just fuzz-million` (ad-hoc runs: `zig build fuzz -- --count N`) |
-| CI | GitHub Actions workflow committed (3-OS matrix, `.github/workflows/ci.yml`); currently verified locally via `just` (see [Building](#building)) |
-| Production use | Backs all shader compilation in [wintty](https://github.com/deblasis/wintty) |
+| CI | 3-OS GitHub Actions matrix (`.github/workflows/ci.yml`): build/test, `zig fmt` gate, spirv-val conformance, fuzz smoke, C-ABI smoke — status in the badge above |
+| Production use | Extracted from [wintty](https://github.com/deblasis/wintty) (GPU-accelerated terminal); the integration PR is in flight |
 
 ## Quick Start
 

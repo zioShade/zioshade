@@ -30,11 +30,11 @@ Thank you for considering a contribution! zioshade is a young, single-contributo
 5. Open a PR. The PR description should call out:
    - Why the change is needed.
    - Test coverage added (new fixtures in `tests/conformance/stress/`, regression cases, etc.).
-   - Any conformance-count delta (`zig build conformance` → 2,080 PASS / 7 known-FAIL / 8 SKIP; the PASS count must not drop and the FAIL count must not grow).
+   - Any conformance-count delta. The authoritative counts live in [docs/STATUS.md](docs/STATUS.md); the invariant is that PASS must not drop and FAIL must not grow (`zig build strict-gate` must stay at 0 FP-regression).
 
 ## Style
 
-- Match the existing code. Zig is opinionated; `zig fmt` keeps formatting honest.
+- Match the existing code. Run `zig fmt src` before committing — CI **enforces** it with a `zig fmt --check src` gate, so unformatted code fails the build.
 - Prefer adding fixtures in `tests/conformance/stress/<name>.{f,v,c}.glsl` over inline test strings for new shader features.
 - No `@panic` in user-reachable code paths — surface errors through the `Diagnostic` collector or return `error.Foo`.
 - Keep `std.debug.print` out of release code. Use `std.log.{warn,err,debug}` so callers can route it.
