@@ -4564,7 +4564,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     } else if (is_fragment and output_vars.items.len > 0 and output_var_id != null) {
         {
             const ov = output_var_id.?;
-            const ptr_inst = getDef(&module, getDef(&module, ov).?.words[1]);
+            // On hostile SPIR-V the output variable's definition may be absent, or
+            // present without a type operand — never `.?`/index it blindly (that
+            // was a null-deref crash). Fall back to treating `ov` itself as the
+            // type id, matching the other malformed-input branches below.
+            const ov_def = getDef(&module, ov);
+            const ptr_inst = if (ov_def != null and ov_def.?.words.len > 1)
+                getDef(&module, ov_def.?.words[1])
+            else
+                null;
             var actual_type: u32 = undefined;
             if (ptr_inst) |pi| {
                 if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = ov;
@@ -4774,15 +4782,21 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         } else if ((is_fragment or is_vertex) and output_var_id != null) {
             const ov = output_var_id.?;
-            const var_inst = getDef(&module, ov).?;
-            const ptr_inst = getDef(&module, var_inst.words[1]);
-            var actual_type: u32 = undefined;
-            if (ptr_inst) |pi| {
-                if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = var_inst.words[1];
-            } else actual_type = var_inst.words[1];
-            const type_name = try wgslType(&module, actual_type, &names, arena);
-            const var_name = names.get(ov) orelse "out";
-            try w.print("    var {s}: {s};\n", .{ var_name, type_name });
+            // On hostile SPIR-V the output variable id may not resolve to a real
+            // definition (or the definition may lack a type operand); guard rather
+            // than `.?`/index blindly, which was a null-deref crash.
+            if (getDef(&module, ov)) |var_inst| {
+                if (var_inst.words.len > 1) {
+                    const ptr_inst = getDef(&module, var_inst.words[1]);
+                    var actual_type: u32 = undefined;
+                    if (ptr_inst) |pi| {
+                        if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3] else actual_type = var_inst.words[1];
+                    } else actual_type = var_inst.words[1];
+                    const type_name = try wgslType(&module, actual_type, &names, arena);
+                    const var_name = names.get(ov) orelse "out";
+                    try w.print("    var {s}: {s};\n", .{ var_name, type_name });
+                }
+            }
         }
     }
 

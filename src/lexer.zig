@@ -254,7 +254,15 @@ pub const Error = error{
     OutOfMemory,
     InvalidToken,
     UnterminatedComment,
+    IdentifierTooLong,
 };
+
+/// Maximum length (in bytes) of a single GLSL identifier. glslang caps
+/// identifiers around 1024 characters; a hostile shader with a multi-kilobyte
+/// identifier would otherwise overflow the fixed name-section stack buffer in
+/// codegen and drive an absurd instruction word count. Anything longer is a
+/// hard error, never a truncation, so the failure is honest.
+pub const max_identifier_len: u32 = 1024;
 
 const KeywordMap = std.StaticStringMap(Token.Tag);
 const PPDirectiveMap = std.StaticStringMap(Token.Tag);
@@ -522,6 +530,11 @@ const Tokenizer = struct {
             // Check for identifiers and keywords
             if (isIdentifierStart(self.source[self.offset])) {
                 const ident_len = self.parseIdentifier();
+                if (ident_len > max_identifier_len) {
+                    last_error_line = start_loc.line;
+                    last_error_column = start_loc.column;
+                    return error.IdentifierTooLong;
+                }
                 const ident = self.source[start..start + ident_len];
                 const tag = keyword_map.get(ident) orelse .identifier;
                 try self.tokens.append(alloc, .{
@@ -985,6 +998,24 @@ test "tokenize identifiers" {
     try std.testing.expectEqualStrings("foo", source[tokens[0].start..][0..tokens[0].len]);
     try std.testing.expectEqualStrings("bar123", source[tokens[1].start..][0..tokens[1].len]);
     try std.testing.expectEqualStrings("_baz", source[tokens[2].start..][0..tokens[2].len]);
+}
+
+test "hostile: an over-long identifier is an honest error, not a buffer overflow" {
+    const alloc = std.testing.allocator;
+    // An identifier just under the cap is accepted; one over it is rejected. This
+    // mirrors probe/repro_longname.frag, whose 401-char member name used to
+    // overflow a fixed 256-byte codegen stack buffer.
+    const ok_len = max_identifier_len; // exactly at the cap is still valid
+    const ok = try alloc.allocSentinel(u8, ok_len, 0);
+    defer alloc.free(ok);
+    @memset(ok, 'a');
+    const ok_tokens = try tokenize(alloc, ok);
+    alloc.free(ok_tokens);
+
+    const too_long = try alloc.allocSentinel(u8, max_identifier_len + 1, 0);
+    defer alloc.free(too_long);
+    @memset(too_long, 'a');
+    try std.testing.expectError(error.IdentifierTooLong, tokenize(alloc, too_long));
 }
 
 test "tokenize integer literals" {

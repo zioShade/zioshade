@@ -42,6 +42,27 @@ pub const Preprocessor = struct {
     // preprocessor errors.
     unresolved_include: bool = false,
 
+    /// Count of ACTUAL macro expansions performed (one per defined-macro
+    /// invocation that is expanded, not per identifier scanned). Recursive
+    /// self-reference is already blocked by the `expanding` stack, but an
+    /// exponential FAN-OUT (`#define A1 A0 A0` … `#define A20 A19 A19`) is not:
+    /// each level doubles the work, so `A20` drives ~2^21 expansions.
+    expansion_work: usize = 0,
+    /// Set when `expansion_work` crosses `max_expansion_work`. Surfaced as an
+    /// honest error by the caller (parallel to `unresolved_include`), because the
+    /// `pp.process(...) catch tokens` fallback would otherwise swallow the error
+    /// and silently compile the half-expanded source.
+    expansion_budget_exceeded: bool = false,
+
+    /// Ceiling on cumulative macro expansions. Even a heavily macro-driven shader
+    /// performs at most a few thousand real expansions; a fan-out bomb blows past
+    /// this in milliseconds. Ten thousand leaves generous headroom for real input
+    /// while turning the bomb into a sub-second honest error rather than a
+    /// multi-second OOM (the per-expansion cost grows with the accumulated token
+    /// arrays, so a higher ceiling would let the bomb burn seconds before
+    /// tripping).
+    pub const max_expansion_work: usize = 10_000;
+
     pub fn init(alloc: std.mem.Allocator) Preprocessor {
         return .{
             .alloc = alloc,
@@ -605,6 +626,18 @@ pub const Preprocessor = struct {
             return;
         };
 
+        // Total-work budget: recursive self-reference is guarded by `expanding`,
+        // but an exponential FAN-OUT (`#define A1 A0 A0` … `#define A20 A19 A19`)
+        // is not: each level doubles the token count. Bill one unit per ACTUAL
+        // macro expansion (not per identifier scanned, so ordinary large shaders
+        // are unaffected); once the budget is spent, flag it and fail before the
+        // fan-out can run to OOM.
+        self.expansion_work += 1;
+        if (self.expansion_work > max_expansion_work) {
+            self.expansion_budget_exceeded = true;
+            return error.PreprocessFailed;
+        }
+
         // Add to expanding stack
         try self.expanding.append(self.alloc, name);
         defer {
@@ -713,7 +746,7 @@ pub const Preprocessor = struct {
     /// is substituted into the body, per C preprocessor semantics — a macro call
     /// used as an argument (`ADD(SQ(t), 1.0)`) must have `SQ(t)` expanded first.
     /// Temporarily redirects `self.output` into a scratch list, then restores it.
-    fn expandTokens(self: *Preprocessor, tokens: []const lexer.Token) error{ OutOfMemory, NoSpaceLeft }![]lexer.Token {
+    fn expandTokens(self: *Preprocessor, tokens: []const lexer.Token) error{ OutOfMemory, NoSpaceLeft, PreprocessFailed }![]lexer.Token {
         const saved = self.output;
         self.output = .empty;
         errdefer {
@@ -1229,6 +1262,14 @@ const ExpressionEvaluator = struct {
     start: usize,
     end: usize,
     pos: usize,
+    /// Recursive-descent depth guard for `#if` expressions, mirroring the GLSL
+    /// parser's cap. A hostile `#if ((((…))))` would otherwise overflow the
+    /// stack; past the cap we fail honestly with PreprocessFailed.
+    depth: u32 = 0,
+
+    /// Shared with `parser.max_parse_depth` in spirit; kept local so the
+    /// preprocessor has no dependency on the parser module.
+    const max_expr_depth: u32 = 256;
 
     fn evaluate(self: *ExpressionEvaluator) ExprEvalError!i64 {
         self.pos = self.start;
@@ -1236,6 +1277,9 @@ const ExpressionEvaluator = struct {
     }
 
     fn parseConditional(self: *ExpressionEvaluator) ExprEvalError!i64 {
+        self.depth += 1;
+        defer self.depth -= 1;
+        if (self.depth > max_expr_depth) return error.PreprocessFailed;
         const cond = try self.parseLogicalOr();
         if (self.peek()) |tok| {
             if (tok.tag == .question) {
@@ -1428,6 +1472,9 @@ const ExpressionEvaluator = struct {
     }
 
     fn parseUnary(self: *ExpressionEvaluator) ExprEvalError!i64 {
+        self.depth += 1;
+        defer self.depth -= 1;
+        if (self.depth > max_expr_depth) return error.PreprocessFailed;
         if (self.peek()) |tok| {
             if (tok.tag == .plus) {
                 self.pos += 1;
@@ -2017,4 +2064,32 @@ test "#pragma once prevents re-inclusion" {
     // The first inclusion expands ONCE_VAR, the second is blocked by #pragma once
     // Count should be 1, not 2
     try std.testing.expect(pp.pragma_once_files.count() == 1);
+}
+
+test "hostile: exponential macro fan-out hits the expansion budget, not OOM" {
+    // Mirrors probe/repro_macrobomb.frag: `#define A1 A0 A0` … `#define A20 A19 A19`
+    // then `A20`. Recursive self-reference is already blocked, but the doubling
+    // fan-out expands to ~2^20 tokens with no cap. The budget turns it into a
+    // fast honest error.
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    var buf = std.ArrayListUnmanaged(u8).empty;
+    defer buf.deinit(alloc);
+    try buf.appendSlice(alloc, "#define A0 1\n");
+    var i: usize = 1;
+    while (i <= 24) : (i += 1) {
+        const line = try std.fmt.allocPrint(alloc, "#define A{d} A{d} A{d}\n", .{ i, i - 1, i - 1 });
+        defer alloc.free(line);
+        try buf.appendSlice(alloc, line);
+    }
+    try buf.appendSlice(alloc, "void main(){ float x = A24; }");
+    const source = try alloc.dupeZ(u8, buf.items);
+    defer alloc.free(source);
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    try std.testing.expectError(error.PreprocessFailed, pp.process(source, tokens));
+    try std.testing.expect(pp.expansion_budget_exceeded);
 }

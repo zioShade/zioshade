@@ -99,7 +99,12 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         return error.OutOfMemory;
     errdefer instructions.deinit(alloc);
 
+    // Reject an absurd id bound before allocating id_defs: a hostile module can
+    // claim a ~4-billion bound whose zero-fill would touch tens of gigabytes and
+    // hang. A real module never has more result ids than words. (See the shared
+    // parser in spirv_cross_common.zig for the full rationale.)
     const bound = if (words.len > 3) words[3] else 0;
+    if (bound > words.len) return error.InvalidSpirv;
     const id_defs = try alloc.alloc(?usize, bound);
     @memset(id_defs, null);
 
@@ -2044,10 +2049,17 @@ fn emitFunction(
         if (output_vars.items.len > 1) {
             try w.writeAll("_MRT_OUT main(");
         } else if (output_vars.items.len == 1) {
-            // Use the actual output variable type
+            // Use the actual output variable type. On malformed input the output
+            // variable's definition (or its type operand) may be missing — never
+            // dereference an undefined instruction (`orelse undefined` then
+            // `.words[1]` was a hard out-of-bounds crash on hostile SPIR-V). Fall
+            // back to the float4 default in that case.
             const ov = output_vars.items[0];
-            const ov_inst = getDef(module, ov.id) orelse undefined;
-            const ov_type = try hlslType(module, ov_inst.words[1], names, alloc);
+            const ov_inst = getDef(module, ov.id);
+            const ov_type = if (ov_inst != null and ov_inst.?.words.len > 1)
+                try hlslType(module, ov_inst.?.words[1], names, alloc)
+            else
+                "float4";
             try w.print("{s} main(", .{ov_type});
         } else {
             try w.writeAll("float4 main(");
