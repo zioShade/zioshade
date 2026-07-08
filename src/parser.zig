@@ -324,20 +324,51 @@ const Parser = struct {
                     _ = self.advance();
                     return;
                 },
-                .kw_void, .kw_float, .kw_int, .kw_uint, .kw_bool,
-                .kw_vec2, .kw_vec3, .kw_vec4,
-                .kw_ivec2, .kw_ivec3, .kw_ivec4,
-                .kw_bvec2, .kw_bvec3, .kw_bvec4,
-                .kw_uvec2, .kw_uvec3, .kw_uvec4,
-                .kw_i8vec2, .kw_i8vec3, .kw_i8vec4,
-                .kw_u8vec2, .kw_u8vec3, .kw_u8vec4,
-                .kw_int8, .kw_uint8,
-                .kw_i16vec2, .kw_i16vec3, .kw_i16vec4,
-                .kw_u16vec2, .kw_u16vec3, .kw_u16vec4,
-                .kw_f16vec2, .kw_f16vec3, .kw_f16vec4,
-                .kw_int16, .kw_uint16, .kw_float16,
-                .kw_mat2, .kw_mat3, .kw_mat4,
-                .kw_struct, .kw_uniform, .kw_in, .kw_out, .kw_buffer,
+                .kw_void,
+                .kw_float,
+                .kw_int,
+                .kw_uint,
+                .kw_bool,
+                .kw_vec2,
+                .kw_vec3,
+                .kw_vec4,
+                .kw_ivec2,
+                .kw_ivec3,
+                .kw_ivec4,
+                .kw_bvec2,
+                .kw_bvec3,
+                .kw_bvec4,
+                .kw_uvec2,
+                .kw_uvec3,
+                .kw_uvec4,
+                .kw_i8vec2,
+                .kw_i8vec3,
+                .kw_i8vec4,
+                .kw_u8vec2,
+                .kw_u8vec3,
+                .kw_u8vec4,
+                .kw_int8,
+                .kw_uint8,
+                .kw_i16vec2,
+                .kw_i16vec3,
+                .kw_i16vec4,
+                .kw_u16vec2,
+                .kw_u16vec3,
+                .kw_u16vec4,
+                .kw_f16vec2,
+                .kw_f16vec3,
+                .kw_f16vec4,
+                .kw_int16,
+                .kw_uint16,
+                .kw_float16,
+                .kw_mat2,
+                .kw_mat3,
+                .kw_mat4,
+                .kw_struct,
+                .kw_uniform,
+                .kw_in,
+                .kw_out,
+                .kw_buffer,
                 => return,
                 else => _ = self.advance(),
             }
@@ -350,7 +381,7 @@ const Parser = struct {
     }
 
     fn text(self: *Parser, tok: lexer.Token) []const u8 {
-        return self.source[tok.start..tok.start + tok.len];
+        return self.source[tok.start .. tok.start + tok.len];
     }
 
     /// Create a heap-allocated AST type (for array bases) tracked for cleanup.
@@ -390,36 +421,91 @@ const Parser = struct {
 
     fn isTypeKeyword(tag: lexer.Token.Tag) bool {
         return switch (tag) {
-            .kw_void, .kw_float, .kw_int, .kw_uint, .kw_bool,
-            .kw_int8, .kw_uint8,
-            .kw_vec2, .kw_vec3, .kw_vec4,
-            .kw_ivec2, .kw_ivec3, .kw_ivec4,
-            .kw_bvec2, .kw_bvec3, .kw_bvec4,
-            .kw_uvec2, .kw_uvec3, .kw_uvec4,
-            .kw_i8vec2, .kw_i8vec3, .kw_i8vec4,
-            .kw_u8vec2, .kw_u8vec3, .kw_u8vec4,
-            .kw_mat2, .kw_mat3, .kw_mat4,
-            .kw_mat2x2, .kw_mat2x3, .kw_mat2x4,
-            .kw_mat3x2, .kw_mat3x3, .kw_mat3x4,
-            .kw_mat4x2, .kw_mat4x3, .kw_mat4x4,
-            .kw_sampler2d, .kw_sampler_cube,
-            .kw_sampler2d_array, .kw_sampler2d_ms, .kw_sampler3d, .kw_sampler1d,
-            .kw_sampler2d_ms_array, .kw_sampler_buffer,
-            .kw_isampler_buffer, .kw_usampler_buffer,
-            .kw_texture2d, .kw_texture3d, .kw_texture_cube,
-            .kw_texture2d_array, .kw_texture2d_ms,
+            .kw_void,
+            .kw_float,
+            .kw_int,
+            .kw_uint,
+            .kw_bool,
+            .kw_int8,
+            .kw_uint8,
+            .kw_vec2,
+            .kw_vec3,
+            .kw_vec4,
+            .kw_ivec2,
+            .kw_ivec3,
+            .kw_ivec4,
+            .kw_bvec2,
+            .kw_bvec3,
+            .kw_bvec4,
+            .kw_uvec2,
+            .kw_uvec3,
+            .kw_uvec4,
+            .kw_i8vec2,
+            .kw_i8vec3,
+            .kw_i8vec4,
+            .kw_u8vec2,
+            .kw_u8vec3,
+            .kw_u8vec4,
+            .kw_mat2,
+            .kw_mat3,
+            .kw_mat4,
+            .kw_mat2x2,
+            .kw_mat2x3,
+            .kw_mat2x4,
+            .kw_mat3x2,
+            .kw_mat3x3,
+            .kw_mat3x4,
+            .kw_mat4x2,
+            .kw_mat4x3,
+            .kw_mat4x4,
+            .kw_sampler2d,
+            .kw_sampler_cube,
+            .kw_sampler2d_array,
+            .kw_sampler2d_ms,
+            .kw_sampler3d,
+            .kw_sampler1d,
+            .kw_sampler2d_ms_array,
+            .kw_sampler_buffer,
+            .kw_isampler_buffer,
+            .kw_usampler_buffer,
+            .kw_texture2d,
+            .kw_texture3d,
+            .kw_texture_cube,
+            .kw_texture2d_array,
+            .kw_texture2d_ms,
             .kw_sampler_plain,
-            .kw_image2d, .kw_iimage2d, .kw_uimage2d,
-            .kw_image1d, .kw_iimage1d, .kw_uimage1d,
-            .kw_image3d, .kw_iimage3d, .kw_uimage3d,
-            .kw_iimage_cube, .kw_uimage_cube,
-            .kw_image2d_array, .kw_iimage2d_array, .kw_uimage2d_array,
-            .kw_image_cube_array, .kw_iimage_cube_array, .kw_uimage_cube_array,
-            .kw_image_buffer, .kw_iimage_buffer, .kw_uimage_buffer, .kw_image2d_ms, .kw_image2d_ms_array,
-            .kw_acceleration_structure_ext, .kw_ray_query_ext, .kw_tensor_arm,
-            .kw_subpass_input, .kw_subpass_input_ms,
-            .kw_float16, .kw_int16, .kw_uint16,
-            .kw_isampler2d, .kw_usampler2d,
+            .kw_image2d,
+            .kw_iimage2d,
+            .kw_uimage2d,
+            .kw_image1d,
+            .kw_iimage1d,
+            .kw_uimage1d,
+            .kw_image3d,
+            .kw_iimage3d,
+            .kw_uimage3d,
+            .kw_iimage_cube,
+            .kw_uimage_cube,
+            .kw_image2d_array,
+            .kw_iimage2d_array,
+            .kw_uimage2d_array,
+            .kw_image_cube_array,
+            .kw_iimage_cube_array,
+            .kw_uimage_cube_array,
+            .kw_image_buffer,
+            .kw_iimage_buffer,
+            .kw_uimage_buffer,
+            .kw_image2d_ms,
+            .kw_image2d_ms_array,
+            .kw_acceleration_structure_ext,
+            .kw_ray_query_ext,
+            .kw_tensor_arm,
+            .kw_subpass_input,
+            .kw_subpass_input_ms,
+            .kw_float16,
+            .kw_int16,
+            .kw_uint16,
+            .kw_isampler2d,
+            .kw_usampler2d,
             => true,
             else => false,
         };
@@ -433,14 +519,29 @@ const Parser = struct {
     fn is64BitTypeName(name: []const u8) bool {
         const names64 = [_][]const u8{
             "double",
-            "dvec2", "dvec3", "dvec4",
-            "dmat2", "dmat3", "dmat4",
-            "dmat2x2", "dmat2x3", "dmat2x4",
-            "dmat3x2", "dmat3x3", "dmat3x4",
-            "dmat4x2", "dmat4x3", "dmat4x4",
-            "int64_t", "uint64_t",
-            "i64vec2", "i64vec3", "i64vec4",
-            "u64vec2", "u64vec3", "u64vec4",
+            "dvec2",
+            "dvec3",
+            "dvec4",
+            "dmat2",
+            "dmat3",
+            "dmat4",
+            "dmat2x2",
+            "dmat2x3",
+            "dmat2x4",
+            "dmat3x2",
+            "dmat3x3",
+            "dmat3x4",
+            "dmat4x2",
+            "dmat4x3",
+            "dmat4x4",
+            "int64_t",
+            "uint64_t",
+            "i64vec2",
+            "i64vec3",
+            "i64vec4",
+            "u64vec2",
+            "u64vec3",
+            "u64vec4",
         };
         for (names64) |n| {
             if (std.mem.eql(u8, name, n)) return true;
@@ -544,15 +645,37 @@ const Parser = struct {
         var found = false;
         while (true) {
             switch (self.current().tag) {
-                .kw_const => { q.is_const = true; _ = self.advance(); found = true; },
-                .kw_in => { q.is_in = true; _ = self.advance(); found = true; },
-                .kw_out => { q.is_out = true; _ = self.advance(); found = true; },
-                .kw_inout => { q.is_inout = true; _ = self.advance(); found = true; },
-                .kw_uniform => { q.is_uniform = true; _ = self.advance(); found = true; },
-                .kw_buffer => { q.is_buffer = true; _ = self.advance(); found = true; },
-                .kw_readonly, .kw_writeonly, .kw_coherent, .kw_restrict, .kw_invariant,
-                .kw_flat, .kw_smooth, .kw_noperspective, .kw_centroid,
-                .kw_mediump, .kw_highp, .kw_lowp => {
+                .kw_const => {
+                    q.is_const = true;
+                    _ = self.advance();
+                    found = true;
+                },
+                .kw_in => {
+                    q.is_in = true;
+                    _ = self.advance();
+                    found = true;
+                },
+                .kw_out => {
+                    q.is_out = true;
+                    _ = self.advance();
+                    found = true;
+                },
+                .kw_inout => {
+                    q.is_inout = true;
+                    _ = self.advance();
+                    found = true;
+                },
+                .kw_uniform => {
+                    q.is_uniform = true;
+                    _ = self.advance();
+                    found = true;
+                },
+                .kw_buffer => {
+                    q.is_buffer = true;
+                    _ = self.advance();
+                    found = true;
+                },
+                .kw_readonly, .kw_writeonly, .kw_coherent, .kw_restrict, .kw_invariant, .kw_flat, .kw_smooth, .kw_noperspective, .kw_centroid, .kw_mediump, .kw_highp, .kw_lowp => {
                     switch (self.current().tag) {
                         .kw_readonly => q.is_readonly = true,
                         .kw_writeonly => q.is_writeonly = true,
@@ -564,44 +687,58 @@ const Parser = struct {
                         .kw_invariant => q.is_invariant = true,
                         else => {},
                     }
-                    _ = self.advance(); found = true;
+                    _ = self.advance();
+                    found = true;
                 },
-                .kw_shared => { q.is_shared = true; _ = self.advance(); found = true; },
+                .kw_shared => {
+                    q.is_shared = true;
+                    _ = self.advance();
+                    found = true;
+                },
                 .identifier => {
                     const ident_text = self.text(self.current());
                     if (std.mem.eql(u8, ident_text, "taskPayloadSharedEXT")) {
                         q.is_task_payload_shared = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "rayPayloadEXT")) {
                         q.is_ray_payload = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "incomingRayPayloadEXT")) {
                         q.is_incoming_ray_payload = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "hitAttributeEXT")) {
                         q.is_hit_attribute = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "callableDataEXT")) {
                         q.is_callable_data = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "incomingCallableDataEXT")) {
                         q.is_incoming_callable_data = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "perprimitiveEXT")) {
                         // GL_EXT_mesh_shader: marks an `out` variable as
                         // per-primitive rather than per-vertex.
                         q.is_perprimitive_ext = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "pervertexEXT")) {
                         // GL_EXT_fragment_shader_barycentric: marks a fragment
                         // `in` as a per-vertex array (PerVertexKHR decoration).
                         q.is_pervertex_ext = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else if (std.mem.eql(u8, ident_text, "pervertexNV")) {
                         // GL_NV_fragment_shader_barycentric: NV spelling of the
                         // same per-vertex array qualifier.
                         q.is_pervertex_nv = true;
-                        _ = self.advance(); found = true;
+                        _ = self.advance();
+                        found = true;
                     } else break;
                 },
                 else => break,
@@ -777,122 +914,470 @@ const Parser = struct {
 
     fn tryType(self: *Parser) ?ast.Type {
         return switch (self.current().tag) {
-            .kw_void => { _ = self.advance(); return .void; },
-            .kw_float => { _ = self.advance(); return .float; },
-            .kw_int => { _ = self.advance(); return .int; },
-            .kw_uint => { _ = self.advance(); return .uint; },
-            .kw_int8 => { _ = self.advance(); return .int8; },
-            .kw_uint8 => { _ = self.advance(); return .uint8; },
-            .kw_int16 => { _ = self.advance(); return .int16; },
-            .kw_uint16 => { _ = self.advance(); return .uint16; },
-            .kw_float16 => { _ = self.advance(); return .float16; },
-            .kw_i8vec2 => { _ = self.advance(); return .i8vec2; },
-            .kw_i8vec3 => { _ = self.advance(); return .i8vec3; },
-            .kw_i8vec4 => { _ = self.advance(); return .i8vec4; },
-            .kw_u8vec2 => { _ = self.advance(); return .u8vec2; },
-            .kw_u8vec3 => { _ = self.advance(); return .u8vec3; },
-            .kw_u8vec4 => { _ = self.advance(); return .u8vec4; },
-            .kw_i16vec2 => { _ = self.advance(); return .i16vec2; },
-            .kw_i16vec3 => { _ = self.advance(); return .i16vec3; },
-            .kw_i16vec4 => { _ = self.advance(); return .i16vec4; },
-            .kw_u16vec2 => { _ = self.advance(); return .u16vec2; },
-            .kw_u16vec3 => { _ = self.advance(); return .u16vec3; },
-            .kw_u16vec4 => { _ = self.advance(); return .u16vec4; },
-            .kw_f16vec2 => { _ = self.advance(); return .f16vec2; },
-            .kw_f16vec3 => { _ = self.advance(); return .f16vec3; },
-            .kw_f16vec4 => { _ = self.advance(); return .f16vec4; },
-            .kw_bool => { _ = self.advance(); return .bool; },
-            .kw_vec2 => { _ = self.advance(); return .vec2; },
-            .kw_vec3 => { _ = self.advance(); return .vec3; },
-            .kw_vec4 => { _ = self.advance(); return .vec4; },
-            .kw_ivec2 => { _ = self.advance(); return .ivec2; },
-            .kw_ivec3 => { _ = self.advance(); return .ivec3; },
-            .kw_ivec4 => { _ = self.advance(); return .ivec4; },
-            .kw_bvec2 => { _ = self.advance(); return .bvec2; },
-            .kw_bvec3 => { _ = self.advance(); return .bvec3; },
-            .kw_bvec4 => { _ = self.advance(); return .bvec4; },
-            .kw_uvec2 => { _ = self.advance(); return .uvec2; },
-            .kw_uvec3 => { _ = self.advance(); return .uvec3; },
-            .kw_uvec4 => { _ = self.advance(); return .uvec4; },
-            .kw_mat2 => { _ = self.advance(); return .mat2; },
-            .kw_mat3 => { _ = self.advance(); return .mat3; },
-            .kw_mat4 => { _ = self.advance(); return .mat4; },
-            .kw_mat2x2 => { _ = self.advance(); return .mat2x2; },
-            .kw_mat2x3 => { _ = self.advance(); return .mat2x3; },
-            .kw_mat2x4 => { _ = self.advance(); return .mat2x4; },
-            .kw_mat3x2 => { _ = self.advance(); return .mat3x2; },
-            .kw_mat3x3 => { _ = self.advance(); return .mat3x3; },
-            .kw_mat3x4 => { _ = self.advance(); return .mat3x4; },
-            .kw_mat4x2 => { _ = self.advance(); return .mat4x2; },
-            .kw_mat4x3 => { _ = self.advance(); return .mat4x3; },
-            .kw_mat4x4 => { _ = self.advance(); return .mat4x4; },
-            .kw_sampler_buffer => { _ = self.advance(); return .sampler_buffer; },
-            .kw_isampler_buffer => { _ = self.advance(); return .isampler_buffer; },
-            .kw_usampler_buffer => { _ = self.advance(); return .usampler_buffer; },
-            .kw_sampler2d_ms => { _ = self.advance(); return .sampler2d_ms; },
-            .kw_isampler2d_ms => { _ = self.advance(); return .isampler2d_ms; },
-            .kw_usampler2d_ms => { _ = self.advance(); return .usampler2d_ms; },
-            .kw_sampler2d_ms_array => { _ = self.advance(); return .sampler2d_ms_array; },
-            .kw_isampler2d_ms_array => { _ = self.advance(); return .isampler2d_ms_array; },
-            .kw_usampler2d_ms_array => { _ = self.advance(); return .usampler2d_ms_array; },
-            .kw_sampler2d => { _ = self.advance(); return .sampler2d; },
-            .kw_isampler2d => { _ = self.advance(); return .isampler2d; },
-            .kw_usampler2d => { _ = self.advance(); return .usampler2d; },
-            .kw_sampler2d_array => { _ = self.advance(); return .sampler2d_array; },
-            .kw_isampler2d_array => { _ = self.advance(); return .isampler2d_array; },
-            .kw_usampler2d_array => { _ = self.advance(); return .usampler2d_array; },
-            .kw_sampler3d => { _ = self.advance(); return .sampler3d; },
-            .kw_isampler3d => { _ = self.advance(); return .isampler3d; },
-            .kw_usampler3d => { _ = self.advance(); return .usampler3d; },
-            .kw_sampler_cube_array => { _ = self.advance(); return .sampler_cube_array; },
-            .kw_sampler_cube_array_shadow => { _ = self.advance(); return .sampler_cube_array_shadow; },
-            .kw_isampler_cube => { _ = self.advance(); return .isampler_cube; },
-            .kw_usampler_cube => { _ = self.advance(); return .usampler_cube; },
-            .kw_isampler_cube_array => { _ = self.advance(); return .isampler_cube_array; },
-            .kw_usampler_cube_array => { _ = self.advance(); return .usampler_cube_array; },
-            .kw_sampler2d_rect => { _ = self.advance(); return .sampler2d; },
-            .kw_sampler1d_array => { _ = self.advance(); return .sampler1d_array; },
-            .kw_sampler1d => { _ = self.advance(); return .sampler1d; },
-            .kw_isampler1d => { _ = self.advance(); return .isampler1d; },
-            .kw_usampler1d => { _ = self.advance(); return .usampler1d; },
-            .kw_isampler1d_array => { _ = self.advance(); return .isampler1d_array; },
-            .kw_usampler1d_array => { _ = self.advance(); return .usampler1d_array; },
-            .kw_sampler2d_shadow => { _ = self.advance(); return .sampler2d_shadow; },
-            .kw_sampler1d_shadow => { _ = self.advance(); return .sampler1d_shadow; },
-            .kw_sampler2d_array_shadow => { _ = self.advance(); return .sampler2d_array_shadow; },
-            .kw_sampler1d_array_shadow => { _ = self.advance(); return .sampler2d_array_shadow; },
-            .kw_sampler2d_rect_shadow => { _ = self.advance(); return .sampler2d_shadow; },
-            .kw_sampler_cube_shadow => { _ = self.advance(); return .sampler_cube_shadow; },
-            .kw_image_buffer => { _ = self.advance(); return .image_buffer; },
-            .kw_iimage_buffer => { _ = self.advance(); return .iimage_buffer; },
-            .kw_uimage_buffer => { _ = self.advance(); return .uimage_buffer; },
-            .kw_image2d => { _ = self.advance(); return .image2d; },
-            .kw_iimage2d => { _ = self.advance(); return .iimage2d; },
-            .kw_uimage2d => { _ = self.advance(); return .uimage2d; },
-            .kw_image2d_ms => { _ = self.advance(); return .image2d_ms; },
-            .kw_image2d_ms_array => { _ = self.advance(); return .image2d_ms_array; },
-            .kw_image1d => { _ = self.advance(); return .image1d; },
-            .kw_iimage1d => { _ = self.advance(); return .iimage1d; },
-            .kw_uimage1d => { _ = self.advance(); return .uimage1d; },
-            .kw_iimage3d => { _ = self.advance(); return .iimage3d; },
-            .kw_uimage3d => { _ = self.advance(); return .uimage3d; },
-            .kw_iimage_cube => { _ = self.advance(); return .iimage_cube; },
-            .kw_uimage_cube => { _ = self.advance(); return .uimage_cube; },
-            .kw_iimage2d_array => { _ = self.advance(); return .iimage2d_array; },
-            .kw_uimage2d_array => { _ = self.advance(); return .uimage2d_array; },
-            .kw_image_cube_array => { _ = self.advance(); return .image_cube_array; },
-            .kw_iimage_cube_array => { _ = self.advance(); return .iimage_cube_array; },
-            .kw_uimage_cube_array => { _ = self.advance(); return .uimage_cube_array; },
-            .kw_image3d => { _ = self.advance(); return .image3d; },
-            .kw_imagecube => { _ = self.advance(); return .image_cube; },
-            .kw_image2d_array => { _ = self.advance(); return .image2d_array; },
-            .kw_texture2d => { _ = self.advance(); return .texture2d_plain; },
-            .kw_texture3d => { _ = self.advance(); return .texture3d_plain; },
-            .kw_texture_cube => { _ = self.advance(); return .texture_cube_plain; },
-            .kw_texture2d_array => { _ = self.advance(); return .texture2d_array_plain; },
-            .kw_texture2d_ms => { _ = self.advance(); return .texture2d_ms_plain; },
-            .kw_acceleration_structure_ext => { _ = self.advance(); return .acceleration_structure_ext; },
-            .kw_ray_query_ext => { _ = self.advance(); return .ray_query_ext; },
+            .kw_void => {
+                _ = self.advance();
+                return .void;
+            },
+            .kw_float => {
+                _ = self.advance();
+                return .float;
+            },
+            .kw_int => {
+                _ = self.advance();
+                return .int;
+            },
+            .kw_uint => {
+                _ = self.advance();
+                return .uint;
+            },
+            .kw_int8 => {
+                _ = self.advance();
+                return .int8;
+            },
+            .kw_uint8 => {
+                _ = self.advance();
+                return .uint8;
+            },
+            .kw_int16 => {
+                _ = self.advance();
+                return .int16;
+            },
+            .kw_uint16 => {
+                _ = self.advance();
+                return .uint16;
+            },
+            .kw_float16 => {
+                _ = self.advance();
+                return .float16;
+            },
+            .kw_i8vec2 => {
+                _ = self.advance();
+                return .i8vec2;
+            },
+            .kw_i8vec3 => {
+                _ = self.advance();
+                return .i8vec3;
+            },
+            .kw_i8vec4 => {
+                _ = self.advance();
+                return .i8vec4;
+            },
+            .kw_u8vec2 => {
+                _ = self.advance();
+                return .u8vec2;
+            },
+            .kw_u8vec3 => {
+                _ = self.advance();
+                return .u8vec3;
+            },
+            .kw_u8vec4 => {
+                _ = self.advance();
+                return .u8vec4;
+            },
+            .kw_i16vec2 => {
+                _ = self.advance();
+                return .i16vec2;
+            },
+            .kw_i16vec3 => {
+                _ = self.advance();
+                return .i16vec3;
+            },
+            .kw_i16vec4 => {
+                _ = self.advance();
+                return .i16vec4;
+            },
+            .kw_u16vec2 => {
+                _ = self.advance();
+                return .u16vec2;
+            },
+            .kw_u16vec3 => {
+                _ = self.advance();
+                return .u16vec3;
+            },
+            .kw_u16vec4 => {
+                _ = self.advance();
+                return .u16vec4;
+            },
+            .kw_f16vec2 => {
+                _ = self.advance();
+                return .f16vec2;
+            },
+            .kw_f16vec3 => {
+                _ = self.advance();
+                return .f16vec3;
+            },
+            .kw_f16vec4 => {
+                _ = self.advance();
+                return .f16vec4;
+            },
+            .kw_bool => {
+                _ = self.advance();
+                return .bool;
+            },
+            .kw_vec2 => {
+                _ = self.advance();
+                return .vec2;
+            },
+            .kw_vec3 => {
+                _ = self.advance();
+                return .vec3;
+            },
+            .kw_vec4 => {
+                _ = self.advance();
+                return .vec4;
+            },
+            .kw_ivec2 => {
+                _ = self.advance();
+                return .ivec2;
+            },
+            .kw_ivec3 => {
+                _ = self.advance();
+                return .ivec3;
+            },
+            .kw_ivec4 => {
+                _ = self.advance();
+                return .ivec4;
+            },
+            .kw_bvec2 => {
+                _ = self.advance();
+                return .bvec2;
+            },
+            .kw_bvec3 => {
+                _ = self.advance();
+                return .bvec3;
+            },
+            .kw_bvec4 => {
+                _ = self.advance();
+                return .bvec4;
+            },
+            .kw_uvec2 => {
+                _ = self.advance();
+                return .uvec2;
+            },
+            .kw_uvec3 => {
+                _ = self.advance();
+                return .uvec3;
+            },
+            .kw_uvec4 => {
+                _ = self.advance();
+                return .uvec4;
+            },
+            .kw_mat2 => {
+                _ = self.advance();
+                return .mat2;
+            },
+            .kw_mat3 => {
+                _ = self.advance();
+                return .mat3;
+            },
+            .kw_mat4 => {
+                _ = self.advance();
+                return .mat4;
+            },
+            .kw_mat2x2 => {
+                _ = self.advance();
+                return .mat2x2;
+            },
+            .kw_mat2x3 => {
+                _ = self.advance();
+                return .mat2x3;
+            },
+            .kw_mat2x4 => {
+                _ = self.advance();
+                return .mat2x4;
+            },
+            .kw_mat3x2 => {
+                _ = self.advance();
+                return .mat3x2;
+            },
+            .kw_mat3x3 => {
+                _ = self.advance();
+                return .mat3x3;
+            },
+            .kw_mat3x4 => {
+                _ = self.advance();
+                return .mat3x4;
+            },
+            .kw_mat4x2 => {
+                _ = self.advance();
+                return .mat4x2;
+            },
+            .kw_mat4x3 => {
+                _ = self.advance();
+                return .mat4x3;
+            },
+            .kw_mat4x4 => {
+                _ = self.advance();
+                return .mat4x4;
+            },
+            .kw_sampler_buffer => {
+                _ = self.advance();
+                return .sampler_buffer;
+            },
+            .kw_isampler_buffer => {
+                _ = self.advance();
+                return .isampler_buffer;
+            },
+            .kw_usampler_buffer => {
+                _ = self.advance();
+                return .usampler_buffer;
+            },
+            .kw_sampler2d_ms => {
+                _ = self.advance();
+                return .sampler2d_ms;
+            },
+            .kw_isampler2d_ms => {
+                _ = self.advance();
+                return .isampler2d_ms;
+            },
+            .kw_usampler2d_ms => {
+                _ = self.advance();
+                return .usampler2d_ms;
+            },
+            .kw_sampler2d_ms_array => {
+                _ = self.advance();
+                return .sampler2d_ms_array;
+            },
+            .kw_isampler2d_ms_array => {
+                _ = self.advance();
+                return .isampler2d_ms_array;
+            },
+            .kw_usampler2d_ms_array => {
+                _ = self.advance();
+                return .usampler2d_ms_array;
+            },
+            .kw_sampler2d => {
+                _ = self.advance();
+                return .sampler2d;
+            },
+            .kw_isampler2d => {
+                _ = self.advance();
+                return .isampler2d;
+            },
+            .kw_usampler2d => {
+                _ = self.advance();
+                return .usampler2d;
+            },
+            .kw_sampler2d_array => {
+                _ = self.advance();
+                return .sampler2d_array;
+            },
+            .kw_isampler2d_array => {
+                _ = self.advance();
+                return .isampler2d_array;
+            },
+            .kw_usampler2d_array => {
+                _ = self.advance();
+                return .usampler2d_array;
+            },
+            .kw_sampler3d => {
+                _ = self.advance();
+                return .sampler3d;
+            },
+            .kw_isampler3d => {
+                _ = self.advance();
+                return .isampler3d;
+            },
+            .kw_usampler3d => {
+                _ = self.advance();
+                return .usampler3d;
+            },
+            .kw_sampler_cube_array => {
+                _ = self.advance();
+                return .sampler_cube_array;
+            },
+            .kw_sampler_cube_array_shadow => {
+                _ = self.advance();
+                return .sampler_cube_array_shadow;
+            },
+            .kw_isampler_cube => {
+                _ = self.advance();
+                return .isampler_cube;
+            },
+            .kw_usampler_cube => {
+                _ = self.advance();
+                return .usampler_cube;
+            },
+            .kw_isampler_cube_array => {
+                _ = self.advance();
+                return .isampler_cube_array;
+            },
+            .kw_usampler_cube_array => {
+                _ = self.advance();
+                return .usampler_cube_array;
+            },
+            .kw_sampler2d_rect => {
+                _ = self.advance();
+                return .sampler2d;
+            },
+            .kw_sampler1d_array => {
+                _ = self.advance();
+                return .sampler1d_array;
+            },
+            .kw_sampler1d => {
+                _ = self.advance();
+                return .sampler1d;
+            },
+            .kw_isampler1d => {
+                _ = self.advance();
+                return .isampler1d;
+            },
+            .kw_usampler1d => {
+                _ = self.advance();
+                return .usampler1d;
+            },
+            .kw_isampler1d_array => {
+                _ = self.advance();
+                return .isampler1d_array;
+            },
+            .kw_usampler1d_array => {
+                _ = self.advance();
+                return .usampler1d_array;
+            },
+            .kw_sampler2d_shadow => {
+                _ = self.advance();
+                return .sampler2d_shadow;
+            },
+            .kw_sampler1d_shadow => {
+                _ = self.advance();
+                return .sampler1d_shadow;
+            },
+            .kw_sampler2d_array_shadow => {
+                _ = self.advance();
+                return .sampler2d_array_shadow;
+            },
+            .kw_sampler1d_array_shadow => {
+                _ = self.advance();
+                return .sampler2d_array_shadow;
+            },
+            .kw_sampler2d_rect_shadow => {
+                _ = self.advance();
+                return .sampler2d_shadow;
+            },
+            .kw_sampler_cube_shadow => {
+                _ = self.advance();
+                return .sampler_cube_shadow;
+            },
+            .kw_image_buffer => {
+                _ = self.advance();
+                return .image_buffer;
+            },
+            .kw_iimage_buffer => {
+                _ = self.advance();
+                return .iimage_buffer;
+            },
+            .kw_uimage_buffer => {
+                _ = self.advance();
+                return .uimage_buffer;
+            },
+            .kw_image2d => {
+                _ = self.advance();
+                return .image2d;
+            },
+            .kw_iimage2d => {
+                _ = self.advance();
+                return .iimage2d;
+            },
+            .kw_uimage2d => {
+                _ = self.advance();
+                return .uimage2d;
+            },
+            .kw_image2d_ms => {
+                _ = self.advance();
+                return .image2d_ms;
+            },
+            .kw_image2d_ms_array => {
+                _ = self.advance();
+                return .image2d_ms_array;
+            },
+            .kw_image1d => {
+                _ = self.advance();
+                return .image1d;
+            },
+            .kw_iimage1d => {
+                _ = self.advance();
+                return .iimage1d;
+            },
+            .kw_uimage1d => {
+                _ = self.advance();
+                return .uimage1d;
+            },
+            .kw_iimage3d => {
+                _ = self.advance();
+                return .iimage3d;
+            },
+            .kw_uimage3d => {
+                _ = self.advance();
+                return .uimage3d;
+            },
+            .kw_iimage_cube => {
+                _ = self.advance();
+                return .iimage_cube;
+            },
+            .kw_uimage_cube => {
+                _ = self.advance();
+                return .uimage_cube;
+            },
+            .kw_iimage2d_array => {
+                _ = self.advance();
+                return .iimage2d_array;
+            },
+            .kw_uimage2d_array => {
+                _ = self.advance();
+                return .uimage2d_array;
+            },
+            .kw_image_cube_array => {
+                _ = self.advance();
+                return .image_cube_array;
+            },
+            .kw_iimage_cube_array => {
+                _ = self.advance();
+                return .iimage_cube_array;
+            },
+            .kw_uimage_cube_array => {
+                _ = self.advance();
+                return .uimage_cube_array;
+            },
+            .kw_image3d => {
+                _ = self.advance();
+                return .image3d;
+            },
+            .kw_imagecube => {
+                _ = self.advance();
+                return .image_cube;
+            },
+            .kw_image2d_array => {
+                _ = self.advance();
+                return .image2d_array;
+            },
+            .kw_texture2d => {
+                _ = self.advance();
+                return .texture2d_plain;
+            },
+            .kw_texture3d => {
+                _ = self.advance();
+                return .texture3d_plain;
+            },
+            .kw_texture_cube => {
+                _ = self.advance();
+                return .texture_cube_plain;
+            },
+            .kw_texture2d_array => {
+                _ = self.advance();
+                return .texture2d_array_plain;
+            },
+            .kw_texture2d_ms => {
+                _ = self.advance();
+                return .texture2d_ms_plain;
+            },
+            .kw_acceleration_structure_ext => {
+                _ = self.advance();
+                return .acceleration_structure_ext;
+            },
+            .kw_ray_query_ext => {
+                _ = self.advance();
+                return .ray_query_ext;
+            },
             .kw_tensor_arm => {
                 _ = self.advance(); // consume tensorARM
                 if (self.current().tag == .lt) {
@@ -902,29 +1387,83 @@ const Parser = struct {
                     const elem_ty: ast.Type = blk: {
                         // Check for explicit arithmetic type keywords (int8_t, uint8_t, etc.)
                         switch (self.current().tag) {
-                            .kw_int => { _ = self.advance(); break :blk .int; },
-                            .kw_uint => { _ = self.advance(); break :blk .uint; },
-                            .kw_float => { _ = self.advance(); break :blk .float; },
-                            .kw_bool => { _ = self.advance(); break :blk .bool; },
-                            .kw_int8 => { _ = self.advance(); break :blk .int8; },
-                            .kw_uint8 => { _ = self.advance(); break :blk .uint8; },
-                            .kw_int16 => { _ = self.advance(); break :blk .int16; },
-                            .kw_uint16 => { _ = self.advance(); break :blk .uint16; },
-                            .kw_float16 => { _ = self.advance(); break :blk .float16; },
+                            .kw_int => {
+                                _ = self.advance();
+                                break :blk .int;
+                            },
+                            .kw_uint => {
+                                _ = self.advance();
+                                break :blk .uint;
+                            },
+                            .kw_float => {
+                                _ = self.advance();
+                                break :blk .float;
+                            },
+                            .kw_bool => {
+                                _ = self.advance();
+                                break :blk .bool;
+                            },
+                            .kw_int8 => {
+                                _ = self.advance();
+                                break :blk .int8;
+                            },
+                            .kw_uint8 => {
+                                _ = self.advance();
+                                break :blk .uint8;
+                            },
+                            .kw_int16 => {
+                                _ = self.advance();
+                                break :blk .int16;
+                            },
+                            .kw_uint16 => {
+                                _ = self.advance();
+                                break :blk .uint16;
+                            },
+                            .kw_float16 => {
+                                _ = self.advance();
+                                break :blk .float16;
+                            },
                             else => {},
                         }
                         // Check for int32_t/uint32_t/float32_t as identifiers
                         if (self.current().tag == .identifier) {
                             const name = self.text(self.current());
-                            if (std.mem.eql(u8, name, "int32_t")) { _ = self.advance(); break :blk .int; }
-                            if (std.mem.eql(u8, name, "uint32_t")) { _ = self.advance(); break :blk .uint; }
-                            if (std.mem.eql(u8, name, "float32_t")) { _ = self.advance(); break :blk .float; }
-                            if (std.mem.eql(u8, name, "int8_t")) { _ = self.advance(); break :blk .int8; }
-                            if (std.mem.eql(u8, name, "uint8_t")) { _ = self.advance(); break :blk .uint8; }
-                            if (std.mem.eql(u8, name, "int16_t")) { _ = self.advance(); break :blk .int16; }
-                            if (std.mem.eql(u8, name, "uint16_t")) { _ = self.advance(); break :blk .uint16; }
-                            if (std.mem.eql(u8, name, "float16_t")) { _ = self.advance(); break :blk .float16; }
-                            if (std.mem.eql(u8, name, "double")) { _ = self.advance(); break :blk .double; }
+                            if (std.mem.eql(u8, name, "int32_t")) {
+                                _ = self.advance();
+                                break :blk .int;
+                            }
+                            if (std.mem.eql(u8, name, "uint32_t")) {
+                                _ = self.advance();
+                                break :blk .uint;
+                            }
+                            if (std.mem.eql(u8, name, "float32_t")) {
+                                _ = self.advance();
+                                break :blk .float;
+                            }
+                            if (std.mem.eql(u8, name, "int8_t")) {
+                                _ = self.advance();
+                                break :blk .int8;
+                            }
+                            if (std.mem.eql(u8, name, "uint8_t")) {
+                                _ = self.advance();
+                                break :blk .uint8;
+                            }
+                            if (std.mem.eql(u8, name, "int16_t")) {
+                                _ = self.advance();
+                                break :blk .int16;
+                            }
+                            if (std.mem.eql(u8, name, "uint16_t")) {
+                                _ = self.advance();
+                                break :blk .uint16;
+                            }
+                            if (std.mem.eql(u8, name, "float16_t")) {
+                                _ = self.advance();
+                                break :blk .float16;
+                            }
+                            if (std.mem.eql(u8, name, "double")) {
+                                _ = self.advance();
+                                break :blk .double;
+                            }
                         }
                         break :blk .void;
                     };
@@ -938,10 +1477,22 @@ const Parser = struct {
                 }
                 return .void;
             },
-            .kw_subpass_input => { _ = self.advance(); return .subpass_input; },
-            .kw_subpass_input_ms => { _ = self.advance(); return .subpass_input_ms; },
-            .kw_sampler_shadow, .kw_sampler_plain => { _ = self.advance(); return .sampler_plain; },
-            .kw_sampler_cube => { _ = self.advance(); return .sampler_cube; },
+            .kw_subpass_input => {
+                _ = self.advance();
+                return .subpass_input;
+            },
+            .kw_subpass_input_ms => {
+                _ = self.advance();
+                return .subpass_input_ms;
+            },
+            .kw_sampler_shadow, .kw_sampler_plain => {
+                _ = self.advance();
+                return .sampler_plain;
+            },
+            .kw_sampler_cube => {
+                _ = self.advance();
+                return .sampler_cube;
+            },
             .identifier => {
                 // All identifiers (including 64-bit type names like `double`/`int64_t`,
                 // which the lexer does not map to dedicated tokens) become `.named`.
@@ -1400,7 +1951,7 @@ const Parser = struct {
             // semantic layer can emit a clear "unsupported 64-bit type" honest error.
             if (is64BitTypeName(type_name) and
                 (self.peek2().tag == .eq or self.peek2().tag == .semicolon or
-                 self.peek2().tag == .l_bracket or self.peek2().tag == .semicolon))
+                    self.peek2().tag == .l_bracket or self.peek2().tag == .semicolon))
             {
                 return self.parseLocalVarDecl();
             }
@@ -2277,19 +2828,47 @@ const Parser = struct {
                 };
             },
             // Type constructors: vec3(1,2,3), mat4(1.0), float(x), etc.
-            .kw_vec2, .kw_vec3, .kw_vec4,
-            .kw_ivec2, .kw_ivec3, .kw_ivec4,
-            .kw_bvec2, .kw_bvec3, .kw_bvec4,
-            .kw_uvec2, .kw_uvec3, .kw_uvec4,
-            .kw_i8vec2, .kw_i8vec3, .kw_i8vec4,
-            .kw_u8vec2, .kw_u8vec3, .kw_u8vec4,
-            .kw_mat2, .kw_mat3, .kw_mat4,
-            .kw_mat2x2, .kw_mat2x3, .kw_mat2x4,
-            .kw_mat3x2, .kw_mat3x3, .kw_mat3x4,
-            .kw_mat4x2, .kw_mat4x3, .kw_mat4x4,
-            .kw_float, .kw_int, .kw_uint, .kw_bool,
-            .kw_int8, .kw_uint8,
-            .kw_sampler2d, .kw_sampler3d, .kw_sampler_cube, .kw_sampler2d_array, .kw_sampler2d_ms,
+            .kw_vec2,
+            .kw_vec3,
+            .kw_vec4,
+            .kw_ivec2,
+            .kw_ivec3,
+            .kw_ivec4,
+            .kw_bvec2,
+            .kw_bvec3,
+            .kw_bvec4,
+            .kw_uvec2,
+            .kw_uvec3,
+            .kw_uvec4,
+            .kw_i8vec2,
+            .kw_i8vec3,
+            .kw_i8vec4,
+            .kw_u8vec2,
+            .kw_u8vec3,
+            .kw_u8vec4,
+            .kw_mat2,
+            .kw_mat3,
+            .kw_mat4,
+            .kw_mat2x2,
+            .kw_mat2x3,
+            .kw_mat2x4,
+            .kw_mat3x2,
+            .kw_mat3x3,
+            .kw_mat3x4,
+            .kw_mat4x2,
+            .kw_mat4x3,
+            .kw_mat4x4,
+            .kw_float,
+            .kw_int,
+            .kw_uint,
+            .kw_bool,
+            .kw_int8,
+            .kw_uint8,
+            .kw_sampler2d,
+            .kw_sampler3d,
+            .kw_sampler_cube,
+            .kw_sampler2d_array,
+            .kw_sampler2d_ms,
             // Vulkan SHADOW combined-sampler constructors built from a separate
             // texture + samplerShadow (e.g. `sampler2DShadow(tex, samp)`). These
             // were omitted, so a `texture(sampler2DShadow(t, s), …)` expression was
@@ -2300,9 +2879,11 @@ const Parser = struct {
             // tryType (no dedicated ast.Type variant), so enabling them as
             // constructors would trade the drop for a wrong-dimension silent-wrong.
             // They remain unsupported (rare/legacy types) rather than mis-lowered.
-            .kw_sampler2d_shadow, .kw_sampler1d_shadow,
+            .kw_sampler2d_shadow,
+            .kw_sampler1d_shadow,
             .kw_sampler2d_array_shadow,
-            .kw_sampler_cube_shadow, .kw_sampler_cube_array_shadow,
+            .kw_sampler_cube_shadow,
+            .kw_sampler_cube_array_shadow,
             => {
                 var ty = self.tryType().?;
                 // Handle array constructors: float[](1.0, 2.0, ...), vec4[](...),
@@ -2358,7 +2939,11 @@ const Parser = struct {
             },
             // texture2D, texture3D etc. are built-in functions, not type constructors.
             // They're tokenized as keywords but used as function calls: texture2D(sampler, coord)
-            .kw_texture2d, .kw_texture3d, .kw_texture_cube, .kw_texture2d_array, .kw_texture2d_ms,
+            .kw_texture2d,
+            .kw_texture3d,
+            .kw_texture_cube,
+            .kw_texture2d_array,
+            .kw_texture2d_ms,
             => {
                 const name = self.text(tok);
                 _ = self.advance();

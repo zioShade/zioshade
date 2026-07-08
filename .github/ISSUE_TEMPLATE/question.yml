@@ -1,0 +1,32 @@
+name: Question
+description: Ask how to use zioshade or clarify expected behavior.
+title: "question: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For usage help, please include enough detail to reproduce what you see.
+        If your question is really a bug (wrong output, crash), use the Bug report template instead.
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What are you trying to do, and where are you stuck?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: What you tried
+      description: The command or code you ran, and the output you got.
+      render: shell
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: zioshade commit / Zig version
+      description: Output of `git rev-parse HEAD` and `zig version` (Zig must be 0.15.2).
+    validations:
+      required: false

@@ -4,6 +4,15 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
+- Hardened against hostile shader and SPIR-V input (Wave 1).
+- Fixed first-run onboarding: CLI install, version guard, quick-start, error UX (Wave 2).
+- Green CI: bumped setup-zig to v2, fixed the conformance spirv-val install, added a concurrency group and a `zig fmt --check` gate (Wave 3).
+- Reformatted `src` with `zig fmt` so the new fmt gate passes.
+- Reconciled conformance counts across the docs against `zig build strict-gate` (2104 PASS, 11 XFAIL, 0 FP-regression); `docs/STATUS.md` is the single source of truth, and fixed the dangling `known-conformance-fails.txt` reference.
+- Added a `zig build release` cross-compile matrix (linux-x86_64, macos-aarch64, macos-x86_64, windows-x86_64) using vanilla `std.Build`, no new dependency.
+- Added governance files: CODE_OF_CONDUCT.md, feature-request/question issue forms, issue-template config, and .editorconfig.
+- Documented the Zig version policy: requires 0.15.2, 0.16 support tracked in #424.
+
 ## [0.2.0] - 2026-07-06
 
 ### Changed

@@ -1,0 +1,36 @@
+# EditorConfig: https://editorconfig.org
+# Formatting for Zig is authoritative via `zig fmt`; this file keeps other file
+# types consistent for editors that honor it.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.zig]
+indent_style = space
+indent_size = 4
+
+[*.{yml,yaml}]
+indent_size = 2
+
+[*.{json,zon}]
+indent_size = 4
+
+[*.md]
+trim_trailing_whitespace = false
+
+[justfile]
+indent_style = space
+indent_size = 4
+
+[Makefile]
+indent_style = tab
+
+[*.{sh,c,h}]
+indent_style = space
+indent_size = 4

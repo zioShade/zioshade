@@ -5,21 +5,67 @@ const spirv = @import("spirv.zig");
 const compact_ids = @import("compact_ids.zig");
 
 pub const TypeKind = enum {
-    unknown, scalar_int, scalar_uint, scalar_float, scalar_bool,
-    vector, matrix, struct_type, array, sampler, image, sampled_image,
-    uniform_buffer, storage_buffer, acceleration_structure,
+    unknown,
+    scalar_int,
+    scalar_uint,
+    scalar_float,
+    scalar_bool,
+    vector,
+    matrix,
+    struct_type,
+    array,
+    sampler,
+    image,
+    sampled_image,
+    uniform_buffer,
+    storage_buffer,
+    acceleration_structure,
 };
 
 /// SPIR-V image format qualifier (from `OpTypeImage` Format operand).
 /// Mirrors the SPIR-V spec's `Image Format` enum; only meaningful for
 /// `storage_images` and storage-image-like resources.
 pub const ImageFormat = enum(u8) {
-    unknown = 0, rgba32f, rgba16f, r32f, rgba8, rgba8_snorm,
-    rg32f, rg16f, r11f_g11f_b10f, r16f, rgba16, rgb10_a2, rg16, rg8,
-    r16, r8, rgba16_snorm, rg16_snorm, rg8_snorm, r16_snorm, r8_snorm,
-    rgba32i, rgba16i, rgba8i, r32i, rg32i, rg16i, rg8i, r16i, r8i,
-    rgba32ui, rgba16ui, rgba8ui, r32ui, rgb10_a2ui, rg32ui, rg16ui,
-    rg8ui, r16ui, r8ui,
+    unknown = 0,
+    rgba32f,
+    rgba16f,
+    r32f,
+    rgba8,
+    rgba8_snorm,
+    rg32f,
+    rg16f,
+    r11f_g11f_b10f,
+    r16f,
+    rgba16,
+    rgb10_a2,
+    rg16,
+    rg8,
+    r16,
+    r8,
+    rgba16_snorm,
+    rg16_snorm,
+    rg8_snorm,
+    r16_snorm,
+    r8_snorm,
+    rgba32i,
+    rgba16i,
+    rgba8i,
+    r32i,
+    rg32i,
+    rg16i,
+    rg8i,
+    r16i,
+    r8i,
+    rgba32ui,
+    rgba16ui,
+    rgba8ui,
+    r32ui,
+    rgb10_a2ui,
+    rg32ui,
+    rg16ui,
+    rg8ui,
+    r16ui,
+    r8ui,
 
     fn fromSpv(format_op: u32) ImageFormat {
         // SPIR-V Image Format enum runs 0..39 contiguously. Cast if in range.
@@ -86,7 +132,7 @@ pub const Member = struct {
     /// EXTERNALLY-produced SPIR-V (e.g. glslang).
     is_volatile: bool = false,
     /// `Restrict` (Decoration 19) on this member.
-    @"restrict": bool = false,
+    restrict: bool = false,
 };
 
 /// Recursively free a member slice and every nested member slice. Frees each
@@ -159,7 +205,7 @@ pub const Resource = struct {
     is_volatile: bool = false,
     /// True if the resource variable carries `Restrict` (Decoration 19),
     /// i.e. a `restrict` buffer/image.
-    @"restrict": bool = false,
+    restrict: bool = false,
 };
 
 pub const EntryPoint = struct {
@@ -222,7 +268,7 @@ const Deco = struct {
     /// `Volatile` (21) on the variable → volatile buffer/image.
     is_volatile: bool = false,
     /// `Restrict` (19) on the variable → restrict buffer/image.
-    @"restrict": bool = false,
+    restrict: bool = false,
 };
 
 // Per-member layout/access decorations, keyed by memberKey(struct_id, idx).
@@ -231,7 +277,7 @@ const MemberDeco = struct {
     is_row_major: bool = false,
     coherent: bool = false,
     is_volatile: bool = false,
-    @"restrict": bool = false,
+    restrict: bool = false,
 };
 
 // Internal: type info
@@ -275,9 +321,17 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
 
     // Collection maps
     var names = std.AutoHashMap(u32, []const u8).init(alloc);
-    defer { var it = names.iterator(); while (it.next()) |e| alloc.free(e.value_ptr.*); names.deinit(); }
+    defer {
+        var it = names.iterator();
+        while (it.next()) |e| alloc.free(e.value_ptr.*);
+        names.deinit();
+    }
     var mnames = std.AutoHashMap(u64, []const u8).init(alloc); // key = memberKey(struct_id, idx)
-    defer { var it = mnames.iterator(); while (it.next()) |e| alloc.free(e.value_ptr.*); mnames.deinit(); }
+    defer {
+        var it = mnames.iterator();
+        while (it.next()) |e| alloc.free(e.value_ptr.*);
+        mnames.deinit();
+    }
     var decos = std.AutoHashMap(u32, Deco).init(alloc);
     defer decos.deinit();
     var types = std.AutoHashMap(u32, TInfo).init(alloc);
@@ -324,8 +378,12 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             15 => { // OpEntryPoint
                 if (wc >= 4) {
                     const stage: Stage = switch (spirv_words[pos + 1]) {
-                        0 => .vertex, 4 => .fragment, 5 => .compute,
-                        3 => .geometry, 1 => .tessellation_control, 2 => .tessellation_evaluation,
+                        0 => .vertex,
+                        4 => .fragment,
+                        5 => .compute,
+                        3 => .geometry,
+                        1 => .tessellation_control,
+                        2 => .tessellation_evaluation,
                         else => .unknown,
                     };
                     const name = extractStr(alloc, spirv_words[pos + 3 .. ie]) catch "";
@@ -339,18 +397,42 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                     const gop = try decos.getOrPut(target);
                     if (!gop.found_existing) gop.value_ptr.* = .{};
                     switch (d) {
-                        34 => { if (wc >= 4) gop.value_ptr.set = spirv_words[pos + 3]; }, // DescriptorSet
-                        33 => { if (wc >= 4) gop.value_ptr.binding = spirv_words[pos + 3]; }, // Binding
-                        30 => { if (wc >= 4) gop.value_ptr.location = spirv_words[pos + 3]; }, // Location
-                        1 => { if (wc >= 4) gop.value_ptr.spec_id = spirv_words[pos + 3]; }, // SpecId
-                        2 => { gop.value_ptr.is_block = true; }, // Block
-                        3 => { gop.value_ptr.is_buffer_block = true; }, // BufferBlock
-                        24 => { gop.value_ptr.nonwritable = true; }, // NonWritable → readonly
-                        25 => { gop.value_ptr.nonreadable = true; }, // NonReadable → writeonly
-                        23 => { gop.value_ptr.coherent = true; }, // Coherent
-                        21 => { gop.value_ptr.is_volatile = true; }, // Volatile
-                        19 => { gop.value_ptr.@"restrict" = true; }, // Restrict
-                        6 => { if (wc >= 4) try astrides.put(target, spirv_words[pos + 3]); }, // ArrayStride (on array TYPE id)
+                        34 => {
+                            if (wc >= 4) gop.value_ptr.set = spirv_words[pos + 3];
+                        }, // DescriptorSet
+                        33 => {
+                            if (wc >= 4) gop.value_ptr.binding = spirv_words[pos + 3];
+                        }, // Binding
+                        30 => {
+                            if (wc >= 4) gop.value_ptr.location = spirv_words[pos + 3];
+                        }, // Location
+                        1 => {
+                            if (wc >= 4) gop.value_ptr.spec_id = spirv_words[pos + 3];
+                        }, // SpecId
+                        2 => {
+                            gop.value_ptr.is_block = true;
+                        }, // Block
+                        3 => {
+                            gop.value_ptr.is_buffer_block = true;
+                        }, // BufferBlock
+                        24 => {
+                            gop.value_ptr.nonwritable = true;
+                        }, // NonWritable → readonly
+                        25 => {
+                            gop.value_ptr.nonreadable = true;
+                        }, // NonReadable → writeonly
+                        23 => {
+                            gop.value_ptr.coherent = true;
+                        }, // Coherent
+                        21 => {
+                            gop.value_ptr.is_volatile = true;
+                        }, // Volatile
+                        19 => {
+                            gop.value_ptr.restrict = true;
+                        }, // Restrict
+                        6 => {
+                            if (wc >= 4) try astrides.put(target, spirv_words[pos + 3]);
+                        }, // ArrayStride (on array TYPE id)
                         else => {},
                     }
                 }
@@ -362,7 +444,9 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                     const deco = spirv_words[pos + 3];
                     const mkey = memberKey(struct_id, member_idx);
                     switch (deco) {
-                        35 => { if (wc >= 5) try moffs.put(mkey, spirv_words[pos + 4]); }, // Offset
+                        35 => {
+                            if (wc >= 5) try moffs.put(mkey, spirv_words[pos + 4]);
+                        }, // Offset
                         7 => { // MatrixStride
                             if (wc >= 5) {
                                 const gop = try mmat.getOrPut(mkey);
@@ -393,7 +477,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                         19 => { // Restrict
                             const gop = try mmat.getOrPut(mkey);
                             if (!gop.found_existing) gop.value_ptr.* = .{};
-                            gop.value_ptr.@"restrict" = true;
+                            gop.value_ptr.restrict = true;
                         },
                         else => {},
                     }
@@ -615,7 +699,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
             // the VARIABLE (how zioshade emits them, like readonly/writeonly).
             .coherent = d.coherent,
             .is_volatile = d.is_volatile,
-            .@"restrict" = d.@"restrict",
+            .restrict = d.restrict,
         };
 
         // Opaque resources (samplers / images / accel structs) are routed by their
@@ -1000,7 +1084,7 @@ const JsonWriter = struct {
             // access qualifiers (#177 Item 3) where present
             if (m.coherent) try self.boolField(depth + 2, "coherent");
             if (m.is_volatile) try self.boolField(depth + 2, "volatile");
-            if (m.@"restrict") try self.boolField(depth + 2, "restrict");
+            if (m.restrict) try self.boolField(depth + 2, "restrict");
             try self.raw("\n");
             try self.indent(depth + 1);
             try self.raw("}");
@@ -1174,13 +1258,13 @@ fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) 
         var is_row_major = false;
         var coherent = false;
         var is_volatile = false;
-        var @"restrict" = false;
+        var restrict = false;
         if (ctx.mmat.get(mkey)) |md| {
             matrix_stride = md.matrix_stride;
             is_row_major = md.is_row_major;
             coherent = md.coherent;
             is_volatile = md.is_volatile;
-            @"restrict" = md.@"restrict";
+            restrict = md.restrict;
         }
 
         // Array layout: ArrayStride is keyed by the array TYPE id; runtime
@@ -1249,7 +1333,7 @@ fn buildMembers(ctx: BuildCtx, struct_type_id: u32, visited: []u32, depth: u32) 
             .inner_type_id = inner_type_id,
             .coherent = coherent,
             .is_volatile = is_volatile,
-            .@"restrict" = @"restrict",
+            .restrict = restrict,
         });
     }
 
@@ -1378,7 +1462,10 @@ fn resolveKind(types: *const std.AutoHashMap(u32, TInfo), type_id: u32) TypeKind
     for (0..10) |_| {
         const ti = types.get(cur) orelse return .unknown;
         if (ti.kind != .unknown) return ti.kind;
-        if (ti.pointee_type_id != 0) { cur = ti.pointee_type_id; continue; }
+        if (ti.pointee_type_id != 0) {
+            cur = ti.pointee_type_id;
+            continue;
+        }
         return .unknown;
     }
     return .unknown;
@@ -1387,7 +1474,9 @@ fn resolveKind(types: *const std.AutoHashMap(u32, TInfo), type_id: u32) TypeKind
 fn extractStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 {
     if (words.len == 0) return try alloc.dupe(u8, "");
     const bytes = std.mem.sliceAsBytes(words);
-    const end = for (bytes, 0..) |b, i| { if (b == 0) break i; } else bytes.len;
+    const end = for (bytes, 0..) |b, i| {
+        if (b == 0) break i;
+    } else bytes.len;
     if (end == 0) return try alloc.dupe(u8, "");
     return try alloc.dupe(u8, bytes[0..end]);
 }

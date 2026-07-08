@@ -1090,7 +1090,6 @@ pub fn fuseKernels(
         const bound = current[3];
         if (bound <= 1) break;
 
-
         // Find all entry points in current binary
         var entries = findEntryPoints(current, bound, alloc) catch break;
         defer {
@@ -1125,7 +1124,6 @@ pub fn fuseKernels(
         if (candidates.items.len == 0) {
             break;
         }
-
 
         // Rank candidates by cost model (highest score = best)
         rankCandidates(candidates.items, entries.items);
@@ -1200,11 +1198,11 @@ test "fuseKernels detects multiple compute entry points" {
 
     // Header
     try words.appendSlice(alloc, &.{
-        spirv.MAGIC,      // magic
-        0x00010000,        // version 1.0
-        0,                 // generator
-        100,               // bound (IDs 0..99)
-        0,                 // schema
+        spirv.MAGIC, // magic
+        0x00010000, // version 1.0
+        0, // generator
+        100, // bound (IDs 0..99)
+        0, // schema
     });
 
     // Capabilities
@@ -1442,8 +1440,8 @@ test "fuseKernels fuses two kernels sharing a buffer" {
     try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(5, 133), 5, 24, 23, 23 });
     // OpStore %22 %24
     try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(3, 62), 22, 24 });
-    try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(1, 253) }); // OpReturn
-    try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(1, 56) }); // OpFunctionEnd
+    try w.appendSlice(alloc, &.{spirv.encodeInstructionHeader(1, 253)}); // OpReturn
+    try w.appendSlice(alloc, &.{spirv.encodeInstructionHeader(1, 56)}); // OpFunctionEnd
 
     // Function 2 (main2): reads from buffer %20, writes to %21
     try w.appendSlice(alloc, &.{
@@ -1460,8 +1458,8 @@ test "fuseKernels fuses two kernels sharing a buffer" {
     try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(5, 133), 5, 28, 27, 27 });
     // OpStore %26 %28
     try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(3, 62), 26, 28 });
-    try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(1, 253) }); // OpReturn
-    try w.appendSlice(alloc, &.{ spirv.encodeInstructionHeader(1, 56) }); // OpFunctionEnd
+    try w.appendSlice(alloc, &.{spirv.encodeInstructionHeader(1, 253)}); // OpReturn
+    try w.appendSlice(alloc, &.{spirv.encodeInstructionHeader(1, 56)}); // OpFunctionEnd
 
     const result = try fuseKernels(alloc, w.items, .{});
     defer if (result.ptr != w.items.ptr) alloc.free(result);
@@ -1650,9 +1648,7 @@ test "detectReductionPattern rejects non-reduction kernel" {
     try std.testing.expect(!info.is_reduction);
 }
 
-
 test "transitive fusion: three kernels sharing buffers" {
-
     const alloc = std.testing.allocator;
     const root = @import("root.zig");
 

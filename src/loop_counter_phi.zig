@@ -44,12 +44,18 @@ fn predecessorCount(words: []const u32, target: u32, last_pred: *u32) u32 {
         if (op == 248 and wc >= 2) cur_label = words[pos + 1]; // OpLabel
         var hit = false;
         switch (op) {
-            249 => if (wc >= 2 and words[pos + 1] == target) { hit = true; }, // OpBranch
-            250 => if (wc >= 4 and (words[pos + 2] == target or words[pos + 3] == target)) { hit = true; }, // OpBranchConditional
+            249 => if (wc >= 2 and words[pos + 1] == target) {
+                hit = true;
+            }, // OpBranch
+            250 => if (wc >= 4 and (words[pos + 2] == target or words[pos + 3] == target)) {
+                hit = true;
+            }, // OpBranchConditional
             251 => { // OpSwitch: selector default [literal target]...
                 if (wc >= 3 and words[pos + 2] == target) hit = true;
                 var k: u32 = pos + 4;
-                while (k < pos + wc) : (k += 2) if (words[k] == target) { hit = true; };
+                while (k < pos + wc) : (k += 2) if (words[k] == target) {
+                    hit = true;
+                };
             },
             else => {},
         }
@@ -432,7 +438,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
         // Handle OpLabel: copy + insert OpPhi after
         if (opcode == 248 and wc >= 2) {
             cur_label = words[pos + 1];
-            try result.appendSlice(alloc, words[pos .. ie]);
+            try result.appendSlice(alloc, words[pos..ie]);
 
             if (phis_by_label.get(cur_label)) |phis| {
                 for (phis.items) |phi| {
@@ -465,23 +471,52 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
         var wi: u32 = pos + 1;
         switch (info.fixed) {
             0 => {},
-            1 => { if (wi < ie) { try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]); wi += 1; } },
-            2 => {
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
-                if (wi < ie) { try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]); wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]); wi += 1; },
-                'l' => { try result.append(alloc, words[wi]); wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]); },
-                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
+                'i' => {
+                    try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                },
+                'l' => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+                },
                 'M' => {
-                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
                     while (wi < ie) : (wi += 1) try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
                 },
                 'W' => {
@@ -491,17 +526,24 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                         try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]); // target
                         wi += 1;
                     }
-                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     var in_str = true;
                     while (wi < ie and in_str) : (wi += 1) {
-                        const w = words[wi]; try result.append(alloc, w);
+                        const w = words[wi];
+                        try result.append(alloc, w);
                         if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
                     }
                     while (wi < ie) : (wi += 1) try result.append(alloc, sub_map.get(words[wi]) orelse words[wi]);
                 },
-                else => { try result.append(alloc, words[wi]); wi += 1; },
+                else => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);

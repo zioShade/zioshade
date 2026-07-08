@@ -48,7 +48,7 @@ Generated: \`$WHEN\` · commit \`$COMMIT\`
 
 The suite exits 0 when \`FAIL (spirv) == 0\` and \`FAIL (compile) == 0\`
 (PASS + XFAIL + SKIP == TOTAL). XFAIL entries are the curated, documented
-known-unsupported fixtures (\`tests/known-conformance-fails.txt\`), not silent
+known-unsupported fixtures (\`KNOWN_UNSUPPORTED\` in \`tests/runner.zig\`), not silent
 failures — zioshade honest-errors on them.
 
 These numbers are authoritative; any conformance count quoted elsewhere in the

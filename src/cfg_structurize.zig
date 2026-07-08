@@ -919,14 +919,11 @@ test "splice: inserts OpSelectionMerge before the header terminator; no-op copie
     // Minimal SPIR-V: 5-word header + an if-else body with NO OpSelectionMerge.
     const words = [_]u32{
         spirv.MAGIC, 0x10000, 0, 10, 0, // header
-        (2 << 16) | L,   1, // OpLabel %1
-        (4 << 16) | BRC, 99, 2, 3, // OpBranchConditional %99 %2 %3
-        (2 << 16) | L,   2,
-        (2 << 16) | BR,  4,
-        (2 << 16) | L,   3,
-        (2 << 16) | BR,  4,
-        (2 << 16) | L,   4,
-        (1 << 16) | RET,
+        (2 << 16) | L, 1, // OpLabel %1
+        (4 << 16) | BRC, 99, 2,               3, // OpBranchConditional %99 %2 %3
+        (2 << 16) | L,   2,  (2 << 16) | BR,  4,
+        (2 << 16) | L,   3,  (2 << 16) | BR,  4,
+        (2 << 16) | L,   4,  (1 << 16) | RET,
     };
     // No-op: empty insertions → byte-identical copy.
     const same = try spliceSelectionMerges(a, &words, &.{});
@@ -963,9 +960,9 @@ test "splice-loop: inserts OpLoopMerge %merge %continue before the header termin
     // header %2 ends in OpBranch %3 (no OpLoopMerge); minimal stream.
     const words = [_]u32{
         spirv.MAGIC, 0x10000, 0, 10, 0,
-        (2 << 16) | L,  2, // %2 header
-        (2 << 16) | BR, 3, // OpBranch %3 (header terminator)
-        (2 << 16) | L,  3,
+        (2 << 16) | L, 2, // %2 header
+        (2 << 16) | BR,  3, // OpBranch %3 (header terminator)
+        (2 << 16) | L,   3,
         (1 << 16) | RET,
     };
     const ins = [_]LoopInsertion{.{ .header_label = 2, .merge_label = 5, .continue_label = 4 }};
@@ -1002,11 +999,11 @@ test "recover-loop: natural loop → header/merge/continue recovered" {
     const l5 = [_]u32{ 0, 5 };
     const ret = [_]u32{0};
     const insts = [_]Instruction{
-        .{ .op = .Label, .words = &l1 },           .{ .op = .Branch, .words = &b12 },
-        .{ .op = .Label, .words = &l2 },           .{ .op = .Branch, .words = &b23 },
-        .{ .op = .Label, .words = &l3 },           .{ .op = .BranchConditional, .words = &brc },
-        .{ .op = .Label, .words = &l4 },           .{ .op = .Branch, .words = &b42 },
-        .{ .op = .Label, .words = &l5 },           .{ .op = .Return, .words = &ret },
+        .{ .op = .Label, .words = &l1 }, .{ .op = .Branch, .words = &b12 },
+        .{ .op = .Label, .words = &l2 }, .{ .op = .Branch, .words = &b23 },
+        .{ .op = .Label, .words = &l3 }, .{ .op = .BranchConditional, .words = &brc },
+        .{ .op = .Label, .words = &l4 }, .{ .op = .Branch, .words = &b42 },
+        .{ .op = .Label, .words = &l5 }, .{ .op = .Return, .words = &ret },
     };
     const ins = try recoverLoopMerges(a, &insts);
     defer a.free(ins);

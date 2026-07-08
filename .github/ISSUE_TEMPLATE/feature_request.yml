@@ -1,0 +1,47 @@
+name: Feature request
+description: Suggest a new capability or an extension to an existing one.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        zioshade has an intentionally narrow scope: the GLSL surface needed by wintty
+        and similar projects. Before filing, please skim docs/IMPLEMENTATION_STATUS.md
+        so we can tell whether a gap is a bug or a deliberate scope decision.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that zioshade cannot do today?
+      placeholder: I want to cross-compile ... but ...
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What behavior or API would solve it? Include a shader snippet or expected output if relevant.
+    validations:
+      required: true
+  - type: input
+    id: backend
+    attributes:
+      label: Affected stage / backend
+      description: e.g. GLSL frontend, SPIR-V, HLSL, GLSL, MSL, WGSL, reflection, CLI.
+    validations:
+      required: false
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you tried, or upstream tools (glslang / SPIRV-Cross) that already do this.
+    validations:
+      required: false
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: I have read docs/IMPLEMENTATION_STATUS.md and this is not already listed as an intentional non-goal.
+          required: true

@@ -30,189 +30,189 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
     // fixed: 0=none, 1=result_type, 2=result_type+result, 3=result_only
     return switch (opcode) {
         // --- Core ---
-        0 => rt(0, ""),           // OpNop
-        1 => rt(2, ""),          // OpUndef: result_type, result
-        3 => rt(0, "lls"),         // OpSource: lang, ver, [file(id), source(str)] -- simplified: treat file as lit
-        5 => rt(0, "is"),          // OpName
-        6 => rt(0, "ils"),         // OpMemberName
-        10 => rt(0, "s"),          // OpExtension
-        11 => rt(3, "s"),          // OpExtInstImport (result_only)
-        12 => rt(2, "ilI"),        // OpExtInst
-        14 => rt(0, "ll"),         // OpMemoryModel
-        15 => rt(0, "liE"),        // OpEntryPoint: model, func-id, [name string + interface ids]
-        16 => rt(0, "ilL"),        // OpExecutionMode (may have extra literals)
-        17 => rt(0, "l"),          // OpCapability
+        0 => rt(0, ""), // OpNop
+        1 => rt(2, ""), // OpUndef: result_type, result
+        3 => rt(0, "lls"), // OpSource: lang, ver, [file(id), source(str)] -- simplified: treat file as lit
+        5 => rt(0, "is"), // OpName
+        6 => rt(0, "ils"), // OpMemberName
+        10 => rt(0, "s"), // OpExtension
+        11 => rt(3, "s"), // OpExtInstImport (result_only)
+        12 => rt(2, "ilI"), // OpExtInst
+        14 => rt(0, "ll"), // OpMemoryModel
+        15 => rt(0, "liE"), // OpEntryPoint: model, func-id, [name string + interface ids]
+        16 => rt(0, "ilL"), // OpExecutionMode (may have extra literals)
+        17 => rt(0, "l"), // OpCapability
         // --- Type ---
-        19 => rt(3, ""),           // OpTypeVoid (result_only)
-        20 => rt(3, ""),           // OpTypeBool
-        21 => rt(3, "ll"),         // OpTypeInt
-        22 => rt(3, "ll"),         // OpTypeFloat
-        23 => rt(3, "il"),         // OpTypeVector: element-type, count
-        24 => rt(3, "il"),         // OpTypeMatrix
-        25 => rt(3, "illllllll"),   // OpTypeImage: result, sampled_type(ID), dim, depth, arrayed, ms, sampled, fmt, access (all literals except sampled_type)
-        26 => rt(3, ""),           // OpTypeSampler
-        27 => rt(3, "i"),          // OpTypeSampledImage
-        28 => rt(3, "ii"),         // OpTypeArray: element-type, length-id
-        29 => rt(3, "i"),          // OpTypeRuntimeArray
-        30 => rt(3, "I"),          // OpTypeStruct: member-types...
-        32 => rt(3, "li"),         // OpTypePointer: sc, type
-        33 => rt(3, "iI"),         // OpTypeFunction: return-type, param-types...
-        39 => rt(0, "il"),         // OpTypeForwardPointer
+        19 => rt(3, ""), // OpTypeVoid (result_only)
+        20 => rt(3, ""), // OpTypeBool
+        21 => rt(3, "ll"), // OpTypeInt
+        22 => rt(3, "ll"), // OpTypeFloat
+        23 => rt(3, "il"), // OpTypeVector: element-type, count
+        24 => rt(3, "il"), // OpTypeMatrix
+        25 => rt(3, "illllllll"), // OpTypeImage: result, sampled_type(ID), dim, depth, arrayed, ms, sampled, fmt, access (all literals except sampled_type)
+        26 => rt(3, ""), // OpTypeSampler
+        27 => rt(3, "i"), // OpTypeSampledImage
+        28 => rt(3, "ii"), // OpTypeArray: element-type, length-id
+        29 => rt(3, "i"), // OpTypeRuntimeArray
+        30 => rt(3, "I"), // OpTypeStruct: member-types...
+        32 => rt(3, "li"), // OpTypePointer: sc, type
+        33 => rt(3, "iI"), // OpTypeFunction: return-type, param-types...
+        39 => rt(0, "il"), // OpTypeForwardPointer
         // --- Constant ---
-        41 => rt(2, ""),           // OpConstantTrue
-        42 => rt(2, ""),           // OpConstantFalse
-        43 => rt(2, "l"),          // OpConstant (value may be multi-word for 64-bit)
-        44 => rt(2, "I"),          // OpConstantComposite: constituents...
-        48 => rt(2, ""),           // OpSpecConstantTrue
-        49 => rt(2, ""),           // OpSpecConstantFalse
-        50 => rt(2, "l"),          // OpSpecConstant
-        51 => rt(2, "I"),          // OpSpecConstantComposite: constituents...
-        52 => rt(2, "lI"),         // OpSpecConstantOp: literal opcode then variable-length IDs (M3.5)
+        41 => rt(2, ""), // OpConstantTrue
+        42 => rt(2, ""), // OpConstantFalse
+        43 => rt(2, "l"), // OpConstant (value may be multi-word for 64-bit)
+        44 => rt(2, "I"), // OpConstantComposite: constituents...
+        48 => rt(2, ""), // OpSpecConstantTrue
+        49 => rt(2, ""), // OpSpecConstantFalse
+        50 => rt(2, "l"), // OpSpecConstant
+        51 => rt(2, "I"), // OpSpecConstantComposite: constituents...
+        52 => rt(2, "lI"), // OpSpecConstantOp: literal opcode then variable-length IDs (M3.5)
         // --- Function ---
-        54 => rt(2, "li"),         // OpFunction: control, func-type
-        55 => rt(2, ""),           // OpFunctionParameter
-        56 => rt(0, ""),           // OpFunctionEnd
-        57 => rt(2, "iI"),         // OpFunctionCall: func, args...
+        54 => rt(2, "li"), // OpFunction: control, func-type
+        55 => rt(2, ""), // OpFunctionParameter
+        56 => rt(0, ""), // OpFunctionEnd
+        57 => rt(2, "iI"), // OpFunctionCall: func, args...
         // 46 = OpCopyMemory: NO result. Target <id>, Source <id> [Memory Operands]
-        63 => rt(0, "iiL"),        // OpCopyMemory: target, source, optional-mem-access
-        64 => rt(0, "iiiL"),       // OpCopyMemorySized: target, source, size, optional-mem-access
-        59 => rt(2, "li"),         // OpVariable: sc, optional-init-id
-        60 => rt(2, "iiI"),        // OpImageTexelPointer
-        61 => rt(2, "iL"),          // OpLoad: ptr, optional-mem-access-literals
-        62 => rt(0, "iiL"),         // OpStore: ptr, obj, optional-mem-access
-        65 => rt(2, "iI"),         // OpAccessChain: base, indexes...
-        68 => rt(2, "il"),         // OpArrayLength: structure-ptr(id), array-member(literal)
+        63 => rt(0, "iiL"), // OpCopyMemory: target, source, optional-mem-access
+        64 => rt(0, "iiiL"), // OpCopyMemorySized: target, source, size, optional-mem-access
+        59 => rt(2, "li"), // OpVariable: sc, optional-init-id
+        60 => rt(2, "iiI"), // OpImageTexelPointer
+        61 => rt(2, "iL"), // OpLoad: ptr, optional-mem-access-literals
+        62 => rt(0, "iiL"), // OpStore: ptr, obj, optional-mem-access
+        65 => rt(2, "iI"), // OpAccessChain: base, indexes...
+        68 => rt(2, "il"), // OpArrayLength: structure-ptr(id), array-member(literal)
         // --- Decoration ---
-        71 => rt(0, "ilL"),        // OpDecorate: target-id, decoration, extra-literals
-        72 => rt(0, "illL"),       // OpMemberDecorate: type-id, member, decoration, extra-literals
+        71 => rt(0, "ilL"), // OpDecorate: target-id, decoration, extra-literals
+        72 => rt(0, "illL"), // OpMemberDecorate: type-id, member, decoration, extra-literals
         // --- Composite ---
-        77 => rt(2, "ii"),         // OpVectorExtractDynamic: vec, index
-        79 => rt(2, "iiL"),        // OpVectorShuffle: vec1, vec2, literal-components...
-        80 => rt(2, "I"),          // OpCompositeConstruct: constituents...
-        81 => rt(2, "iL"),         // OpCompositeExtract: composite, literal-indexes...
-        82 => rt(2, "iiL"),        // OpCompositeInsert: object, composite, literal-indexes...
-        83 => rt(2, "i"),          // OpCopyObject
+        77 => rt(2, "ii"), // OpVectorExtractDynamic: vec, index
+        79 => rt(2, "iiL"), // OpVectorShuffle: vec1, vec2, literal-components...
+        80 => rt(2, "I"), // OpCompositeConstruct: constituents...
+        81 => rt(2, "iL"), // OpCompositeExtract: composite, literal-indexes...
+        82 => rt(2, "iiL"), // OpCompositeInsert: object, composite, literal-indexes...
+        83 => rt(2, "i"), // OpCopyObject
         // --- Image ---
-        84 => rt(2, "i"),          // OpTranspose
-        86 => rt(2, "ii"),         // OpSampledImage
-        87 => rt(2, "iiM"),        // OpImageSampleImplicitLod: sampled, coord, [img-ops]
-        88 => rt(2, "iiM"),        // OpImageSampleExplicitLod: sampled, coord, img-ops(mask+IDs)
-        89 => rt(2, "iiiM"),       // OpImageSampleDrefImplicitLod: sampled, coord, dref, [img-ops]
-        90 => rt(2, "iiiM"),        // OpImageSampleDrefExplicitLod: sampled, coord, dref, img-ops
-        91 => rt(2, "iiM"),        // OpImageSampleProjImplicitLod
-        92 => rt(2, "iiM"),        // OpImageSampleProjExplicitLod
-        93 => rt(2, "iiii"),       // OpImageSampleProjDrefImplicitLod
-        94 => rt(2, "iiiiM"),      // OpImageSampleProjDrefExplicitLod
-        95 => rt(2, "iiM"),        // OpImageFetch: image, coord, [img-ops]
-        96 => rt(2, "iiiM"),       // OpImageGather: sampled, coord, component, [img-ops] (ConstOffsets for textureGatherOffsets)
-        97 => rt(2, "iiii"),       // OpImageDrefGather
-        98 => rt(2, "iiM"),        // OpImageRead: image, coord, [img-ops]
-        99 => rt(0, "iiiM"),       // OpImageWrite: image, coord, texel, [img-ops]
-        100 => rt(2, "i"),         // OpImage: sampled-image
-        103 => rt(2, "ii"),        // OpImageQuerySizeLod
-        104 => rt(2, "i"),         // OpImageQuerySize
-        105 => rt(2, "ii"),        // OpImageQueryLod
-        106 => rt(2, "i"),         // OpImageQueryLevels
-        107 => rt(2, "i"),         // OpImageQuerySamples
+        84 => rt(2, "i"), // OpTranspose
+        86 => rt(2, "ii"), // OpSampledImage
+        87 => rt(2, "iiM"), // OpImageSampleImplicitLod: sampled, coord, [img-ops]
+        88 => rt(2, "iiM"), // OpImageSampleExplicitLod: sampled, coord, img-ops(mask+IDs)
+        89 => rt(2, "iiiM"), // OpImageSampleDrefImplicitLod: sampled, coord, dref, [img-ops]
+        90 => rt(2, "iiiM"), // OpImageSampleDrefExplicitLod: sampled, coord, dref, img-ops
+        91 => rt(2, "iiM"), // OpImageSampleProjImplicitLod
+        92 => rt(2, "iiM"), // OpImageSampleProjExplicitLod
+        93 => rt(2, "iiii"), // OpImageSampleProjDrefImplicitLod
+        94 => rt(2, "iiiiM"), // OpImageSampleProjDrefExplicitLod
+        95 => rt(2, "iiM"), // OpImageFetch: image, coord, [img-ops]
+        96 => rt(2, "iiiM"), // OpImageGather: sampled, coord, component, [img-ops] (ConstOffsets for textureGatherOffsets)
+        97 => rt(2, "iiii"), // OpImageDrefGather
+        98 => rt(2, "iiM"), // OpImageRead: image, coord, [img-ops]
+        99 => rt(0, "iiiM"), // OpImageWrite: image, coord, texel, [img-ops]
+        100 => rt(2, "i"), // OpImage: sampled-image
+        103 => rt(2, "ii"), // OpImageQuerySizeLod
+        104 => rt(2, "i"), // OpImageQuerySize
+        105 => rt(2, "ii"), // OpImageQueryLod
+        106 => rt(2, "i"), // OpImageQueryLevels
+        107 => rt(2, "i"), // OpImageQuerySamples
         // --- Conversion ---
-        109 => rt(2, "i"),         // OpConvertFToU
-        110 => rt(2, "i"),         // OpConvertFToS
-        111 => rt(2, "i"),         // OpConvertSToF
-        112 => rt(2, "i"),         // OpConvertUToF
-        113 => rt(2, "i"),         // OpUConvert
-        114 => rt(2, "i"),         // OpSConvert
-        115 => rt(2, "i"),         // OpFConvert
-        124 => rt(2, "i"),         // OpBitcast
+        109 => rt(2, "i"), // OpConvertFToU
+        110 => rt(2, "i"), // OpConvertFToS
+        111 => rt(2, "i"), // OpConvertSToF
+        112 => rt(2, "i"), // OpConvertUToF
+        113 => rt(2, "i"), // OpUConvert
+        114 => rt(2, "i"), // OpSConvert
+        115 => rt(2, "i"), // OpFConvert
+        124 => rt(2, "i"), // OpBitcast
         // --- Arithmetic ---
-        126 => rt(2, "i"),         // OpSNegate
-        127 => rt(2, "i"),         // OpFNegate
-        128...134 => rt(2, "ii"),  // OpIAdd..OpUDiv
-        135 => rt(2, "ii"),        // OpSDiv
-        136 => rt(2, "ii"),        // OpFDiv
-        137 => rt(2, "ii"),        // OpUMod
-        138 => rt(2, "ii"),        // OpSRem
-        139 => rt(2, "ii"),        // OpSMod
-        140 => rt(2, "ii"),        // OpFRem
-        141 => rt(2, "ii"),        // OpFMod
-        142 => rt(2, "ii"),        // OpVectorTimesScalar
-        143 => rt(2, "ii"),        // OpMatrixTimesScalar
-        144...148 => rt(2, "ii"),  // OpVectorTimesMatrix..OpDot
+        126 => rt(2, "i"), // OpSNegate
+        127 => rt(2, "i"), // OpFNegate
+        128...134 => rt(2, "ii"), // OpIAdd..OpUDiv
+        135 => rt(2, "ii"), // OpSDiv
+        136 => rt(2, "ii"), // OpFDiv
+        137 => rt(2, "ii"), // OpUMod
+        138 => rt(2, "ii"), // OpSRem
+        139 => rt(2, "ii"), // OpSMod
+        140 => rt(2, "ii"), // OpFRem
+        141 => rt(2, "ii"), // OpFMod
+        142 => rt(2, "ii"), // OpVectorTimesScalar
+        143 => rt(2, "ii"), // OpMatrixTimesScalar
+        144...148 => rt(2, "ii"), // OpVectorTimesMatrix..OpDot
         // --- Relational ---
-        154...155 => rt(2, "i"),   // OpAll, OpAny
-        156...157 => rt(2, "i"),   // OpIsNan, OpIsInf
-        166...168 => rt(2, "ii"),  // OpLogicalOr, OpLogicalAnd, OpLogicalNot (168 is unary)
-        169 => rt(2, "iii"),       // OpSelect
-        170...171 => rt(2, "ii"),  // OpIEqual, OpINotEqual
-        172 => rt(2, "ii"),        // OpUGreaterThan
-        173 => rt(2, "ii"),        // OpSGreaterThan
-        174 => rt(2, "ii"),        // OpUGreaterThanEqual
-        175 => rt(2, "ii"),        // OpSGreaterThanEqual
-        176 => rt(2, "ii"),        // OpULessThan
-        177 => rt(2, "ii"),        // OpSLessThan
-        178 => rt(2, "ii"),        // OpULessThanEqual
-        179 => rt(2, "ii"),        // OpSLessThanEqual
-        180 => rt(2, "ii"),        // OpFOrdEqual
-        181 => rt(2, "ii"),        // OpFUnordEqual
-        182 => rt(2, "ii"),        // OpFOrdNotEqual
-        183 => rt(2, "ii"),        // OpFUnordNotEqual
-        184 => rt(2, "ii"),        // OpFOrdLessThan
-        185 => rt(2, "ii"),        // OpFUnordLessThan
-        186 => rt(2, "ii"),        // OpFOrdGreaterThan
-        187 => rt(2, "ii"),        // OpFUnordGreaterThan
-        188 => rt(2, "ii"),        // OpFOrdLessThanEqual
-        189 => rt(2, "ii"),        // OpFUnordLessThanEqual
-        190 => rt(2, "ii"),        // OpFOrdGreaterThanEqual
-        191 => rt(2, "ii"),        // OpFUnordGreaterThanEqual
+        154...155 => rt(2, "i"), // OpAll, OpAny
+        156...157 => rt(2, "i"), // OpIsNan, OpIsInf
+        166...168 => rt(2, "ii"), // OpLogicalOr, OpLogicalAnd, OpLogicalNot (168 is unary)
+        169 => rt(2, "iii"), // OpSelect
+        170...171 => rt(2, "ii"), // OpIEqual, OpINotEqual
+        172 => rt(2, "ii"), // OpUGreaterThan
+        173 => rt(2, "ii"), // OpSGreaterThan
+        174 => rt(2, "ii"), // OpUGreaterThanEqual
+        175 => rt(2, "ii"), // OpSGreaterThanEqual
+        176 => rt(2, "ii"), // OpULessThan
+        177 => rt(2, "ii"), // OpSLessThan
+        178 => rt(2, "ii"), // OpULessThanEqual
+        179 => rt(2, "ii"), // OpSLessThanEqual
+        180 => rt(2, "ii"), // OpFOrdEqual
+        181 => rt(2, "ii"), // OpFUnordEqual
+        182 => rt(2, "ii"), // OpFOrdNotEqual
+        183 => rt(2, "ii"), // OpFUnordNotEqual
+        184 => rt(2, "ii"), // OpFOrdLessThan
+        185 => rt(2, "ii"), // OpFUnordLessThan
+        186 => rt(2, "ii"), // OpFOrdGreaterThan
+        187 => rt(2, "ii"), // OpFUnordGreaterThan
+        188 => rt(2, "ii"), // OpFOrdLessThanEqual
+        189 => rt(2, "ii"), // OpFUnordLessThanEqual
+        190 => rt(2, "ii"), // OpFOrdGreaterThanEqual
+        191 => rt(2, "ii"), // OpFUnordGreaterThanEqual
         // --- Bit ---
-        194 => rt(2, "ii"),        // OpShiftRightLogical
-        195 => rt(2, "ii"),        // OpShiftRightArithmetic
-        196 => rt(2, "ii"),        // OpShiftLeftLogical
-        197 => rt(2, "ii"),        // OpBitwiseOr
-        198...199 => rt(2, "ii"),  // OpBitwiseXor, OpBitwiseAnd
-        204...205 => rt(2, "i"),   // OpBitReverse, OpBitCount
-        201 => rt(2, "iiii"),      // OpBitFieldInsert: base, insert, offset, count
+        194 => rt(2, "ii"), // OpShiftRightLogical
+        195 => rt(2, "ii"), // OpShiftRightArithmetic
+        196 => rt(2, "ii"), // OpShiftLeftLogical
+        197 => rt(2, "ii"), // OpBitwiseOr
+        198...199 => rt(2, "ii"), // OpBitwiseXor, OpBitwiseAnd
+        204...205 => rt(2, "i"), // OpBitReverse, OpBitCount
+        201 => rt(2, "iiii"), // OpBitFieldInsert: base, insert, offset, count
         202...203 => rt(2, "iii"), // OpBitFieldSExtract, OpBitFieldUExtract: base, offset, count
-        200 => rt(2, "i"),         // OpNot
+        200 => rt(2, "i"), // OpNot
         // --- Derivatives ---
-        207...215 => rt(2, "i"),   // OpDPdx..OpFwidthCoarse
+        207...215 => rt(2, "i"), // OpDPdx..OpFwidthCoarse
         // --- Geometry emission ---
-        218 => rt(0, ""),          // OpEmitVertex
-        219 => rt(0, ""),          // OpEndPrimitive
+        218 => rt(0, ""), // OpEmitVertex
+        219 => rt(0, ""), // OpEndPrimitive
         // --- Atomic ---
-        224 => rt(0, "iii"),       // OpControlBarrier: exec-scope, mem-scope, semantics
-        225 => rt(0, "ii"),        // OpMemoryBarrier: scope, semantics
-        229 => rt(2, "iiii"),      // OpAtomicExchange: ptr, scope, semantics, value
-        230 => rt(2, "iiiiii"),    // OpAtomicCompareExchange: ptr, scope, eq-sem, neq-sem, val, cmp
-        234 => rt(2, "iiii"),      // OpAtomicIAdd: ptr, scope, sem, value
-        235 => rt(2, "iiii"),      // OpAtomicISub: ptr, scope, sem, value
-        236...242 => rt(2, "iiii"),// OpAtomicSMin..OpAtomicXor
+        224 => rt(0, "iii"), // OpControlBarrier: exec-scope, mem-scope, semantics
+        225 => rt(0, "ii"), // OpMemoryBarrier: scope, semantics
+        229 => rt(2, "iiii"), // OpAtomicExchange: ptr, scope, semantics, value
+        230 => rt(2, "iiiiii"), // OpAtomicCompareExchange: ptr, scope, eq-sem, neq-sem, val, cmp
+        234 => rt(2, "iiii"), // OpAtomicIAdd: ptr, scope, sem, value
+        235 => rt(2, "iiii"), // OpAtomicISub: ptr, scope, sem, value
+        236...242 => rt(2, "iiii"), // OpAtomicSMin..OpAtomicXor
         // --- Control Flow ---
-        245 => rt(2, "I"),          // OpPhi: result_type, result, (value, parent)...
-        246 => rt(0, "iil"),       // OpLoopMerge: merge, continue, control
-        247 => rt(0, "il"),        // OpSelectionMerge: merge, control
-        248 => rt(3, ""),           // OpLabel (result_only)
-        249 => rt(0, "i"),          // OpBranch: target
-        250 => rt(0, "iiiL"),       // OpBranchConditional: cond, true, false, optional-weights
-        251 => rt(0, "iiW"),        // OpSwitch: selector, default, (literal, target)...
-        252 => rt(0, ""),            // OpKill
-        253 => rt(0, ""),            // OpReturn
-        254 => rt(0, "i"),           // OpReturnValue: value
-        255 => rt(0, ""),            // OpUnreachable
+        245 => rt(2, "I"), // OpPhi: result_type, result, (value, parent)...
+        246 => rt(0, "iil"), // OpLoopMerge: merge, continue, control
+        247 => rt(0, "il"), // OpSelectionMerge: merge, control
+        248 => rt(3, ""), // OpLabel (result_only)
+        249 => rt(0, "i"), // OpBranch: target
+        250 => rt(0, "iiiL"), // OpBranchConditional: cond, true, false, optional-weights
+        251 => rt(0, "iiW"), // OpSwitch: selector, default, (literal, target)...
+        252 => rt(0, ""), // OpKill
+        253 => rt(0, ""), // OpReturn
+        254 => rt(0, "i"), // OpReturnValue: value
+        255 => rt(0, ""), // OpUnreachable
         // --- Fragment Shader Interlock ---
-        5364 => rt(0, ""),            // OpBeginInvocationInterlockEXT
-        5365 => rt(0, ""),            // OpEndInvocationInterlockEXT
+        5364 => rt(0, ""), // OpBeginInvocationInterlockEXT
+        5365 => rt(0, ""), // OpEndInvocationInterlockEXT
         // --- Vendor ---
-        4163 => rt(3, "iii"),       // OpTypeTensorARM
-        4164 => rt(2, "iil"),       // OpTensorReadARM
-        4166 => rt(2, "ii"),        // OpTensorQuerySizeARM
+        4163 => rt(3, "iii"), // OpTypeTensorARM
+        4164 => rt(2, "iil"), // OpTensorReadARM
+        4166 => rt(2, "ii"), // OpTensorQuerySizeARM
         // --- GroupNonUniform ---
-        333 => rt(2, "i"),       // OpGroupNonUniformElect: scope
+        333 => rt(2, "i"), // OpGroupNonUniformElect: scope
         334...336 => rt(2, "ii"), // OpGroupNonUniformAll/Any/AllEqual: scope, value
-        337 => rt(2, "iii"),      // OpGroupNonUniformBroadcast: scope, value, index
-        338 => rt(2, "ii"),       // OpGroupNonUniformBroadcastFirst: scope, value
+        337 => rt(2, "iii"), // OpGroupNonUniformBroadcast: scope, value, index
+        338 => rt(2, "ii"), // OpGroupNonUniformBroadcastFirst: scope, value
         339...340 => rt(2, "ii"), // OpGroupNonUniformBallot/InverseBallot: scope, value
-        341 => rt(2, "iii"),      // OpGroupNonUniformBallotBitExtract: scope, value, index
-        342 => rt(2, "ili"),     // OpGroupNonUniformBallotBitCount: scope, group_op(lit), value
+        341 => rt(2, "iii"), // OpGroupNonUniformBallotBitExtract: scope, value, index
+        342 => rt(2, "ili"), // OpGroupNonUniformBallotBitCount: scope, group_op(lit), value
         343...344 => rt(2, "ii"), // OpGroupNonUniformBallotFindLSB/MSB: scope, value
         345...348 => rt(2, "iii"), // OpGroupNonUniformShuffle/Xor/Up/Down: scope, value, index
         349...352 => rt(2, "ili"), // OpGroupNonUniformIAdd/FAdd/IMul/FMul: scope, group_op(lit), value
@@ -220,25 +220,25 @@ pub fn getOpInfo(opcode: u16) ?OpInfo {
         359...361 => rt(2, "ili"), // OpGroupNonUniformBitwiseAnd/Or/Xor: scope, group_op(lit), value
         362...364 => rt(2, "ili"), // OpGroupNonUniformLogicalAnd/Or/Xor: scope, group_op(lit), value
         365...366 => rt(2, "iii"), // OpGroupNonUniformQuadBroadcast/Swap: scope, value, index
-        4428...4430 => rt(2, "i"),  // OpSubgroupAllKHR, OpSubgroupAnyKHR, OpSubgroupAllEqualKHR
-        4432 => rt(2, "ii"),       // OpGroupNonUniformRotate
-        4472 => rt(3, ""),           // OpTypeRayQueryKHR (result_only)
-        4473 => rt(0, "iiiiiiii"),   // OpRayQueryInitializeKHR
-        4477 => rt(2, "i"),          // OpRayQueryProceedKHR
-        4479 => rt(2, "ii"),         // OpRayQueryGetIntersectionTypeKHR
+        4428...4430 => rt(2, "i"), // OpSubgroupAllKHR, OpSubgroupAnyKHR, OpSubgroupAllEqualKHR
+        4432 => rt(2, "ii"), // OpGroupNonUniformRotate
+        4472 => rt(3, ""), // OpTypeRayQueryKHR (result_only)
+        4473 => rt(0, "iiiiiiii"), // OpRayQueryInitializeKHR
+        4477 => rt(2, "i"), // OpRayQueryProceedKHR
+        4479 => rt(2, "ii"), // OpRayQueryGetIntersectionTypeKHR
         4480...4481 => rt(2, "iii"), // OpImageSampleWeightedQCOM, OpImageBoxFilterQCOM
         4482...4483 => rt(2, "iiiii"), // OpImageBlockMatchSSDQCOM, OpImageBlockMatchSADQCOM
-        5340 => rt(2, "ii"),         // OpRayQueryGetIntersectionTriangleVertexPositionsKHR
-        5341 => rt(3, ""),            // OpTypeAccelerationStructureKHR (result_only)
-        5056 => rt(1, "i"),           // OpReadClockKHR: scope
-        5294 => rt(0, "iiii"),         // OpEmitMeshTasksEXT: x, y, z, payload
-        5295 => rt(0, "ii"),           // OpSetMeshOutputsEXT: vertex_count, primitive_count
+        5340 => rt(2, "ii"), // OpRayQueryGetIntersectionTriangleVertexPositionsKHR
+        5341 => rt(3, ""), // OpTypeAccelerationStructureKHR (result_only)
+        5056 => rt(1, "i"), // OpReadClockKHR: scope
+        5294 => rt(0, "iiii"), // OpEmitMeshTasksEXT: x, y, z, payload
+        5295 => rt(0, "ii"), // OpSetMeshOutputsEXT: vertex_count, primitive_count
         4445 => rt(0, "iiiiiiiiiii"), // OpTraceRayKHR: accel, flags, mask, sbt_off, sbt_stride, miss, origin, tMin, dir, tMax, payload
-        5334 => rt(1, "ii"),           // OpReportIntersectionKHR: hitT, hitKind → bool result
-        4448 => rt(0, ""),             // OpIgnoreIntersectionKHR: no operands
-        4449 => rt(0, ""),             // OpTerminateRayKHR: no operands
-        4446 => rt(0, "ii"),           // OpExecuteCallableKHR: sbt_index, callable_data
-        6035 => rt(2, "iiii"),        // OpAtomicFAddEXT
+        5334 => rt(1, "ii"), // OpReportIntersectionKHR: hitT, hitKind → bool result
+        4448 => rt(0, ""), // OpIgnoreIntersectionKHR: no operands
+        4449 => rt(0, ""), // OpTerminateRayKHR: no operands
+        4446 => rt(0, "ii"), // OpExecuteCallableKHR: sbt_index, callable_data
+        6035 => rt(2, "iiii"), // OpAtomicFAddEXT
 
         else => null,
     };
@@ -282,14 +282,26 @@ pub fn compactIds(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
         // Fixed part
         switch (info.fixed) {
             1 => { // result_type at word 1
-                if (wi < inst_end) { mark(&used, words[wi], bound); wi += 1; }
+                if (wi < inst_end) {
+                    mark(&used, words[wi], bound);
+                    wi += 1;
+                }
             },
             2 => { // result_type at word 1, result at word 2
-                if (wi < inst_end) { mark(&used, words[wi], bound); wi += 1; }
-                if (wi < inst_end) { mark(&used, words[wi], bound); wi += 1; }
+                if (wi < inst_end) {
+                    mark(&used, words[wi], bound);
+                    wi += 1;
+                }
+                if (wi < inst_end) {
+                    mark(&used, words[wi], bound);
+                    wi += 1;
+                }
             },
             3 => { // result only at word 1
-                if (wi < inst_end) { mark(&used, words[wi], bound); wi += 1; }
+                if (wi < inst_end) {
+                    mark(&used, words[wi], bound);
+                    wi += 1;
+                }
             },
             else => {},
         }
@@ -409,14 +421,26 @@ pub fn compactIds(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
         // Fixed part
         switch (info.fixed) {
             1 => {
-                if (wi < inst_end) { try result.append(alloc, remap(mapping, words[wi])); wi += 1; }
+                if (wi < inst_end) {
+                    try result.append(alloc, remap(mapping, words[wi]));
+                    wi += 1;
+                }
             },
             2 => {
-                if (wi < inst_end) { try result.append(alloc, remap(mapping, words[wi])); wi += 1; }
-                if (wi < inst_end) { try result.append(alloc, remap(mapping, words[wi])); wi += 1; }
+                if (wi < inst_end) {
+                    try result.append(alloc, remap(mapping, words[wi]));
+                    wi += 1;
+                }
+                if (wi < inst_end) {
+                    try result.append(alloc, remap(mapping, words[wi]));
+                    wi += 1;
+                }
             },
             3 => {
-                if (wi < inst_end) { try result.append(alloc, remap(mapping, words[wi])); wi += 1; }
+                if (wi < inst_end) {
+                    try result.append(alloc, remap(mapping, words[wi]));
+                    wi += 1;
+                }
             },
             else => {},
         }
@@ -491,4 +515,3 @@ pub fn compactIds(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
 
     return result.toOwnedSlice(alloc);
 }
-

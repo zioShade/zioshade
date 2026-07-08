@@ -123,14 +123,29 @@ fn is64BitType(ty: ast.Type) ?[]const u8 {
         const name = ty.named;
         const names64 = [_][]const u8{
             "double",
-            "dvec2", "dvec3", "dvec4",
-            "dmat2", "dmat3", "dmat4",
-            "dmat2x2", "dmat2x3", "dmat2x4",
-            "dmat3x2", "dmat3x3", "dmat3x4",
-            "dmat4x2", "dmat4x3", "dmat4x4",
-            "int64_t", "uint64_t",
-            "i64vec2", "i64vec3", "i64vec4",
-            "u64vec2", "u64vec3", "u64vec4",
+            "dvec2",
+            "dvec3",
+            "dvec4",
+            "dmat2",
+            "dmat3",
+            "dmat4",
+            "dmat2x2",
+            "dmat2x3",
+            "dmat2x4",
+            "dmat3x2",
+            "dmat3x3",
+            "dmat3x4",
+            "dmat4x2",
+            "dmat4x3",
+            "dmat4x4",
+            "int64_t",
+            "uint64_t",
+            "i64vec2",
+            "i64vec3",
+            "i64vec4",
+            "u64vec2",
+            "u64vec3",
+            "u64vec4",
         };
         for (names64) |n| {
             if (std.mem.eql(u8, name, n)) return name;
@@ -336,7 +351,7 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
         if (node.tag == .function_decl) {
             analyzer.analyzeFunction(node) catch |err| {
                 if (!analyzer.tolerate_errors) return err;
-                const msg = std.fmt.allocPrint(alloc, "{s} in function {s}", .{@errorName(err), node.data.name}) catch "error";
+                const msg = std.fmt.allocPrint(alloc, "{s} in function {s}", .{ @errorName(err), node.data.name }) catch "error";
                 analyzer.errors.append(alloc, msg) catch {};
             };
         }
@@ -1619,7 +1634,7 @@ const Analyzer = struct {
                     store_ops[0] = .{ .id = var_id };
                     store_ops[1] = .{ .id = init_val };
                     _ = self.load_cache.remove(var_id);
-        try self.instructions.append(self.alloc, .{
+                    try self.instructions.append(self.alloc, .{
                         .tag = .store,
                         .result_type = null,
                         .result_id = null,
@@ -1749,17 +1764,14 @@ const Analyzer = struct {
 
         // Math functions that return float (or same type as primary argument)
         const float_return_funcs = .{
-            "abs",   "acos",  "asin",      "atan",    "atan2",
-            "ceil",  "clamp", "cos",       "cosh",
-            "degrees", "distance", "dot",
-            "exp",   "exp2",  "floor", "fract",
-            "inversesqrt", "length", "log", "log2",
-            "max",   "min",   "mix",       "mod",
-            "min3", "max3", "mid3",
-            "pow",   "radians", "round", "sign",
-            "sin",       "sinh",
-            "smoothstep", "sqrt", "step",  "tan",     "tanh",
-            "trunc",
+            "abs",      "acos",        "asin",   "atan",       "atan2",
+            "ceil",     "clamp",       "cos",    "cosh",       "degrees",
+            "distance", "dot",         "exp",    "exp2",       "floor",
+            "fract",    "inversesqrt", "length", "log",        "log2",
+            "max",      "min",         "mix",    "mod",        "min3",
+            "max3",     "mid3",        "pow",    "radians",    "round",
+            "sign",     "sin",         "sinh",   "smoothstep", "sqrt",
+            "step",     "tan",         "tanh",   "trunc",
         };
         inline for (float_return_funcs) |name| {
             try self.declare(name, .{
@@ -1806,7 +1818,6 @@ const Analyzer = struct {
         try self.declare("EmitVertex", .{ .kind = .func, .ty = .void, .ir_id = 0 });
         try self.declare("EndPrimitive", .{ .kind = .func, .ty = .void, .ir_id = 0 });
     }
-
 
     fn ensureBuiltinVar(self: *Analyzer, name: []const u8) ?Symbol {
         // Lazy builtin variable injection — only create when referenced
@@ -2120,62 +2131,62 @@ const Analyzer = struct {
         // mapping to a constant integer (value = the minimum required by the spec).
         // They appear in float(gl_MaxTextureImageUnits) casts, array sizes, etc.
         const gl_max_consts = [_]struct { name: []const u8, value: u32 }{
-            .{ .name = "gl_MaxVertexAttribs",               .value = 16 },
-            .{ .name = "gl_MaxVertexUniformVectors",         .value = 256 },
-            .{ .name = "gl_MaxVaryingVectors",               .value = 15 },
-            .{ .name = "gl_MaxVertexTextureImageUnits",       .value = 16 },
-            .{ .name = "gl_MaxCombinedTextureImageUnits",     .value = 96 },
-            .{ .name = "gl_MaxTextureImageUnits",             .value = 16 },
-            .{ .name = "gl_MaxFragmentUniformVectors",        .value = 224 },
-            .{ .name = "gl_MaxDrawBuffers",                   .value = 8 },
-            .{ .name = "gl_MaxVertexOutputVectors",           .value = 16 },
-            .{ .name = "gl_MaxFragmentInputVectors",          .value = 15 },
-            .{ .name = "gl_MinProgramTexelOffset",            .value = @as(u32, @bitCast(@as(i32, -8))) },
-            .{ .name = "gl_MaxProgramTexelOffset",            .value = 7 },
-            .{ .name = "gl_MaxImageUnits",                    .value = 8 },
+            .{ .name = "gl_MaxVertexAttribs", .value = 16 },
+            .{ .name = "gl_MaxVertexUniformVectors", .value = 256 },
+            .{ .name = "gl_MaxVaryingVectors", .value = 15 },
+            .{ .name = "gl_MaxVertexTextureImageUnits", .value = 16 },
+            .{ .name = "gl_MaxCombinedTextureImageUnits", .value = 96 },
+            .{ .name = "gl_MaxTextureImageUnits", .value = 16 },
+            .{ .name = "gl_MaxFragmentUniformVectors", .value = 224 },
+            .{ .name = "gl_MaxDrawBuffers", .value = 8 },
+            .{ .name = "gl_MaxVertexOutputVectors", .value = 16 },
+            .{ .name = "gl_MaxFragmentInputVectors", .value = 15 },
+            .{ .name = "gl_MinProgramTexelOffset", .value = @as(u32, @bitCast(@as(i32, -8))) },
+            .{ .name = "gl_MaxProgramTexelOffset", .value = 7 },
+            .{ .name = "gl_MaxImageUnits", .value = 8 },
             .{ .name = "gl_MaxCombinedImageUnitsAndFragmentOutputs", .value = 8 },
-            .{ .name = "gl_MaxImageSamples",                  .value = 0 },
-            .{ .name = "gl_MaxVertexImageUniforms",           .value = 0 },
-            .{ .name = "gl_MaxTessControlImageUniforms",      .value = 0 },
-            .{ .name = "gl_MaxTessEvaluationImageUniforms",   .value = 0 },
-            .{ .name = "gl_MaxGeometryImageUniforms",         .value = 0 },
-            .{ .name = "gl_MaxFragmentImageUniforms",         .value = 8 },
-            .{ .name = "gl_MaxCombinedImageUniforms",         .value = 8 },
-            .{ .name = "gl_MaxComputeImageUniforms",          .value = 8 },
-            .{ .name = "gl_MaxGeometryInputComponents",       .value = 64 },
-            .{ .name = "gl_MaxGeometryOutputComponents",      .value = 128 },
-            .{ .name = "gl_MaxGeometryOutputVertices",        .value = 256 },
+            .{ .name = "gl_MaxImageSamples", .value = 0 },
+            .{ .name = "gl_MaxVertexImageUniforms", .value = 0 },
+            .{ .name = "gl_MaxTessControlImageUniforms", .value = 0 },
+            .{ .name = "gl_MaxTessEvaluationImageUniforms", .value = 0 },
+            .{ .name = "gl_MaxGeometryImageUniforms", .value = 0 },
+            .{ .name = "gl_MaxFragmentImageUniforms", .value = 8 },
+            .{ .name = "gl_MaxCombinedImageUniforms", .value = 8 },
+            .{ .name = "gl_MaxComputeImageUniforms", .value = 8 },
+            .{ .name = "gl_MaxGeometryInputComponents", .value = 64 },
+            .{ .name = "gl_MaxGeometryOutputComponents", .value = 128 },
+            .{ .name = "gl_MaxGeometryOutputVertices", .value = 256 },
             .{ .name = "gl_MaxGeometryTotalOutputComponents", .value = 1024 },
-            .{ .name = "gl_MaxGeometryUniformComponents",     .value = 1024 },
-            .{ .name = "gl_MaxGeometryVaryingComponents",     .value = 64 },
-            .{ .name = "gl_MaxTessControlInputComponents",    .value = 128 },
-            .{ .name = "gl_MaxTessControlOutputComponents",   .value = 128 },
-            .{ .name = "gl_MaxTessControlTextureImageUnits",  .value = 16 },
-            .{ .name = "gl_MaxTessControlUniformComponents",  .value = 1024 },
+            .{ .name = "gl_MaxGeometryUniformComponents", .value = 1024 },
+            .{ .name = "gl_MaxGeometryVaryingComponents", .value = 64 },
+            .{ .name = "gl_MaxTessControlInputComponents", .value = 128 },
+            .{ .name = "gl_MaxTessControlOutputComponents", .value = 128 },
+            .{ .name = "gl_MaxTessControlTextureImageUnits", .value = 16 },
+            .{ .name = "gl_MaxTessControlUniformComponents", .value = 1024 },
             .{ .name = "gl_MaxTessControlTotalOutputComponents", .value = 4096 },
             .{ .name = "gl_MaxTessEvaluationInputComponents", .value = 128 },
             .{ .name = "gl_MaxTessEvaluationOutputComponents", .value = 128 },
             .{ .name = "gl_MaxTessEvaluationTextureImageUnits", .value = 16 },
             .{ .name = "gl_MaxTessEvaluationUniformComponents", .value = 1024 },
-            .{ .name = "gl_MaxTessPatchComponents",           .value = 120 },
-            .{ .name = "gl_MaxPatchVertices",                 .value = 32 },
-            .{ .name = "gl_MaxTessGenLevel",                  .value = 64 },
-            .{ .name = "gl_MaxUniformBufferBindings",         .value = 84 },
-            .{ .name = "gl_MaxVertexUniformBlocks",           .value = 12 },
-            .{ .name = "gl_MaxGeometryUniformBlocks",         .value = 12 },
-            .{ .name = "gl_MaxFragmentUniformBlocks",         .value = 12 },
-            .{ .name = "gl_MaxCombinedUniformBlocks",         .value = 60 },
-            .{ .name = "gl_MaxUniformBlockSize",              .value = 16384 },
+            .{ .name = "gl_MaxTessPatchComponents", .value = 120 },
+            .{ .name = "gl_MaxPatchVertices", .value = 32 },
+            .{ .name = "gl_MaxTessGenLevel", .value = 64 },
+            .{ .name = "gl_MaxUniformBufferBindings", .value = 84 },
+            .{ .name = "gl_MaxVertexUniformBlocks", .value = 12 },
+            .{ .name = "gl_MaxGeometryUniformBlocks", .value = 12 },
+            .{ .name = "gl_MaxFragmentUniformBlocks", .value = 12 },
+            .{ .name = "gl_MaxCombinedUniformBlocks", .value = 60 },
+            .{ .name = "gl_MaxUniformBlockSize", .value = 16384 },
             .{ .name = "gl_MaxCombinedVertexUniformComponents", .value = 49152 },
             .{ .name = "gl_MaxCombinedGeometryUniformComponents", .value = 49152 },
             .{ .name = "gl_MaxCombinedFragmentUniformComponents", .value = 49152 },
-            .{ .name = "gl_MaxVaryingComponents",             .value = 60 },
-            .{ .name = "gl_MaxComputeWorkGroupCount",         .value = 0 },
-            .{ .name = "gl_MaxComputeWorkGroupSize",          .value = 0 },
-            .{ .name = "gl_MaxComputeUniformComponents",      .value = 512 },
-            .{ .name = "gl_MaxComputeTextureImageUnits",      .value = 16 },
-            .{ .name = "gl_MaxComputeAtomicCounters",         .value = 8 },
-            .{ .name = "gl_MaxComputeAtomicCounterBuffers",   .value = 1 },
+            .{ .name = "gl_MaxVaryingComponents", .value = 60 },
+            .{ .name = "gl_MaxComputeWorkGroupCount", .value = 0 },
+            .{ .name = "gl_MaxComputeWorkGroupSize", .value = 0 },
+            .{ .name = "gl_MaxComputeUniformComponents", .value = 512 },
+            .{ .name = "gl_MaxComputeTextureImageUnits", .value = 16 },
+            .{ .name = "gl_MaxComputeAtomicCounters", .value = 8 },
+            .{ .name = "gl_MaxComputeAtomicCounterBuffers", .value = 1 },
         };
         for (gl_max_consts) |c| {
             if (std.mem.eql(u8, name, c.name)) {
@@ -2280,289 +2291,289 @@ const Analyzer = struct {
                 }
                 // Skip creating a global for standalone layout qualifiers (e.g. layout(local_size_x=1) in;)
                 if (node.data.name.len > 0) {
-                // #170: 64-bit types (double/dvecN/dmatN/int64_t/...) are not modeled.
-                // On an IO/uniform/module GLOBAL declaration they otherwise fall through
-                // to a member-less OpTypeStruct, and any use (e.g. `in dvec3 p` then
-                // `vec3(p)`) emits invalid SPIR-V at rc=0 (spirv-val rejects; naga
-                // rejects) = silent-wrong. Honest-error here, mirroring the local
-                // var_decl path (analyzeNode .var_decl) and matching zioshade's stance
-                // that 64-bit types are unsupported (WGSL has no f64/i64 either).
-                // Unwrap array bases so `uniform double K[2]` / `const double[]` are
-                // caught too (the type is `.array` whose base is the 64-bit type).
-                if (node.data.ty) |gty| {
-                    var leaf = gty;
-                    while (leaf == .array) leaf = leaf.array.base.*;
-                    if (is64BitType(leaf)) |type_name| {
-                        last_error_ctx = "unsupported-64bit-type";
-                        last_error_inner = type_name;
-                        last_error_line = node.loc.line;
-                        last_error_column = node.loc.column;
-                        return error.SemanticFailed;
-                    }
-                }
-                // Check for specialization constant: layout(constant_id = N) const int X = val;
-                if (node.data.qualifier != null and node.data.qualifier.?.is_const) {
-                    if (node.data.layout) |layout| {
-                        if (layout.constant_id) |cid| {
-                            const sc_ir_id = self.allocId();
-                            const sc_ty = node.data.ty orelse .int;
-
-                            // Build the list of per-component literals.
-                            // Scalars: length-1 slice. Vec/mat: per-component literals
-                            // extracted from the type_constructor's argument list.
-                            //
-                            // M3.4 v1 scope: only literal arguments are accepted for
-                            // vec/mat. Non-literal args (expressions) cause us to fall
-                            // back to all-zero defaults — the user's CPU-side override
-                            // will still take effect per component via SpecId+i.
-                            var component_literals = std.ArrayListUnmanaged(u32).empty;
-                            errdefer component_literals.deinit(self.alloc);
-
-                            const is_composite = sc_ty.isVector() or sc_ty.isMatrix();
-
-                            if (node.data.children.len > 0) {
-                                const init_node = node.data.children[0];
-
-                                if (is_composite and init_node.tag == .type_constructor) {
-                                    // vec3(0.5, 0.5, 0.5) or mat3(1.0, 0.0, ...)
-                                    const n = sc_ty.numComponents();
-                                    try component_literals.ensureTotalCapacity(self.alloc, n);
-
-                                    // Walk constructor args; extract scalar literals.
-                                    // If any arg is non-literal, leave its component as 0.
-                                    const args = init_node.data.children;
-                                    const elem_ty = sc_ty.elementType();
-                                    const is_float_elem = elem_ty == .float or elem_ty == .double or elem_ty == .float16;
-
-                                    // GLSL also allows `vec3(0.5)` to mean splat; if the constructor
-                                    // has fewer args than components and the only arg is scalar,
-                                    // replicate it. Conservatively detect splat: 1 arg, n_components > 1.
-                                    const is_splat = args.len == 1 and n > 1;
-                                    var i_arg: usize = 0;
-                                    while (i_arg < n) : (i_arg += 1) {
-                                        var lit: u32 = 0;
-                                        const src_idx: usize = if (is_splat) 0 else i_arg;
-                                        if (src_idx < args.len) {
-                                            const arg = args[src_idx];
-                                            // Direct AST literal extraction (avoids emitting IR).
-                                            switch (arg.tag) {
-                                                .int_literal, .uint_literal => {
-                                                    // Bounds-check the literal magnitude against 32 bits
-                                                    // before lowering it to a component word. literalWord
-                                                    // records an honest error.SemanticFailed for magnitudes
-                                                    // > 0xFFFFFFFF (glslangValidator: "numeric literal too
-                                                    // big") instead of silently truncating (int elements,
-                                                    // via @truncate) or silently widening (float elements,
-                                                    // via @floatFromInt) the out-of-range value.
-                                                    const word = try literalWord(arg);
-                                                    // For float-element composites, convert int → float.
-                                                    // NOTE: a signed int_literal >=2^31 here folds with the
-                                                    // wrong sign (bare @floatFromInt on the u32 word), the
-                                                    // same class fixed for the float-vector ctor and the
-                                                    // const-array folder. Left as-is: this path is only
-                                                    // reachable via `layout(constant_id=N) const vecT` — a
-                                                    // SpecId on a composite, which is NOT valid Vulkan GLSL
-                                                    // (SpecId is scalar-only) and glslangValidator rejects,
-                                                    // so there is no oracle to gate the fix against.
-                                                    if (is_float_elem) {
-                                                        const fv: f32 = @floatFromInt(word);
-                                                        lit = @as(u32, @bitCast(fv));
-                                                    } else {
-                                                        lit = word;
-                                                    }
-                                                },
-                                                .float_literal => {
-                                                    const fv: f32 = @floatCast(arg.data.float_val);
-                                                    lit = @as(u32, @bitCast(fv));
-                                                },
-                                                else => {
-                                                    // Non-literal arg: default to 0. For float
-                                                    // composites, 0.0 == bit-pattern 0 already.
-                                                    lit = 0;
-                                                },
-                                            }
-                                        }
-                                        component_literals.appendAssumeCapacity(lit);
-                                    }
-                                } else {
-                                    // Scalar spec const: reuse existing extraction logic.
-                                    var default_literal: u32 = 0;
-                                    const init = try self.analyzeExpression(init_node);
-                                    for (self.instructions.items) |inst| {
-                                        if (inst.result_id == null or inst.result_id.? != init.id) continue;
-                                        switch (inst.tag) {
-                                            .constant_int, .constant_bool => {
-                                                default_literal = switch (inst.operands[0]) {
-                                                    .literal_int => |v| @intCast(v),
-                                                    else => 0,
-                                                };
-                                            },
-                                            .constant_float => {
-                                                default_literal = switch (inst.operands[0]) {
-                                                    .literal_float => |v| @bitCast(v),
-                                                    else => 0,
-                                                };
-                                            },
-                                            else => continue,
-                                        }
-                                        break;
-                                    }
-                                    try component_literals.append(self.alloc, default_literal);
-                                }
-                            } else if (!is_composite) {
-                                // Scalar with no initializer: default 0.
-                                try component_literals.append(self.alloc, 0);
-                            } else {
-                                // Composite with no initializer: zero-fill.
-                                const n = sc_ty.numComponents();
-                                try component_literals.appendNTimes(self.alloc, 0, n);
-                            }
-
-                            // Declare as SSA symbol
-                            try self.declare(node.data.name, .{
-                                .kind = .var_sym,
-                                .ty = sc_ty,
-                                .ir_id = sc_ir_id,
-                                .init_value = sc_ir_id,
-                                .is_ssa = true,
-                            });
-                            // Store spec constant info for codegen
-                            const owned_name = try self.alloc.dupe(u8, node.data.name);
-                            const owned_lits = try component_literals.toOwnedSlice(self.alloc);
-                            try self.spec_constants.put(self.alloc, owned_name, .{
-                                .result_id = sc_ir_id,
-                                .spec_id = cid,
-                                .component_literals = owned_lits,
-                                .type_tag = @intFromEnum(sc_ty),
-                            });
-                            // Track the scalar spec const result_id so derived-
-                            // expression detection (M3.5) can flag references to it.
-                            if (!is_composite) {
-                                try self.spec_const_ids.put(self.alloc, sc_ir_id, {});
-                            }
-                            return; // Don't create a global variable
+                    // #170: 64-bit types (double/dvecN/dmatN/int64_t/...) are not modeled.
+                    // On an IO/uniform/module GLOBAL declaration they otherwise fall through
+                    // to a member-less OpTypeStruct, and any use (e.g. `in dvec3 p` then
+                    // `vec3(p)`) emits invalid SPIR-V at rc=0 (spirv-val rejects; naga
+                    // rejects) = silent-wrong. Honest-error here, mirroring the local
+                    // var_decl path (analyzeNode .var_decl) and matching zioshade's stance
+                    // that 64-bit types are unsupported (WGSL has no f64/i64 either).
+                    // Unwrap array bases so `uniform double K[2]` / `const double[]` are
+                    // caught too (the type is `.array` whose base is the 64-bit type).
+                    if (node.data.ty) |gty| {
+                        var leaf = gty;
+                        while (leaf == .array) leaf = leaf.array.base.*;
+                        if (is64BitType(leaf)) |type_name| {
+                            last_error_ctx = "unsupported-64bit-type";
+                            last_error_inner = type_name;
+                            last_error_line = node.loc.line;
+                            last_error_column = node.loc.column;
+                            return error.SemanticFailed;
                         }
                     }
-                }
-                // M3.5: const declarations whose initializer transitively
-                // depends on a specialization constant lower to
-                // OpSpecConstantOp instead of becoming a normal global
-                // variable. The walker returns null when the expression
-                // is unsupported (non-scalar, non-arithmetic, etc.) or
-                // when no spec const participates -- both cases fall
-                // through to the regular const-global path below.
-                if (node.tag == .var_decl and node.data.qualifier != null and
-                    node.data.qualifier.?.is_const and
-                    node.data.name.len > 0 and
-                    node.data.children.len > 0)
-                {
-                    if (self.tryBuildSpecConstOp(node.data.children[0])) |maybe_build| {
-                        if (maybe_build) |build| {
-                            if (build.is_spec_derived) {
-                                // Declare the user-facing name as an SSA symbol
-                                // mapped to the derived const's result_id.
+                    // Check for specialization constant: layout(constant_id = N) const int X = val;
+                    if (node.data.qualifier != null and node.data.qualifier.?.is_const) {
+                        if (node.data.layout) |layout| {
+                            if (layout.constant_id) |cid| {
+                                const sc_ir_id = self.allocId();
+                                const sc_ty = node.data.ty orelse .int;
+
+                                // Build the list of per-component literals.
+                                // Scalars: length-1 slice. Vec/mat: per-component literals
+                                // extracted from the type_constructor's argument list.
+                                //
+                                // M3.4 v1 scope: only literal arguments are accepted for
+                                // vec/mat. Non-literal args (expressions) cause us to fall
+                                // back to all-zero defaults — the user's CPU-side override
+                                // will still take effect per component via SpecId+i.
+                                var component_literals = std.ArrayListUnmanaged(u32).empty;
+                                errdefer component_literals.deinit(self.alloc);
+
+                                const is_composite = sc_ty.isVector() or sc_ty.isMatrix();
+
+                                if (node.data.children.len > 0) {
+                                    const init_node = node.data.children[0];
+
+                                    if (is_composite and init_node.tag == .type_constructor) {
+                                        // vec3(0.5, 0.5, 0.5) or mat3(1.0, 0.0, ...)
+                                        const n = sc_ty.numComponents();
+                                        try component_literals.ensureTotalCapacity(self.alloc, n);
+
+                                        // Walk constructor args; extract scalar literals.
+                                        // If any arg is non-literal, leave its component as 0.
+                                        const args = init_node.data.children;
+                                        const elem_ty = sc_ty.elementType();
+                                        const is_float_elem = elem_ty == .float or elem_ty == .double or elem_ty == .float16;
+
+                                        // GLSL also allows `vec3(0.5)` to mean splat; if the constructor
+                                        // has fewer args than components and the only arg is scalar,
+                                        // replicate it. Conservatively detect splat: 1 arg, n_components > 1.
+                                        const is_splat = args.len == 1 and n > 1;
+                                        var i_arg: usize = 0;
+                                        while (i_arg < n) : (i_arg += 1) {
+                                            var lit: u32 = 0;
+                                            const src_idx: usize = if (is_splat) 0 else i_arg;
+                                            if (src_idx < args.len) {
+                                                const arg = args[src_idx];
+                                                // Direct AST literal extraction (avoids emitting IR).
+                                                switch (arg.tag) {
+                                                    .int_literal, .uint_literal => {
+                                                        // Bounds-check the literal magnitude against 32 bits
+                                                        // before lowering it to a component word. literalWord
+                                                        // records an honest error.SemanticFailed for magnitudes
+                                                        // > 0xFFFFFFFF (glslangValidator: "numeric literal too
+                                                        // big") instead of silently truncating (int elements,
+                                                        // via @truncate) or silently widening (float elements,
+                                                        // via @floatFromInt) the out-of-range value.
+                                                        const word = try literalWord(arg);
+                                                        // For float-element composites, convert int → float.
+                                                        // NOTE: a signed int_literal >=2^31 here folds with the
+                                                        // wrong sign (bare @floatFromInt on the u32 word), the
+                                                        // same class fixed for the float-vector ctor and the
+                                                        // const-array folder. Left as-is: this path is only
+                                                        // reachable via `layout(constant_id=N) const vecT` — a
+                                                        // SpecId on a composite, which is NOT valid Vulkan GLSL
+                                                        // (SpecId is scalar-only) and glslangValidator rejects,
+                                                        // so there is no oracle to gate the fix against.
+                                                        if (is_float_elem) {
+                                                            const fv: f32 = @floatFromInt(word);
+                                                            lit = @as(u32, @bitCast(fv));
+                                                        } else {
+                                                            lit = word;
+                                                        }
+                                                    },
+                                                    .float_literal => {
+                                                        const fv: f32 = @floatCast(arg.data.float_val);
+                                                        lit = @as(u32, @bitCast(fv));
+                                                    },
+                                                    else => {
+                                                        // Non-literal arg: default to 0. For float
+                                                        // composites, 0.0 == bit-pattern 0 already.
+                                                        lit = 0;
+                                                    },
+                                                }
+                                            }
+                                            component_literals.appendAssumeCapacity(lit);
+                                        }
+                                    } else {
+                                        // Scalar spec const: reuse existing extraction logic.
+                                        var default_literal: u32 = 0;
+                                        const init = try self.analyzeExpression(init_node);
+                                        for (self.instructions.items) |inst| {
+                                            if (inst.result_id == null or inst.result_id.? != init.id) continue;
+                                            switch (inst.tag) {
+                                                .constant_int, .constant_bool => {
+                                                    default_literal = switch (inst.operands[0]) {
+                                                        .literal_int => |v| @intCast(v),
+                                                        else => 0,
+                                                    };
+                                                },
+                                                .constant_float => {
+                                                    default_literal = switch (inst.operands[0]) {
+                                                        .literal_float => |v| @bitCast(v),
+                                                        else => 0,
+                                                    };
+                                                },
+                                                else => continue,
+                                            }
+                                            break;
+                                        }
+                                        try component_literals.append(self.alloc, default_literal);
+                                    }
+                                } else if (!is_composite) {
+                                    // Scalar with no initializer: default 0.
+                                    try component_literals.append(self.alloc, 0);
+                                } else {
+                                    // Composite with no initializer: zero-fill.
+                                    const n = sc_ty.numComponents();
+                                    try component_literals.appendNTimes(self.alloc, 0, n);
+                                }
+
+                                // Declare as SSA symbol
                                 try self.declare(node.data.name, .{
                                     .kind = .var_sym,
-                                    .ty = build.ty,
-                                    .ir_id = build.id,
-                                    .init_value = build.id,
+                                    .ty = sc_ty,
+                                    .ir_id = sc_ir_id,
+                                    .init_value = sc_ir_id,
                                     .is_ssa = true,
                                 });
-                                // Bind the user-facing GLSL identifier onto the
-                                // matching spec_constant_ops entry so codegen
-                                // can emit an OpName that downstream backends
-                                // surface (HLSL/GLSL/MSL/WGSL) instead of the
-                                // auto-generated `v{id}` fallback. Only the
-                                // outermost expression's result_id gets a user
-                                // name; intermediate sub-expressions stay
-                                // anonymous (their synthetic `.specop.<id>`
-                                // key is left untouched and codegen skips
-                                // those when emitting names).
-                                var sco_iter = self.spec_constant_ops.iterator();
-                                while (sco_iter.next()) |entry| {
-                                    if (entry.value_ptr.result_id == build.id) {
-                                        entry.value_ptr.user_name = node.data.name;
-                                        break;
-                                    }
+                                // Store spec constant info for codegen
+                                const owned_name = try self.alloc.dupe(u8, node.data.name);
+                                const owned_lits = try component_literals.toOwnedSlice(self.alloc);
+                                try self.spec_constants.put(self.alloc, owned_name, .{
+                                    .result_id = sc_ir_id,
+                                    .spec_id = cid,
+                                    .component_literals = owned_lits,
+                                    .type_tag = @intFromEnum(sc_ty),
+                                });
+                                // Track the scalar spec const result_id so derived-
+                                // expression detection (M3.5) can flag references to it.
+                                if (!is_composite) {
+                                    try self.spec_const_ids.put(self.alloc, sc_ir_id, {});
                                 }
-                                return; // No global variable / no IR instruction.
+                                return; // Don't create a global variable
                             }
                         }
-                    } else |err| {
-                        // tryBuildSpecConstOp only ever returns `null` (not an
-                        // error) for unsupported / non-spec expressions; the
-                        // ONLY errors it can produce are OutOfMemory and the
-                        // SemanticFailed that literalWord raises for an out-of-
-                        // 32-bit-range int/uint literal in the initializer. The
-                        // normal const-global fallback below does NOT re-validate
-                        // the initializer, so swallowing here would silently emit
-                        // a bogus global for `const uint y = 4294967296u;` —
-                        // exactly the silent-wrong outcome the Mitchell bar
-                        // forbids. Propagate the honest error instead of crashing
-                        // (pre-fix) or silently compiling.
-                        return err;
                     }
-                }
-                const ir_id = self.allocId();
-                // Resolve expression-based array sizes (e.g. gl_WorkGroupSize.x → local_size_x).
-                // The parser records the source text in size_name when the dimension is a non-
-                // literal constant expression; size is left as 0. Fold it here before the type
-                // is stored so that codegen sees the correct concrete array size.
-                var ty = node.data.ty orelse ast.Type.void;
-                if (ty == .array and ty.array.size == 0) {
-                    if (ty.array.size_name) |sn| {
-                        if (self.resolveSizeExpr(sn)) |resolved| {
-                            // Allocate a new heap type for the base (same pointer is fine — it's
-                            // already heap-allocated by the parser; we just build a new wrapper).
-                            const resolved_base = ty.array.base;
-                            const resolved_ty = try self.alloc.create(ast.Type);
-                            resolved_ty.* = resolved_base.*;
-                            try self.heap_types.append(self.alloc, resolved_ty);
-                            ty = .{ .array = .{ .base = resolved_ty, .size = resolved } };
+                    // M3.5: const declarations whose initializer transitively
+                    // depends on a specialization constant lower to
+                    // OpSpecConstantOp instead of becoming a normal global
+                    // variable. The walker returns null when the expression
+                    // is unsupported (non-scalar, non-arithmetic, etc.) or
+                    // when no spec const participates -- both cases fall
+                    // through to the regular const-global path below.
+                    if (node.tag == .var_decl and node.data.qualifier != null and
+                        node.data.qualifier.?.is_const and
+                        node.data.name.len > 0 and
+                        node.data.children.len > 0)
+                    {
+                        if (self.tryBuildSpecConstOp(node.data.children[0])) |maybe_build| {
+                            if (maybe_build) |build| {
+                                if (build.is_spec_derived) {
+                                    // Declare the user-facing name as an SSA symbol
+                                    // mapped to the derived const's result_id.
+                                    try self.declare(node.data.name, .{
+                                        .kind = .var_sym,
+                                        .ty = build.ty,
+                                        .ir_id = build.id,
+                                        .init_value = build.id,
+                                        .is_ssa = true,
+                                    });
+                                    // Bind the user-facing GLSL identifier onto the
+                                    // matching spec_constant_ops entry so codegen
+                                    // can emit an OpName that downstream backends
+                                    // surface (HLSL/GLSL/MSL/WGSL) instead of the
+                                    // auto-generated `v{id}` fallback. Only the
+                                    // outermost expression's result_id gets a user
+                                    // name; intermediate sub-expressions stay
+                                    // anonymous (their synthetic `.specop.<id>`
+                                    // key is left untouched and codegen skips
+                                    // those when emitting names).
+                                    var sco_iter = self.spec_constant_ops.iterator();
+                                    while (sco_iter.next()) |entry| {
+                                        if (entry.value_ptr.result_id == build.id) {
+                                            entry.value_ptr.user_name = node.data.name;
+                                            break;
+                                        }
+                                    }
+                                    return; // No global variable / no IR instruction.
+                                }
+                            }
+                        } else |err| {
+                            // tryBuildSpecConstOp only ever returns `null` (not an
+                            // error) for unsupported / non-spec expressions; the
+                            // ONLY errors it can produce are OutOfMemory and the
+                            // SemanticFailed that literalWord raises for an out-of-
+                            // 32-bit-range int/uint literal in the initializer. The
+                            // normal const-global fallback below does NOT re-validate
+                            // the initializer, so swallowing here would silently emit
+                            // a bogus global for `const uint y = 4294967296u;` —
+                            // exactly the silent-wrong outcome the Mitchell bar
+                            // forbids. Propagate the honest error instead of crashing
+                            // (pre-fix) or silently compiling.
+                            return err;
                         }
                     }
-                }
-                const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
-                    .in_decl => .input,
-                    .out_decl => .output,
-                    .uniform_decl => if (ty.isSamplerOrArrayOf()) .uniform_constant else .uniform,
-                    .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_task_payload_shared) .task_payload_workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_ray_payload) .ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_ray_payload) .incoming_ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_hit_attribute) .hit_attribute else if (node.data.qualifier != null and node.data.qualifier.?.is_callable_data) .callable_data else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_callable_data) .incoming_callable_data else .private,
-                    else => .private,
-                };
-                try self.globals.append(self.alloc, .{
-                    .name = node.data.name,
-                    .ty = ty,
-                    .qualifier = node.data.qualifier orelse .{},
-                    .layout = node.data.layout,
-                    .storage_class = storage_class,
-                    .result_id = ir_id,
-                });
-                // Track as global pointer for cross-block load caching
-                if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .uniform_constant) {
-                    self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
-                }
-                try self.declare(node.data.name, .{
-                    .kind = .var_sym,
-                    .ty = ty,
-                    .ir_id = ir_id,
-                    // Propagate `const` qualifier so consumers that require a
-                    // provably immutable value (e.g. textureGatherOffsets ConstOffsets)
-                    // can verify the argument is a compile-time constant array.
-                    .is_const = node.data.qualifier != null and node.data.qualifier.?.is_const,
-                });
-                // For global `const` array declarations with an initializer, record the
-                // AST initializer node so constStoreSource() can evaluate it lazily
-                // (during function analysis) to obtain the constant-composite id for
-                // textureGatherOffsets ConstOffsets validation. Scalar int/uint const
-                // globals are recorded too so evalConstInt can fold a name used as an
-                // array size (`const int N = 3; float a[N];`) or switch-case label. The
-                // init pass only assigns an initializer to a matching Private global and
-                // skips anything else, so recording extra scalars is harmless.
-                if (node.data.qualifier != null and node.data.qualifier.?.is_const and
-                    (ty == .array or ty == .int or ty == .uint) and node.data.children.len > 0)
-                {
-                    self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
-                }
+                    const ir_id = self.allocId();
+                    // Resolve expression-based array sizes (e.g. gl_WorkGroupSize.x → local_size_x).
+                    // The parser records the source text in size_name when the dimension is a non-
+                    // literal constant expression; size is left as 0. Fold it here before the type
+                    // is stored so that codegen sees the correct concrete array size.
+                    var ty = node.data.ty orelse ast.Type.void;
+                    if (ty == .array and ty.array.size == 0) {
+                        if (ty.array.size_name) |sn| {
+                            if (self.resolveSizeExpr(sn)) |resolved| {
+                                // Allocate a new heap type for the base (same pointer is fine — it's
+                                // already heap-allocated by the parser; we just build a new wrapper).
+                                const resolved_base = ty.array.base;
+                                const resolved_ty = try self.alloc.create(ast.Type);
+                                resolved_ty.* = resolved_base.*;
+                                try self.heap_types.append(self.alloc, resolved_ty);
+                                ty = .{ .array = .{ .base = resolved_ty, .size = resolved } };
+                            }
+                        }
+                    }
+                    const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
+                        .in_decl => .input,
+                        .out_decl => .output,
+                        .uniform_decl => if (ty.isSamplerOrArrayOf()) .uniform_constant else .uniform,
+                        .var_decl => if (node.data.qualifier != null and node.data.qualifier.?.is_shared) .workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_task_payload_shared) .task_payload_workgroup else if (node.data.qualifier != null and node.data.qualifier.?.is_ray_payload) .ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_ray_payload) .incoming_ray_payload else if (node.data.qualifier != null and node.data.qualifier.?.is_hit_attribute) .hit_attribute else if (node.data.qualifier != null and node.data.qualifier.?.is_callable_data) .callable_data else if (node.data.qualifier != null and node.data.qualifier.?.is_incoming_callable_data) .incoming_callable_data else .private,
+                        else => .private,
+                    };
+                    try self.globals.append(self.alloc, .{
+                        .name = node.data.name,
+                        .ty = ty,
+                        .qualifier = node.data.qualifier orelse .{},
+                        .layout = node.data.layout,
+                        .storage_class = storage_class,
+                        .result_id = ir_id,
+                    });
+                    // Track as global pointer for cross-block load caching
+                    if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .uniform_constant) {
+                        self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
+                    }
+                    try self.declare(node.data.name, .{
+                        .kind = .var_sym,
+                        .ty = ty,
+                        .ir_id = ir_id,
+                        // Propagate `const` qualifier so consumers that require a
+                        // provably immutable value (e.g. textureGatherOffsets ConstOffsets)
+                        // can verify the argument is a compile-time constant array.
+                        .is_const = node.data.qualifier != null and node.data.qualifier.?.is_const,
+                    });
+                    // For global `const` array declarations with an initializer, record the
+                    // AST initializer node so constStoreSource() can evaluate it lazily
+                    // (during function analysis) to obtain the constant-composite id for
+                    // textureGatherOffsets ConstOffsets validation. Scalar int/uint const
+                    // globals are recorded too so evalConstInt can fold a name used as an
+                    // array size (`const int N = 3; float a[N];`) or switch-case label. The
+                    // init pass only assigns an initializer to a matching Private global and
+                    // skips anything else, so recording extra scalars is harmless.
+                    if (node.data.qualifier != null and node.data.qualifier.?.is_const and
+                        (ty == .array or ty == .int or ty == .uint) and node.data.children.len > 0)
+                    {
+                        self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
+                    }
                 } // end if name.len > 0
             },
             .uniform_block => {
@@ -2659,80 +2670,80 @@ const Analyzer = struct {
                         .ir_id = 0, // No global variable for buffer_reference types
                     });
                 } else {
-                // Create a global variable for the block
-                const ir_id = self.allocId();
-                // Use instance name for the global variable if present
-                const global_name = if (node.data.instance_name.len > 0) node.data.instance_name else name;
+                    // Create a global variable for the block
+                    const ir_id = self.allocId();
+                    // Use instance name for the global variable if present
+                    const global_name = if (node.data.instance_name.len > 0) node.data.instance_name else name;
 
-                // If the block instance is declared as an array (e.g. `buffer SSBO { ... } ssbos[2]`),
-                // `node.data.int_val` carries the array size (parsed from the `[N]` suffix by the parser).
-                // We must represent the global as an array-of-the-block-type so that the semantic
-                // analyzer can type-check indexed access `ssbos[i].member` correctly.
-                const instance_array_size: u32 = if (node.data.int_val > 0) @intCast(node.data.int_val) else 0;
-                const is_block_array = instance_array_size > 0;
+                    // If the block instance is declared as an array (e.g. `buffer SSBO { ... } ssbos[2]`),
+                    // `node.data.int_val` carries the array size (parsed from the `[N]` suffix by the parser).
+                    // We must represent the global as an array-of-the-block-type so that the semantic
+                    // analyzer can type-check indexed access `ssbos[i].member` correctly.
+                    const instance_array_size: u32 = if (node.data.int_val > 0) @intCast(node.data.int_val) else 0;
+                    const is_block_array = instance_array_size > 0;
 
-                // Build the type for the global variable (either named or array-of-named).
-                const global_ty: ast.Type = if (is_block_array) blk: {
-                    const arr_base = try self.alloc.create(ast.Type);
-                    arr_base.* = .{ .named = name };
-                    try self.heap_types.append(self.alloc, arr_base);
-                    break :blk .{ .array = .{ .base = arr_base, .size = instance_array_size } };
-                } else .{ .named = name };
+                    // Build the type for the global variable (either named or array-of-named).
+                    const global_ty: ast.Type = if (is_block_array) blk: {
+                        const arr_base = try self.alloc.create(ast.Type);
+                        arr_base.* = .{ .named = name };
+                        try self.heap_types.append(self.alloc, arr_base);
+                        break :blk .{ .array = .{ .base = arr_base, .size = instance_array_size } };
+                    } else .{ .named = name };
 
-                try self.globals.append(self.alloc, .{
-                    .name = global_name,
-                    .ty = global_ty,
-                    .qualifier = qual,
-                    .layout = node.data.layout,
-                    .storage_class = storage_class,
-                    .result_id = ir_id,
-                });
-                // Track as global pointer for cross-block load caching
-                if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .uniform_constant or storage_class == .workgroup) {
-                    self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
-                }
-
-                if (is_block_array) {
-                    // For block arrays (e.g. `buffer SSBO { ... } ssbos[2]`):
-                    // - Only declare the instance name (not the block type name) as a symbol.
-                    // - Type is the array type so that `ssbos[i]` resolves element type correctly.
-                    // - Do NOT inject members as directly-accessible scope symbols: members are
-                    //   only reachable via `ssbos[i].member`, never as bare `member`.
-                    try self.declare(node.data.instance_name, .{
-                        .kind = .var_sym,
+                    try self.globals.append(self.alloc, .{
+                        .name = global_name,
                         .ty = global_ty,
-                        .ir_id = ir_id,
+                        .qualifier = qual,
+                        .layout = node.data.layout,
+                        .storage_class = storage_class,
+                        .result_id = ir_id,
                     });
-                } else {
-                // Declare the block variable under both names (type name and instance name)
-                try self.declare(name, .{
-                    .kind = .var_sym,
-                    .ty = .{ .named = name },
-                    .ir_id = ir_id,
-                });
-                if (node.data.instance_name.len > 0 and !std.mem.eql(u8, name, node.data.instance_name)) {
-                    try self.declare(node.data.instance_name, .{
-                        .kind = .var_sym,
-                        .ty = .{ .named = name },
-                        .ir_id = ir_id,
-                    });
-                }
-
-                // Declare block members as directly accessible for uniform/buffer/workgroup blocks
-                // and for anonymous in/out blocks (no instance name).
-                if (storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .workgroup or
-                    ((storage_class == .input or storage_class == .output) and node.data.instance_name.len == 0))
-                {
-                    for (node.data.members, 0..) |member, idx| {
-                        try self.declare(member.name, .{
-                            .kind = .block_member,
-                            .ty = member.ty,
-                            .ir_id = ir_id, // Block variable ID
-                            .member_index = @intCast(idx),
-                        });
+                    // Track as global pointer for cross-block load caching
+                    if (storage_class == .input or storage_class == .output or storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .uniform_constant or storage_class == .workgroup) {
+                        self.global_ptr_ids.put(self.alloc, ir_id, {}) catch {};
                     }
-                }
-                } // end else (not block array)
+
+                    if (is_block_array) {
+                        // For block arrays (e.g. `buffer SSBO { ... } ssbos[2]`):
+                        // - Only declare the instance name (not the block type name) as a symbol.
+                        // - Type is the array type so that `ssbos[i]` resolves element type correctly.
+                        // - Do NOT inject members as directly-accessible scope symbols: members are
+                        //   only reachable via `ssbos[i].member`, never as bare `member`.
+                        try self.declare(node.data.instance_name, .{
+                            .kind = .var_sym,
+                            .ty = global_ty,
+                            .ir_id = ir_id,
+                        });
+                    } else {
+                        // Declare the block variable under both names (type name and instance name)
+                        try self.declare(name, .{
+                            .kind = .var_sym,
+                            .ty = .{ .named = name },
+                            .ir_id = ir_id,
+                        });
+                        if (node.data.instance_name.len > 0 and !std.mem.eql(u8, name, node.data.instance_name)) {
+                            try self.declare(node.data.instance_name, .{
+                                .kind = .var_sym,
+                                .ty = .{ .named = name },
+                                .ir_id = ir_id,
+                            });
+                        }
+
+                        // Declare block members as directly accessible for uniform/buffer/workgroup blocks
+                        // and for anonymous in/out blocks (no instance name).
+                        if (storage_class == .uniform or storage_class == .storage_buffer or storage_class == .push_constant or storage_class == .workgroup or
+                            ((storage_class == .input or storage_class == .output) and node.data.instance_name.len == 0))
+                        {
+                            for (node.data.members, 0..) |member, idx| {
+                                try self.declare(member.name, .{
+                                    .kind = .block_member,
+                                    .ty = member.ty,
+                                    .ir_id = ir_id, // Block variable ID
+                                    .member_index = @intCast(idx),
+                                });
+                            }
+                        }
+                    } // end else (not block array)
                 } // end if !buffer_reference
             },
             .struct_decl => {
@@ -2980,7 +2991,7 @@ const Analyzer = struct {
                     // the function body. Downstream consumers (HLSL/MSL/WGSL backends,
                     // DXC validation) otherwise see a structurally-valid SPIR-V module
                     // whose body is missing whole writes. See Bug #3.
-                    const msg = std.fmt.allocPrint(self.alloc, "{s} in {s}", .{@errorName(err), @tagName(child.tag)}) catch "error";
+                    const msg = std.fmt.allocPrint(self.alloc, "{s} in {s}", .{ @errorName(err), @tagName(child.tag) }) catch "error";
                     self.errors.append(self.alloc, msg) catch {};
 
                     // Bug #3.B: when a structured diagnostic sink is registered
@@ -3251,7 +3262,7 @@ const Analyzer = struct {
                         store_operands[0] = .{ .id = id };
                         store_operands[1] = .{ .id = init_id };
                         _ = self.load_cache.remove(id);
-        try self.instructions.append(self.alloc, .{
+                        try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
                             .result_id = null,
@@ -3505,7 +3516,10 @@ const Analyzer = struct {
                 // Default label if no default case was found
                 var has_default = false;
                 for (case_infos.items) |ci| {
-                    if (ci.value == null) { has_default = true; break; }
+                    if (ci.value == null) {
+                        has_default = true;
+                        break;
+                    }
                 }
                 if (!has_default) {
                     try self.emitLabel(default_label);
@@ -3965,7 +3979,7 @@ const Analyzer = struct {
                         store_ops[0] = .{ .id = var_id };
                         store_ops[1] = .{ .id = sym.ir_id };
                         _ = self.load_cache.remove(var_id);
-        try self.instructions.append(self.alloc, .{
+                        try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
                             .result_id = null,
@@ -4305,16 +4319,16 @@ const Analyzer = struct {
     // the short-circuit side-effect check below. (#170)
     fn isSideEffectingBuiltin(name: []const u8) bool {
         const list = [_][]const u8{
-            "modf",          "frexp",         "uaddCarry",     "usubBorrow",     "umulExtended",  "imulExtended",
-            "imageStore",    "imageAtomicAdd","imageAtomicMin","imageAtomicMax", "imageAtomicAnd","imageAtomicOr",
-            "imageAtomicXor","imageAtomicExchange","imageAtomicCompSwap",
-            "atomicAdd",     "atomicMin",     "atomicMax",     "atomicAnd",      "atomicOr",      "atomicXor",
-            "atomicExchange","atomicCompSwap","atomicCounterIncrement","atomicCounterDecrement","atomicCounterAdd","atomicCounterExchange","atomicCounterCompSwap",
-            "barrier",       "memoryBarrier", "memoryBarrierBuffer","memoryBarrierShared","memoryBarrierImage","memoryBarrierAtomicCounter","groupMemoryBarrier",
-            "EmitVertex",    "EndPrimitive",  "EmitStreamVertex","EndStreamPrimitive",
+            "modf",                   "frexp",               "uaddCarry",             "usubBorrow",                 "umulExtended",          "imulExtended",
+            "imageStore",             "imageAtomicAdd",      "imageAtomicMin",        "imageAtomicMax",             "imageAtomicAnd",        "imageAtomicOr",
+            "imageAtomicXor",         "imageAtomicExchange", "imageAtomicCompSwap",   "atomicAdd",                  "atomicMin",             "atomicMax",
+            "atomicAnd",              "atomicOr",            "atomicXor",             "atomicExchange",             "atomicCompSwap",        "atomicCounterIncrement",
+            "atomicCounterDecrement", "atomicCounterAdd",    "atomicCounterExchange", "atomicCounterCompSwap",      "barrier",               "memoryBarrier",
+            "memoryBarrierBuffer",    "memoryBarrierShared", "memoryBarrierImage",    "memoryBarrierAtomicCounter", "groupMemoryBarrier",    "EmitVertex",
+            "EndPrimitive",           "EmitStreamVertex",    "EndStreamPrimitive",
             // bool-returning side-effecting builtins (mutate ray-query / report a hit) —
             // would otherwise be classed pure and take the eager `&&`/`||` path.
-            "rayQueryProceedEXT", "reportIntersectionEXT",
+               "rayQueryProceedEXT",         "reportIntersectionEXT",
         };
         for (list) |b| if (std.mem.eql(u8, name, b)) return true;
         return false;
@@ -4567,12 +4581,14 @@ const Analyzer = struct {
                 if (std.mem.eql(u8, node.data.name, "gl_RayFlagsNoneEXT") or
                     std.mem.eql(u8, node.data.name, "gl_RayFlagsNoneKHR") or
                     std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionNoneEXT") or
-                    std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionNoneKHR")) {
+                    std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionNoneKHR"))
+                {
                     const cid = try self.getConstInt(0, .uint);
                     return .{ .ty = .uint, .id = cid };
                 }
                 if (std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionTriangleEXT") or
-                    std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionTriangleKHR")) {
+                    std.mem.eql(u8, node.data.name, "gl_RayQueryCommittedIntersectionTriangleKHR"))
+                {
                     const cid = try self.getConstInt(1, .uint);
                     return .{ .ty = .uint, .id = cid };
                 }
@@ -4857,7 +4873,6 @@ const Analyzer = struct {
                 // Unsigned relational comparison iff EITHER operand is unsigned
                 // (GLSL promotes a mixed int/uint comparison to unsigned).
                 const is_ucmp = isUnsignedIntType(left.ty) or isUnsignedIntType(right.ty);
-
 
                 const tag: ir.Instruction.Tag = switch (op) {
                     .add => if (is_float) .fadd else .add,
@@ -5197,7 +5212,7 @@ const Analyzer = struct {
                                     _ = self.load_cache.remove(var_ptr_id);
                                     _ = self.global_load_cache.remove(var_ptr_id);
                                     self.load_cache.put(self.alloc, var_ptr_id, shuffle_id) catch {}; // Forward
-        try self.instructions.append(self.alloc, .{
+                                    try self.instructions.append(self.alloc, .{
                                         .tag = .store,
                                         .result_type = null,
                                         .result_id = null,
@@ -5334,7 +5349,7 @@ const Analyzer = struct {
                 // chains too (residual C). Runs before the forwarding put below.
                 self.invalidateAliasingChains(target.id);
                 self.load_cache.put(self.alloc, target.id, value_id) catch {}; // Forward stored value
-        try self.instructions.append(self.alloc, .{
+                try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
@@ -5364,183 +5379,183 @@ const Analyzer = struct {
                         const swizzle_name = swizzle_name_maybe;
                         const var_ptr_id2 = base_ptr.id;
 
-                                    // 1. Load current vector
-                                    const vec_load_id = try self.emitLoadCached(var_ptr_id2, base_ty);
+                        // 1. Load current vector
+                        const vec_load_id = try self.emitLoadCached(var_ptr_id2, base_ty);
 
-                                    // 2. Extract swizzled components from the loaded vector
-                                    const swizzle_len = swizzle_name.len;
-                                    const swizzle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + swizzle_len);
-                                    swizzle_ops[0] = .{ .id = vec_load_id };
-                                    swizzle_ops[1] = .{ .id = vec_load_id }; // second vector unused for extract-only
-                                    for (0..swizzle_len) |i| {
-                                        swizzle_ops[2 + i] = .{ .literal_int = self.swizzleIndex(swizzle_name[i]) };
+                        // 2. Extract swizzled components from the loaded vector
+                        const swizzle_len = swizzle_name.len;
+                        const swizzle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + swizzle_len);
+                        swizzle_ops[0] = .{ .id = vec_load_id };
+                        swizzle_ops[1] = .{ .id = vec_load_id }; // second vector unused for extract-only
+                        for (0..swizzle_len) |i| {
+                            swizzle_ops[2 + i] = .{ .literal_int = self.swizzleIndex(swizzle_name[i]) };
+                        }
+                        const swizzled_ty: ast.Type = switch (base_ty) {
+                            .vec2, .vec3, .vec4 => switch (swizzle_len) {
+                                2 => ast.Type.vec2,
+                                3 => ast.Type.vec3,
+                                4 => ast.Type.vec4,
+                                else => base_ty,
+                            },
+                            .ivec2, .ivec3, .ivec4 => switch (swizzle_len) {
+                                2 => ast.Type.ivec2,
+                                3 => ast.Type.ivec3,
+                                4 => ast.Type.ivec4,
+                                else => base_ty,
+                            },
+                            .uvec2, .uvec3, .uvec4 => switch (swizzle_len) {
+                                2 => ast.Type.uvec2,
+                                3 => ast.Type.uvec3,
+                                4 => ast.Type.uvec4,
+                                else => base_ty,
+                            },
+                            .bvec2, .bvec3, .bvec4 => switch (swizzle_len) {
+                                2 => ast.Type.bvec2,
+                                3 => ast.Type.bvec3,
+                                4 => ast.Type.bvec4,
+                                else => base_ty,
+                            },
+                            else => base_ty,
+                        };
+                        const swizzled_id = try self.emitPureOp(.vector_shuffle, swizzle_ops, swizzled_ty);
+
+                        // 3. Evaluate RHS
+                        var value = try self.analyzeExpression(node.data.children[1]);
+                        if (value.is_ptr) {
+                            const loaded_id = try self.emitLoadCached(value.id, value.ty);
+                            value = .{ .ty = value.ty, .id = loaded_id };
+                        }
+
+                        // 3a. GLSL implicitly converts the RHS to the lvalue element
+                        // type. The op below uses the float arithmetic tags (fadd/
+                        // fmul/…) and the scalar splat builds a `swizzled_ty` vector,
+                        // so an int/uint RHS (vector OR scalar) must be converted to
+                        // the swizzle's element type first — otherwise the op mixes
+                        // int operands into a float op, or the splat builds a float
+                        // vector from int constituents = invalid SPIR-V. (Same gap as
+                        // the plain swizzle write.)
+                        const sw_elem = swizzled_ty.elementType();
+                        if (value.ty.isVector()) {
+                            if (!std.meta.eql(value.ty.elementType(), sw_elem)) {
+                                const target_vec: ast.Type = switch (value.ty.numComponents()) {
+                                    2 => sw_elem.toVec2(),
+                                    3 => sw_elem.toVec3(),
+                                    4 => sw_elem.toVec4(),
+                                    else => value.ty,
+                                };
+                                if (!std.meta.eql(target_vec, value.ty)) {
+                                    if (self.getConversionTag(target_vec, value.ty)) |cvtag| {
+                                        const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                        conv_ops[0] = .{ .id = value.id };
+                                        const conv_id = try self.emitPureOp(cvtag, conv_ops, target_vec);
+                                        value = .{ .ty = target_vec, .id = conv_id };
                                     }
-                                    const swizzled_ty: ast.Type = switch (base_ty) {
-                                        .vec2, .vec3, .vec4 => switch (swizzle_len) {
-                                            2 => ast.Type.vec2,
-                                            3 => ast.Type.vec3,
-                                            4 => ast.Type.vec4,
-                                            else => base_ty,
-                                        },
-                                        .ivec2, .ivec3, .ivec4 => switch (swizzle_len) {
-                                            2 => ast.Type.ivec2,
-                                            3 => ast.Type.ivec3,
-                                            4 => ast.Type.ivec4,
-                                            else => base_ty,
-                                        },
-                                        .uvec2, .uvec3, .uvec4 => switch (swizzle_len) {
-                                            2 => ast.Type.uvec2,
-                                            3 => ast.Type.uvec3,
-                                            4 => ast.Type.uvec4,
-                                            else => base_ty,
-                                        },
-                                        .bvec2, .bvec3, .bvec4 => switch (swizzle_len) {
-                                            2 => ast.Type.bvec2,
-                                            3 => ast.Type.bvec3,
-                                            4 => ast.Type.bvec4,
-                                            else => base_ty,
-                                        },
-                                        else => base_ty,
-                                    };
-                                    const swizzled_id = try self.emitPureOp(.vector_shuffle, swizzle_ops, swizzled_ty);
+                                }
+                            }
+                        } else if (value.ty.isScalar() and !std.meta.eql(value.ty, sw_elem)) {
+                            if (self.getConversionTag(sw_elem, value.ty)) |cvtag| {
+                                const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                conv_ops[0] = .{ .id = value.id };
+                                const conv_id = try self.emitPureOp(cvtag, conv_ops, sw_elem);
+                                value = .{ .ty = sw_elem, .id = conv_id };
+                            }
+                        }
 
-                                    // 3. Evaluate RHS
-                                    var value = try self.analyzeExpression(node.data.children[1]);
-                                    if (value.is_ptr) {
-                                        const loaded_id = try self.emitLoadCached(value.id, value.ty);
-                                        value = .{ .ty = value.ty, .id = loaded_id };
-                                    }
+                        // 3b. Determine operation before splat decision
+                        const assign_op = node.data.op orelse .mul_assign;
 
-                                    // 3a. GLSL implicitly converts the RHS to the lvalue element
-                                    // type. The op below uses the float arithmetic tags (fadd/
-                                    // fmul/…) and the scalar splat builds a `swizzled_ty` vector,
-                                    // so an int/uint RHS (vector OR scalar) must be converted to
-                                    // the swizzle's element type first — otherwise the op mixes
-                                    // int operands into a float op, or the splat builds a float
-                                    // vector from int constituents = invalid SPIR-V. (Same gap as
-                                    // the plain swizzle write.)
-                                    const sw_elem = swizzled_ty.elementType();
-                                    if (value.ty.isVector()) {
-                                        if (!std.meta.eql(value.ty.elementType(), sw_elem)) {
-                                            const target_vec: ast.Type = switch (value.ty.numComponents()) {
-                                                2 => sw_elem.toVec2(),
-                                                3 => sw_elem.toVec3(),
-                                                4 => sw_elem.toVec4(),
-                                                else => value.ty,
-                                            };
-                                            if (!std.meta.eql(target_vec, value.ty)) {
-                                                if (self.getConversionTag(target_vec, value.ty)) |cvtag| {
-                                                    const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                                    conv_ops[0] = .{ .id = value.id };
-                                                    const conv_id = try self.emitPureOp(cvtag, conv_ops, target_vec);
-                                                    value = .{ .ty = target_vec, .id = conv_id };
-                                                }
-                                            }
-                                        }
-                                    } else if (value.ty.isScalar() and !std.meta.eql(value.ty, sw_elem)) {
-                                        if (self.getConversionTag(sw_elem, value.ty)) |cvtag| {
-                                            const conv_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
-                                            conv_ops[0] = .{ .id = value.id };
-                                            const conv_id = try self.emitPureOp(cvtag, conv_ops, sw_elem);
-                                            value = .{ .ty = sw_elem, .id = conv_id };
-                                        }
-                                    }
+                        // Splat scalar to swizzle_len if needed
+                        var value_id = value.id;
+                        const skip_splat_for_mul = assign_op == .mul_assign and !value.ty.isVector() and swizzled_ty.isVector() and swizzled_ty.isFloatVector();
+                        if (!skip_splat_for_mul and !value.ty.isVector() and swizzled_ty.isVector()) {
+                            const splat_ops = try self.alloc.alloc(ir.Instruction.Operand, swizzle_len);
+                            for (0..swizzle_len) |i| {
+                                splat_ops[i] = .{ .id = value.id };
+                            }
+                            const splat_key = self.constCompositeKey(swizzled_ty, splat_ops);
+                            if (self.const_composite_cache.get(splat_key)) |existing_id| {
+                                self.alloc.free(splat_ops);
+                                value_id = existing_id;
+                            } else {
+                                value_id = try self.emitPureOp(.composite_construct, splat_ops, swizzled_ty);
+                                _ = self.tryUpgradeToConstantComposite();
+                            }
+                        }
 
-                                    // 3b. Determine operation before splat decision
-                                    const assign_op = node.data.op orelse .mul_assign;
+                        // 4. Apply the compound operation
+                        // Pick float vs integer op tags by the swizzle's element
+                        // type — an integer/uint-base swizzle (`ivec.xy += ivec2`)
+                        // must use OpIAdd/OpIMul/etc., not the float ops, or spirv-val
+                        // rejects ("Expected floating scalar or vector type"). Signed
+                        // vs unsigned division/etc. is resolved from the result type in
+                        // codegen, so `.div` covers both (mirrors the plain compound-
+                        // assign path above). vec_scalar_mul stays float-only — it is
+                        // only reached when skip_splat_for_mul (a float vector) is set.
+                        const sw_is_float = swizzled_ty.isFloatVector();
+                        const op_tag: ir.Instruction.Tag = switch (assign_op) {
+                            .add_assign => if (sw_is_float) .fadd else .add,
+                            .sub_assign => if (sw_is_float) .fsub else .sub,
+                            .mul_assign => if (skip_splat_for_mul) .vec_scalar_mul else if (sw_is_float) .fmul else .mul,
+                            .div_assign => if (sw_is_float) .fdiv else .div,
+                            else => if (sw_is_float) .fmul else .mul, // fallback
+                        };
+                        const result_id = self.allocId();
+                        const op_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        op_ops[0] = .{ .id = swizzled_id };
+                        op_ops[1] = .{ .id = value_id };
+                        try self.instructions.append(self.alloc, .{
+                            .tag = op_tag,
+                            .result_type = null,
+                            .result_id = result_id,
+                            .operands = op_ops,
+                            .ty = swizzled_ty,
+                        });
 
-                                    // Splat scalar to swizzle_len if needed
-                                    var value_id = value.id;
-                                    const skip_splat_for_mul = assign_op == .mul_assign and !value.ty.isVector() and swizzled_ty.isVector() and swizzled_ty.isFloatVector();
-                                    if (!skip_splat_for_mul and !value.ty.isVector() and swizzled_ty.isVector()) {
-                                        const splat_ops = try self.alloc.alloc(ir.Instruction.Operand, swizzle_len);
-                                        for (0..swizzle_len) |i| {
-                                            splat_ops[i] = .{ .id = value.id };
-                                        }
-                                        const splat_key = self.constCompositeKey(swizzled_ty, splat_ops);
-                                        if (self.const_composite_cache.get(splat_key)) |existing_id| {
-                                            self.alloc.free(splat_ops);
-                                            value_id = existing_id;
-                                        } else {
-                                            value_id = try self.emitPureOp(.composite_construct, splat_ops, swizzled_ty);
-                                            _ = self.tryUpgradeToConstantComposite();
-                                        }
-                                    }
+                        // 5. VectorShuffle to combine: keep non-swizzled from original, use result for swizzled
+                        const n = base_ty.numComponents();
+                        const final_shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + n);
+                        final_shuffle_ops[0] = .{ .id = vec_load_id }; // original vector
+                        final_shuffle_ops[1] = .{ .id = result_id }; // computed values
+                        for (0..n) |i| {
+                            var found = false;
+                            for (0..swizzle_len) |j| {
+                                if (self.swizzleIndex(swizzle_name[j]) == i) {
+                                    // The computed values (operand 1) start at index n in the
+                                    // shuffle (operand 0 has n components), so the j-th computed
+                                    // value is at n+j — NOT swizzle_len+j (which only coincides
+                                    // for a full-width swizzle). swizzle_len+j silently wrote the
+                                    // wrong components for partial swizzles like `col.rgb *= x`.
+                                    final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(n + j) };
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if (!found) {
+                                final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(i) };
+                            }
+                        }
+                        const final_shuffle_id = try self.emitPureOp(.vector_shuffle, final_shuffle_ops, base_ty);
 
-                                    // 4. Apply the compound operation
-                                    // Pick float vs integer op tags by the swizzle's element
-                                    // type — an integer/uint-base swizzle (`ivec.xy += ivec2`)
-                                    // must use OpIAdd/OpIMul/etc., not the float ops, or spirv-val
-                                    // rejects ("Expected floating scalar or vector type"). Signed
-                                    // vs unsigned division/etc. is resolved from the result type in
-                                    // codegen, so `.div` covers both (mirrors the plain compound-
-                                    // assign path above). vec_scalar_mul stays float-only — it is
-                                    // only reached when skip_splat_for_mul (a float vector) is set.
-                                    const sw_is_float = swizzled_ty.isFloatVector();
-                                    const op_tag: ir.Instruction.Tag = switch (assign_op) {
-                                        .add_assign => if (sw_is_float) .fadd else .add,
-                                        .sub_assign => if (sw_is_float) .fsub else .sub,
-                                        .mul_assign => if (skip_splat_for_mul) .vec_scalar_mul else if (sw_is_float) .fmul else .mul,
-                                        .div_assign => if (sw_is_float) .fdiv else .div,
-                                        else => if (sw_is_float) .fmul else .mul, // fallback
-                                    };
-                                    const result_id = self.allocId();
-                                    const op_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                    op_ops[0] = .{ .id = swizzled_id };
-                                    op_ops[1] = .{ .id = value_id };
-                                    try self.instructions.append(self.alloc, .{
-                                        .tag = op_tag,
-                                        .result_type = null,
-                                        .result_id = result_id,
-                                        .operands = op_ops,
-                                        .ty = swizzled_ty,
-                                    });
-
-                                    // 5. VectorShuffle to combine: keep non-swizzled from original, use result for swizzled
-                                    const n = base_ty.numComponents();
-                                    const final_shuffle_ops = try self.alloc.alloc(ir.Instruction.Operand, 2 + n);
-                                    final_shuffle_ops[0] = .{ .id = vec_load_id }; // original vector
-                                    final_shuffle_ops[1] = .{ .id = result_id }; // computed values
-                                    for (0..n) |i| {
-                                        var found = false;
-                                        for (0..swizzle_len) |j| {
-                                            if (self.swizzleIndex(swizzle_name[j]) == i) {
-                                                // The computed values (operand 1) start at index n in the
-                                                // shuffle (operand 0 has n components), so the j-th computed
-                                                // value is at n+j — NOT swizzle_len+j (which only coincides
-                                                // for a full-width swizzle). swizzle_len+j silently wrote the
-                                                // wrong components for partial swizzles like `col.rgb *= x`.
-                                                final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(n + j) };
-                                                found = true;
-                                                break;
-                                            }
-                                        }
-                                        if (!found) {
-                                            final_shuffle_ops[2 + i] = .{ .literal_int = @intCast(i) };
-                                        }
-                                    }
-                                    const final_shuffle_id = try self.emitPureOp(.vector_shuffle, final_shuffle_ops, base_ty);
-
-                                    // 6. Store back
-                                    const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-                                    store_ops[0] = .{ .id = var_ptr_id2 };
-                                    store_ops[1] = .{ .id = final_shuffle_id };
-                                    _ = self.load_cache.remove(var_ptr_id2);
-                                    _ = self.global_load_cache.remove(var_ptr_id2);
-                                    // #248-D: a multi-component swizzle compound-assign (`v.xy *= k`)
-                                    // is a mutation site too — invalidate the chain's root and every
-                                    // sibling chain into it before forwarding the stored value.
-                                    self.invalidateAliasingChains(var_ptr_id2);
-                                    self.load_cache.put(self.alloc, var_ptr_id2, final_shuffle_id) catch {}; // Forward
-        try self.instructions.append(self.alloc, .{
-                                        .tag = .store,
-                                        .result_type = null,
-                                        .result_id = null,
-                                        .operands = store_ops,
-                                        .ty = .void,
-                                    });
-                                    return .{ .ty = .void, .id = 0 };
-                        } // end inner swizzle block
+                        // 6. Store back
+                        const store_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
+                        store_ops[0] = .{ .id = var_ptr_id2 };
+                        store_ops[1] = .{ .id = final_shuffle_id };
+                        _ = self.load_cache.remove(var_ptr_id2);
+                        _ = self.global_load_cache.remove(var_ptr_id2);
+                        // #248-D: a multi-component swizzle compound-assign (`v.xy *= k`)
+                        // is a mutation site too — invalidate the chain's root and every
+                        // sibling chain into it before forwarding the stored value.
+                        self.invalidateAliasingChains(var_ptr_id2);
+                        self.load_cache.put(self.alloc, var_ptr_id2, final_shuffle_id) catch {}; // Forward
+                        try self.instructions.append(self.alloc, .{
+                            .tag = .store,
+                            .result_type = null,
+                            .result_id = null,
+                            .operands = store_ops,
+                            .ty = .void,
+                        });
+                        return .{ .ty = .void, .id = 0 };
+                    } // end inner swizzle block
                 } // end swizzle_ca
 
                 // Regular (non-swizzle) compound assignment
@@ -5928,13 +5943,13 @@ const Analyzer = struct {
                     .bool
                 else if (self.isFloatReturnBuiltin(node.data.name))
                     .float
-                // Pack functions return uint
+                    // Pack functions return uint
                 else if (self.isPackBuiltin(node.data.name))
                     .uint
-                // Unpack functions return vec2 (or vec4 for unpackSnorm4x8/unpackUnorm4x8)
+                    // Unpack functions return vec2 (or vec4 for unpackSnorm4x8/unpackUnorm4x8)
                 else if (self.isUnpackBuiltin(node.data.name))
                     if (std.mem.endsWith(u8, node.data.name, "4x8")) .vec4 else .vec2
-                // transpose returns the transposed matrix type (rows ↔ columns)
+                    // transpose returns the transposed matrix type (rows ↔ columns)
                 else if (std.mem.eql(u8, node.data.name, "transpose") and arg_tids.items.len > 0 and arg_tids.items[0].ty.isMatrix())
                     arg_tids.items[0].ty.transposeType()
                 else if (self.isGLSLBuiltin(node.data.name) and arg_tids.items.len > 0)
@@ -5951,8 +5966,7 @@ const Analyzer = struct {
                         }
                     else
                         arg_tids.items[0].ty
-                else if (sym) |s| s.ty
-                else .void;
+                else if (sym) |s| s.ty else .void;
 
                 // Pre-check pure op cache for known pure GLSL builtins BEFORE allocating result_id.
                 const maybe_cached_builtin: ?u32 = blk: {
@@ -6023,9 +6037,15 @@ const Analyzer = struct {
                                 if (!tid.ty.isVector()) {
                                     const vec_id = self.allocId();
                                     const num_comps: usize = switch (ret_ty) {
-                                        .vec2 => 2, .vec3 => 3, .vec4 => 4,
-                                        .ivec2 => 2, .ivec3 => 3, .ivec4 => 4,
-                                        .uvec2 => 2, .uvec3 => 3, .uvec4 => 4,
+                                        .vec2 => 2,
+                                        .vec3 => 3,
+                                        .vec4 => 4,
+                                        .ivec2 => 2,
+                                        .ivec3 => 3,
+                                        .ivec4 => 4,
+                                        .uvec2 => 2,
+                                        .uvec3 => 3,
+                                        .uvec4 => 4,
                                         else => unreachable,
                                     };
                                     const comp_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
@@ -6516,7 +6536,7 @@ const Analyzer = struct {
                         _ = self.load_cache.remove(out_id);
                         _ = self.global_load_cache.remove(out_id);
                         self.load_cache.put(self.alloc, out_id, read_result_id) catch {}; // Forward
-        try self.instructions.append(self.alloc, .{
+                        try self.instructions.append(self.alloc, .{
                             .tag = .store,
                             .result_type = null,
                             .result_id = null,
@@ -6543,18 +6563,11 @@ const Analyzer = struct {
                             } else |_| {}
                         }
                         const atomic_tag: ir.Instruction.Tag =
-                            if (std.mem.eql(u8, node.data.name, "atomicAdd") and ret_ty == .float) .atomic_fadd else
-                            if (std.mem.eql(u8, node.data.name, "atomicAdd")) .atomic_iadd else
-                            if (std.mem.eql(u8, node.data.name, "atomicAnd")) .atomic_and else
-                            if (std.mem.eql(u8, node.data.name, "atomicOr")) .atomic_or else
-                            if (std.mem.eql(u8, node.data.name, "atomicXor")) .atomic_xor else
-                            if (std.mem.eql(u8, node.data.name, "atomicMin")) blk: {
+                            if (std.mem.eql(u8, node.data.name, "atomicAdd") and ret_ty == .float) .atomic_fadd else if (std.mem.eql(u8, node.data.name, "atomicAdd")) .atomic_iadd else if (std.mem.eql(u8, node.data.name, "atomicAnd")) .atomic_and else if (std.mem.eql(u8, node.data.name, "atomicOr")) .atomic_or else if (std.mem.eql(u8, node.data.name, "atomicXor")) .atomic_xor else if (std.mem.eql(u8, node.data.name, "atomicMin")) blk: {
                                 break :blk if (ret_ty == .int) .atomic_smin else .atomic_umin;
-                            } else
-                            if (std.mem.eql(u8, node.data.name, "atomicMax")) blk: {
+                            } else if (std.mem.eql(u8, node.data.name, "atomicMax")) blk: {
                                 break :blk if (ret_ty == .int) .atomic_smax else .atomic_umax;
-                            } else
-                            .atomic_exchange;
+                            } else .atomic_exchange;
                         // Convert value to match return type if needed
                         var value_id = if (arg_tids.items.len > 1) arg_tids.items[1].id else 0;
                         if (arg_tids.items.len > 1 and !std.meta.eql(arg_tids.items[1].ty, ret_ty)) {
@@ -6654,18 +6667,11 @@ const Analyzer = struct {
                             });
                         } else {
                             const atomic_tag: ir.Instruction.Tag =
-                                if (std.mem.eql(u8, node.data.name, "imageAtomicAdd") and ret_ty == .float) .atomic_fadd else
-                                if (std.mem.eql(u8, node.data.name, "imageAtomicAdd")) .atomic_iadd else
-                                if (std.mem.eql(u8, node.data.name, "imageAtomicAnd")) .atomic_and else
-                                if (std.mem.eql(u8, node.data.name, "imageAtomicOr")) .atomic_or else
-                                if (std.mem.eql(u8, node.data.name, "imageAtomicXor")) .atomic_xor else
-                                if (std.mem.eql(u8, node.data.name, "imageAtomicMin")) blk: {
+                                if (std.mem.eql(u8, node.data.name, "imageAtomicAdd") and ret_ty == .float) .atomic_fadd else if (std.mem.eql(u8, node.data.name, "imageAtomicAdd")) .atomic_iadd else if (std.mem.eql(u8, node.data.name, "imageAtomicAnd")) .atomic_and else if (std.mem.eql(u8, node.data.name, "imageAtomicOr")) .atomic_or else if (std.mem.eql(u8, node.data.name, "imageAtomicXor")) .atomic_xor else if (std.mem.eql(u8, node.data.name, "imageAtomicMin")) blk: {
                                     break :blk if (ret_ty == .int) .atomic_smin else .atomic_umin;
-                                } else
-                                if (std.mem.eql(u8, node.data.name, "imageAtomicMax")) blk: {
+                                } else if (std.mem.eql(u8, node.data.name, "imageAtomicMax")) blk: {
                                     break :blk if (ret_ty == .int) .atomic_smax else .atomic_umax;
-                                } else
-                                .atomic_exchange;
+                                } else .atomic_exchange;
                             // Coerce value to match return type (int->uint or uint->int)
                             var value_id = arg_tids.items[2].id;
                             const value_ty = arg_tids.items[2].ty;
@@ -6699,13 +6705,9 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "imageSize")) {
                         const size_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
                             // 1-component (width only): 1D + buffer
-                            .image1d, .iimage1d, .uimage1d,
-                            .image_buffer, .iimage_buffer, .uimage_buffer => .int,
+                            .image1d, .iimage1d, .uimage1d, .image_buffer, .iimage_buffer, .uimage_buffer => .int,
                             // 3-component: 2D array, 3D, cube array, 2DMS array
-                            .image2d_array, .iimage2d_array, .uimage2d_array,
-                            .image3d, .iimage3d, .uimage3d,
-                            .image_cube_array, .iimage_cube_array, .uimage_cube_array,
-                            .image2d_ms_array => .ivec3,
+                            .image2d_array, .iimage2d_array, .uimage2d_array, .image3d, .iimage3d, .uimage3d, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .image2d_ms_array => .ivec3,
                             // 2-component: 2D, cube, 2DMS (and anything else)
                             else => .ivec2,
                         } else .ivec2;
@@ -6726,24 +6728,9 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "textureSize")) {
                         // Determine result type based on sampler type
                         const size_ty: ast.Type = if (arg_tids.items.len > 0) switch (arg_tids.items[0].ty) {
-                            .sampler1d, .sampler1d_shadow, .isampler1d, .usampler1d,
-                            .sampler_buffer, .isampler_buffer, .usampler_buffer,
-                            .image_buffer, .iimage_buffer, .uimage_buffer => .int,
-                            .sampler2d, .sampler2d_shadow, .sampler2d_ms,
-                            .sampler_cube, .sampler_cube_shadow,
-                            .isampler2d, .usampler2d,
-                            .isampler_cube, .usampler_cube,
-                            .isampler2d_ms, .usampler2d_ms,
-                            .isampler1d_array, .usampler1d_array,
-                            .image2d, .iimage2d, .uimage2d, .image2d_ms => .ivec2,
-                            .sampler2d_array, .sampler2d_array_shadow, .sampler3d,
-                            .isampler3d, .usampler3d,
-                            .sampler_cube_array, .sampler_cube_array_shadow,
-                            .sampler2d_ms_array,
-                            .isampler2d_ms_array, .usampler2d_ms_array,
-                            .isampler2d_array, .usampler2d_array,
-                            .isampler_cube_array, .usampler_cube_array,
-                            .image2d_ms_array => .ivec3,
+                            .sampler1d, .sampler1d_shadow, .isampler1d, .usampler1d, .sampler_buffer, .isampler_buffer, .usampler_buffer, .image_buffer, .iimage_buffer, .uimage_buffer => .int,
+                            .sampler2d, .sampler2d_shadow, .sampler2d_ms, .sampler_cube, .sampler_cube_shadow, .isampler2d, .usampler2d, .isampler_cube, .usampler_cube, .isampler2d_ms, .usampler2d_ms, .isampler1d_array, .usampler1d_array, .image2d, .iimage2d, .uimage2d, .image2d_ms => .ivec2,
+                            .sampler2d_array, .sampler2d_array_shadow, .sampler3d, .isampler3d, .usampler3d, .sampler_cube_array, .sampler_cube_array_shadow, .sampler2d_ms_array, .isampler2d_ms_array, .usampler2d_ms_array, .isampler2d_array, .usampler2d_array, .isampler_cube_array, .usampler_cube_array, .image2d_ms_array => .ivec3,
                             else => .ivec2,
                         } else .ivec2;
                         // Extract image from sampler (all sampler types need extraction)
@@ -6792,8 +6779,7 @@ const Analyzer = struct {
                         if (arg_tids.items[0].ty.isCombinedSampler() or
                             arg_tids.items[0].ty == .sampler1d_shadow or arg_tids.items[0].ty == .sampler2d_shadow or
                             arg_tids.items[0].ty == .sampler_cube_shadow or arg_tids.items[0].ty == .sampler2d_array_shadow or
-                            arg_tids.items[0].ty == .sampler_cube_array_shadow
-                        )
+                            arg_tids.items[0].ty == .sampler_cube_array_shadow)
                         {
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
@@ -6875,7 +6861,8 @@ const Analyzer = struct {
                     if (std.mem.eql(u8, node.data.name, "textureSamples") or std.mem.eql(u8, node.data.name, "imageSamples")) {
                         var img_id = arg_tids.items[0].id;
                         if (arg_tids.items[0].ty.isCombinedSampler() or
-                            arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array) {
+                            arg_tids.items[0].ty == .sampler2d_ms or arg_tids.items[0].ty == .sampler2d_ms_array)
+                        {
                             const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
                             ext_ops[0] = .{ .id = arg_tids.items[0].id };
                             const extracted = try self.emitPureOp(.extract_image, ext_ops, arg_tids.items[0].ty);
@@ -6898,12 +6885,10 @@ const Analyzer = struct {
                         if (arg_tids.items.len >= 2) {
                             const a_rows = arg_tids.items[0].ty.numComponents();
                             const b_rows = arg_tids.items[1].ty.numComponents();
-                            const mat_ty: ast.Type = if (a_rows == 2 and b_rows == 2) .mat2
-                                else if (a_rows == 3 and b_rows == 2) .mat2x3 // 3 rows, 2 cols
+                            const mat_ty: ast.Type = if (a_rows == 2 and b_rows == 2) .mat2 else if (a_rows == 3 and b_rows == 2) .mat2x3 // 3 rows, 2 cols
                                 else if (a_rows == 4 and b_rows == 2) .mat2x4 // 4 rows, 2 cols
                                 else if (a_rows == 2 and b_rows == 3) .mat3x2 // 2 rows, 3 cols
-                                else if (a_rows == 3 and b_rows == 3) .mat3
-                                else if (a_rows == 4 and b_rows == 3) .mat3x4 // 4 rows, 3 cols
+                                else if (a_rows == 3 and b_rows == 3) .mat3 else if (a_rows == 4 and b_rows == 3) .mat3x4 // 4 rows, 3 cols
                                 else if (a_rows == 2 and b_rows == 4) .mat4x2 // 2 rows, 4 cols
                                 else if (a_rows == 3 and b_rows == 4) .mat4x3 // 3 rows, 4 cols
                                 else .mat4; // 4x4
@@ -7270,194 +7255,190 @@ const Analyzer = struct {
                                     .ty = result_ty,
                                 });
                             } else {
-                            // texture(sampler, coord) → image_sample (implicit or explicit lod)
-                            const is_lod = std.mem.eql(u8, node.data.name, "textureLod") or std.mem.eql(u8, node.data.name, "textureLodOffset");
-                            const is_grad = std.mem.eql(u8, node.data.name, "textureGrad") or std.mem.eql(u8, node.data.name, "textureGradOffset");
-                            const is_explicit_lod = is_lod or is_grad or std.mem.eql(u8, node.data.name, "textureProjLod") or std.mem.eql(u8, node.data.name, "textureProjLodOffset") or std.mem.eql(u8, node.data.name, "textureProjGrad") or std.mem.eql(u8, node.data.name, "textureProjGradOffset");
-                            const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
-                            // textureOffset(s, coord, const ivec offset) →
-                            // image_sample_offset (see ir.zig) so codegen emits the
-                            // SPIR-V ConstOffset image operand. The plain image_sample
-                            // arm dropped operand[2] entirely = silent-wrong (sampled
-                            // the wrong texels). The WGSL back-end carries this offset
-                            // into textureSample(t, s, coord, offset). (#170)
-                            //
-                            // Scope note: textureGradOffset IS now lowered — it routes
-                            // through is_grad to image_sample_grad, whose codegen emits
-                            // Grad|ConstOffset when the 5th (offset) operand is present,
-                            // and ALL FOUR back-ends now carry the offset (WGSL
-                            // textureSampleGrad 6th arg, GLSL textureGradOffset, HLSL
-                            // .SampleGrad 5th arg, MSL sample(..., offset)). Its const
-                            // offset is the offset_arg_idx=4 case below. textureProjOffset
-                            // IS now lowered too (image_sample_proj_offset →
-                            // OpImageSampleProjImplicitLod with ConstOffset; WGSL
-                            // textureSample(coord/divisor, offset) carries it).
-                            const is_tex_offset = !is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset");
-                            // The ConstOffset operand MUST be an OpConstantComposite
-                            // (SPIR-V requires it constant). For ivec2(1,0) the arg
-                            // folds to a constant_composite; a non-constant offset
-                            // cannot be a ConstOffset, so honest-error rather than
-                            // emit invalid SPIR-V. Mirrors the textureGatherOffsets
-                            // offsets-constant gate above. textureOffset's offset is
-                            // arg 2; textureLodOffset's (which routes through
-                            // image_sample_explicit_lod's ConstOffset arm) is arg 3.
-                            const offset_arg_idx: ?usize = if (is_tex_offset)
-                                2
-                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureLodOffset"))
-                                3
-                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureGradOffset"))
-                                // textureGradOffset(s, coord, dPdx, dPdy, const ivec offset):
-                                // the offset is arg 4, carried as a ConstOffset alongside
-                                // the Grad operand (mask Grad|ConstOffset). (#170)
-                                4
-                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjLodOffset"))
-                                // textureProjLodOffset(s, coord, lod, const ivec offset):
-                                // the offset is arg 3, carried as a ConstOffset alongside
-                                // the Lod operand (mask Lod|ConstOffset). (#170)
-                                3
-                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjGradOffset"))
-                                // textureProjGradOffset(s, coord, dPdx, dPdy, const ivec offset):
-                                // the offset is arg 4, carried as a ConstOffset alongside
-                                // the Grad operands (mask Grad|ConstOffset). (#170)
-                                4
-                            else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjOffset"))
-                                // textureProjOffset(s, coord, const ivec offset): projective
-                                // sample (implicit LOD) + ConstOffset; the offset is arg 2. (#170)
-                                2
-                            else
-                                null;
-                            if (offset_arg_idx) |oi| {
-                                if (oi >= arg_tids.items.len or !self.isConstantId(arg_tids.items[oi].id)) {
-                                    last_error_ctx = "texture-offset-not-constant";
-                                    last_error_inner = "texture-offset-not-constant";
+                                // texture(sampler, coord) → image_sample (implicit or explicit lod)
+                                const is_lod = std.mem.eql(u8, node.data.name, "textureLod") or std.mem.eql(u8, node.data.name, "textureLodOffset");
+                                const is_grad = std.mem.eql(u8, node.data.name, "textureGrad") or std.mem.eql(u8, node.data.name, "textureGradOffset");
+                                const is_explicit_lod = is_lod or is_grad or std.mem.eql(u8, node.data.name, "textureProjLod") or std.mem.eql(u8, node.data.name, "textureProjLodOffset") or std.mem.eql(u8, node.data.name, "textureProjGrad") or std.mem.eql(u8, node.data.name, "textureProjGradOffset");
+                                const is_proj = std.mem.eql(u8, node.data.name, "textureProj");
+                                // textureOffset(s, coord, const ivec offset) →
+                                // image_sample_offset (see ir.zig) so codegen emits the
+                                // SPIR-V ConstOffset image operand. The plain image_sample
+                                // arm dropped operand[2] entirely = silent-wrong (sampled
+                                // the wrong texels). The WGSL back-end carries this offset
+                                // into textureSample(t, s, coord, offset). (#170)
+                                //
+                                // Scope note: textureGradOffset IS now lowered — it routes
+                                // through is_grad to image_sample_grad, whose codegen emits
+                                // Grad|ConstOffset when the 5th (offset) operand is present,
+                                // and ALL FOUR back-ends now carry the offset (WGSL
+                                // textureSampleGrad 6th arg, GLSL textureGradOffset, HLSL
+                                // .SampleGrad 5th arg, MSL sample(..., offset)). Its const
+                                // offset is the offset_arg_idx=4 case below. textureProjOffset
+                                // IS now lowered too (image_sample_proj_offset →
+                                // OpImageSampleProjImplicitLod with ConstOffset; WGSL
+                                // textureSample(coord/divisor, offset) carries it).
+                                const is_tex_offset = !is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset");
+                                // The ConstOffset operand MUST be an OpConstantComposite
+                                // (SPIR-V requires it constant). For ivec2(1,0) the arg
+                                // folds to a constant_composite; a non-constant offset
+                                // cannot be a ConstOffset, so honest-error rather than
+                                // emit invalid SPIR-V. Mirrors the textureGatherOffsets
+                                // offsets-constant gate above. textureOffset's offset is
+                                // arg 2; textureLodOffset's (which routes through
+                                // image_sample_explicit_lod's ConstOffset arm) is arg 3.
+                                const offset_arg_idx: ?usize = if (is_tex_offset)
+                                    2
+                                else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureLodOffset"))
+                                    3
+                                else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureGradOffset"))
+                                    // textureGradOffset(s, coord, dPdx, dPdy, const ivec offset):
+                                    // the offset is arg 4, carried as a ConstOffset alongside
+                                    // the Grad operand (mask Grad|ConstOffset). (#170)
+                                    4
+                                else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjLodOffset"))
+                                    // textureProjLodOffset(s, coord, lod, const ivec offset):
+                                    // the offset is arg 3, carried as a ConstOffset alongside
+                                    // the Lod operand (mask Lod|ConstOffset). (#170)
+                                    3
+                                else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjGradOffset"))
+                                    // textureProjGradOffset(s, coord, dPdx, dPdy, const ivec offset):
+                                    // the offset is arg 4, carried as a ConstOffset alongside
+                                    // the Grad operands (mask Grad|ConstOffset). (#170)
+                                    4
+                                else if (!is_shadow_sample and std.mem.eql(u8, node.data.name, "textureProjOffset"))
+                                    // textureProjOffset(s, coord, const ivec offset): projective
+                                    // sample (implicit LOD) + ConstOffset; the offset is arg 2. (#170)
+                                    2
+                                else
+                                    null;
+                                if (offset_arg_idx) |oi| {
+                                    if (oi >= arg_tids.items.len or !self.isConstantId(arg_tids.items[oi].id)) {
+                                        last_error_ctx = "texture-offset-not-constant";
+                                        last_error_inner = "texture-offset-not-constant";
+                                        last_error_line = node.loc.line;
+                                        last_error_column = node.loc.column;
+                                        return error.SemanticFailed;
+                                    }
+                                    // A ConstOffset image operand is illegal on a Cube-dim
+                                    // image (SPIR-V) and has no GLSL overload — honest-error
+                                    // rather than emit invalid SPIR-V ("Image Operand
+                                    // ConstOffset cannot be used with Cube Image 'Dim'"). (#170)
+                                    if (arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty)) {
+                                        last_error_ctx = "texture-offset-on-cube-unsupported";
+                                        last_error_inner = "texture-offset-on-cube-unsupported";
+                                        last_error_line = node.loc.line;
+                                        last_error_column = node.loc.column;
+                                        return error.SemanticFailed;
+                                    }
+                                }
+                                // #170: textureOffset(sampler2DShadow, coord, const ivec
+                                // offset) — the 3-arg form (no bias) — routes to
+                                // image_sample_dref, whose 3-operand codegen path assumes a
+                                // FLOAT Bias operand (it cannot tell the ivec2 offset apart
+                                // from a `texture(shadow, coord, bias)` bias by arg count
+                                // alone). Emitting the offset there produced INVALID SPIR-V
+                                // (spirv-val: "Expected Image Operand Bias to be a 32-bit
+                                // float scalar") at rc=0 = silent-wrong. Honest-error until
+                                // the dref-ConstOffset lowering lands (the 4-arg
+                                // offset+bias form @codegen image_sample_dref already emits
+                                // Bias|ConstOffset correctly, and shadow textureLodOffset
+                                // works via the Lod-disambiguated explicit-lod path — both
+                                // unaffected). WGSL's textureSampleCompare can carry a const
+                                // offset, so a full lowering is a tracked follow-up. (#170)
+                                if (is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset") and arg_tids.items.len == 3) {
+                                    last_error_ctx = "shadow-textureOffset-unsupported";
+                                    last_error_inner = "shadow-textureOffset-unsupported";
                                     last_error_line = node.loc.line;
                                     last_error_column = node.loc.column;
                                     return error.SemanticFailed;
                                 }
-                                // A ConstOffset image operand is illegal on a Cube-dim
-                                // image (SPIR-V) and has no GLSL overload — honest-error
-                                // rather than emit invalid SPIR-V ("Image Operand
-                                // ConstOffset cannot be used with Cube Image 'Dim'"). (#170)
-                                if (arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty)) {
-                                    last_error_ctx = "texture-offset-on-cube-unsupported";
-                                    last_error_inner = "texture-offset-on-cube-unsupported";
+                                // textureProjLod (projective sample + explicit LOD) is
+                                // its own non-shadow op; the shadow variant
+                                // (OpImageSampleProjDrefExplicitLod) is not lowered — fail
+                                // loud rather than route to a NON-proj dref tag (which
+                                // would drop the projection = silent-wrong).
+                                const is_proj_lod = std.mem.eql(u8, node.data.name, "textureProjLod");
+                                // textureProjGrad: projective sample with EXPLICIT gradients →
+                                // OpImageSampleProjExplicitLod with the Grad image operand (not
+                                // Lod). Shares image_sample_proj_explicit_lod with textureProjLod;
+                                // codegen distinguishes them by operand count (3 = Lod, 4 = Grad).
+                                const is_proj_grad = std.mem.eql(u8, node.data.name, "textureProjGrad");
+                                // textureProjLodOffset: projective + explicit LOD + const
+                                // offset → OpImageSampleProjExplicitLod with Lod|ConstOffset
+                                // (its own IR tag — the count-based Lod/Grad dispatch can't
+                                // tell [coord,lod,offset] from the Grad form [coord,dPdx,dPdy]).
+                                const is_proj_lod_offset = std.mem.eql(u8, node.data.name, "textureProjLodOffset");
+                                // textureProjGradOffset: projective + explicit gradients + const
+                                // offset → OpImageSampleProjExplicitLod with Grad|ConstOffset
+                                // (its own IR tag: [si,coord,dPdx,dPdy,offset]).
+                                const is_proj_grad_offset = std.mem.eql(u8, node.data.name, "textureProjGradOffset");
+                                // textureProjOffset: projective sample (implicit LOD) + const
+                                // offset → OpImageSampleProjImplicitLod with ConstOffset
+                                // (its own IR tag: [si,coord,offset]).
+                                const is_proj_offset = std.mem.eql(u8, node.data.name, "textureProjOffset");
+                                if ((is_proj_lod or is_proj_lod_offset) and is_shadow_sample) {
+                                    last_error_ctx = "textureProjLod-shadow-unsupported";
+                                    last_error_inner = "textureProjLod-shadow-unsupported";
                                     last_error_line = node.loc.line;
                                     last_error_column = node.loc.column;
                                     return error.SemanticFailed;
                                 }
-                            }
-                            // #170: textureOffset(sampler2DShadow, coord, const ivec
-                            // offset) — the 3-arg form (no bias) — routes to
-                            // image_sample_dref, whose 3-operand codegen path assumes a
-                            // FLOAT Bias operand (it cannot tell the ivec2 offset apart
-                            // from a `texture(shadow, coord, bias)` bias by arg count
-                            // alone). Emitting the offset there produced INVALID SPIR-V
-                            // (spirv-val: "Expected Image Operand Bias to be a 32-bit
-                            // float scalar") at rc=0 = silent-wrong. Honest-error until
-                            // the dref-ConstOffset lowering lands (the 4-arg
-                            // offset+bias form @codegen image_sample_dref already emits
-                            // Bias|ConstOffset correctly, and shadow textureLodOffset
-                            // works via the Lod-disambiguated explicit-lod path — both
-                            // unaffected). WGSL's textureSampleCompare can carry a const
-                            // offset, so a full lowering is a tracked follow-up. (#170)
-                            if (is_shadow_sample and std.mem.eql(u8, node.data.name, "textureOffset") and arg_tids.items.len == 3) {
-                                last_error_ctx = "shadow-textureOffset-unsupported";
-                                last_error_inner = "shadow-textureOffset-unsupported";
-                                last_error_line = node.loc.line;
-                                last_error_column = node.loc.column;
-                                return error.SemanticFailed;
-                            }
-                            // textureProjLod (projective sample + explicit LOD) is
-                            // its own non-shadow op; the shadow variant
-                            // (OpImageSampleProjDrefExplicitLod) is not lowered — fail
-                            // loud rather than route to a NON-proj dref tag (which
-                            // would drop the projection = silent-wrong).
-                            const is_proj_lod = std.mem.eql(u8, node.data.name, "textureProjLod");
-                            // textureProjGrad: projective sample with EXPLICIT gradients →
-                            // OpImageSampleProjExplicitLod with the Grad image operand (not
-                            // Lod). Shares image_sample_proj_explicit_lod with textureProjLod;
-                            // codegen distinguishes them by operand count (3 = Lod, 4 = Grad).
-                            const is_proj_grad = std.mem.eql(u8, node.data.name, "textureProjGrad");
-                            // textureProjLodOffset: projective + explicit LOD + const
-                            // offset → OpImageSampleProjExplicitLod with Lod|ConstOffset
-                            // (its own IR tag — the count-based Lod/Grad dispatch can't
-                            // tell [coord,lod,offset] from the Grad form [coord,dPdx,dPdy]).
-                            const is_proj_lod_offset = std.mem.eql(u8, node.data.name, "textureProjLodOffset");
-                            // textureProjGradOffset: projective + explicit gradients + const
-                            // offset → OpImageSampleProjExplicitLod with Grad|ConstOffset
-                            // (its own IR tag: [si,coord,dPdx,dPdy,offset]).
-                            const is_proj_grad_offset = std.mem.eql(u8, node.data.name, "textureProjGradOffset");
-                            // textureProjOffset: projective sample (implicit LOD) + const
-                            // offset → OpImageSampleProjImplicitLod with ConstOffset
-                            // (its own IR tag: [si,coord,offset]).
-                            const is_proj_offset = std.mem.eql(u8, node.data.name, "textureProjOffset");
-                            if ((is_proj_lod or is_proj_lod_offset) and is_shadow_sample) {
-                                last_error_ctx = "textureProjLod-shadow-unsupported";
-                                last_error_inner = "textureProjLod-shadow-unsupported";
-                                last_error_line = node.loc.line;
-                                last_error_column = node.loc.column;
-                                return error.SemanticFailed;
-                            }
-                            // Shadow textureProjOffset (sampler2DShadow) is valid GLSL but
-                            // would route to image_sample_dref_proj, which has no ConstOffset
-                            // path — the offset would be silently dropped. Honest-error rather
-                            // than mis-compile (mirrors the 3-arg shadow textureOffset guard
-                            // below; WGSL's projective compare lowering can't carry an offset
-                            // here). (#170)
-                            if (is_proj_offset and is_shadow_sample) {
-                                last_error_ctx = "shadow-textureProjOffset-unsupported";
-                                last_error_inner = "shadow-textureProjOffset-unsupported";
-                                last_error_line = node.loc.line;
-                                last_error_column = node.loc.column;
-                                return error.SemanticFailed;
-                            }
-                            // Shadow GRADIENT sampling (textureGrad/textureGradOffset/
-                            // textureProjGrad on a *Shadow sampler) has no lowering: it would
-                            // route to a dref instruction whose codegen reads operand[2]
-                            // (here dPdx, a vec2) as the float Lod operand → INVALID SPIR-V
-                            // ("Expected Image Operand Lod to be a 32-bit float scalar"). Fail
-                            // loud rather than mis-compile. (WGSL's compare-sample builtins
-                            // can't carry gradients anyway.) (#170)
-                            if ((is_grad or is_proj_grad or is_proj_grad_offset) and is_shadow_sample) {
-                                last_error_ctx = "shadow-textureGrad-unsupported";
-                                last_error_inner = "shadow-textureGrad-unsupported";
-                                last_error_line = node.loc.line;
-                                last_error_column = node.loc.column;
-                                return error.SemanticFailed;
-                            }
-                            // Projective sampling is undefined for a CUBE image: the
-                            // perspective divide needs a homogeneous coordinate, and
-                            // SPIR-V's OpImageSampleProj* require Dim 1D/2D/3D/Rect (not
-                            // Cube). GLSL has no cube textureProj* overload either
-                            // (glslang: "no matching overloaded function"). zioshade used to
-                            // emit invalid SPIR-V ("Expected Image 'Dim' to be 1D, 2D, 3D
-                            // or Rect"); honest-error instead. (#170)
-                            if ((is_proj or is_proj_lod or is_proj_grad or is_proj_lod_offset or is_proj_grad_offset or is_proj_offset) and
-                                arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty))
-                            {
-                                last_error_ctx = "projective-sample-on-cube-unsupported";
-                                last_error_inner = "projective-sample-on-cube-unsupported";
-                                last_error_line = node.loc.line;
-                                last_error_column = node.loc.column;
-                                return error.SemanticFailed;
-                            }
-                            // Shadow samplers use Dref instructions that return float
-                            const tag: ir.Instruction.Tag = if (is_shadow_sample) (
-                                if (is_explicit_lod) .image_sample_dref_explicit_lod
-                                else if (is_proj) .image_sample_dref_proj
-                                else .image_sample_dref
-                            ) else if (is_proj_grad_offset) .image_sample_proj_grad_offset else if (is_proj_lod_offset) .image_sample_proj_lod_offset else if (is_proj_lod or is_proj_grad) .image_sample_proj_explicit_lod else if (is_proj_offset) .image_sample_proj_offset else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
-                            const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
-                            for (arg_tids.items, 0..) |tid, i| {
-                                operands[i] = .{ .id = tid.id };
-                            }
-                            try self.instructions.append(self.alloc, .{
-                                .tag = tag,
-                                .result_type = null,
-                                .result_id = result_id,
-                                .operands = operands,
-                                .ty = if (is_shadow_sample) arg_tids.items[0].ty else result_ty,
-                            });
+                                // Shadow textureProjOffset (sampler2DShadow) is valid GLSL but
+                                // would route to image_sample_dref_proj, which has no ConstOffset
+                                // path — the offset would be silently dropped. Honest-error rather
+                                // than mis-compile (mirrors the 3-arg shadow textureOffset guard
+                                // below; WGSL's projective compare lowering can't carry an offset
+                                // here). (#170)
+                                if (is_proj_offset and is_shadow_sample) {
+                                    last_error_ctx = "shadow-textureProjOffset-unsupported";
+                                    last_error_inner = "shadow-textureProjOffset-unsupported";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // Shadow GRADIENT sampling (textureGrad/textureGradOffset/
+                                // textureProjGrad on a *Shadow sampler) has no lowering: it would
+                                // route to a dref instruction whose codegen reads operand[2]
+                                // (here dPdx, a vec2) as the float Lod operand → INVALID SPIR-V
+                                // ("Expected Image Operand Lod to be a 32-bit float scalar"). Fail
+                                // loud rather than mis-compile. (WGSL's compare-sample builtins
+                                // can't carry gradients anyway.) (#170)
+                                if ((is_grad or is_proj_grad or is_proj_grad_offset) and is_shadow_sample) {
+                                    last_error_ctx = "shadow-textureGrad-unsupported";
+                                    last_error_inner = "shadow-textureGrad-unsupported";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // Projective sampling is undefined for a CUBE image: the
+                                // perspective divide needs a homogeneous coordinate, and
+                                // SPIR-V's OpImageSampleProj* require Dim 1D/2D/3D/Rect (not
+                                // Cube). GLSL has no cube textureProj* overload either
+                                // (glslang: "no matching overloaded function"). zioshade used to
+                                // emit invalid SPIR-V ("Expected Image 'Dim' to be 1D, 2D, 3D
+                                // or Rect"); honest-error instead. (#170)
+                                if ((is_proj or is_proj_lod or is_proj_grad or is_proj_lod_offset or is_proj_grad_offset or is_proj_offset) and
+                                    arg_tids.items.len > 0 and self.isCubeSamplerType(arg_tids.items[0].ty))
+                                {
+                                    last_error_ctx = "projective-sample-on-cube-unsupported";
+                                    last_error_inner = "projective-sample-on-cube-unsupported";
+                                    last_error_line = node.loc.line;
+                                    last_error_column = node.loc.column;
+                                    return error.SemanticFailed;
+                                }
+                                // Shadow samplers use Dref instructions that return float
+                                const tag: ir.Instruction.Tag = if (is_shadow_sample) (if (is_explicit_lod) .image_sample_dref_explicit_lod else if (is_proj) .image_sample_dref_proj else .image_sample_dref) else if (is_proj_grad_offset) .image_sample_proj_grad_offset else if (is_proj_lod_offset) .image_sample_proj_lod_offset else if (is_proj_lod or is_proj_grad) .image_sample_proj_explicit_lod else if (is_proj_offset) .image_sample_proj_offset else if (is_grad) .image_sample_grad else if (is_explicit_lod) .image_sample_explicit_lod else if (is_proj) .image_sample_proj else if (is_tex_offset) .image_sample_offset else .image_sample;
+                                const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len);
+                                for (arg_tids.items, 0..) |tid, i| {
+                                    operands[i] = .{ .id = tid.id };
+                                }
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = tag,
+                                    .result_type = null,
+                                    .result_id = result_id,
+                                    .operands = operands,
+                                    .ty = if (is_shadow_sample) arg_tids.items[0].ty else result_ty,
+                                });
                             }
                         } else {
                             // texelFetch etc → image_fetch as fallback
@@ -7560,15 +7541,11 @@ const Analyzer = struct {
                         }
                         self.pure_op_cache.put(self.alloc, key, result_id) catch {};
                     } else if (std.mem.eql(u8, node.data.name, "dFdx") or std.mem.eql(u8, node.data.name, "dFdy") or
-                              std.mem.eql(u8, node.data.name, "dFdxFine") or std.mem.eql(u8, node.data.name, "dFdyFine") or
-                              std.mem.eql(u8, node.data.name, "dFdxCoarse") or std.mem.eql(u8, node.data.name, "dFdyCoarse")) {
+                        std.mem.eql(u8, node.data.name, "dFdxFine") or std.mem.eql(u8, node.data.name, "dFdyFine") or
+                        std.mem.eql(u8, node.data.name, "dFdxCoarse") or std.mem.eql(u8, node.data.name, "dFdyCoarse"))
+                    {
                         // Derivatives: OpDPdx/OpDPdy and Fine/Coarse variants (core SPIR-V)
-                        const which: u32 = if (std.mem.eql(u8, node.data.name, "dFdx")) 0
-                            else if (std.mem.eql(u8, node.data.name, "dFdy")) 1
-                            else if (std.mem.eql(u8, node.data.name, "dFdxFine")) 2
-                            else if (std.mem.eql(u8, node.data.name, "dFdyFine")) 3
-                            else if (std.mem.eql(u8, node.data.name, "dFdxCoarse")) 4
-                            else 5; // dFdyCoarse
+                        const which: u32 = if (std.mem.eql(u8, node.data.name, "dFdx")) 0 else if (std.mem.eql(u8, node.data.name, "dFdy")) 1 else if (std.mem.eql(u8, node.data.name, "dFdxFine")) 2 else if (std.mem.eql(u8, node.data.name, "dFdyFine")) 3 else if (std.mem.eql(u8, node.data.name, "dFdxCoarse")) 4 else 5; // dFdyCoarse
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                         operands[0] = .{ .literal_int = which };
                         for (arg_tids.items, 1..) |tid, i| {
@@ -7583,9 +7560,7 @@ const Analyzer = struct {
                         });
                     } else if (std.mem.eql(u8, node.data.name, "fwidth") or std.mem.eql(u8, node.data.name, "fwidthFine") or std.mem.eql(u8, node.data.name, "fwidthCoarse")) {
                         // fwidth(p) = abs(dFdx(p)) + abs(dFdy(p)) → OpFwidth / OpFwidthFine / OpFwidthCoarse
-                        const which: u32 = if (std.mem.eql(u8, node.data.name, "fwidth")) 0
-                            else if (std.mem.eql(u8, node.data.name, "fwidthFine")) 1
-                            else 2;
+                        const which: u32 = if (std.mem.eql(u8, node.data.name, "fwidth")) 0 else if (std.mem.eql(u8, node.data.name, "fwidthFine")) 1 else 2;
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                         operands[0] = .{ .literal_int = which };
                         for (arg_tids.items, 0..) |tid, i| {
@@ -7711,11 +7686,13 @@ const Analyzer = struct {
                                 if (is_float) .compare_fgte else if (is_u) .compare_ugte else .compare_gte
                             else if (std.mem.eql(u8, node.data.name, "equal"))
                                 if (is_float) .compare_feq else .compare_eq
-                            else
-                                if (is_float) .compare_fneq else .compare_neq;
+                            else if (is_float) .compare_fneq else .compare_neq;
                             // Result type: bvec with same dimension
                             const bvec_ty: ast.Type = if (left_ty.isVector()) switch (left_ty.numComponents()) {
-                                2 => .bvec2, 3 => .bvec3, 4 => .bvec4, else => .bool,
+                                2 => .bvec2,
+                                3 => .bvec3,
+                                4 => .bvec4,
+                                else => .bool,
                             } else .bool;
                             const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
                             operands[0] = .{ .id = arg_tids.items[0].id };
@@ -8320,10 +8297,18 @@ const Analyzer = struct {
                                     // Promote scalar to vector via OpCompositeConstruct
                                     const vec_id = self.allocId();
                                     const num_comps: usize = switch (first_ty) {
-                                        .vec2 => 2, .vec3 => 3, .vec4 => 4,
-                                        .ivec2 => 2, .ivec3 => 3, .ivec4 => 4,
-                                        .uvec2 => 2, .uvec3 => 3, .uvec4 => 4,
-                                        .bvec2 => 2, .bvec3 => 3, .bvec4 => 4,
+                                        .vec2 => 2,
+                                        .vec3 => 3,
+                                        .vec4 => 4,
+                                        .ivec2 => 2,
+                                        .ivec3 => 3,
+                                        .ivec4 => 4,
+                                        .uvec2 => 2,
+                                        .uvec3 => 3,
+                                        .uvec4 => 4,
+                                        .bvec2 => 2,
+                                        .bvec3 => 3,
+                                        .bvec4 => 4,
                                         else => unreachable,
                                     };
                                     const comp_ops = try self.alloc.alloc(ir.Instruction.Operand, num_comps);
@@ -8635,9 +8620,9 @@ const Analyzer = struct {
                         // Extract first component from vector
                         const element_ty = arg_ty.elementType();
                         const extract_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-        extract_ops[0] = .{ .id = arg_tids.items[0].id };
-        extract_ops[1] = .{ .literal_int = 0 };
-        const extract_id = try self.emitPureOp(.composite_extract, extract_ops, element_ty);
+                        extract_ops[0] = .{ .id = arg_tids.items[0].id };
+                        extract_ops[1] = .{ .literal_int = 0 };
+                        const extract_id = try self.emitPureOp(.composite_extract, extract_ops, element_ty);
                         // Convert element to target type if needed
                         if (std.meta.eql(element_ty, result_ty)) {
                             return .{ .ty = result_ty, .id = extract_id };
@@ -8686,9 +8671,9 @@ const Analyzer = struct {
                             const zero_id = try self.getConstInt(0, .int);
                             for (0..n) |i| {
                                 const elem_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-        elem_ops[0] = .{ .id = arg_tids.items[0].id };
-        elem_ops[1] = .{ .literal_int = @intCast(i) };
-        const elem_id = try self.emitPureOp(.composite_extract, elem_ops, .int);
+                                elem_ops[0] = .{ .id = arg_tids.items[0].id };
+                                elem_ops[1] = .{ .literal_int = @intCast(i) };
+                                const elem_id = try self.emitPureOp(.composite_extract, elem_ops, .int);
                                 const cmp_id = self.allocId();
                                 const cmp_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                                 cmp_ops[0] = .{ .id = elem_id };
@@ -8721,9 +8706,9 @@ const Analyzer = struct {
                             for (0..n) |i| {
                                 // Extract bool component
                                 const ext_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
-        ext_ops[0] = .{ .id = arg_tids.items[0].id };
-        ext_ops[1] = .{ .literal_int = @intCast(i) };
-        const bool_id = try self.emitPureOp(.composite_extract, ext_ops, .bool);
+                                ext_ops[0] = .{ .id = arg_tids.items[0].id };
+                                ext_ops[1] = .{ .literal_int = @intCast(i) };
+                                const bool_id = try self.emitPureOp(.composite_extract, ext_ops, .bool);
                                 // OpSelect: cond=true_id, true=one_id, false=zero_id
                                 const sel_id = self.allocId();
                                 const sel_ops = try self.alloc.alloc(ir.Instruction.Operand, 3);
@@ -9831,9 +9816,9 @@ const Analyzer = struct {
                     if (member_name.len == 1) {
                         const idx = self.swizzleIndex(member_name[0]);
                         const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-        operands[0] = .{ .id = base_tid.id };
-        operands[1] = .{ .literal_int = idx };
-        const result_id = try self.emitPureOp(.composite_extract, operands, elem_ty);
+                        operands[0] = .{ .id = base_tid.id };
+                        operands[1] = .{ .literal_int = idx };
+                        const result_id = try self.emitPureOp(.composite_extract, operands, elem_ty);
                         return .{ .ty = elem_ty, .id = result_id };
                     }
                     // Multi-component swizzle (e.g., .xyz, .xy, .xz)
@@ -9909,9 +9894,9 @@ const Analyzer = struct {
                             } else {
                                 // Value base → composite_extract (value result)
                                 const operands = try self.alloc.alloc(ir.Instruction.Operand, 2);
-        operands[0] = .{ .id = base_tid.id };
-        operands[1] = .{ .literal_int = idx };
-        const result_id = try self.emitPureOp(.composite_extract, operands, member_ty);
+                                operands[0] = .{ .id = base_tid.id };
+                                operands[1] = .{ .literal_int = idx };
+                                const result_id = try self.emitPureOp(.composite_extract, operands, member_ty);
                                 return .{ .ty = member_ty, .id = result_id };
                             }
                         }
@@ -9958,7 +9943,10 @@ const Analyzer = struct {
                     // First check instruction list (for current function)
                     for (self.instructions.items, 0..) |inst, i| {
                         if (inst.result_id != null and inst.result_id.? == index_tid.id and inst.tag == .constant_int) {
-                            const_idx = switch (inst.operands[0]) { .literal_int => |v| v, else => null };
+                            const_idx = switch (inst.operands[0]) {
+                                .literal_int => |v| v,
+                                else => null,
+                            };
                             _ = i;
                             break;
                         }
@@ -10094,7 +10082,7 @@ const Analyzer = struct {
                 // (per-function) so it fires for dominating-block chains too (residual C).
                 self.invalidateAliasingChains(lval.id);
                 self.load_cache.put(self.alloc, lval.id, new_val_id) catch {}; // Forward
-        try self.instructions.append(self.alloc, .{
+                try self.instructions.append(self.alloc, .{
                     .tag = .store,
                     .result_type = null,
                     .result_id = null,
@@ -10283,79 +10271,60 @@ const Analyzer = struct {
     fn isGLSLBuiltin(self: *Analyzer, name: []const u8) bool {
         _ = self;
         const builtins = .{
-            "abs", "acos", "asin", "atan", "atan2", "ceil", "clamp",
-            "cos", "cosh", "cross", "degrees", "determinant", "distance",
-            "dot", "exp", "exp2", "faceforward", "floor", "fract",
-            "inversesqrt", "length", "log", "log2", "max", "min", "mix",
-            "min3", "max3", "mid3",
-            "mod", "normalize", "pow", "radians", "reflect", "refract",
-            "round", "roundEven", "sign", "sin", "sinh", "smoothstep", "sqrt", "step",
-            "tan", "tanh", "transpose", "trunc",
-            "asinh", "acosh", "atanh",
-            "texture", "texture2D", "textureLod", "textureProj", "texelFetch",
-            "textureQueryLevels",
-            "textureQueryLod",
-            "subpassLoad",
-            "dFdx", "dFdy", "fwidth", "dFdxFine", "dFdyFine", "fwidthFine", "dFdxCoarse", "dFdyCoarse", "fwidthCoarse",
-            "isnan", "isinf",
+            "abs",                 "acos",                  "asin",                   "atan",                           "atan2",                                             "ceil",                      "clamp",
+            "cos",                 "cosh",                  "cross",                  "degrees",                        "determinant",                                       "distance",                  "dot",
+            "exp",                 "exp2",                  "faceforward",            "floor",                          "fract",                                             "inversesqrt",               "length",
+            "log",                 "log2",                  "max",                    "min",                            "mix",                                               "min3",                      "max3",
+            "mid3",                "mod",                   "normalize",              "pow",                            "radians",                                           "reflect",                   "refract",
+            "round",               "roundEven",             "sign",                   "sin",                            "sinh",                                              "smoothstep",                "sqrt",
+            "step",                "tan",                   "tanh",                   "transpose",                      "trunc",                                             "asinh",                     "acosh",
+            "atanh",               "texture",               "texture2D",              "textureLod",                     "textureProj",                                       "texelFetch",                "textureQueryLevels",
+            "textureQueryLod",     "subpassLoad",           "dFdx",                   "dFdy",                           "fwidth",                                            "dFdxFine",                  "dFdyFine",
+            "fwidthFine",          "dFdxCoarse",            "dFdyCoarse",             "fwidthCoarse",                   "isnan",                                             "isinf",
             // Additional GLSL builtins
-            "inverse", "outerProduct", "matrixCompMult",
+                                "inverse",
+            "outerProduct",        "matrixCompMult",
             // Fragment interpolation builtins (GLSL.std.450 76/77/78, pointer interpolant)
-            "interpolateAtCentroid", "interpolateAtSample", "interpolateAtOffset",
-            "lessThan", "greaterThan", "lessThanEqual", "greaterThanEqual",
-            "equal", "notEqual", "any", "all", "not",
-            "floatBitsToInt", "floatBitsToUint", "intBitsToFloat", "uintBitsToFloat",
-            "fma", "frexp", "ldexp", "modf",
-            "packSnorm4x8", "packUnorm4x8", "packHalf2x16",
-            "packSnorm2x16", "packUnorm2x16",
-            "unpackSnorm2x16", "unpackUnorm2x16", "unpackHalf2x16",
-            "unpackSnorm4x8", "unpackUnorm4x8",
-            "findLSB", "findMSB",
-            "bitCount",
-            "bitfieldReverse",
-            "bitfieldInsert", "bitfieldExtract",
+                   "interpolateAtCentroid",  "interpolateAtSample",            "interpolateAtOffset",                               "lessThan",                  "greaterThan",
+            "lessThanEqual",       "greaterThanEqual",      "equal",                  "notEqual",                       "any",                                               "all",                       "not",
+            "floatBitsToInt",      "floatBitsToUint",       "intBitsToFloat",         "uintBitsToFloat",                "fma",                                               "frexp",                     "ldexp",
+            "modf",                "packSnorm4x8",          "packUnorm4x8",           "packHalf2x16",                   "packSnorm2x16",                                     "packUnorm2x16",             "unpackSnorm2x16",
+            "unpackUnorm2x16",     "unpackHalf2x16",        "unpackSnorm4x8",         "unpackUnorm4x8",                 "findLSB",                                           "findMSB",                   "bitCount",
+            "bitfieldReverse",     "bitfieldInsert",        "bitfieldExtract",
             // Extended arithmetic (GL_ARB_gpu_shader5). uaddCarry/usubBorrow and the
             // SCALAR form of umul/imulExtended are emulated with core u32 ops (16-bit-
             // limb multiply-high); the vector form of the latter honest-errors.
-            "uaddCarry", "usubBorrow", "umulExtended", "imulExtended",
-            "imageSize", "imageLoad", "imageStore", "textureSize",
-            "textureSamples", "imageSamples", "textureOffset", "textureLodOffset", "texelFetchOffset", "textureGrad", "textureGather", "textureGatherOffset", "textureGatherOffsets",
-            "textureGradOffset", "textureProjLod", "textureProjLodOffset", "textureProjGrad", "textureProjGradOffset", "textureProjOffset",
+                   "uaddCarry",                      "usubBorrow",                                        "umulExtended",              "imulExtended",
+            "imageSize",           "imageLoad",             "imageStore",             "textureSize",                    "textureSamples",                                    "imageSamples",              "textureOffset",
+            "textureLodOffset",    "texelFetchOffset",      "textureGrad",            "textureGather",                  "textureGatherOffset",                               "textureGatherOffsets",      "textureGradOffset",
+            "textureProjLod",      "textureProjLodOffset",  "textureProjGrad",        "textureProjGradOffset",          "textureProjOffset",
             // Barrier/memory builtins (void, special handling)
-            "barrier", "memoryBarrier", "memoryBarrierShared",
-            "memoryBarrierImage", "memoryBarrierBuffer", "groupMemoryBarrier",
+                                            "barrier",                   "memoryBarrier",
+            "memoryBarrierShared", "memoryBarrierImage",    "memoryBarrierBuffer",    "groupMemoryBarrier",
             // Fragment shader interlock
-            "beginInvocationInterlockARB", "endInvocationInterlockARB",
+                        "beginInvocationInterlockARB",                       "endInvocationInterlockARB",
             // Demote helper invocation
             "demote",
             // Geometry shader builtins
-            "EmitVertex", "EndPrimitive",
+            "EmitVertex",          "EndPrimitive",
             // Helper invocation query (returns bool)
-            "helperInvocationEXT",
+                     "helperInvocationEXT",
             // Atomic builtins
-            "atomicAdd",
-            "atomicAnd", "atomicOr", "atomicXor", "atomicMin", "atomicMax",
-            "atomicExchange", "atomicCompSwap",
-            "atomicCounter", "atomicCounterIncrement",
-            "imageAtomicAdd",
-            "imageAtomicOr", "imageAtomicXor", "imageAtomicAnd",
-            "imageAtomicMin", "imageAtomicMax",
-            "imageAtomicExchange", "imageAtomicCompSwap",
+               "atomicAdd",                      "atomicAnd",                                         "atomicOr",                  "atomicXor",
+            "atomicMin",           "atomicMax",             "atomicExchange",         "atomicCompSwap",                 "atomicCounter",                                     "atomicCounterIncrement",    "imageAtomicAdd",
+            "imageAtomicOr",       "imageAtomicXor",        "imageAtomicAnd",         "imageAtomicMin",                 "imageAtomicMax",                                    "imageAtomicExchange",       "imageAtomicCompSwap",
             // Subgroup / group vote
-            "allInvocationsARB", "anyInvocationARB", "allInvocationsEqualARB",
-            "allInvocations", "anyInvocation", "allInvocationsEqual",
-            "subgroupBarrier", "subgroupElect", "subgroupAll", "subgroupAny", "subgroupAllEqual",
+            "allInvocationsARB",   "anyInvocationARB",      "allInvocationsEqualARB", "allInvocations",                 "anyInvocation",                                     "allInvocationsEqual",       "subgroupBarrier",
+            "subgroupElect",       "subgroupAll",           "subgroupAny",            "subgroupAllEqual",
             // QCOM image processing builtins
-            "textureBoxFilterQCOM", "textureBlockMatchSADQCOM", "textureBlockMatchSSDQCOM", "textureWeightedQCOM",
+                          "textureBoxFilterQCOM",                              "textureBlockMatchSADQCOM",  "textureBlockMatchSSDQCOM",
+            "textureWeightedQCOM",
             // Ray query builtins
-            "rayQueryInitializeEXT", "rayQueryProceedEXT", "rayQueryGetIntersectionTypeEXT",
-            "rayQueryGetIntersectionTriangleVertexPositionsEXT",
-            "tensorSizeARM", "tensorReadARM",
+            "rayQueryInitializeEXT", "rayQueryProceedEXT",     "rayQueryGetIntersectionTypeEXT", "rayQueryGetIntersectionTriangleVertexPositionsEXT", "tensorSizeARM",             "tensorReadARM",
             // EXT_mesh_shader builtins
-            "SetMeshOutputsEXT", "EmitMeshTasksEXT",
+            "SetMeshOutputsEXT",   "EmitMeshTasksEXT",
             // KHR_ray_tracing builtins
-            "traceRayEXT", "reportIntersectionEXT", "ignoreIntersectionEXT",
-            "terminateRayEXT", "executeCallableEXT",
+                 "traceRayEXT",            "reportIntersectionEXT",          "ignoreIntersectionEXT",                             "terminateRayEXT",           "executeCallableEXT",
         };
         inline for (builtins) |b| {
             if (std.mem.eql(u8, name, b)) return true;
@@ -10473,49 +10442,49 @@ const Analyzer = struct {
     fn glslExtInstruction(self: *Analyzer, name: []const u8) ?u32 {
         _ = self;
         // GLSL.std.450 instruction numbers (from SPIR-V spec)
-        if (std.mem.eql(u8, name, "round")) return 1;      // Round
-        if (std.mem.eql(u8, name, "roundEven")) return 2;   // RoundEven
-        if (std.mem.eql(u8, name, "trunc")) return 3;       // Trunc
-        if (std.mem.eql(u8, name, "abs")) return 4;         // FAbs
-        if (std.mem.eql(u8, name, "sign")) return 6;        // FSign
-        if (std.mem.eql(u8, name, "floor")) return 8;       // Floor
-        if (std.mem.eql(u8, name, "ceil")) return 9;        // Ceil
-        if (std.mem.eql(u8, name, "fract")) return 10;      // Fract
-        if (std.mem.eql(u8, name, "radians")) return 11;    // Radians
-        if (std.mem.eql(u8, name, "degrees")) return 12;    // Degrees
-        if (std.mem.eql(u8, name, "sin")) return 13;        // Sin
-        if (std.mem.eql(u8, name, "cos")) return 14;        // Cos
-        if (std.mem.eql(u8, name, "tan")) return 15;        // Tan
-        if (std.mem.eql(u8, name, "asin")) return 16;       // Asin
-        if (std.mem.eql(u8, name, "acos")) return 17;       // Acos
-        if (std.mem.eql(u8, name, "atan")) return 18;       // Atan
-        if (std.mem.eql(u8, name, "sinh")) return 19;       // Sinh
-        if (std.mem.eql(u8, name, "cosh")) return 20;       // Cosh
-        if (std.mem.eql(u8, name, "tanh")) return 21;       // Tanh
-        if (std.mem.eql(u8, name, "asinh")) return 22;      // Asinh
-        if (std.mem.eql(u8, name, "acosh")) return 23;      // Acosh
-        if (std.mem.eql(u8, name, "atanh")) return 24;      // Atanh
-        if (std.mem.eql(u8, name, "atan2")) return 25;      // Atan2
-        if (std.mem.eql(u8, name, "pow")) return 26;        // Pow
-        if (std.mem.eql(u8, name, "exp")) return 27;        // Exp
-        if (std.mem.eql(u8, name, "log")) return 28;        // Log
-        if (std.mem.eql(u8, name, "exp2")) return 29;       // Exp2
-        if (std.mem.eql(u8, name, "log2")) return 30;       // Log2
-        if (std.mem.eql(u8, name, "sqrt")) return 31;       // Sqrt
+        if (std.mem.eql(u8, name, "round")) return 1; // Round
+        if (std.mem.eql(u8, name, "roundEven")) return 2; // RoundEven
+        if (std.mem.eql(u8, name, "trunc")) return 3; // Trunc
+        if (std.mem.eql(u8, name, "abs")) return 4; // FAbs
+        if (std.mem.eql(u8, name, "sign")) return 6; // FSign
+        if (std.mem.eql(u8, name, "floor")) return 8; // Floor
+        if (std.mem.eql(u8, name, "ceil")) return 9; // Ceil
+        if (std.mem.eql(u8, name, "fract")) return 10; // Fract
+        if (std.mem.eql(u8, name, "radians")) return 11; // Radians
+        if (std.mem.eql(u8, name, "degrees")) return 12; // Degrees
+        if (std.mem.eql(u8, name, "sin")) return 13; // Sin
+        if (std.mem.eql(u8, name, "cos")) return 14; // Cos
+        if (std.mem.eql(u8, name, "tan")) return 15; // Tan
+        if (std.mem.eql(u8, name, "asin")) return 16; // Asin
+        if (std.mem.eql(u8, name, "acos")) return 17; // Acos
+        if (std.mem.eql(u8, name, "atan")) return 18; // Atan
+        if (std.mem.eql(u8, name, "sinh")) return 19; // Sinh
+        if (std.mem.eql(u8, name, "cosh")) return 20; // Cosh
+        if (std.mem.eql(u8, name, "tanh")) return 21; // Tanh
+        if (std.mem.eql(u8, name, "asinh")) return 22; // Asinh
+        if (std.mem.eql(u8, name, "acosh")) return 23; // Acosh
+        if (std.mem.eql(u8, name, "atanh")) return 24; // Atanh
+        if (std.mem.eql(u8, name, "atan2")) return 25; // Atan2
+        if (std.mem.eql(u8, name, "pow")) return 26; // Pow
+        if (std.mem.eql(u8, name, "exp")) return 27; // Exp
+        if (std.mem.eql(u8, name, "log")) return 28; // Log
+        if (std.mem.eql(u8, name, "exp2")) return 29; // Exp2
+        if (std.mem.eql(u8, name, "log2")) return 30; // Log2
+        if (std.mem.eql(u8, name, "sqrt")) return 31; // Sqrt
         if (std.mem.eql(u8, name, "inversesqrt")) return 32; // InverseSqrt
         if (std.mem.eql(u8, name, "determinant")) return 33; // Determinant
-        if (std.mem.eql(u8, name, "inverse")) return 34;   // MatrixInverse
-        if (std.mem.eql(u8, name, "mod")) return 29;        // unused, mod has special handler
-        if (std.mem.eql(u8, name, "modf")) return 36;       // ModfStruct
-        if (std.mem.eql(u8, name, "min")) return 37;        // FMin
-        if (std.mem.eql(u8, name, "max")) return 40;        // FMax
-        if (std.mem.eql(u8, name, "clamp")) return 43;      // FClamp
-        if (std.mem.eql(u8, name, "mix")) return 46;        // FMix
-        if (std.mem.eql(u8, name, "step")) return 48;       // Step
+        if (std.mem.eql(u8, name, "inverse")) return 34; // MatrixInverse
+        if (std.mem.eql(u8, name, "mod")) return 29; // unused, mod has special handler
+        if (std.mem.eql(u8, name, "modf")) return 36; // ModfStruct
+        if (std.mem.eql(u8, name, "min")) return 37; // FMin
+        if (std.mem.eql(u8, name, "max")) return 40; // FMax
+        if (std.mem.eql(u8, name, "clamp")) return 43; // FClamp
+        if (std.mem.eql(u8, name, "mix")) return 46; // FMix
+        if (std.mem.eql(u8, name, "step")) return 48; // Step
         if (std.mem.eql(u8, name, "smoothstep")) return 49; // SmoothStep
-        if (std.mem.eql(u8, name, "fma")) return 50;        // Fma
-        if (std.mem.eql(u8, name, "frexp")) return 52;      // FrexpStruct
-        if (std.mem.eql(u8, name, "ldexp")) return 53;      // Ldexp
+        if (std.mem.eql(u8, name, "fma")) return 50; // Fma
+        if (std.mem.eql(u8, name, "frexp")) return 52; // FrexpStruct
+        if (std.mem.eql(u8, name, "ldexp")) return 53; // Ldexp
         // Pack/Unpack (from SPIR-V spec)
         if (std.mem.eql(u8, name, "packSnorm4x8")) return 54;
         if (std.mem.eql(u8, name, "packUnorm4x8")) return 55;
@@ -10528,16 +10497,16 @@ const Analyzer = struct {
         if (std.mem.eql(u8, name, "unpackSnorm4x8")) return 63;
         if (std.mem.eql(u8, name, "unpackUnorm4x8")) return 64;
         // Geometric (from SPIR-V spec)
-        if (std.mem.eql(u8, name, "length")) return 66;     // Length
-        if (std.mem.eql(u8, name, "distance")) return 67;   // Distance
-        if (std.mem.eql(u8, name, "cross")) return 68;      // Cross
-        if (std.mem.eql(u8, name, "normalize")) return 69;  // Normalize
+        if (std.mem.eql(u8, name, "length")) return 66; // Length
+        if (std.mem.eql(u8, name, "distance")) return 67; // Distance
+        if (std.mem.eql(u8, name, "cross")) return 68; // Cross
+        if (std.mem.eql(u8, name, "normalize")) return 69; // Normalize
         if (std.mem.eql(u8, name, "faceforward")) return 70; // FaceForward
-        if (std.mem.eql(u8, name, "reflect")) return 71;    // Reflect
-        if (std.mem.eql(u8, name, "refract")) return 72;    // Refract
+        if (std.mem.eql(u8, name, "reflect")) return 71; // Reflect
+        if (std.mem.eql(u8, name, "refract")) return 72; // Refract
         // Integer ops (from SPIR-V spec)
-        if (std.mem.eql(u8, name, "findLSB")) return 73;      // FindILsb
-        if (std.mem.eql(u8, name, "findMSB")) return 74;      // FindSMsb (signed, GLSL spec says this is correct for both signed/unsigned)
+        if (std.mem.eql(u8, name, "findLSB")) return 73; // FindILsb
+        if (std.mem.eql(u8, name, "findMSB")) return 74; // FindSMsb (signed, GLSL spec says this is correct for both signed/unsigned)
         // NOT GLSL.std.450 — handled as core SPIR-V ops or specially
         if (std.mem.eql(u8, name, "transpose") or std.mem.eql(u8, name, "outerProduct") or
             std.mem.eql(u8, name, "matrixCompMult"))

@@ -34,14 +34,26 @@ pub const Token = struct {
         kw_float,
         kw_int,
         kw_uint,
-        kw_int8, kw_uint8,
-        kw_int16, kw_uint16,
+        kw_int8,
+        kw_uint8,
+        kw_int16,
+        kw_uint16,
         kw_float16,
-        kw_i8vec2, kw_i8vec3, kw_i8vec4,
-        kw_u8vec2, kw_u8vec3, kw_u8vec4,
-        kw_i16vec2, kw_i16vec3, kw_i16vec4,
-        kw_u16vec2, kw_u16vec3, kw_u16vec4,
-        kw_f16vec2, kw_f16vec3, kw_f16vec4,
+        kw_i8vec2,
+        kw_i8vec3,
+        kw_i8vec4,
+        kw_u8vec2,
+        kw_u8vec3,
+        kw_u8vec4,
+        kw_i16vec2,
+        kw_i16vec3,
+        kw_i16vec4,
+        kw_u16vec2,
+        kw_u16vec3,
+        kw_u16vec4,
+        kw_f16vec2,
+        kw_f16vec3,
+        kw_f16vec4,
         kw_bool,
         kw_vec2,
         kw_vec3,
@@ -535,7 +547,7 @@ const Tokenizer = struct {
                     last_error_column = start_loc.column;
                     return error.IdentifierTooLong;
                 }
-                const ident = self.source[start..start + ident_len];
+                const ident = self.source[start .. start + ident_len];
                 const tag = keyword_map.get(ident) orelse .identifier;
                 try self.tokens.append(alloc, .{
                     .tag = tag,
@@ -549,7 +561,7 @@ const Tokenizer = struct {
             // Check for numeric literals
             if (isDigit(self.source[self.offset]) or (self.source[self.offset] == '.')) {
                 if (self.tryParseNumber()) |num_len| {
-                    const num_str = self.source[start..start + num_len];
+                    const num_str = self.source[start .. start + num_len];
                     const tag = classifyNumber(num_str);
                     try self.tokens.append(alloc, .{
                         .tag = tag,
@@ -790,12 +802,12 @@ const Tokenizer = struct {
 
         // Check for three-character operators first (<<= and >>=)
         if (i + 2 < s.len) {
-            if (s[i] == '<' and s[i+1] == '<' and s[i+2] == '=') {
+            if (s[i] == '<' and s[i + 1] == '<' and s[i + 2] == '=') {
                 self.offset += 3;
                 self.loc.column += 3;
                 return .{ .tag = .lshift_eq, .len = 3 };
             }
-            if (s[i] == '>' and s[i+1] == '>' and s[i+2] == '=') {
+            if (s[i] == '>' and s[i + 1] == '>' and s[i + 2] == '=') {
                 self.offset += 3;
                 self.loc.column += 3;
                 return .{ .tag = .rshift_eq, .len = 3 };
@@ -805,28 +817,8 @@ const Tokenizer = struct {
         // Two-character operators
         if (i + 1 < s.len) {
             const c0 = s[i];
-            const c1 = s[i+1];
-            const tag: ?Token.Tag = if (c0 == '<' and c1 == '<') .lshift
-                else if (c0 == '>' and c1 == '>') .rshift
-                else if (c0 == '=' and c1 == '=') .eq_eq
-                else if (c0 == '!' and c1 == '=') .bang_eq
-                else if (c0 == '<' and c1 == '=') .lt_eq
-                else if (c0 == '>' and c1 == '=') .gt_eq
-                else if (c0 == '&' and c1 == '&') .ampersand_ampersand
-                else if (c0 == '|' and c1 == '|') .pipe_pipe
-                else if (c0 == '^' and c1 == '^') .caret_caret
-                else if (c0 == '+' and c1 == '=') .plus_eq
-                else if (c0 == '-' and c1 == '=') .minus_eq
-                else if (c0 == '*' and c1 == '=') .star_eq
-                else if (c0 == '/' and c1 == '=') .slash_eq
-                else if (c0 == '%' and c1 == '=') .percent_eq
-                else if (c0 == '&' and c1 == '=') .ampersand_eq
-                else if (c0 == '|' and c1 == '=') .pipe_eq
-                else if (c0 == '^' and c1 == '=') .caret_eq
-                else if (c0 == '+' and c1 == '+') .plus_plus
-                else if (c0 == '-' and c1 == '-') .minus_minus
-                else if (c0 == '#' and c1 == '#') .hash_hash
-                else null;
+            const c1 = s[i + 1];
+            const tag: ?Token.Tag = if (c0 == '<' and c1 == '<') .lshift else if (c0 == '>' and c1 == '>') .rshift else if (c0 == '=' and c1 == '=') .eq_eq else if (c0 == '!' and c1 == '=') .bang_eq else if (c0 == '<' and c1 == '=') .lt_eq else if (c0 == '>' and c1 == '=') .gt_eq else if (c0 == '&' and c1 == '&') .ampersand_ampersand else if (c0 == '|' and c1 == '|') .pipe_pipe else if (c0 == '^' and c1 == '^') .caret_caret else if (c0 == '+' and c1 == '=') .plus_eq else if (c0 == '-' and c1 == '=') .minus_eq else if (c0 == '*' and c1 == '=') .star_eq else if (c0 == '/' and c1 == '=') .slash_eq else if (c0 == '%' and c1 == '=') .percent_eq else if (c0 == '&' and c1 == '=') .ampersand_eq else if (c0 == '|' and c1 == '=') .pipe_eq else if (c0 == '^' and c1 == '=') .caret_eq else if (c0 == '+' and c1 == '+') .plus_plus else if (c0 == '-' and c1 == '-') .minus_minus else if (c0 == '#' and c1 == '#') .hash_hash else null;
 
             if (tag) |t| {
                 self.offset += 2;
@@ -893,7 +885,7 @@ fn isHexDigit(c: u8) bool {
 fn classifyNumber(s: []const u8) Token.Tag {
     // Check for hex literal
     if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) {
-        if (s.len > 2 and (s[s.len-1] == 'u' or s[s.len-1] == 'U')) {
+        if (s.len > 2 and (s[s.len - 1] == 'u' or s[s.len - 1] == 'U')) {
             return .uint_literal;
         }
         return .int_literal;
@@ -922,7 +914,7 @@ fn classifyNumber(s: []const u8) Token.Tag {
     }
 
     // Check for uint suffix
-    if (s.len > 0 and (s[s.len-1] == 'u' or s[s.len-1] == 'U')) {
+    if (s.len > 0 and (s[s.len - 1] == 'u' or s[s.len - 1] == 'U')) {
         return .uint_literal;
     }
 
