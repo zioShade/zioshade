@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security report
+    url: https://github.com/deblasis/zioshade/security/policy
+    about: Please report security issues privately (see SECURITY.md), not as public issues.
+  - name: Question or usage help
+    url: https://github.com/deblasis/zioshade/discussions
+    about: For open-ended questions, prefer Discussions if enabled; otherwise use the Question template.

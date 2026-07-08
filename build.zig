@@ -5,7 +5,7 @@ pub fn build(b: *std.Build) void {
     // Fail with one actionable line on unsupported Zig versions rather than a
     // cryptic linkLibrary/stdlib error deep in the build. zioshade pins 0.15.2.
     if (builtin.zig_version.minor != 15) {
-        @compileError("zioshade requires Zig 0.15.2. See the README (mise install, or ziglang.org/download/0.15.2). 0.16 support is tracked in the issue tracker.");
+        @compileError("zioshade requires Zig 0.15.2. See the README (mise install, or ziglang.org/download/0.15.2). 0.16 support is tracked in issue #424.");
     }
 
     const target = b.standardTargetOptions(.{});
@@ -46,6 +46,50 @@ pub fn build(b: *std.Build) void {
     // (a bare dependency on the compile step builds it but never copies it out).
     const cli_install = b.addInstallArtifact(cli_exe, .{});
     cli_step.dependOn(&cli_install.step);
+
+    // Release matrix. Build with: zig build release
+    //
+    // Cross-compiles the CLI for the four shipping targets into
+    // zig-out/release/<triple>/. Pure vanilla std.Build: no external
+    // dependency (build.zig.zon stays dependency-free, which is a selling
+    // point). linux-x86_64 and windows-x86_64 cross-build cleanly from any
+    // host; the two macOS targets need a macOS SDK (System framework stubs)
+    // and are expected to build in CI on a macOS runner rather than from an
+    // arbitrary Linux host.
+    //
+    // NOTE (portfolio cross-reference): this hand-written per-target loop is
+    // exactly the boilerplate a ziobuild `releases()` helper collapses to a
+    // single call. We keep it hand-written on purpose: adding ziobuild would
+    // reintroduce a build-graph dependency this project deliberately avoids.
+    const release_step = b.step("release", "Cross-compile the CLI for all shipping targets into zig-out/release/");
+    const release_targets = .{
+        .{ "linux-x86_64", std.Target.Query{ .cpu_arch = .x86_64, .os_tag = .linux } },
+        .{ "macos-aarch64", std.Target.Query{ .cpu_arch = .aarch64, .os_tag = .macos } },
+        .{ "macos-x86_64", std.Target.Query{ .cpu_arch = .x86_64, .os_tag = .macos } },
+        .{ "windows-x86_64", std.Target.Query{ .cpu_arch = .x86_64, .os_tag = .windows } },
+    };
+    inline for (release_targets) |rt| {
+        const rt_target = b.resolveTargetQuery(rt[1]);
+        const rt_lib_mod = b.createModule(.{
+            .root_source_file = b.path("src/root.zig"),
+            .target = rt_target,
+            .optimize = .ReleaseFast,
+        });
+        const rt_cli_mod = b.createModule(.{
+            .root_source_file = b.path("src/cli.zig"),
+            .target = rt_target,
+            .optimize = .ReleaseFast,
+        });
+        rt_cli_mod.addImport("zioshade", rt_lib_mod);
+        const rt_exe = b.addExecutable(.{
+            .name = "zioshade",
+            .root_module = rt_cli_mod,
+        });
+        const rt_install = b.addInstallArtifact(rt_exe, .{
+            .dest_dir = .{ .override = .{ .custom = b.fmt("release/{s}", .{rt[0]}) } },
+        });
+        release_step.dependOn(&rt_install.step);
+    }
 
     // C ABI libraries (M7.2) — build with: zig build c-lib
     //

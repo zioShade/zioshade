@@ -134,7 +134,7 @@ pub const Preprocessor = struct {
             const start = tok.start - self.top_source_len;
             return self.extra_strings.items[start..][0..tok.len];
         }
-        return self.source[tok.start..tok.start + tok.len];
+        return self.source[tok.start .. tok.start + tok.len];
     }
 
     /// Append `text` to extra_strings and return the synthetic `start` offset for a
@@ -809,16 +809,19 @@ pub const Preprocessor = struct {
                                 // Stringify: convert arg tokens to a string literal
                                 var buf: [1024]u8 = undefined;
                                 var len: usize = 0;
-                                buf[len] = '"'; len += 1;
+                                buf[len] = '"';
+                                len += 1;
                                 for (args[idx], 0..) |arg_tok, ai| {
                                     if (ai > 0) {
-                                        buf[len] = ' '; len += 1;
+                                        buf[len] = ' ';
+                                        len += 1;
                                     }
                                     const arg_text = self.getTokenText(arg_tok);
                                     @memcpy(buf[len..][0..arg_text.len], arg_text);
                                     len += arg_text.len;
                                 }
-                                buf[len] = '"'; len += 1;
+                                buf[len] = '"';
+                                len += 1;
                                 // Intern so getTokenText AND the parser resolve it
                                 // (offset keyed off top_source_len, not the swapped
                                 // self.source.len — correct inside #include too).
@@ -1174,16 +1177,16 @@ pub const Preprocessor = struct {
                                     const behavior = self.getTokenText(tokens[i]);
                                     if ((std.mem.eql(u8, behavior, "enable") or std.mem.eql(u8, behavior, "require")) and
                                         (std.mem.eql(u8, ext_name, "GL_EXT_null_initializer") or
-                                         std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader") or
-                                         std.mem.eql(u8, ext_name, "GL_KHR_ray_tracing") or
-                                         std.mem.eql(u8, ext_name, "GL_ARB_fragment_shader_interlock") or
-                                         std.mem.eql(u8, ext_name, "GL_EXT_scalar_block_layout") or
-                                         std.mem.eql(u8, ext_name, "GL_EXT_buffer_reference") or
-                                         std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_basic") or
-                                         std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_vote") or
-                                         std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_arithmetic") or
-                                         std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_ballot") or
-                                         std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_shuffle")))
+                                            std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader") or
+                                            std.mem.eql(u8, ext_name, "GL_KHR_ray_tracing") or
+                                            std.mem.eql(u8, ext_name, "GL_ARB_fragment_shader_interlock") or
+                                            std.mem.eql(u8, ext_name, "GL_EXT_scalar_block_layout") or
+                                            std.mem.eql(u8, ext_name, "GL_EXT_buffer_reference") or
+                                            std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_basic") or
+                                            std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_vote") or
+                                            std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_arithmetic") or
+                                            std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_ballot") or
+                                            std.mem.eql(u8, ext_name, "GL_KHR_shader_subgroup_shuffle")))
                                     {
                                         if (std.mem.eql(u8, ext_name, "GL_EXT_mesh_shader")) {
                                             self.has_ext_mesh_shader = true;

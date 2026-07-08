@@ -120,7 +120,10 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
         // Check sequential indices
         var sequential = true;
         for (exts, 0..) |e, i| {
-            if (e.idx != i) { sequential = false; break; }
+            if (e.idx != i) {
+                sequential = false;
+                break;
+            }
         }
         if (!sequential) continue;
 
@@ -133,8 +136,14 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
         var all_ok = true;
 
         for (exts) |e| {
-            if (num_rows >= 4) { all_ok = false; break; }
-            if ((use_count.get(e.rid) orelse 0) != 1) { all_ok = false; break; }
+            if (num_rows >= 4) {
+                all_ok = false;
+                break;
+            }
+            if ((use_count.get(e.rid) orelse 0) != 1) {
+                all_ok = false;
+                break;
+            }
 
             var found = false;
             var vit = vts_scalar.iterator();
@@ -151,7 +160,10 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
                     break;
                 }
             }
-            if (!found) { all_ok = false; break; }
+            if (!found) {
+                all_ok = false;
+                break;
+            }
         }
 
         if (!all_ok or num_rows < 3) continue;
@@ -260,7 +272,9 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
     var mat_type_id: u32 = 0;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -318,7 +332,9 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;

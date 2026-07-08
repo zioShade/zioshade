@@ -98,14 +98,37 @@ pub const Node = struct {
 };
 
 pub const Op = enum {
-    add, sub, mul, div, mod,
-    eq, neq, lt, gt, lte, gte,
-    logical_and, logical_or, logical_not,
-    bit_and, bit_or, bit_xor, bit_not,
-    lshift, rshift,
+    add,
+    sub,
+    mul,
+    div,
+    mod,
+    eq,
+    neq,
+    lt,
+    gt,
+    lte,
+    gte,
+    logical_and,
+    logical_or,
+    logical_not,
+    bit_and,
+    bit_or,
+    bit_xor,
+    bit_not,
+    lshift,
+    rshift,
     assign,
-    add_assign, sub_assign, mul_assign, div_assign, mod_assign,
-    and_assign, or_assign, xor_assign, lshift_assign, rshift_assign,
+    add_assign,
+    sub_assign,
+    mul_assign,
+    div_assign,
+    mod_assign,
+    and_assign,
+    or_assign,
+    xor_assign,
+    lshift_assign,
+    rshift_assign,
 };
 
 pub const Type = union(enum) {
@@ -115,14 +138,30 @@ pub const Type = union(enum) {
     uint,
     float,
     double,
-    vec2, vec3, vec4,
-    ivec2, ivec3, ivec4,
-    bvec2, bvec3, bvec4,
-    uvec2, uvec3, uvec4,
-    mat2, mat3, mat4,
-    mat2x2, mat2x3, mat2x4,
-    mat3x2, mat3x3, mat3x4,
-    mat4x2, mat4x3, mat4x4,
+    vec2,
+    vec3,
+    vec4,
+    ivec2,
+    ivec3,
+    ivec4,
+    bvec2,
+    bvec3,
+    bvec4,
+    uvec2,
+    uvec3,
+    uvec4,
+    mat2,
+    mat3,
+    mat4,
+    mat2x2,
+    mat2x3,
+    mat2x4,
+    mat3x2,
+    mat3x3,
+    mat3x4,
+    mat4x2,
+    mat4x3,
+    mat4x4,
     sampler2d,
     sampler2d_array,
     sampler3d,
@@ -200,11 +239,21 @@ pub const Type = union(enum) {
     int16,
     uint16,
     float16,
-    i8vec2, i8vec3, i8vec4,
-    u8vec2, u8vec3, u8vec4,
-    i16vec2, i16vec3, i16vec4,
-    u16vec2, u16vec3, u16vec4,
-    f16vec2, f16vec3, f16vec4,
+    i8vec2,
+    i8vec3,
+    i8vec4,
+    u8vec2,
+    u8vec3,
+    u8vec4,
+    i16vec2,
+    i16vec3,
+    i16vec4,
+    u16vec2,
+    u16vec3,
+    u16vec4,
+    f16vec2,
+    f16vec3,
+    f16vec4,
     named: []const u8,
     array: struct { base: *const Type, size: u32, size_name: ?[]const u8 = null },
 
@@ -232,9 +281,12 @@ pub const Type = union(enum) {
             .mat2, .mat2x2 => 4,
             .mat3, .mat3x3 => 9,
             .mat4, .mat4x4 => 16,
-            .mat2x3 => 6, .mat2x4 => 8,
-            .mat3x2 => 6, .mat3x4 => 12,
-            .mat4x2 => 8, .mat4x3 => 12,
+            .mat2x3 => 6,
+            .mat2x4 => 8,
+            .mat3x2 => 6,
+            .mat3x4 => 12,
+            .mat4x2 => 8,
+            .mat4x3 => 12,
             .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler1d_array, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .sampler_cube_array, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .sampler_plain, .texture2d_plain, .texture3d_plain, .texture_cube_plain, .texture2d_array_plain, .texture2d_ms_plain, .acceleration_structure_ext, .ray_query_ext, .tensor_arm, .subpass_input, .subpass_input_ms, .named, .array => 0,
         };
     }
@@ -255,15 +307,7 @@ pub const Type = union(enum) {
 
     pub fn isVector(self: Type) bool {
         return switch (self) {
-            .vec2, .vec3, .vec4,
-            .ivec2, .ivec3, .ivec4,
-            .bvec2, .bvec3, .bvec4,
-            .uvec2, .uvec3, .uvec4,
-            .i8vec2, .i8vec3, .i8vec4,
-            .u8vec2, .u8vec3, .u8vec4,
-            .i16vec2, .i16vec3, .i16vec4,
-            .u16vec2, .u16vec3, .u16vec4,
-            .f16vec2, .f16vec3, .f16vec4 => true,
+            .vec2, .vec3, .vec4, .ivec2, .ivec3, .ivec4, .bvec2, .bvec3, .bvec4, .uvec2, .uvec3, .uvec4, .i8vec2, .i8vec3, .i8vec4, .u8vec2, .u8vec3, .u8vec4, .i16vec2, .i16vec3, .i16vec4, .u16vec2, .u16vec3, .u16vec4, .f16vec2, .f16vec3, .f16vec4 => true,
             else => false,
         };
     }
@@ -277,18 +321,14 @@ pub const Type = union(enum) {
 
     pub fn isIntVector(self: Type) bool {
         return switch (self) {
-            .ivec2, .ivec3, .ivec4,
-            .uvec2, .uvec3, .uvec4 => true,
+            .ivec2, .ivec3, .ivec4, .uvec2, .uvec3, .uvec4 => true,
             else => false,
         };
     }
 
     pub fn isMatrix(self: Type) bool {
         return switch (self) {
-            .mat2, .mat3, .mat4,
-            .mat2x2, .mat2x3, .mat2x4,
-            .mat3x2, .mat3x3, .mat3x4,
-            .mat4x2, .mat4x3, .mat4x4 => true,
+            .mat2, .mat3, .mat4, .mat2x2, .mat2x3, .mat2x4, .mat3x2, .mat3x3, .mat3x4, .mat4x2, .mat4x3, .mat4x4 => true,
             else => false,
         };
     }
@@ -356,10 +396,7 @@ pub const Type = union(enum) {
     /// True for combined image-sampler types (need OpImage extraction)
     pub fn isCombinedSampler(self: Type) bool {
         return switch (self) {
-            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler1d_array, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .sampler_cube, .sampler_cube_array,
-            .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow,
-            .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer,
-            .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer => true,
+            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler1d_array, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .sampler_cube, .sampler_cube_array, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer => true,
             else => false,
         };
     }
@@ -375,10 +412,7 @@ pub const Type = union(enum) {
             .i16vec2, .i16vec3, .i16vec4 => .int16,
             .u16vec2, .u16vec3, .u16vec4 => .uint16,
             .f16vec2, .f16vec3, .f16vec4 => .float16,
-            .mat2, .mat3, .mat4,
-            .mat2x2, .mat2x3, .mat2x4,
-            .mat3x2, .mat3x3, .mat3x4,
-            .mat4x2, .mat4x3, .mat4x4 => .float,
+            .mat2, .mat3, .mat4, .mat2x2, .mat2x3, .mat2x4, .mat3x2, .mat3x3, .mat3x4, .mat4x2, .mat4x3, .mat4x4 => .float,
             .array => |a| a.base.*,
             else => self,
         };
@@ -416,17 +450,9 @@ pub const Type = union(enum) {
     /// Returns the scalar base type for sampler types (float for regular, int for isampler, uint for usampler)
     pub fn samplerBaseType(self: Type) Type {
         return switch (self) {
-            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler1d_array, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer,
-            .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow,
-            .sampler_cube_array_shadow,
-            .sampler_cube, .sampler_cube_array, .image2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array,
-            .image1d, .image3d, .image_cube, .image2d_array, .image_cube_array => .float,
-            .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms,
-            .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array,
-            .isampler_buffer, .iimage2d, .iimage1d, .iimage3d, .iimage_cube, .iimage2d_array, .iimage_cube_array => .int,
-            .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms,
-            .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array,
-            .usampler_buffer, .uimage2d, .uimage1d, .uimage3d, .uimage_cube, .uimage2d_array, .uimage_cube_array => .uint,
+            .sampler2d, .sampler2d_array, .sampler3d, .sampler1d, .sampler1d_array, .sampler2d_ms, .sampler2d_ms_array, .sampler_buffer, .sampler2d_shadow, .sampler1d_shadow, .sampler_cube_shadow, .sampler2d_array_shadow, .sampler_cube_array_shadow, .sampler_cube, .sampler_cube_array, .image2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .image3d, .image_cube, .image2d_array, .image_cube_array => .float,
+            .isampler2d, .isampler3d, .isampler_cube, .isampler2d_array, .isampler2d_ms, .isampler2d_ms_array, .isampler_cube_array, .isampler1d, .isampler1d_array, .isampler_buffer, .iimage2d, .iimage1d, .iimage3d, .iimage_cube, .iimage2d_array, .iimage_cube_array => .int,
+            .usampler2d, .usampler3d, .usampler_cube, .usampler2d_array, .usampler2d_ms, .usampler2d_ms_array, .usampler_cube_array, .usampler1d, .usampler1d_array, .usampler_buffer, .uimage2d, .uimage1d, .uimage3d, .uimage_cube, .uimage2d_array, .uimage_cube_array => .uint,
             else => .float,
         };
     }
@@ -440,14 +466,7 @@ pub const Type = union(enum) {
     /// `OpTypeImage` with Sampled=2 and a meaningful Format operand.
     pub fn isStorageImage(self: Type) bool {
         return switch (self) {
-            .image2d, .iimage2d, .uimage2d,
-            .image_buffer, .iimage_buffer, .uimage_buffer,
-            .image2d_ms, .image2d_ms_array,
-            .image1d, .iimage1d, .uimage1d,
-            .image3d, .iimage3d, .uimage3d,
-            .image_cube, .iimage_cube, .uimage_cube,
-            .image2d_array, .iimage2d_array, .uimage2d_array,
-            .image_cube_array, .iimage_cube_array, .uimage_cube_array => true,
+            .image2d, .iimage2d, .uimage2d, .image_buffer, .iimage_buffer, .uimage_buffer, .image2d_ms, .image2d_ms_array, .image1d, .iimage1d, .uimage1d, .image3d, .iimage3d, .uimage3d, .image_cube, .iimage_cube, .uimage_cube, .image2d_array, .iimage2d_array, .uimage2d_array, .image_cube_array, .iimage_cube_array, .uimage_cube_array => true,
             else => false,
         };
     }
@@ -499,11 +518,45 @@ pub const TessSpacing = enum { equal, fractional_even, fractional_odd };
 /// enum (Unknown=0, Rgba32f=1, ..., R8ui=39). Used for storage-image
 /// `layout(rgbaN) image2D` qualifiers.
 pub const ImageFormat = enum {
-    rgba32f, rgba16f, r32f, rgba8, rgba8_snorm,
-    rg32f, rg16f, r11f_g11f_b10f, r16f, rgba16, rgb10_a2, rg16, rg8, r16, r8,
-    rgba16_snorm, rg16_snorm, rg8_snorm, r16_snorm, r8_snorm,
-    rgba32i, rgba16i, rgba8i, r32i, rg32i, rg16i, rg8i, r16i, r8i,
-    rgba32ui, rgba16ui, rgba8ui, r32ui, rgb10_a2ui, rg32ui, rg16ui, rg8ui, r16ui, r8ui,
+    rgba32f,
+    rgba16f,
+    r32f,
+    rgba8,
+    rgba8_snorm,
+    rg32f,
+    rg16f,
+    r11f_g11f_b10f,
+    r16f,
+    rgba16,
+    rgb10_a2,
+    rg16,
+    rg8,
+    r16,
+    r8,
+    rgba16_snorm,
+    rg16_snorm,
+    rg8_snorm,
+    r16_snorm,
+    r8_snorm,
+    rgba32i,
+    rgba16i,
+    rgba8i,
+    r32i,
+    rg32i,
+    rg16i,
+    rg8i,
+    r16i,
+    r8i,
+    rgba32ui,
+    rgba16ui,
+    rgba8ui,
+    r32ui,
+    rgb10_a2ui,
+    rg32ui,
+    rg16ui,
+    rg8ui,
+    r16ui,
+    r8ui,
 };
 
 pub const Layout = struct {

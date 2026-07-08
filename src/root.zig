@@ -330,7 +330,7 @@ pub fn compileToSPIRV(
         const result = buf.toOwnedSlice(alloc) catch return error.OutOfMemory;
         break :blk result[0 .. result.len - 1 :0];
     } else source;
-    defer if (actual_source.ptr != source.ptr) alloc.free(@constCast(actual_source.ptr[0..actual_source.len + 1]));
+    defer if (actual_source.ptr != source.ptr) alloc.free(@constCast(actual_source.ptr[0 .. actual_source.len + 1]));
 
     const tokens = lexer.tokenize(alloc, actual_source) catch {
         last_compile_detail = .lex_failed;
@@ -499,7 +499,10 @@ pub fn applySpecOverrides(words: []u32, overrides: []const SpecOverride) void {
             // Look up spec_id for this result_id
             var spec_id: ?u32 = null;
             for (pairs[0..pair_count]) |p| {
-                if (p.result_id == result_id) { spec_id = p.spec_id; break; }
+                if (p.result_id == result_id) {
+                    spec_id = p.spec_id;
+                    break;
+                }
             }
             if (spec_id) |sid| {
                 // Find override with matching spec_id
@@ -821,7 +824,6 @@ pub fn compileGlslToGlslVersion(
     defer alloc.free(glsl);
     return try alloc.dupeZ(u8, glsl);
 }
-
 
 /// Merge multiple SPIR-V modules into a single module with proper ID remapping.
 /// Uses compact_ids.getOpInfo to distinguish IDs from literals.
@@ -1570,8 +1572,6 @@ test "compileGlslToGlslVersion outputs requested version" {
     defer alloc.free(glsl_v450);
     try std.testing.expect(std.mem.indexOf(u8, glsl_v450, "#version 450") != null);
 }
-
-
 
 test "compileGlslToWgsl basic" {
     const alloc = std.testing.allocator;
