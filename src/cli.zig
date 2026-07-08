@@ -264,7 +264,10 @@ fn readInput(alloc: std.mem.Allocator, path: ?[]const u8, use_stdin: bool) ![:0]
 }
 
 fn readSource(alloc: std.mem.Allocator, path: []const u8) ![:0]const u8 {
-    const raw = try std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024);
+    const raw = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => fatal("cannot open '{s}'", .{path}),
+        else => fatal("cannot read '{s}': {s}", .{ path, @errorName(err) }),
+    };
     defer alloc.free(raw);
     var buf = try std.ArrayListUnmanaged(u8).initCapacity(alloc, raw.len + 1);
     defer buf.deinit(alloc);
@@ -275,7 +278,10 @@ fn readSource(alloc: std.mem.Allocator, path: []const u8) ![:0]const u8 {
 }
 
 fn readSpv(alloc: std.mem.Allocator, path: []const u8) ![]const u32 {
-    const raw = try std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024);
+    const raw = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |err| switch (err) {
+        error.FileNotFound => fatal("cannot open '{s}'", .{path}),
+        else => fatal("cannot read '{s}': {s}", .{ path, @errorName(err) }),
+    };
     defer alloc.free(raw);
     if (raw.len < 20 or raw.len % 4 != 0) fatal("invalid SPIR-V binary: {s}", .{path});
     const n = raw.len / 4;
@@ -581,7 +587,14 @@ fn compileWithDiagsOrExit(
         diags.deinit(alloc);
     }
     const spv = zioshade.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |e| {
-        for (diags.items) |d| printDiagnostic(d);
+        // When we have structured diagnostics they already carry the file, line,
+        // column, and message, so printing them is the whole story. Only fall
+        // back to the bare error-name line when nothing more specific exists,
+        // instead of always dumping a redundant `error: <Name> (<detail>)`.
+        if (diags.items.len > 0) {
+            for (diags.items) |d| printDiagnostic(d);
+            std.process.exit(1);
+        }
         compileErr(e);
     };
     if (cli_spec_overrides.len == 0) return spv;
