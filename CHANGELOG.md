@@ -4,6 +4,8 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-08
+
 - Hardened against hostile shader and SPIR-V input (Wave 1).
 - Fixed first-run onboarding: CLI install, version guard, quick-start, error UX (Wave 2).
 - Green CI: bumped setup-zig to v2, fixed the conformance spirv-val install, added a concurrency group and a `zig fmt --check` gate (Wave 3).
@@ -12,6 +14,9 @@ All notable changes to zioshade are documented here. The format is loosely based
 - Added a `zig build release` cross-compile matrix (linux-x86_64, macos-aarch64, macos-x86_64, windows-x86_64) using vanilla `std.Build`, no new dependency.
 - Added governance files: CODE_OF_CONDUCT.md, feature-request/question issue forms, issue-template config, and .editorconfig.
 - Documented the Zig version policy: requires 0.15.2, 0.16 support tracked in #424.
+- Rewrote the README as a launch landing page with a comparison table, honest benchmark framing, and an FAQ (#427).
+- Added a WASM playground scaffold: a wasm32-freestanding build target and a static web harness, browser testing pending (#428).
+- Replaced em dashes with plain hyphens across the authored docs (#426).
 
 ## [0.2.0] - 2026-07-06
 
