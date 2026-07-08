@@ -29,31 +29,78 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         const inst_end = pos + wc;
         if (inst_end > words.len) break;
 
-        const info = compact_ids.getOpInfo(opcode) orelse { pos = inst_end; continue; };
+        const info = compact_ids.getOpInfo(opcode) orelse {
+            pos = inst_end;
+            continue;
+        };
         var wi: u32 = pos + 1;
 
         // result_type is a REFERENCE
         switch (info.fixed) {
-            1 => { if (wi < inst_end) { mark(&referenced, words[wi], bound); wi += 1; } },
-            2 => {
-                if (wi < inst_end) { mark(&referenced, words[wi], bound); wi += 1; }
-                if (wi < inst_end) { wi += 1; } // skip result (definition)
+            1 => {
+                if (wi < inst_end) {
+                    mark(&referenced, words[wi], bound);
+                    wi += 1;
+                }
             },
-            3 => { if (wi < inst_end) { wi += 1; } }, // skip result (definition)
+            2 => {
+                if (wi < inst_end) {
+                    mark(&referenced, words[wi], bound);
+                    wi += 1;
+                }
+                if (wi < inst_end) {
+                    wi += 1;
+                } // skip result (definition)
+            },
+            3 => {
+                if (wi < inst_end) {
+                    wi += 1;
+                }
+            }, // skip result (definition)
             else => {},
         }
 
         for (info.ops) |ch| {
             if (wi >= inst_end) break;
             switch (ch) {
-                'i' => { mark(&referenced, words[wi], bound); wi += 1; },
-                'l' => { wi += 1; },
-                'I' => { while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound); },
-                'L' => { wi = inst_end; },
-                's' => { wi = inst_end; },
-                'M' => { if (wi < inst_end) { wi += 1; while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound); } },
-                'W' => { while (wi + 1 < inst_end) { wi += 1; mark(&referenced, words[wi], bound); wi += 1; } if (wi < inst_end) wi += 1; },
-                'E' => { while (wi < inst_end) { const w = words[wi]; wi += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound); },
+                'i' => {
+                    mark(&referenced, words[wi], bound);
+                    wi += 1;
+                },
+                'l' => {
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound);
+                },
+                'L' => {
+                    wi = inst_end;
+                },
+                's' => {
+                    wi = inst_end;
+                },
+                'M' => {
+                    if (wi < inst_end) {
+                        wi += 1;
+                        while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound);
+                    }
+                },
+                'W' => {
+                    while (wi + 1 < inst_end) {
+                        wi += 1;
+                        mark(&referenced, words[wi], bound);
+                        wi += 1;
+                    }
+                    if (wi < inst_end) wi += 1;
+                },
+                'E' => {
+                    while (wi < inst_end) {
+                        const w = words[wi];
+                        wi += 1;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < inst_end) : (wi += 1) mark(&referenced, words[wi], bound);
+                },
                 else => {},
             }
         }
@@ -128,8 +175,12 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 };
                 var result_id: ?u32 = null;
                 switch (info.fixed) {
-                    2 => { if (pos + 2 < inst_end) result_id = current_words[pos + 2]; },
-                    3 => { if (pos + 1 < inst_end) result_id = current_words[pos + 1]; },
+                    2 => {
+                        if (pos + 2 < inst_end) result_id = current_words[pos + 2];
+                    },
+                    3 => {
+                        if (pos + 1 < inst_end) result_id = current_words[pos + 1];
+                    },
                     else => {},
                 }
                 if (result_id) |rid| {
@@ -163,25 +214,71 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             if (wc2 == 0) break;
             const ie2 = pos + wc2;
             if (ie2 > new_words.len) break;
-            const info2 = compact_ids.getOpInfo(opcode2) orelse { pos = ie2; continue; };
+            const info2 = compact_ids.getOpInfo(opcode2) orelse {
+                pos = ie2;
+                continue;
+            };
             var wi2: u32 = pos + 1;
             switch (info2.fixed) {
-                1 => { if (wi2 < ie2) { mark(&referenced, new_words[wi2], bound); wi2 += 1; } },
-                2 => { if (wi2 < ie2) { mark(&referenced, new_words[wi2], bound); wi2 += 1; } if (wi2 < ie2) wi2 += 1; },
-                3 => { if (wi2 < ie2) wi2 += 1; },
+                1 => {
+                    if (wi2 < ie2) {
+                        mark(&referenced, new_words[wi2], bound);
+                        wi2 += 1;
+                    }
+                },
+                2 => {
+                    if (wi2 < ie2) {
+                        mark(&referenced, new_words[wi2], bound);
+                        wi2 += 1;
+                    }
+                    if (wi2 < ie2) wi2 += 1;
+                },
+                3 => {
+                    if (wi2 < ie2) wi2 += 1;
+                },
                 else => {},
             }
             for (info2.ops) |ch| {
                 if (wi2 >= ie2) break;
                 switch (ch) {
-                    'i' => { mark(&referenced, new_words[wi2], bound); wi2 += 1; },
-                    'l' => { wi2 += 1; },
-                    'I' => { while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound); },
-                    'L' => { wi2 = ie2; },
-                    's' => { wi2 = ie2; },
-                    'M' => { if (wi2 < ie2) { wi2 += 1; while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound); } },
-                    'W' => { while (wi2 + 1 < ie2) { wi2 += 1; mark(&referenced, new_words[wi2], bound); wi2 += 1; } if (wi2 < ie2) wi2 += 1; },
-                    'E' => { while (wi2 < ie2) { const w = new_words[wi2]; wi2 += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound); },
+                    'i' => {
+                        mark(&referenced, new_words[wi2], bound);
+                        wi2 += 1;
+                    },
+                    'l' => {
+                        wi2 += 1;
+                    },
+                    'I' => {
+                        while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound);
+                    },
+                    'L' => {
+                        wi2 = ie2;
+                    },
+                    's' => {
+                        wi2 = ie2;
+                    },
+                    'M' => {
+                        if (wi2 < ie2) {
+                            wi2 += 1;
+                            while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound);
+                        }
+                    },
+                    'W' => {
+                        while (wi2 + 1 < ie2) {
+                            wi2 += 1;
+                            mark(&referenced, new_words[wi2], bound);
+                            wi2 += 1;
+                        }
+                        if (wi2 < ie2) wi2 += 1;
+                    },
+                    'E' => {
+                        while (wi2 < ie2) {
+                            const w = new_words[wi2];
+                            wi2 += 1;
+                            if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                        }
+                        while (wi2 < ie2) : (wi2 += 1) mark(&referenced, new_words[wi2], bound);
+                    },
                     else => {},
                 }
             }
@@ -634,8 +731,12 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                     try fwd_result.append(alloc, replacements.get(w) orelse w);
                                 }
                             },
-                            'L' => { while (wi < inst_end) : (wi += 1) try fwd_result.append(alloc, current_words[wi]); },
-                            's' => { while (wi < inst_end) : (wi += 1) try fwd_result.append(alloc, current_words[wi]); },
+                            'L' => {
+                                while (wi < inst_end) : (wi += 1) try fwd_result.append(alloc, current_words[wi]);
+                            },
+                            's' => {
+                                while (wi < inst_end) : (wi += 1) try fwd_result.append(alloc, current_words[wi]);
+                            },
                             'M' => {
                                 if (wi < inst_end) {
                                     try fwd_result.append(alloc, current_words[wi]); // image
@@ -708,7 +809,9 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             defer xb_func_vars.deinit();
             pos = 5;
             while (pos < current_words.len) {
-                const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                const hdr = current_words[pos];
+                const wc: u32 = hdr >> 16;
+                const opcode: u16 = @truncate(hdr & 0xFFFF);
                 if (wc == 0) break;
                 if (opcode == 59 and wc >= 4 and current_words[pos + 3] == 7) {
                     const var_id = current_words[pos + 2];
@@ -733,12 +836,21 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 var in_entry = false;
                 pos = 5;
                 while (pos < current_words.len) {
-                    const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                    const hdr = current_words[pos];
+                    const wc: u32 = hdr >> 16;
+                    const opcode: u16 = @truncate(hdr & 0xFFFF);
                     if (wc == 0) break;
                     const ie = pos + wc;
 
-                    if (opcode == 54) { in_func = true; first_label = true; in_entry = false; }
-                    if (opcode == 56) { in_func = false; in_entry = false; }
+                    if (opcode == 54) {
+                        in_func = true;
+                        first_label = true;
+                        in_entry = false;
+                    }
+                    if (opcode == 56) {
+                        in_func = false;
+                        in_entry = false;
+                    }
                     if (opcode == 248 and in_func) {
                         in_entry = first_label;
                         first_label = false;
@@ -813,7 +925,9 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                     defer xb_load_fwd.deinit(alloc);
                     pos = 5;
                     while (pos < current_words.len) {
-                        const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                        const hdr = current_words[pos];
+                        const wc: u32 = hdr >> 16;
+                        const opcode: u16 = @truncate(hdr & 0xFFFF);
                         if (wc == 0) break;
                         if (opcode == 61 and wc >= 4) { // OpLoad
                             const ptr = current_words[pos + 3];
@@ -832,51 +946,111 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
                         pos = 5;
                         while (pos < current_words.len) {
-                            const hdr = current_words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+                            const hdr = current_words[pos];
+                            const wc: u32 = hdr >> 16;
+                            const opcode: u16 = @truncate(hdr & 0xFFFF);
                             if (wc == 0) break;
                             const ie = pos + wc;
 
                             // Skip dead variable declarations
                             if (opcode == 59 and wc >= 3 and xb_var_to_value.contains(current_words[pos + 2])) {
-                                pos = ie; continue;
+                                pos = ie;
+                                continue;
                             }
                             // Skip stores to forwardable vars
                             if (opcode == 62 and wc >= 2 and xb_var_to_value.contains(current_words[pos + 1])) {
-                                pos = ie; continue;
+                                pos = ie;
+                                continue;
                             }
                             // Skip loads of forwardable vars
                             if (opcode == 61 and wc >= 4 and xb_load_fwd.contains(current_words[pos + 2])) {
-                                pos = ie; continue;
+                                pos = ie;
+                                continue;
                             }
 
                             // Apply replacements using getOpInfo
                             const info = compact_ids.getOpInfo(opcode) orelse {
                                 xb_result.appendSlice(alloc, current_words[pos..ie]) catch return current_words;
-                                pos = ie; continue;
+                                pos = ie;
+                                continue;
                             };
 
                             try xb_result.append(alloc, hdr);
                             var wi: u32 = pos + 1;
                             switch (info.fixed) {
-                                1 => { if (wi < ie) { try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; } },
-                                2 => {
-                                    if (wi < ie) { try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; }
-                                    if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; }
+                                1 => {
+                                    if (wi < ie) {
+                                        try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]);
+                                        wi += 1;
+                                    }
                                 },
-                                3 => { if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } },
+                                2 => {
+                                    if (wi < ie) {
+                                        try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]);
+                                        wi += 1;
+                                    }
+                                    if (wi < ie) {
+                                        try xb_result.append(alloc, current_words[wi]);
+                                        wi += 1;
+                                    }
+                                },
+                                3 => {
+                                    if (wi < ie) {
+                                        try xb_result.append(alloc, current_words[wi]);
+                                        wi += 1;
+                                    }
+                                },
                                 else => {},
                             }
                             for (info.ops) |ch| {
                                 if (wi >= ie) break;
                                 switch (ch) {
-                                    'i' => { try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; },
-                                    'l' => { try xb_result.append(alloc, current_words[wi]); wi += 1; },
-                                    'I' => { while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
-                                    'L', 's' => { while (wi < ie) : (wi += 1) try xb_result.append(alloc, current_words[wi]); },
-                                    'M' => { if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
-                                    'W' => { while (wi + 1 < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); wi += 1; } if (wi < ie) { try xb_result.append(alloc, current_words[wi]); wi += 1; } },
-                                    'E' => { while (wi < ie) { const w = current_words[wi]; wi += 1; try xb_result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]); },
-                                    else => { try xb_result.append(alloc, current_words[wi]); wi += 1; },
+                                    'i' => {
+                                        try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]);
+                                        wi += 1;
+                                    },
+                                    'l' => {
+                                        try xb_result.append(alloc, current_words[wi]);
+                                        wi += 1;
+                                    },
+                                    'I' => {
+                                        while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]);
+                                    },
+                                    'L', 's' => {
+                                        while (wi < ie) : (wi += 1) try xb_result.append(alloc, current_words[wi]);
+                                    },
+                                    'M' => {
+                                        if (wi < ie) {
+                                            try xb_result.append(alloc, current_words[wi]);
+                                            wi += 1;
+                                        }
+                                        while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]);
+                                    },
+                                    'W' => {
+                                        while (wi + 1 < ie) {
+                                            try xb_result.append(alloc, current_words[wi]);
+                                            wi += 1;
+                                            try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]);
+                                            wi += 1;
+                                        }
+                                        if (wi < ie) {
+                                            try xb_result.append(alloc, current_words[wi]);
+                                            wi += 1;
+                                        }
+                                    },
+                                    'E' => {
+                                        while (wi < ie) {
+                                            const w = current_words[wi];
+                                            wi += 1;
+                                            try xb_result.append(alloc, w);
+                                            if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                                        }
+                                        while (wi < ie) : (wi += 1) try xb_result.append(alloc, xb_load_fwd.get(current_words[wi]) orelse current_words[wi]);
+                                    },
+                                    else => {
+                                        try xb_result.append(alloc, current_words[wi]);
+                                        wi += 1;
+                                    },
                                 }
                             }
                             while (wi < ie) : (wi += 1) try xb_result.append(alloc, current_words[wi]);
@@ -946,12 +1120,22 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (wc == 0) break;
         // Count references to AccessChain results (skip the definition itself)
         const opcode: u16 = @truncate(hdr & 0xFFFF);
-        const info = compact_ids.getOpInfo(opcode) orelse { pos += wc; continue; };
+        const info = compact_ids.getOpInfo(opcode) orelse {
+            pos += wc;
+            continue;
+        };
         var wi: u32 = pos + 1;
         switch (info.fixed) {
-            1 => { if (wi < pos + wc) wi += 1; }, // skip result_type (not an AC result ref)
-            2 => { if (wi < pos + wc) wi += 1; if (wi < pos + wc) wi += 1; }, // skip result_type + result
-            3 => { if (wi < pos + wc) wi += 1; }, // skip result
+            1 => {
+                if (wi < pos + wc) wi += 1;
+            }, // skip result_type (not an AC result ref)
+            2 => {
+                if (wi < pos + wc) wi += 1;
+                if (wi < pos + wc) wi += 1;
+            }, // skip result_type + result
+            3 => {
+                if (wi < pos + wc) wi += 1;
+            }, // skip result
             else => {},
         }
         for (info.ops) |ch| {
@@ -974,12 +1158,42 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
                         }
                     }
                 },
-                'l' => { wi += 1; },
-                'L' => { wi = pos + wc; },
-                's' => { wi = pos + wc; },
-                'M' => { if (wi < pos + wc) { wi += 1; while (wi < pos + wc) : (wi += 1) { const w = words[wi]; if (ac_map.contains(w)) { const entry = ref_count.getOrPutValue(alloc, w, 0) catch null; if (entry != null) entry.?.value_ptr.* += 1; } } } },
-                'W' => { while (wi + 1 < pos + wc) { wi += 1; const w = words[wi]; if (ac_map.contains(w)) { const entry = ref_count.getOrPutValue(alloc, w, 0) catch null; if (entry != null) entry.?.value_ptr.* += 1; } wi += 1; } if (wi < pos + wc) wi += 1; },
-                else => { wi += 1; },
+                'l' => {
+                    wi += 1;
+                },
+                'L' => {
+                    wi = pos + wc;
+                },
+                's' => {
+                    wi = pos + wc;
+                },
+                'M' => {
+                    if (wi < pos + wc) {
+                        wi += 1;
+                        while (wi < pos + wc) : (wi += 1) {
+                            const w = words[wi];
+                            if (ac_map.contains(w)) {
+                                const entry = ref_count.getOrPutValue(alloc, w, 0) catch null;
+                                if (entry != null) entry.?.value_ptr.* += 1;
+                            }
+                        }
+                    }
+                },
+                'W' => {
+                    while (wi + 1 < pos + wc) {
+                        wi += 1;
+                        const w = words[wi];
+                        if (ac_map.contains(w)) {
+                            const entry = ref_count.getOrPutValue(alloc, w, 0) catch null;
+                            if (entry != null) entry.?.value_ptr.* += 1;
+                        }
+                        wi += 1;
+                    }
+                    if (wi < pos + wc) wi += 1;
+                },
+                else => {
+                    wi += 1;
+                },
             }
         }
         pos += wc;
@@ -1001,25 +1215,67 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (wc == 0) break;
         const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (opcode != 65) { // Not an AccessChain
-            const info = compact_ids.getOpInfo(opcode) orelse { pos += wc; continue; };
+            const info = compact_ids.getOpInfo(opcode) orelse {
+                pos += wc;
+                continue;
+            };
             var wi: u32 = pos + 1;
             switch (info.fixed) {
-                1 => { if (wi < pos + wc) { if (wi < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); wi += 1; } },
-                2 => { if (wi < pos + wc) wi += 1; if (wi < pos + wc) wi += 1; }, // skip result_type + result
-                3 => { if (wi < pos + wc) wi += 1; }, // skip result
+                1 => {
+                    if (wi < pos + wc) {
+                        if (wi < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]);
+                        wi += 1;
+                    }
+                },
+                2 => {
+                    if (wi < pos + wc) wi += 1;
+                    if (wi < pos + wc) wi += 1;
+                }, // skip result_type + result
+                3 => {
+                    if (wi < pos + wc) wi += 1;
+                }, // skip result
                 else => {},
             }
             for (info.ops) |ch| {
                 if (wi >= pos + wc) break;
                 switch (ch) {
-                    'i' => { if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); wi += 1; },
-                    'I' => { while (wi < pos + wc) : (wi += 1) { if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); } },
-                    'l' => { wi += 1; },
-                    'L' => { wi = pos + wc; },
-                    's' => { wi = pos + wc; },
-                    'M' => { if (wi < pos + wc) { wi += 1; while (wi < pos + wc) : (wi += 1) { if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); } } },
-                    'W' => { while (wi + 1 < pos + wc) { wi += 1; if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]); wi += 1; } if (wi < pos + wc) wi += 1; },
-                    else => { wi += 1; },
+                    'i' => {
+                        if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]);
+                        wi += 1;
+                    },
+                    'I' => {
+                        while (wi < pos + wc) : (wi += 1) {
+                            if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]);
+                        }
+                    },
+                    'l' => {
+                        wi += 1;
+                    },
+                    'L' => {
+                        wi = pos + wc;
+                    },
+                    's' => {
+                        wi = pos + wc;
+                    },
+                    'M' => {
+                        if (wi < pos + wc) {
+                            wi += 1;
+                            while (wi < pos + wc) : (wi += 1) {
+                                if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]);
+                            }
+                        }
+                    },
+                    'W' => {
+                        while (wi + 1 < pos + wc) {
+                            wi += 1;
+                            if (wi < bound and words[wi] < bound and all_ac_users.isSet(words[wi])) all_ac_users.unset(words[wi]);
+                            wi += 1;
+                        }
+                        if (wi < pos + wc) wi += 1;
+                    },
+                    else => {
+                        wi += 1;
+                    },
                 }
             }
         }
@@ -1048,10 +1304,10 @@ pub fn mergeAccessChains(alloc: std.mem.Allocator, words: []const u32) error{Out
             // Collect index groups from innermost to outermost
             var index_groups = std.ArrayListUnmanaged(struct { start: u32, count: u32 }).empty;
             defer index_groups.deinit(alloc);
-            
+
             // Our own indices first (innermost)
             try index_groups.append(alloc, .{ .start = pos + 4, .count = wc - 4 });
-            
+
             var current_base = base_id;
             while (ac_map.get(current_base)) |base_ac| {
                 const refs = ref_count.get(current_base) orelse 0;
@@ -1154,13 +1410,19 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
             const pwc: u32 = words[fp] >> 16;
             const pop: u16 = @truncate(words[fp] & 0xFFFF);
             if (pwc == 0) break;
-            if (pop == 55) { fp += pwc; continue; } // OpFunctionParameter
+            if (pop == 55) {
+                fp += pwc;
+                continue;
+            } // OpFunctionParameter
             break;
         }
         if (fp >= words.len) break;
         const lwc: u32 = words[fp] >> 16;
         const lop: u16 = @truncate(words[fp] & 0xFFFF);
-        if (lop != 248 or lwc < 2) { pos = ie; continue; } // expected entry OpLabel
+        if (lop != 248 or lwc < 2) {
+            pos = ie;
+            continue;
+        } // expected entry OpLabel
         const entry_label = words[fp + 1];
 
         // Find the end of the function (OpFunctionEnd) and whether the entry label
@@ -1191,9 +1453,14 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
                 const swc: u32 = words[sp] >> 16;
                 const sop: u16 = @truncate(words[sp] & 0xFFFF);
                 if (swc == 0) break;
-                if (sop == 56) { func_end = sp; break; } // OpFunctionEnd
+                if (sop == 56) {
+                    func_end = sp;
+                    break;
+                } // OpFunctionEnd
                 switch (sop) {
-                    249 => if (swc >= 2 and words[sp + 1] == entry_label) { is_target = true; }, // OpBranch
+                    249 => if (swc >= 2 and words[sp + 1] == entry_label) {
+                        is_target = true;
+                    }, // OpBranch
                     250 => { // OpBranchConditional
                         if (swc >= 4 and (words[sp + 2] == entry_label or words[sp + 3] == entry_label)) is_target = true;
                     },
@@ -1260,14 +1527,20 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
             break;
         }
         const ie = pos + wc;
-        if (ie > words.len) { result.appendSlice(alloc, words[pos..]) catch {}; break; }
+        if (ie > words.len) {
+            result.appendSlice(alloc, words[pos..]) catch {};
+            break;
+        }
 
         if (op == 248 and wc >= 2) { // OpLabel
             const lbl = words[pos + 1];
             active_drop = null;
             var matched: ?usize = null;
             for (edits.items, 0..) |e, idx| {
-                if (e.entry_label == lbl) { matched = idx; break; }
+                if (e.entry_label == lbl) {
+                    matched = idx;
+                    break;
+                }
             }
             if (matched) |idx| {
                 const e = edits.items[idx];
@@ -1349,11 +1622,16 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     for (loops.items, 0..) |loop_info, li| {
         // Find header label
         var header_label_id: u32 = 0;
-        { var sp: u32 = 5; while (sp < loop_info.header_pos) {
-            const h = words[sp]; const w = h >> 16; if (w == 0) break;
-            if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) header_label_id = words[sp + 1];
-            sp += w;
-        }}
+        {
+            var sp: u32 = 5;
+            while (sp < loop_info.header_pos) {
+                const h = words[sp];
+                const w = h >> 16;
+                if (w == 0) break;
+                if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) header_label_id = words[sp + 1];
+                sp += w;
+            }
+        }
         if (header_label_id == 0) continue;
 
         // Phase 1: check for side effects (stores to non-func-local vars)
@@ -1370,7 +1648,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         for (0..2) |_| {
             var sp: u32 = 5;
             while (sp < words.len) {
-                const sh = words[sp]; const swc: u32 = sh >> 16; const sop: u16 = @truncate(sh & 0xFFFF);
+                const sh = words[sp];
+                const swc: u32 = sh >> 16;
+                const sop: u16 = @truncate(sh & 0xFFFF);
                 if (swc == 0) break;
                 if (sop == 65 and swc >= 5) { // OpAccessChain
                     const base = words[sp + 3];
@@ -1387,7 +1667,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         var in_loop = false;
         pos = 5;
         while (pos < words.len) {
-            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             if (opcode == 248 and wc >= 2) {
                 const lbl = words[pos + 1];
@@ -1398,7 +1680,8 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 if (opcode == 62 and wc >= 3) { // OpStore
                     if (!safe_ptrs.isSet(words[pos + 1])) has_side_effects = true;
                 } else if (opcode == 252 or opcode == 253 or opcode == 254 or
-                           opcode == 4416 or opcode == 5380) {
+                    opcode == 4416 or opcode == 5380)
+                {
                     // Early function exit / fragment discard inside the loop is a
                     // CONTROL-FLOW side effect: OpKill (252), OpReturn (253),
                     // OpReturnValue (254), OpTerminateInvocation (4416),
@@ -1409,9 +1692,10 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                     // fallthrough value). Keep the loop.
                     has_side_effects = true;
                 } else if (opcode == 63 or opcode == 234 or opcode == 235 or
-                           (opcode >= 57 and opcode <= 60) or
-                           (opcode >= 68 and opcode <= 76) or opcode == 99 or
-                           opcode == 218 or opcode == 219) { // OpEmitVertex, OpEndPrimitive
+                    (opcode >= 57 and opcode <= 60) or
+                    (opcode >= 68 and opcode <= 76) or opcode == 99 or
+                    opcode == 218 or opcode == 219)
+                { // OpEmitVertex, OpEndPrimitive
                     has_side_effects = true;
                 }
             }
@@ -1425,7 +1709,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         in_loop = false;
         pos = 5;
         while (pos < words.len) {
-            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             if (opcode == 248 and wc >= 2) {
                 const lbl = words[pos + 1];
@@ -1434,11 +1720,18 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             }
             if (in_loop) {
                 // Find result ID for this instruction
-                const info = compact_ids.getOpInfo(opcode) orelse { pos += wc; continue; };
+                const info = compact_ids.getOpInfo(opcode) orelse {
+                    pos += wc;
+                    continue;
+                };
                 var result_id: u32 = 0;
                 switch (info.fixed) {
-                    2 => { if (wc >= 3) result_id = words[pos + 2]; },
-                    3 => { if (wc >= 2) result_id = words[pos + 1]; },
+                    2 => {
+                        if (wc >= 3) result_id = words[pos + 2];
+                    },
+                    3 => {
+                        if (wc >= 2) result_id = words[pos + 1];
+                    },
                     else => {},
                 }
                 if (result_id > 0 and result_id < bound) loop_defined.set(result_id);
@@ -1456,30 +1749,78 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         var past_merge = false;
         pos = 5;
         while (pos < words.len) {
-            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             if (opcode == 248 and wc >= 2) {
                 if (words[pos + 1] == loop_info.merge_id) past_merge = true;
             }
             if (past_merge and !value_escapes) {
                 // Check all operand IDs for references to loop-defined values
-                const info = compact_ids.getOpInfo(opcode) orelse { pos += wc; continue; };
+                const info = compact_ids.getOpInfo(opcode) orelse {
+                    pos += wc;
+                    continue;
+                };
                 var wi: u32 = pos + 1;
                 switch (info.fixed) {
-                    1 => { if (wi < pos + wc) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; } },
-                    2 => { if (wi < pos + wc) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; } if (wi < pos + wc) wi += 1; },
-                    3 => { if (wi < pos + wc) wi += 1; }, // skip result
+                    1 => {
+                        if (wi < pos + wc) {
+                            if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true;
+                            wi += 1;
+                        }
+                    },
+                    2 => {
+                        if (wi < pos + wc) {
+                            if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true;
+                            wi += 1;
+                        }
+                        if (wi < pos + wc) wi += 1;
+                    },
+                    3 => {
+                        if (wi < pos + wc) wi += 1;
+                    }, // skip result
                     else => {},
                 }
                 for (info.ops) |ch| {
                     if (wi >= pos + wc) break;
                     switch (ch) {
-                        'i' => { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; },
-                        'I' => { while (wi < pos + wc) : (wi += 1) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; } },
-                        'M' => { if (wi < pos + wc) wi += 1; while (wi < pos + wc) : (wi += 1) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; } },
-                        'W' => { while (wi + 1 < pos + wc) { wi += 1; if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; wi += 1; } if (wi < pos + wc) wi += 1; },
-                        'E' => { while (wi < pos + wc) { const w = words[wi]; wi += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < pos + wc) : (wi += 1) { if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true; } },
-                        else => { wi += 1; },
+                        'i' => {
+                            if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true;
+                            wi += 1;
+                        },
+                        'I' => {
+                            while (wi < pos + wc) : (wi += 1) {
+                                if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true;
+                            }
+                        },
+                        'M' => {
+                            if (wi < pos + wc) wi += 1;
+                            while (wi < pos + wc) : (wi += 1) {
+                                if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true;
+                            }
+                        },
+                        'W' => {
+                            while (wi + 1 < pos + wc) {
+                                wi += 1;
+                                if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true;
+                                wi += 1;
+                            }
+                            if (wi < pos + wc) wi += 1;
+                        },
+                        'E' => {
+                            while (wi < pos + wc) {
+                                const w = words[wi];
+                                wi += 1;
+                                if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                            }
+                            while (wi < pos + wc) : (wi += 1) {
+                                if (words[wi] < bound and loop_defined.isSet(words[wi])) value_escapes = true;
+                            }
+                        },
+                        else => {
+                            wi += 1;
+                        },
                     }
                 }
             }
@@ -1502,11 +1843,16 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
             // Find the header label for this loop
             var header_label_id: u32 = 0;
-            { var sp: u32 = 5; while (sp < loop_info.header_pos) {
-                const h = words[sp]; const w: u32 = h >> 16; if (w == 0) break;
-                if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) header_label_id = words[sp + 1];
-                sp += w;
-            }}
+            {
+                var sp: u32 = 5;
+                while (sp < loop_info.header_pos) {
+                    const h = words[sp];
+                    const w: u32 = h >> 16;
+                    if (w == 0) break;
+                    if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) header_label_id = words[sp + 1];
+                    sp += w;
+                }
+            }
             if (header_label_id == 0) continue;
 
             // Collect func-local vars stored inside the loop
@@ -1522,7 +1868,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             var in_loop2 = false;
             pos = 5;
             while (pos < words.len) {
-                const hdr2 = words[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                const hdr2 = words[pos];
+                const wc2: u32 = hdr2 >> 16;
+                const op2: u16 = @truncate(hdr2 & 0xFFFF);
                 if (wc2 == 0) break;
                 if (op2 == 248 and wc2 >= 2) {
                     const lbl = words[pos + 1];
@@ -1553,7 +1901,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 in_loop2 = false;
                 pos = 5;
                 while (pos < words.len) {
-                    const hdr3 = words[pos]; const wc3: u32 = hdr3 >> 16; const op3: u16 = @truncate(hdr3 & 0xFFFF);
+                    const hdr3 = words[pos];
+                    const wc3: u32 = hdr3 >> 16;
+                    const op3: u16 = @truncate(hdr3 & 0xFFFF);
                     if (wc3 == 0) break;
                     if (op3 == 248 and wc3 >= 2) {
                         const lbl = words[pos + 1];
@@ -1598,7 +1948,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             defer ac_to_base_load.deinit(alloc);
             pos = 5;
             while (pos < words.len) {
-                const hdr3 = words[pos]; const wc3: u32 = hdr3 >> 16; const op3: u16 = @truncate(hdr3 & 0xFFFF);
+                const hdr3 = words[pos];
+                const wc3: u32 = hdr3 >> 16;
+                const op3: u16 = @truncate(hdr3 & 0xFFFF);
                 if (wc3 == 0) break;
                 if (op3 == 65 and wc3 >= 4) { // OpAccessChain: result, type, base, ...
                     const ac_result = words[pos + 2];
@@ -1618,7 +1970,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             var past_merge2 = false;
             pos = 5;
             while (pos < words.len) {
-                const hdr2 = words[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                const hdr2 = words[pos];
+                const wc2: u32 = hdr2 >> 16;
+                const op2: u16 = @truncate(hdr2 & 0xFFFF);
                 if (wc2 == 0) break;
                 if (op2 == 248 and wc2 >= 2) {
                     if (words[pos + 1] == loop_info.merge_id) past_merge2 = true;
@@ -1650,18 +2004,31 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     for (loops.items, 0..) |li, idx| {
         if (!dead_loops.isSet(idx)) continue;
         var ll: u32 = 0;
-        { var sp: u32 = 5; while (sp < li.header_pos) {
-            const h = words[sp]; const w = h >> 16; if (w == 0) break;
-            if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) ll = words[sp + 1];
-            sp += w;
-        }}
+        {
+            var sp: u32 = 5;
+            while (sp < li.header_pos) {
+                const h = words[sp];
+                const w = h >> 16;
+                if (w == 0) break;
+                if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2) ll = words[sp + 1];
+                sp += w;
+            }
+        }
         if (ll == 0) continue;
         var mp: u32 = @intCast(words.len);
-        { var sp: u32 = 5; while (sp < words.len) {
-            const h = words[sp]; const w = h >> 16; if (w == 0) break;
-            if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2 and words[sp + 1] == li.merge_id) { mp = sp; break; }
-            sp += w;
-        }}
+        {
+            var sp: u32 = 5;
+            while (sp < words.len) {
+                const h = words[sp];
+                const w = h >> 16;
+                if (w == 0) break;
+                if ((@as(u16, @truncate(h & 0xFFFF)) == 248) and w >= 2 and words[sp + 1] == li.merge_id) {
+                    mp = sp;
+                    break;
+                }
+                sp += w;
+            }
+        }
         dead_ranges.append(alloc, .{ .header_label = ll, .merge_label = li.merge_id, .hdr_pos = li.header_pos, .mrg_pos = mp }) catch {};
     }
 
@@ -1670,7 +2037,8 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     for (dead_ranges.items, 0..) |dr, i| {
         for (dead_ranges.items, 0..) |dr2, j| {
             if (i != j and dr.hdr_pos > dr2.hdr_pos and dr.hdr_pos < dr2.mrg_pos) {
-                outermost.unset(i); break;
+                outermost.unset(i);
+                break;
             }
         }
     }
@@ -1689,29 +2057,42 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     var dead_merge_id: u32 = 0;
     var skip_block = false;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (opcode == 248 and wc >= 2) { // OpLabel
             const lbl = words[pos + 1];
             if (dead_header_labels.get(lbl)) |mid| {
-                in_dead_loop = true; dead_merge_id = mid; skip_block = true;
+                in_dead_loop = true;
+                dead_merge_id = mid;
+                skip_block = true;
                 result.appendSlice(alloc, words[pos..ie]) catch return words;
                 result.append(alloc, (2 << 16) | 249) catch return words; // OpBranch
                 result.append(alloc, mid) catch return words;
-                pos = ie; continue;
+                pos = ie;
+                continue;
             }
             if (in_dead_loop and lbl == dead_merge_id) {
-                in_dead_loop = false; skip_block = false;
+                in_dead_loop = false;
+                skip_block = false;
                 result.appendSlice(alloc, words[pos..ie]) catch return words;
-                pos = ie; continue;
+                pos = ie;
+                continue;
             }
         }
-        if (in_dead_loop or skip_block) { pos = ie; continue; }
+        if (in_dead_loop or skip_block) {
+            pos = ie;
+            continue;
+        }
         result.appendSlice(alloc, words[pos..ie]) catch return words;
         pos = ie;
     }
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
 
     // Phase 4.5: Fix OpPhi instructions that reference labels inside eliminated loops
     // When a dead loop is removed, its labels are gone but OpPhi entries may still reference them.
@@ -1721,7 +2102,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         if (!outermost.isSet(idx)) continue;
         var rp: u32 = dr.hdr_pos;
         while (rp < words.len) {
-            const rh = words[rp]; const rwc: u32 = rh >> 16; const rop: u16 = @truncate(rh & 0xFFFF);
+            const rh = words[rp];
+            const rwc: u32 = rh >> 16;
+            const rop: u16 = @truncate(rh & 0xFFFF);
             if (rwc == 0) break;
             const rie = rp + rwc;
             if (rie > words.len) break;
@@ -1738,7 +2121,9 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         fixed.appendSliceAssumeCapacity(result.items[0..5]);
         var fp: u32 = 5;
         while (fp < result.items.len) {
-            const fh = result.items[fp]; const fwc: u32 = fh >> 16; const fop: u16 = @truncate(fh & 0xFFFF);
+            const fh = result.items[fp];
+            const fwc: u32 = fh >> 16;
+            const fop: u16 = @truncate(fh & 0xFFFF);
             if (fwc == 0) break;
             const fie = fp + fwc;
             if (fie > result.items.len) break;
@@ -1747,7 +2132,8 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 const phi_result = result.items[fp + 2];
                 var phi_buf = std.ArrayListUnmanaged(u32).initCapacity(alloc, fwc) catch {
                     fixed.appendSlice(alloc, result.items[fp..fie]) catch {};
-                    fp = fie; continue;
+                    fp = fie;
+                    continue;
                 };
                 defer phi_buf.deinit(alloc);
                 phi_buf.appendAssumeCapacity(phi_type);
@@ -1915,7 +2301,9 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
                 // Skip label + following OpBranch
                 pos = ie;
                 if (pos < words.len) {
-                    const h2 = words[pos]; const w2 = h2 >> 16; const o2: u16 = @truncate(h2 & 0xFFFF);
+                    const h2 = words[pos];
+                    const w2 = h2 >> 16;
+                    const o2: u16 = @truncate(h2 & 0xFFFF);
                     if (o2 == 249) pos += w2;
                 }
                 continue;
@@ -1932,21 +2320,21 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
         }
         // Retarget OpBranchConditional
         if (opcode == 250 and wc >= 4) {
-            result.appendSlice(alloc, words[pos..pos+2]) catch return words; // header + condition
-            result.append(alloc, empty_targets.get(words[pos+2]) orelse words[pos+2]) catch return words;
-            result.append(alloc, empty_targets.get(words[pos+3]) orelse words[pos+3]) catch return words;
-            if (wc > 4) result.appendSlice(alloc, words[pos+4..ie]) catch return words;
+            result.appendSlice(alloc, words[pos .. pos + 2]) catch return words; // header + condition
+            result.append(alloc, empty_targets.get(words[pos + 2]) orelse words[pos + 2]) catch return words;
+            result.append(alloc, empty_targets.get(words[pos + 3]) orelse words[pos + 3]) catch return words;
+            if (wc > 4) result.appendSlice(alloc, words[pos + 4 .. ie]) catch return words;
             pos = ie;
             continue;
         }
         // Retarget OpSwitch (opcode 251)
         if (opcode == 251 and wc >= 3) {
-            result.appendSlice(alloc, words[pos..pos+2]) catch return words; // header + selector
-            result.append(alloc, empty_targets.get(words[pos+2]) orelse words[pos+2]) catch return words; // default
+            result.appendSlice(alloc, words[pos .. pos + 2]) catch return words; // header + selector
+            result.append(alloc, empty_targets.get(words[pos + 2]) orelse words[pos + 2]) catch return words; // default
             var si: u32 = pos + 3;
             while (si + 1 < ie) : (si += 2) {
                 result.append(alloc, words[si]) catch return words; // literal
-                result.append(alloc, empty_targets.get(words[si+1]) orelse words[si+1]) catch return words;
+                result.append(alloc, empty_targets.get(words[si + 1]) orelse words[si + 1]) catch return words;
             }
             pos = ie;
             continue;
@@ -1958,7 +2346,6 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
 
     return result.toOwnedSlice(alloc) catch return words;
 }
-
 
 pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
     const bound = words[3];
@@ -2094,7 +2481,9 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
     pos = 5;
     current_label = 0;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 248 and wc >= 2) current_label = words[pos + 1];
         if ((opcode == 246 or opcode == 247) and current_label < bound) { // OpLoopMerge or OpSelectionMerge
@@ -2216,10 +2605,17 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
             var in_func = false;
             var cur_label: u32 = 0;
             while (pos < dce_result.len) {
-                const hdr2 = dce_result[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                const hdr2 = dce_result[pos];
+                const wc2: u32 = hdr2 >> 16;
+                const op2: u16 = @truncate(hdr2 & 0xFFFF);
                 if (wc2 == 0) break;
-                if (op2 == 54) { in_func = true; cur_label = 0; }
-                if (op2 == 56) { in_func = false; }
+                if (op2 == 54) {
+                    in_func = true;
+                    cur_label = 0;
+                }
+                if (op2 == 56) {
+                    in_func = false;
+                }
                 if (op2 == 248 and wc2 >= 2 and in_func) {
                     const lid = dce_result[pos + 1];
                     if (lid < dce_bound) {
@@ -2238,20 +2634,33 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
                     }
                 }
                 if (op2 == 250 and wc2 >= 4 and in_func and cur_label > 0) {
-                    const t1 = dce_result[pos + 2]; const t2 = dce_result[pos + 3];
-                    if (t1 < dce_bound) { const e = try preds2.getOrPutValue(alloc, t1, 0); e.value_ptr.* += 1; }
-                    if (t2 < dce_bound) { const e = try preds2.getOrPutValue(alloc, t2, 0); e.value_ptr.* += 1; }
+                    const t1 = dce_result[pos + 2];
+                    const t2 = dce_result[pos + 3];
+                    if (t1 < dce_bound) {
+                        const e = try preds2.getOrPutValue(alloc, t1, 0);
+                        e.value_ptr.* += 1;
+                    }
+                    if (t2 < dce_bound) {
+                        const e = try preds2.getOrPutValue(alloc, t2, 0);
+                        e.value_ptr.* += 1;
+                    }
                     structured2.set(cur_label);
                 }
                 if (op2 == 251 and wc2 >= 3 and in_func and cur_label > 0) {
                     structured2.set(cur_label);
                     // Default + cases
                     const default = dce_result[pos + 1];
-                    if (default < dce_bound) { const e = try preds2.getOrPutValue(alloc, default, 0); e.value_ptr.* += 1; }
+                    if (default < dce_bound) {
+                        const e = try preds2.getOrPutValue(alloc, default, 0);
+                        e.value_ptr.* += 1;
+                    }
                     var si: u32 = pos + 3;
                     while (si + 1 < pos + wc2) : (si += 2) {
                         const case_target = dce_result[si + 1];
-                        if (case_target < dce_bound) { const e = try preds2.getOrPutValue(alloc, case_target, 0); e.value_ptr.* += 1; }
+                        if (case_target < dce_bound) {
+                            const e = try preds2.getOrPutValue(alloc, case_target, 0);
+                            e.value_ptr.* += 1;
+                        }
                     }
                 }
                 if (op2 == 246 or op2 == 247 or op2 == 254) structured2.set(cur_label);
@@ -2307,7 +2716,9 @@ pub fn mergeBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemo
 
                 pos = 5;
                 while (pos < dce_result.len) {
-                    const hdr2 = dce_result[pos]; const wc2: u32 = hdr2 >> 16; const op2: u16 = @truncate(hdr2 & 0xFFFF);
+                    const hdr2 = dce_result[pos];
+                    const wc2: u32 = hdr2 >> 16;
+                    const op2: u16 = @truncate(hdr2 & 0xFFFF);
                     if (wc2 == 0) break;
                     const ie2 = pos + wc2;
 
@@ -2629,7 +3040,9 @@ pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 20 and wc >= 2) bool_type = words[pos + 1];
         if (opcode == 41 and wc >= 3 and words[pos + 1] == bool_type) true_id = words[pos + 2];
@@ -2644,13 +3057,14 @@ pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
     defer replacements.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 169 and wc >= 6) {
             const result_id = words[pos + 2];
             const cond = words[pos + 3];
-            if (cond == true_id) replacements.put(alloc, result_id, words[pos + 4]) catch {}
-            else if (cond == false_id) replacements.put(alloc, result_id, words[pos + 5]) catch {};
+            if (cond == true_id) replacements.put(alloc, result_id, words[pos + 4]) catch {} else if (cond == false_id) replacements.put(alloc, result_id, words[pos + 5]) catch {};
         }
         pos += wc;
     }
@@ -2663,46 +3077,109 @@ pub fn foldSelect(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemor
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
-        if (opcode == 169 and wc >= 6 and replacements.contains(words[pos + 2])) { pos = ie; continue; }
+        if (opcode == 169 and wc >= 6 and replacements.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
 
         const info = compact_ids.getOpInfo(opcode) orelse {
             result.appendSlice(alloc, words[pos..ie]) catch return words;
-            pos = ie; continue;
+            pos = ie;
+            continue;
         };
 
         var wi: u32 = pos + 1;
         try result.append(alloc, hdr);
         switch (info.fixed) {
-            1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
-            2 => {
-                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
-                'l' => { try result.append(alloc, words[wi]); wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
-                'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
-                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; try result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                else => { try result.append(alloc, words[wi]); wi += 1; },
+                'i' => {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                },
+                'l' => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+                },
+                'M' => {
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi];
+                        wi += 1;
+                        try result.append(alloc, w);
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                else => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
         pos = ie;
     }
 
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
@@ -2728,7 +3205,9 @@ fn structDebugAndDecorMatch(alloc: std.mem.Allocator, words: []const u32, id_a: 
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         // OpMemberName=6, OpDecorate=71, OpMemberDecorate=72 all carry the
@@ -2772,25 +3251,29 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
     // First pass: find duplicate struct types
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 30 and wc >= 2) { // OpTypeStruct
             const result_id = words[pos + 1];
             const members = words[pos + 2 .. pos + wc];
-            
+
             // Compute hash of member types
             var h: u64 = @intCast(members.len);
             for (members) |mid| {
                 h = h *% 33 +% @as(u64, mid);
             }
-            
+
             if (structs.get(h)) |first_id| {
                 // Verify it's actually the same layout (hash collision check)
                 // Find the first struct's members to compare
                 var verify_pos: u32 = 5;
                 var first_members: []const u32 = &[_]u32{};
                 while (verify_pos < words.len) {
-                    const vhdr = words[verify_pos]; const vwc: u32 = vhdr >> 16; const vop: u16 = @truncate(vhdr & 0xFFFF);
+                    const vhdr = words[verify_pos];
+                    const vwc: u32 = vhdr >> 16;
+                    const vop: u16 = @truncate(vhdr & 0xFFFF);
                     if (vwc == 0) break;
                     if (vop == 30 and vwc >= 2 and words[verify_pos + 1] == first_id) {
                         first_members = words[verify_pos + 2 .. verify_pos + vwc];
@@ -2798,8 +3281,7 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
                     }
                     verify_pos += vwc;
                 }
-                if (members.len == first_members.len and std.mem.eql(u32, members, first_members)
-                    and try structDebugAndDecorMatch(alloc, words, first_id, result_id)) {
+                if (members.len == first_members.len and std.mem.eql(u32, members, first_members) and try structDebugAndDecorMatch(alloc, words, first_id, result_id)) {
                     // True duplicate — same member types, names, and decorations.
                     try replacements.put(alloc, result_id, first_id);
                 } else {
@@ -2826,7 +3308,9 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -2848,38 +3332,96 @@ pub fn dedupStructTypes(alloc: std.mem.Allocator, words: []const u32) error{OutO
 
         const info = compact_ids.getOpInfo(opcode) orelse {
             result.appendSlice(alloc, words[pos..ie]) catch return words;
-            pos = ie; continue;
+            pos = ie;
+            continue;
         };
 
         var wi: u32 = pos + 1;
         try result.append(alloc, hdr);
         switch (info.fixed) {
-            1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
-            2 => {
-                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
-                'l' => { try result.append(alloc, words[wi]); wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
-                'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
-                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; try result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                else => { try result.append(alloc, words[wi]); wi += 1; },
+                'i' => {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                },
+                'l' => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+                },
+                'M' => {
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi];
+                        wi += 1;
+                        try result.append(alloc, w);
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                else => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
         pos = ie;
     }
 
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
@@ -2906,7 +3448,9 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     {
         var sp: u32 = 5;
         while (sp < words.len) {
-            const hdr = words[sp]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[sp];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             // OpDecorate=71, ArrayStride=6: word1=target, word2=decoration, word3=value
             if (opcode == 71 and wc >= 4 and words[sp + 2] == 6) {
@@ -2919,7 +3463,9 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     // First pass: find duplicate array types
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 28 and wc >= 4) { // OpTypeArray
             const result_id = words[pos + 1];
@@ -2954,7 +3500,9 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -3000,38 +3548,96 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
 
         const info = compact_ids.getOpInfo(opcode) orelse {
             result.appendSlice(alloc, words[pos..ie]) catch return words;
-            pos = ie; continue;
+            pos = ie;
+            continue;
         };
 
         var wi: u32 = pos + 1;
         result.append(alloc, hdr) catch return words;
         switch (info.fixed) {
-            1 => { if (wi < ie) { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
-            2 => {
-                if (wi < ie) { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
-                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
-                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
-                'M' => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
-                'W' => { while (wi + 1 < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
-                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; result.append(alloc, w) catch return words; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'i' => {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+                },
+                'M' => {
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi];
+                        wi += 1;
+                        result.append(alloc, w) catch return words;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
         pos = ie;
     }
 
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
@@ -3052,7 +3658,9 @@ pub fn dedupPointerTypes(alloc: std.mem.Allocator, words: []const u32) error{Out
     // First pass: find duplicate pointer types (OpTypePointer = opcode 32)
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 32 and wc >= 4) { // OpTypePointer: result, storage_class, pointee_type
             const result_id = words[pos + 1];
@@ -3078,7 +3686,9 @@ pub fn dedupPointerTypes(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -3090,28 +3700,58 @@ pub fn dedupPointerTypes(alloc: std.mem.Allocator, words: []const u32) error{Out
 
         const info = compact_ids.getOpInfo(opcode) orelse {
             result.appendSlice(alloc, words[pos..ie]) catch return words;
-            pos = ie; continue;
+            pos = ie;
+            continue;
         };
 
         var wi: u32 = pos + 1;
         try result.append(alloc, hdr);
         switch (info.fixed) {
-            1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
-            2 => {
-                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
-                'l' => { try result.append(alloc, words[wi]); wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
-                else => { try result.append(alloc, words[wi]); wi += 1; },
+                'i' => {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                },
+                'l' => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+                },
+                else => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
             }
         }
         // Copy any remaining words
@@ -3181,7 +3821,9 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if ((opcode == 126 or opcode == 127 or opcode == 168 or opcode == 200) and wc == 4) {
             const result_id = words[pos + 2];
@@ -3216,7 +3858,9 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -3228,38 +3872,96 @@ pub fn eliminateDoubleNegate(alloc: std.mem.Allocator, words: []const u32) error
 
         const info = compact_ids.getOpInfo(opcode) orelse {
             result.appendSlice(alloc, words[pos..ie]) catch return words;
-            pos = ie; continue;
+            pos = ie;
+            continue;
         };
 
         var wi: u32 = pos + 1;
         try result.append(alloc, hdr);
         switch (info.fixed) {
-            1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
-            2 => {
-                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
-                'l' => { try result.append(alloc, words[wi]); wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
-                'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
-                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; try result.append(alloc, w); if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                else => { try result.append(alloc, words[wi]); wi += 1; },
+                'i' => {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                },
+                'l' => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+                },
+                'M' => {
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi];
+                        wi += 1;
+                        try result.append(alloc, w);
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                else => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
         pos = ie;
     }
 
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
@@ -3281,7 +3983,9 @@ pub fn foldNegateIntoAddSub(alloc: std.mem.Allocator, words: []const u32) error{
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if ((opcode == 127 or opcode == 126) and wc == 4) {
             const result_id = words[pos + 2];
@@ -3301,7 +4005,9 @@ pub fn foldNegateIntoAddSub(alloc: std.mem.Allocator, words: []const u32) error{
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -3388,7 +4094,9 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 59 and wc >= 4) { // OpVariable: result_type, result_id, storage_class
             const result_id = words[pos + 2];
@@ -3438,7 +4146,9 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
         changed = false;
         pos = 5;
         while (pos < words.len) {
-            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             if ((opcode == 65 or opcode == 66) and wc >= 4) { // Op(InBounds)AccessChain
                 const result_id = words[pos + 2];
@@ -3459,7 +4169,9 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
 
         if (opcode == 248) { // OpLabel - new block, reset tracking
@@ -3529,7 +4241,8 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16;
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -3543,7 +4256,10 @@ pub fn redundantStoreElim(alloc: std.mem.Allocator, words: []const u32) error{Ou
         pos = ie;
     }
 
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
 
     const nw = result.toOwnedSlice(alloc) catch return words;
     // Re-run DCE to clean up values that were only stored in dead stores
@@ -3571,7 +4287,9 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 22 and wc >= 3) { // OpTypeFloat
             const tid = words[pos + 1];
@@ -3596,12 +4314,17 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 43 and wc >= 4) { // OpConstant
             const type_id = words[pos + 1];
             const result_id = words[pos + 2];
-            if (result_id >= bound) { pos += wc; continue; }
+            if (result_id >= bound) {
+                pos += wc;
+                continue;
+            }
             const val = words[pos + 3];
             if (float_types.isSet(type_id)) {
                 if (val == 0 or val == 0x80000000) float_zero_ids.set(result_id);
@@ -3621,11 +4344,16 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         changed = false;
         pos = 5;
         while (pos < words.len) {
-            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             if (opcode == 44 and wc >= 4) { // OpConstantComposite
                 const result_id = words[pos + 2];
-                if (result_id >= bound) { pos += wc; continue; }
+                if (result_id >= bound) {
+                    pos += wc;
+                    continue;
+                }
                 if (float_zero_ids.isSet(result_id) or float_one_ids.isSet(result_id) or
                     int_zero_ids.isSet(result_id) or int_one_ids.isSet(result_id))
                 {
@@ -3633,7 +4361,10 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     continue;
                 }
                 const constituents = words[pos + 3 .. pos + wc];
-                if (constituents.len == 0) { pos += wc; continue; }
+                if (constituents.len == 0) {
+                    pos += wc;
+                    continue;
+                }
                 var all_fz = true;
                 var all_fo = true;
                 var all_iz = true;
@@ -3644,10 +4375,22 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                     if (!int_zero_ids.isSet(c)) all_iz = false;
                     if (!int_one_ids.isSet(c)) all_io = false;
                 }
-                if (all_fz) { float_zero_ids.set(result_id); changed = true; }
-                if (all_fo) { float_one_ids.set(result_id); changed = true; }
-                if (all_iz) { int_zero_ids.set(result_id); changed = true; }
-                if (all_io) { int_one_ids.set(result_id); changed = true; }
+                if (all_fz) {
+                    float_zero_ids.set(result_id);
+                    changed = true;
+                }
+                if (all_fo) {
+                    float_one_ids.set(result_id);
+                    changed = true;
+                }
+                if (all_iz) {
+                    int_zero_ids.set(result_id);
+                    changed = true;
+                }
+                if (all_io) {
+                    int_one_ids.set(result_id);
+                    changed = true;
+                }
             }
             pos += wc;
         }
@@ -3659,7 +4402,9 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (wc >= 5) {
             const result_id = words[pos + 2];
@@ -3752,7 +4497,9 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         defer unary_ops.deinit(alloc);
         pos = 5;
         while (pos < words.len) {
-            const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             const ie = pos + wc;
             if (ie > words.len) break;
@@ -3789,7 +4536,9 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -3815,14 +4564,24 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         // deleted live OpStores whose stored value was an identity-folded result,
         // which then orphaned the store's type chain (dangling OpTypeVector).
         switch (info.fixed) {
-            2 => { if (pos + 2 < ie) {
-                const rid = words[pos + 2];
-                if (rid > 0 and rid < bound and replacements.contains(rid)) { pos = ie; continue; }
-            } },
-            3 => { if (pos + 1 < ie) {
-                const rid = words[pos + 1];
-                if (rid > 0 and rid < bound and replacements.contains(rid)) { pos = ie; continue; }
-            } },
+            2 => {
+                if (pos + 2 < ie) {
+                    const rid = words[pos + 2];
+                    if (rid > 0 and rid < bound and replacements.contains(rid)) {
+                        pos = ie;
+                        continue;
+                    }
+                }
+            },
+            3 => {
+                if (pos + 1 < ie) {
+                    const rid = words[pos + 1];
+                    if (rid > 0 and rid < bound and replacements.contains(rid)) {
+                        pos = ie;
+                        continue;
+                    }
+                }
+            },
             else => {},
         }
 
@@ -3832,14 +4591,26 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         switch (info.fixed) {
             0 => {}, // no type or result
             1 => { // type only
-                if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
+                if (wi < ie) {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                }
             },
             2 => { // type + result
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
             },
             3 => { // result only
-                if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                if (wi < ie) {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                }
             },
             else => {},
         }
@@ -3847,37 +4618,62 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
-                'l' => { try result.append(alloc, words[wi]); wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
+                'i' => {
+                    try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    wi += 1;
+                },
+                'l' => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+                },
                 'M' => {
-                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
                     while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
                 },
                 'W' => {
                     while (wi + 1 < ie) {
-                        try result.append(alloc, words[wi]); wi += 1;
-                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1;
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                        wi += 1;
                     }
-                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     while (wi < ie) {
-                        const w = words[wi]; wi += 1;
+                        const w = words[wi];
+                        wi += 1;
                         try result.append(alloc, w);
                         if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
                     }
                     while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
                 },
-                else => { try result.append(alloc, words[wi]); wi += 1; },
+                else => {
+                    try result.append(alloc, words[wi]);
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
         pos = ie;
     }
 
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
@@ -3941,7 +4737,10 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
             if (cur_func > 0 and in_body) {
                 var all_unreachable = true;
                 for (body_after_label.items) |op| {
-                    if (op != 255) { all_unreachable = false; break; } // not OpUnreachable
+                    if (op != 255) {
+                        all_unreachable = false;
+                        break;
+                    } // not OpUnreachable
                 }
                 if (all_unreachable and body_after_label.items.len > 0) {
                     if (!entry_point_funcs.contains(cur_func)) {
@@ -3961,7 +4760,10 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
             if (cur_func > 0 and in_body) {
                 var all_unreachable = true;
                 for (body_after_label.items) |op| {
-                    if (op != 255) { all_unreachable = false; break; }
+                    if (op != 255) {
+                        all_unreachable = false;
+                        break;
+                    }
                 }
                 if (all_unreachable and body_after_label.items.len > 0) {
                     if (!entry_point_funcs.contains(cur_func)) {
@@ -4069,7 +4871,9 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     // Scan functions
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (opcode == 54 and wc >= 5) { // OpFunction
@@ -4086,28 +4890,45 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
             var fp = ie;
             while (fp < words.len) {
-                const fh = words[fp]; const fwc: u32 = fh >> 16; const fop: u16 = @truncate(fh & 0xFFFF);
+                const fh = words[fp];
+                const fwc: u32 = fh >> 16;
+                const fop: u16 = @truncate(fh & 0xFFFF);
                 if (fwc == 0) break;
                 const fie = fp + fwc;
-                if (fop == 56) { func_end = fie; break; }
+                if (fop == 56) {
+                    func_end = fie;
+                    break;
+                }
                 if (fop == 55 and fwc >= 3) try param_ids.append(alloc, words[fp + 2]);
-                if (fop == 248) { block_count += 1; if (block_count == 1) body_start = fie; }
+                if (fop == 248) {
+                    block_count += 1;
+                    if (block_count == 1) body_start = fie;
+                }
                 if (fop == 59) has_var = true; // OpVariable — allowed for single-block inlining
                 if (fop == 57) has_call_or_cf = true; // OpFunctionCall
-                if (fop == 249 or fop == 250 or fop == 251) { if (block_count <= 1) has_call_or_cf = true; }
+                if (fop == 249 or fop == 250 or fop == 251) {
+                    if (block_count <= 1) has_call_or_cf = true;
+                }
                 if (fop == 246 or fop == 247) has_call_or_cf = true;
                 if (fop == 253) body_end = fp; // OpReturn
-                if (fop == 254 and fwc >= 2) { body_end = fp; return_value_id = words[fp + 1]; }
+                if (fop == 254 and fwc >= 2) {
+                    body_end = fp;
+                    return_value_id = words[fp + 1];
+                }
                 fp = fie;
             }
             const is_inlineable = block_count == 1 and !has_call_or_cf and body_start > 0 and body_end >= body_start;
             const ps = try param_ids.toOwnedSlice(alloc);
             try param_slices.append(alloc, ps);
             try funcs.append(alloc, .{
-                .func_id = func_id, .type_id = func_type,
-                .start_pos = pos, .end_pos = func_end,
-                .body_start = body_start, .body_end = body_end,
-                .param_ids = ps, .return_value_id = return_value_id,
+                .func_id = func_id,
+                .type_id = func_type,
+                .start_pos = pos,
+                .end_pos = func_end,
+                .body_start = body_start,
+                .body_end = body_end,
+                .param_ids = ps,
+                .return_value_id = return_value_id,
                 .is_inlineable = is_inlineable,
             });
             pos = func_end;
@@ -4128,9 +4949,14 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     var has_calls = false;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
-        if (opcode == 57 and wc >= 4 and inlineable.contains(words[pos + 3])) { has_calls = true; break; }
+        if (opcode == 57 and wc >= 4 and inlineable.contains(words[pos + 3])) {
+            has_calls = true;
+            break;
+        }
         pos += wc;
     }
     if (!has_calls) return words;
@@ -4141,9 +4967,14 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
             var result_ids = std.AutoHashMapUnmanaged(u32, u32).empty;
             var bp: u32 = bs;
             while (bp < be) {
-                const bh = w[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+                const bh = w[bp];
+                const bwc: u32 = bh >> 16;
+                const bop: u16 = @truncate(bh & 0xFFFF);
                 if (bwc == 0) break;
-                const info = compact_ids.getOpInfo(bop) orelse { bp += bwc; continue; };
+                const info = compact_ids.getOpInfo(bop) orelse {
+                    bp += bwc;
+                    continue;
+                };
                 if (info.fixed == 2 and bp + 2 < be) { // type + result
                     const rid = w[bp + 2];
                     if (rid != ret_id) { // don't rename return value (it maps to call result)
@@ -4170,14 +5001,17 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
         fn run(allocator: std.mem.Allocator, w: []const u32, bs: u32, be: u32, repl: std.AutoHashMapUnmanaged(u32, u32), out: *std.ArrayList(u32)) !void {
             var bp: u32 = bs;
             while (bp < be) {
-                const bh = w[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+                const bh = w[bp];
+                const bwc: u32 = bh >> 16;
+                const bop: u16 = @truncate(bh & 0xFFFF);
                 if (bwc == 0) break;
                 const bie = bp + bwc;
                 const info = compact_ids.getOpInfo(bop) orelse {
                     try out.append(allocator, bh);
                     var bi: u32 = bp + 1;
                     while (bi < bie) : (bi += 1) try out.append(allocator, repl.get(w[bi]) orelse w[bi]);
-                    bp = bie; continue;
+                    bp = bie;
+                    continue;
                 };
                 try out.append(allocator, bh);
                 var wi: u32 = bp + 1;
@@ -4185,14 +5019,26 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 switch (info.fixed) {
                     0 => {},
                     1 => { // result_type only — don't replace (it's a type)
-                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                        if (wi < bie) {
+                            try out.append(allocator, w[wi]);
+                            wi += 1;
+                        }
                     },
                     2 => { // result_type + result_id
-                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; } // type — keep
-                        if (wi < bie) { try out.append(allocator, repl.get(w[wi]) orelse w[wi]); wi += 1; } // result — rename
+                        if (wi < bie) {
+                            try out.append(allocator, w[wi]);
+                            wi += 1;
+                        } // type — keep
+                        if (wi < bie) {
+                            try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                            wi += 1;
+                        } // result — rename
                     },
                     3 => { // result_id only
-                        if (wi < bie) { try out.append(allocator, repl.get(w[wi]) orelse w[wi]); wi += 1; } // result — rename
+                        if (wi < bie) {
+                            try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                            wi += 1;
+                        } // result — rename
                     },
                     else => {},
                 }
@@ -4200,12 +5046,25 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 for (info.ops) |ch| {
                     if (wi >= bie) break;
                     switch (ch) {
-                        'i' => { try out.append(allocator, repl.get(w[wi]) orelse w[wi]); wi += 1; },
-                        'l' => { try out.append(allocator, w[wi]); wi += 1; },
-                        'I' => { while (wi < bie) : (wi += 1) try out.append(allocator, repl.get(w[wi]) orelse w[wi]); },
-                        'L', 's' => { while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]); },
+                        'i' => {
+                            try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                            wi += 1;
+                        },
+                        'l' => {
+                            try out.append(allocator, w[wi]);
+                            wi += 1;
+                        },
+                        'I' => {
+                            while (wi < bie) : (wi += 1) try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
+                        },
+                        'L', 's' => {
+                            while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]);
+                        },
                         'M' => {
-                            if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                            if (wi < bie) {
+                                try out.append(allocator, w[wi]);
+                                wi += 1;
+                            }
                             while (wi < bie) : (wi += 1) try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
                         },
                         'W' => {
@@ -4215,17 +5074,24 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                                 try out.append(allocator, repl.get(w[wi]) orelse w[wi]); // target
                                 wi += 1;
                             }
-                            if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                            if (wi < bie) {
+                                try out.append(allocator, w[wi]);
+                                wi += 1;
+                            }
                         },
                         'E' => {
                             var in_str = true;
                             while (wi < bie and in_str) : (wi += 1) {
-                                const ww = w[wi]; try out.append(allocator, ww);
+                                const ww = w[wi];
+                                try out.append(allocator, ww);
                                 if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) in_str = false;
                             }
                             while (wi < bie) : (wi += 1) try out.append(allocator, repl.get(w[wi]) orelse w[wi]);
                         },
-                        else => { try out.append(allocator, w[wi]); wi += 1; },
+                        else => {
+                            try out.append(allocator, w[wi]);
+                            wi += 1;
+                        },
                     }
                 }
                 while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]);
@@ -4248,7 +5114,9 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     const applySub = struct {
         fn run(allocator: std.mem.Allocator, w: []const u32, p: u32, _ie: u32, sm: std.AutoHashMapUnmanaged(u32, u32), out: *std.ArrayList(u32)) !void {
             _ = _ie;
-            const bh = w[p]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+            const bh = w[p];
+            const bwc: u32 = bh >> 16;
+            const bop: u16 = @truncate(bh & 0xFFFF);
             const bie = p + bwc;
             const info = compact_ids.getOpInfo(bop) orelse {
                 // Unknown opcode — simple word-by-word substitution
@@ -4261,23 +5129,52 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
             var wi: u32 = p + 1;
             switch (info.fixed) {
                 0 => {},
-                1 => { if (wi < bie) { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; } },
-                2 => {
-                    if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; } // type — keep
-                    if (wi < bie) { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; } // result
+                1 => {
+                    if (wi < bie) {
+                        try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                        wi += 1;
+                    }
                 },
-                3 => { if (wi < bie) { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; } },
+                2 => {
+                    if (wi < bie) {
+                        try out.append(allocator, w[wi]);
+                        wi += 1;
+                    } // type — keep
+                    if (wi < bie) {
+                        try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                        wi += 1;
+                    } // result
+                },
+                3 => {
+                    if (wi < bie) {
+                        try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                        wi += 1;
+                    }
+                },
                 else => {},
             }
             for (info.ops) |ch| {
                 if (wi >= bie) break;
                 switch (ch) {
-                    'i' => { try out.append(allocator, sm.get(w[wi]) orelse w[wi]); wi += 1; },
-                    'l' => { try out.append(allocator, w[wi]); wi += 1; },
-                    'I' => { while (wi < bie) : (wi += 1) try out.append(allocator, sm.get(w[wi]) orelse w[wi]); },
-                    'L', 's' => { while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]); },
+                    'i' => {
+                        try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                        wi += 1;
+                    },
+                    'l' => {
+                        try out.append(allocator, w[wi]);
+                        wi += 1;
+                    },
+                    'I' => {
+                        while (wi < bie) : (wi += 1) try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
+                    },
+                    'L', 's' => {
+                        while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]);
+                    },
                     'M' => {
-                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                        if (wi < bie) {
+                            try out.append(allocator, w[wi]);
+                            wi += 1;
+                        }
                         while (wi < bie) : (wi += 1) try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
                     },
                     'W' => {
@@ -4287,17 +5184,24 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                             try out.append(allocator, sm.get(w[wi]) orelse w[wi]); // target
                             wi += 1;
                         }
-                        if (wi < bie) { try out.append(allocator, w[wi]); wi += 1; }
+                        if (wi < bie) {
+                            try out.append(allocator, w[wi]);
+                            wi += 1;
+                        }
                     },
                     'E' => {
                         var in_str = true;
                         while (wi < bie and in_str) : (wi += 1) {
-                            const ww = w[wi]; try out.append(allocator, ww);
+                            const ww = w[wi];
+                            try out.append(allocator, ww);
                             if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) in_str = false;
                         }
                         while (wi < bie) : (wi += 1) try out.append(allocator, sm.get(w[wi]) orelse w[wi]);
                     },
-                    else => { try out.append(allocator, w[wi]); wi += 1; },
+                    else => {
+                        try out.append(allocator, w[wi]);
+                        wi += 1;
+                    },
                 }
             }
             while (wi < bie) : (wi += 1) try out.append(allocator, w[wi]);
@@ -4306,16 +5210,24 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
         // Skip OpName for inlineable functions
-        if (opcode == 5 and wc >= 3 and inlineable.contains(words[pos + 1])) { pos = ie; continue; }
+        if (opcode == 5 and wc >= 3 and inlineable.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
 
         // Skip function definitions
         if (opcode == 54 and wc >= 5) {
-            if (inlineable.get(words[pos + 2])) |fi| { pos = fi.end_pos; continue; }
+            if (inlineable.get(words[pos + 2])) |fi| {
+                pos = fi.end_pos;
+                continue;
+            }
         }
 
         // Inline OpFunctionCall
@@ -4348,9 +5260,14 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                     var ret_defined_in_body = false;
                     var bp: u32 = fi.body_start;
                     while (bp < fi.body_end) {
-                        const bh = words[bp]; const bwc: u32 = bh >> 16; const bop: u16 = @truncate(bh & 0xFFFF);
+                        const bh = words[bp];
+                        const bwc: u32 = bh >> 16;
+                        const bop: u16 = @truncate(bh & 0xFFFF);
                         if (bwc == 0) break;
-                        const binfo = compact_ids.getOpInfo(bop) orelse { bp += bwc; continue; };
+                        const binfo = compact_ids.getOpInfo(bop) orelse {
+                            bp += bwc;
+                            continue;
+                        };
                         if (binfo.fixed == 2 and bp + 2 < fi.body_end and words[bp + 2] == fi.return_value_id) {
                             ret_defined_in_body = true;
                         } else if (binfo.fixed == 3 and bp + 1 < fi.body_end and words[bp + 1] == fi.return_value_id) {
@@ -4391,7 +5308,10 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
     // Update bound
     result.items[3] = bound;
 
-    if (result.items.len == words.len) { result.deinit(alloc); return words; }
+    if (result.items.len == words.len) {
+        result.deinit(alloc);
+        return words;
+    }
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
@@ -4426,7 +5346,9 @@ pub fn moveVarToEntry(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         result.appendSliceAssumeCapacity(words[pos..inst_end]);
         pos = inst_end;
         while (pos < words.len) {
-            const ph = words[pos]; const pwc: u32 = ph >> 16; const pop: u16 = @truncate(ph & 0xFFFF);
+            const ph = words[pos];
+            const pwc: u32 = ph >> 16;
+            const pop: u16 = @truncate(ph & 0xFFFF);
             if (pwc == 0 or pop != 55) break;
             const pie = pos + pwc;
             result.appendSliceAssumeCapacity(words[pos..pie]);
@@ -4436,7 +5358,9 @@ pub fn moveVarToEntry(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         // Copy first OpLabel
         if (pos >= words.len) break;
         {
-            const lh = words[pos]; const lwc: u32 = lh >> 16; const lop: u16 = @truncate(lh & 0xFFFF);
+            const lh = words[pos];
+            const lwc: u32 = lh >> 16;
+            const lop: u16 = @truncate(lh & 0xFFFF);
             if (lop != 248) continue;
             result.appendSliceAssumeCapacity(words[pos .. pos + lwc]);
             pos += lwc;
@@ -4446,7 +5370,10 @@ pub fn moveVarToEntry(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         // Collect ALL OpVariable instructions from ALL blocks to hoist to entry block
         // SPIR-V spec: All OpVariable instructions in a function must be in the first block
         var func_body = std.ArrayList(u32).initCapacity(alloc, words.len - pos) catch return words;
-        var all_vars = std.ArrayList(u32).initCapacity(alloc, 64) catch { func_body.deinit(alloc); return words; };
+        var all_vars = std.ArrayList(u32).initCapacity(alloc, 64) catch {
+            func_body.deinit(alloc);
+            return words;
+        };
         var found_misplaced = false;
         var label_count: u32 = 0;
 
@@ -4729,7 +5656,7 @@ pub fn fixEarlyAccessVars(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 // Type-defining opcodes (19-33) have different formats where words[pos+1]
                 // is the result ID, not a type. Exclude them from id_types to prevent
                 // type IDs from being used as values in fixEarlyAccessVars insertions.
-                4,5,11,12,17,18,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,77,78,79,80,81,82,83,84,85,86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,101,102,103,104,105,106,107,108,109,110,111,112,113,114,115,116,117,118,119,120,121,122,123,124,125,126,127,128,129,130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,149,150,151,152,153,154,155,156,157,158,159,160,161,162,163,164,165,166,167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,191,192,193,194,195,196,197,198,199,200 => {
+                4, 5, 11, 12, 17, 18, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179, 180, 181, 182, 183, 184, 185, 186, 187, 188, 189, 190, 191, 192, 193, 194, 195, 196, 197, 198, 199, 200 => {
                     id_types.put(alloc, words[pos + 2], words[pos + 1]) catch {};
                 },
                 else => {},
@@ -4796,7 +5723,10 @@ pub fn fixEarlyAccessVars(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 const ie_f2 = pos + wc_f2;
                 if (ie_f2 > words.len) break;
                 const op_f2: u16 = @truncate(words[pos] & 0xFFFF);
-                if (op_f2 == 56) { func_end = pos; break; } // OpFunctionEnd
+                if (op_f2 == 56) {
+                    func_end = pos;
+                    break;
+                } // OpFunctionEnd
                 pos = ie_f2;
             }
             // Build set of load result IDs from this variable (to avoid circular: storing load-of-self)
@@ -5043,14 +5973,26 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
         switch (info.fixed) {
             0 => {},
             1 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
             },
             2 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
             },
             3 => {
-                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
             },
             else => {},
         }
@@ -5058,12 +6000,25 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
-                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
-                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'i' => {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+                },
                 'M' => {
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                     while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
                 },
                 'W' => {
@@ -5073,17 +6028,24 @@ pub fn elimRedundantLoads(alloc: std.mem.Allocator, words: []const u32) error{Ou
                         result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; // target
                         wi += 1;
                     }
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     var in_str = true;
                     while (wi < ie and in_str) : (wi += 1) {
-                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        const w = words[wi];
+                        result.append(alloc, w) catch return words;
                         if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
                     }
                     while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
                 },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
@@ -5148,7 +6110,9 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
     defer insert_map.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -5180,7 +6144,9 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
     defer value_vec_width.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -5189,7 +6155,10 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
             type_vec_width.put(alloc, words[pos + 1], words[pos + 3]) catch {};
         }
         // Track IDs whose type is a vector
-        const info = compact_ids.getOpInfo(opcode) orelse { pos = ie; continue; };
+        const info = compact_ids.getOpInfo(opcode) orelse {
+            pos = ie;
+            continue;
+        };
         switch (info.fixed) {
             2 => { // type + result
                 if (pos + 2 < ie and vector_type_ids.contains(words[pos + 1])) {
@@ -5408,23 +6377,52 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
         var wi: u32 = pos + 1;
         switch (info.fixed) {
             0 => {},
-            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
-            2 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
-                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
-                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'i' => {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+                },
                 'M' => {
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                     while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
                 },
                 'W' => {
@@ -5434,17 +6432,24 @@ pub fn foldCompositeExtract(alloc: std.mem.Allocator, words: []const u32) error{
                         result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; // target
                         wi += 1;
                     }
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     var in_str = true;
                     while (wi < ie and in_str) : (wi += 1) {
-                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        const w = words[wi];
+                        result.append(alloc, w) catch return words;
                         if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
                     }
                     while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
                 },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
@@ -5602,16 +6607,46 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             80, // OpCompositeConstruct
             81, // OpCompositeExtract
             84, // OpTranspose
-            126, 127, // SNegate, FNegate
-            128, 129, 130, 131, 132, 133, // IAdd, FAdd, ISub, FSub, IMul, FMul
+            126,
+            127, // SNegate, FNegate
+            128,
+            129,
+            130,
+            131,
+            132,
+            133, // IAdd, FAdd, ISub, FSub, IMul, FMul
             136, // FDiv
-            142, 143, 144, 145, 146, 147, 148, // Vector/Matrix ops
-            109, 110, 111, 112, // Conversions
-            154, 155, 156, 157, // OpAny, OpAll, OpIsNan, OpIsInf — NOT derivatives (207-215,
+            142,
+            143,
+            144,
+            145,
+            146,
+            147,
+            148, // Vector/Matrix ops
+            109,
+            110,
+            111,
+            112, // Conversions
+            154,
+            155,
+            156,
+            157, // OpAny, OpAll, OpIsNan, OpIsInf — NOT derivatives (207-215,
             // which are screen-position-dependent and must NOT be CSE-eligible)
-            166, 167, 168, 170, 171, // Logical ops
+            166,
+            167,
+            168,
+            170,
+            171, // Logical ops
             169, // Select
-            177, 178, 179, 180, 182, 184, 186, 188, 190, // Comparisons
+            177,
+            178,
+            179,
+            180,
+            182,
+            184,
+            186,
+            188,
+            190, // Comparisons
             => true,
             else => false,
         };
@@ -5678,10 +6713,7 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
 
         // Skip duplicate AccessChains and SampledImages
         const is_cse_eligible_2 = switch (opcode) {
-            79, 80, 81, 84, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 143, 144, 145, 146, 147, 148,
-            109, 110, 111, 112, 154, 155, 156, 157, 166, 167, 168, 170, 171, 169,
-            177, 178, 179, 180, 182, 184, 186, 188, 190
-            => true,
+            79, 80, 81, 84, 126, 127, 128, 129, 130, 131, 132, 133, 136, 142, 143, 144, 145, 146, 147, 148, 109, 110, 111, 112, 154, 155, 156, 157, 166, 167, 168, 170, 171, 169, 177, 178, 179, 180, 182, 184, 186, 188, 190 => true,
             else => false,
         };
         if ((opcode == 65 and wc >= 4) or (opcode == 86 and wc >= 5) or (is_cse_eligible_2 and wc >= 4)) {
@@ -5707,23 +6739,52 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         var wi: u32 = pos + 1;
         switch (info.fixed) {
             0 => {},
-            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
-            2 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
-                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
-                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'i' => {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+                },
                 'M' => {
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                     while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
                 },
                 'W' => {
@@ -5733,17 +6794,24 @@ pub fn cseWithinBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                         result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; // target
                         wi += 1;
                     }
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     var in_str = true;
                     while (wi < ie and in_str) : (wi += 1) {
-                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        const w = words[wi];
+                        result.append(alloc, w) catch return words;
                         if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
                     }
                     while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
                 },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
@@ -5770,7 +6838,9 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
     {
         var p: u32 = 5;
         while (p < words.len) {
-            const hdr = words[p]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+            const hdr = words[p];
+            const wc: u32 = hdr >> 16;
+            const opcode: u16 = @truncate(hdr & 0xFFFF);
             if (wc == 0) break;
             const ie = p + wc;
             if (ie > words.len) break;
@@ -5800,7 +6870,9 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
     var in_func = false;
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -5812,7 +6884,8 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
                 if (vid >= 1 and vid < bound) func_vars.set(vid);
             }
             if (opcode == 62 and wc >= 3) {
-                const ptr = words[pos + 1]; const val = words[pos + 2];
+                const ptr = words[pos + 1];
+                const val = words[pos + 2];
                 if (ptr >= 1 and ptr < bound and func_vars.isSet(ptr)) {
                     const entry = try store_count.getOrPutValue(alloc, ptr, 0);
                     entry.value_ptr.* += 1;
@@ -5890,7 +6963,9 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
                 // Find store position
                 var sp: u32 = 5;
                 while (sp < words.len) {
-                    const sh = words[sp]; const swc: u32 = sh >> 16; const sop: u16 = @truncate(sh & 0xFFFF);
+                    const sh = words[sp];
+                    const swc: u32 = sh >> 16;
+                    const sop: u16 = @truncate(sh & 0xFFFF);
                     if (swc == 0) break;
                     const sie = sp + swc;
                     if (sie > words.len) break;
@@ -5909,10 +6984,12 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
             const st_pos = entry.value_ptr.*;
             // Find store's block
             const store_block = blk: {
-                var bp: u32 = 5; var cur: u32 = 0;
+                var bp: u32 = 5;
+                var cur: u32 = 0;
                 while (bp < words.len) {
                     if (bp == st_pos) break :blk cur;
-                    const bh = words[bp]; const bwc: u32 = bh >> 16;
+                    const bh = words[bp];
+                    const bwc: u32 = bh >> 16;
                     if (bwc == 0) break;
                     if ((@as(u16, @truncate(bh & 0xFFFF)) == 248) and bwc >= 2) cur = words[bp + 1];
                     const bie = bp + bwc;
@@ -5925,16 +7002,20 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
             var load_same_block = true;
             var lp: u32 = 5;
             while (lp < words.len) {
-                const lh = words[lp]; const lwc: u32 = lh >> 16; const lop: u16 = @truncate(lh & 0xFFFF);
+                const lh = words[lp];
+                const lwc: u32 = lh >> 16;
+                const lop: u16 = @truncate(lh & 0xFFFF);
                 if (lwc == 0) break;
                 const lie = lp + lwc;
                 if (lie > words.len) break;
                 if (lop == 61 and lwc >= 4 and words[lp + 3] == vid) {
                     const load_block = blk: {
-                        var bp2: u32 = 5; var cur2: u32 = 0;
+                        var bp2: u32 = 5;
+                        var cur2: u32 = 0;
                         while (bp2 < words.len) {
                             if (bp2 == lp) break :blk cur2;
-                            const bh = words[bp2]; const bwc: u32 = bh >> 16;
+                            const bh = words[bp2];
+                            const bwc: u32 = bh >> 16;
                             if (bwc == 0) break;
                             if ((@as(u16, @truncate(bh & 0xFFFF)) == 248) and bwc >= 2) cur2 = words[bp2 + 1];
                             const bie = bp2 + bwc;
@@ -5943,7 +7024,10 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
                         }
                         break :blk cur2;
                     };
-                    if (load_block != store_block) { load_same_block = false; break; }
+                    if (load_block != store_block) {
+                        load_same_block = false;
+                        break;
+                    }
                 }
                 lp = lie;
             }
@@ -5967,7 +7051,9 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -5988,15 +7074,26 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
 
         // Skip OpVariable/OpStore/OpLoad for qualifying vars
-        if (opcode == 59 and wc >= 3 and words[pos + 2] < bound and vars_to_remove.isSet(words[pos + 2])) { pos = ie; continue; }
-        if (opcode == 62 and wc >= 3 and words[pos + 1] < bound and vars_to_remove.isSet(words[pos + 1])) { pos = ie; continue; }
-        if (opcode == 61 and wc >= 4 and words[pos + 3] < bound and vars_to_remove.isSet(words[pos + 3])) { pos = ie; continue; }
+        if (opcode == 59 and wc >= 3 and words[pos + 2] < bound and vars_to_remove.isSet(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
+        if (opcode == 62 and wc >= 3 and words[pos + 1] < bound and vars_to_remove.isSet(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
+        if (opcode == 61 and wc >= 4 and words[pos + 3] < bound and vars_to_remove.isSet(words[pos + 3])) {
+            pos = ie;
+            continue;
+        }
 
         // Apply substitution using getOpInfo
         const info = compact_ids.getOpInfo(opcode);
@@ -6005,42 +7102,81 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
             var wi: u32 = pos + 1;
             const fixed = inf.fixed;
             switch (fixed) {
-                1 => { if (wi < ie) { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
-                2 => {
-                    if (wi < ie) { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
-                    if (wi < ie) { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+                1 => {
+                    if (wi < ie) {
+                        result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                        wi += 1;
+                    }
                 },
-                else => { var fi: u32 = 0; while (fi < fixed and wi < ie) : ({fi += 1; wi += 1;}) result.append(alloc, words[wi]) catch return words; },
+                2 => {
+                    if (wi < ie) {
+                        result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                        wi += 1;
+                    }
+                },
+                else => {
+                    var fi: u32 = 0;
+                    while (fi < fixed and wi < ie) : ({
+                        fi += 1;
+                        wi += 1;
+                    }) result.append(alloc, words[wi]) catch return words;
+                },
             }
             const ops = inf.ops;
             var ci: usize = 0;
             while (ci < ops.len and wi < ie) : (ci += 1) {
                 const ch = ops[ci];
                 switch (ch) {
-                    'i' => { result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
-                    'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                    'I' => { while (wi < ie) : (wi += 1) result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; },
-                    'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                    'i' => {
+                        result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                        wi += 1;
+                    },
+                    'l' => {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    },
+                    'I' => {
+                        while (wi < ie) : (wi += 1) result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                    },
+                    'L', 's' => {
+                        while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+                    },
                     'M' => {
-                        if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                        if (wi < ie) {
+                            result.append(alloc, words[wi]) catch return words;
+                            wi += 1;
+                        }
                         while (wi < ie) : (wi += 1) result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
                     },
                     'W' => {
                         while (wi + 1 < ie) {
-                            result.append(alloc, words[wi]) catch return words; wi += 1;
-                            result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words; wi += 1;
+                            result.append(alloc, words[wi]) catch return words;
+                            wi += 1;
+                            result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
+                            wi += 1;
                         }
-                        if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                        if (wi < ie) {
+                            result.append(alloc, words[wi]) catch return words;
+                            wi += 1;
+                        }
                     },
                     'E' => {
                         while (wi < ie) {
-                            const w = words[wi]; wi += 1;
+                            const w = words[wi];
+                            wi += 1;
                             result.append(alloc, w) catch return words;
                             if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
                         }
                         while (wi < ie) : (wi += 1) result.append(alloc, load_fwd.get(words[wi]) orelse words[wi]) catch return words;
                     },
-                    else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                    else => {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    },
                 }
             }
             // Remaining words (shouldn't happen for well-formed instructions)
@@ -6088,7 +7224,9 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode >= 19 and opcode <= 33 and wc >= 2) {
             const tid = words[pos + 1];
@@ -6096,7 +7234,10 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
         }
         if (opcode == 22 and wc >= 3) { // OpTypeFloat
             const tid = words[pos + 1];
-            if (tid >= 1 and tid < bound) { float_types.set(tid); defined_types.set(tid); }
+            if (tid >= 1 and tid < bound) {
+                float_types.set(tid);
+                defined_types.set(tid);
+            }
         }
         if (opcode == 21 and wc >= 4) { // OpTypeInt
             const tid = words[pos + 1];
@@ -6133,10 +7274,15 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
-        if (ie > words.len) { pos = ie; continue; }
+        if (ie > words.len) {
+            pos = ie;
+            continue;
+        }
 
         // Binary arithmetic: result_type, result_id, operand_a, operand_b
         if (wc >= 5) {
@@ -6164,40 +7310,100 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                         const bf: f32 = @bitCast(bv);
                         var cf: f32 = undefined;
                         switch (opcode) {
-                            129 => { cf = af + bf; result_val = @bitCast(cf); }, // FAdd
-                            131 => { cf = af - bf; result_val = @bitCast(cf); }, // FSub
-                            133 => { cf = af * bf; result_val = @bitCast(cf); }, // FMul
-                            136 => { if (bf != 0.0) { cf = af / bf; result_val = @bitCast(cf); } }, // FDiv
-                            140 => { if (bf != 0.0) { cf = @rem(af, bf); result_val = @bitCast(cf); } }, // FRem
-                            141 => { if (bf != 0.0) { cf = @mod(af, bf); result_val = @bitCast(cf); } }, // FMod
+                            129 => {
+                                cf = af + bf;
+                                result_val = @bitCast(cf);
+                            }, // FAdd
+                            131 => {
+                                cf = af - bf;
+                                result_val = @bitCast(cf);
+                            }, // FSub
+                            133 => {
+                                cf = af * bf;
+                                result_val = @bitCast(cf);
+                            }, // FMul
+                            136 => {
+                                if (bf != 0.0) {
+                                    cf = af / bf;
+                                    result_val = @bitCast(cf);
+                                }
+                            }, // FDiv
+                            140 => {
+                                if (bf != 0.0) {
+                                    cf = @rem(af, bf);
+                                    result_val = @bitCast(cf);
+                                }
+                            }, // FRem
+                            141 => {
+                                if (bf != 0.0) {
+                                    cf = @mod(af, bf);
+                                    result_val = @bitCast(cf);
+                                }
+                            }, // FMod
                             else => {},
                         }
                     } else if (int_unsigned.isSet(result_type)) {
                         // Unsigned int operations (32-bit)
                         switch (opcode) {
-                            128 => { result_val = av +% bv; }, // IAdd
-                            130 => { result_val = av -% bv; }, // ISub
-                            132 => { result_val = av *% bv; }, // IMul
-                            134 => { if (bv != 0) result_val = av / bv; }, // UDiv
-                            137 => { if (bv != 0) result_val = av % bv; }, // UMod
-                            194 => { if (bv < 32) result_val = av >> @intCast(bv); }, // ShiftRightLogical
-                            196 => { if (bv < 32) result_val = av << @intCast(bv); }, // ShiftLeftLogical
-                            197 => { result_val = av | bv; }, // BitwiseOr
-                            198 => { result_val = av ^ bv; }, // BitwiseXor
-                            199 => { result_val = av & bv; }, // BitwiseAnd
+                            128 => {
+                                result_val = av +% bv;
+                            }, // IAdd
+                            130 => {
+                                result_val = av -% bv;
+                            }, // ISub
+                            132 => {
+                                result_val = av *% bv;
+                            }, // IMul
+                            134 => {
+                                if (bv != 0) result_val = av / bv;
+                            }, // UDiv
+                            137 => {
+                                if (bv != 0) result_val = av % bv;
+                            }, // UMod
+                            194 => {
+                                if (bv < 32) result_val = av >> @intCast(bv);
+                            }, // ShiftRightLogical
+                            196 => {
+                                if (bv < 32) result_val = av << @intCast(bv);
+                            }, // ShiftLeftLogical
+                            197 => {
+                                result_val = av | bv;
+                            }, // BitwiseOr
+                            198 => {
+                                result_val = av ^ bv;
+                            }, // BitwiseXor
+                            199 => {
+                                result_val = av & bv;
+                            }, // BitwiseAnd
                             else => {},
                         }
                     } else if (int_signed.isSet(result_type)) {
                         // Signed int operations (32-bit, using wrapping for safety)
                         switch (opcode) {
-                            128 => { result_val = av +% bv; }, // IAdd
-                            130 => { result_val = av -% bv; }, // ISub
-                            132 => { result_val = av *% bv; }, // IMul
-                            135 => { if (bv != 0) result_val = @bitCast(@divTrunc(@as(i32, @bitCast(av)), @as(i32, @bitCast(bv)))); }, // SDiv
-                            196 => { if (bv < 32) result_val = av << @intCast(bv); }, // ShiftLeftLogical
-                            197 => { result_val = av | bv; }, // BitwiseOr
-                            198 => { result_val = av ^ bv; }, // BitwiseXor
-                            199 => { result_val = av & bv; }, // BitwiseAnd
+                            128 => {
+                                result_val = av +% bv;
+                            }, // IAdd
+                            130 => {
+                                result_val = av -% bv;
+                            }, // ISub
+                            132 => {
+                                result_val = av *% bv;
+                            }, // IMul
+                            135 => {
+                                if (bv != 0) result_val = @bitCast(@divTrunc(@as(i32, @bitCast(av)), @as(i32, @bitCast(bv))));
+                            }, // SDiv
+                            196 => {
+                                if (bv < 32) result_val = av << @intCast(bv);
+                            }, // ShiftLeftLogical
+                            197 => {
+                                result_val = av | bv;
+                            }, // BitwiseOr
+                            198 => {
+                                result_val = av ^ bv;
+                            }, // BitwiseXor
+                            199 => {
+                                result_val = av & bv;
+                            }, // BitwiseAnd
                             else => {},
                         }
                     }
@@ -6257,37 +7463,73 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                     const af: f32 = @bitCast(av);
                     const bf: f32 = @bitCast(bv);
                     switch (opcode) {
-                        180 => { bool_result = af == bf; }, // OpFOrdEqual (false for NaN — `==` already gives that)
+                        180 => {
+                            bool_result = af == bf;
+                        }, // OpFOrdEqual (false for NaN — `==` already gives that)
                         // OpFOrdNotEqual is ORDERED: false when either operand is NaN. Zig's
                         // `af != bf` returns TRUE for NaN, so guard it (the other ordered
                         // comparisons below already yield false for NaN via `< > <= >=`).
-                        182 => { bool_result = !std.math.isNan(af) and !std.math.isNan(bf) and af != bf; }, // OpFOrdNotEqual
-                        184 => { bool_result = af < bf; },   // OpFOrdLessThan
-                        186 => { bool_result = af > bf; },   // OpFOrdGreaterThan
-                        188 => { bool_result = af <= bf; },  // OpFOrdLessThanEqual
-                        190 => { bool_result = af >= bf; },  // OpFOrdGreaterThanEqual
+                        182 => {
+                            bool_result = !std.math.isNan(af) and !std.math.isNan(bf) and af != bf;
+                        }, // OpFOrdNotEqual
+                        184 => {
+                            bool_result = af < bf;
+                        }, // OpFOrdLessThan
+                        186 => {
+                            bool_result = af > bf;
+                        }, // OpFOrdGreaterThan
+                        188 => {
+                            bool_result = af <= bf;
+                        }, // OpFOrdLessThanEqual
+                        190 => {
+                            bool_result = af >= bf;
+                        }, // OpFOrdGreaterThanEqual
                         else => {},
                     }
                 } else if (int_unsigned.isSet(a_type)) {
                     switch (opcode) {
-                        170 => { bool_result = av == bv; }, // OpIEqual
-                        171 => { bool_result = av != bv; }, // OpINotEqual
-                        172 => { bool_result = av > bv; },  // OpUGreaterThan
-                        174 => { bool_result = av >= bv; }, // OpUGreaterThanEqual
-                        176 => { bool_result = av < bv; },  // OpULessThan
-                        178 => { bool_result = av <= bv; }, // OpULessThanEqual
+                        170 => {
+                            bool_result = av == bv;
+                        }, // OpIEqual
+                        171 => {
+                            bool_result = av != bv;
+                        }, // OpINotEqual
+                        172 => {
+                            bool_result = av > bv;
+                        }, // OpUGreaterThan
+                        174 => {
+                            bool_result = av >= bv;
+                        }, // OpUGreaterThanEqual
+                        176 => {
+                            bool_result = av < bv;
+                        }, // OpULessThan
+                        178 => {
+                            bool_result = av <= bv;
+                        }, // OpULessThanEqual
                         else => {},
                     }
                 } else if (int_signed.isSet(a_type)) {
                     const as_i: i32 = @bitCast(av);
                     const bs_i: i32 = @bitCast(bv);
                     switch (opcode) {
-                        170 => { bool_result = as_i == bs_i; }, // OpIEqual
-                        171 => { bool_result = as_i != bs_i; }, // OpINotEqual
-                        173 => { bool_result = as_i > bs_i; },  // OpSGreaterThan
-                        175 => { bool_result = as_i >= bs_i; }, // OpSGreaterThanEqual
-                        177 => { bool_result = as_i < bs_i; },  // OpSLessThan
-                        179 => { bool_result = as_i <= bs_i; }, // OpSLessThanEqual
+                        170 => {
+                            bool_result = as_i == bs_i;
+                        }, // OpIEqual
+                        171 => {
+                            bool_result = as_i != bs_i;
+                        }, // OpINotEqual
+                        173 => {
+                            bool_result = as_i > bs_i;
+                        }, // OpSGreaterThan
+                        175 => {
+                            bool_result = as_i >= bs_i;
+                        }, // OpSGreaterThanEqual
+                        177 => {
+                            bool_result = as_i < bs_i;
+                        }, // OpSLessThan
+                        179 => {
+                            bool_result = as_i <= bs_i;
+                        }, // OpSLessThanEqual
                         else => {},
                     }
                 }
@@ -6388,7 +7630,9 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     var insert_point: u32 = 5;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -6412,10 +7656,15 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     var inserted_constants = false;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
-        if (ie > words.len) { pos = ie; continue; }
+        if (ie > words.len) {
+            pos = ie;
+            continue;
+        }
 
         // Skip foldable arithmetic ops (they become constants)
         // Only skip if this instruction DEFINES a result ID that's being folded.
@@ -6498,26 +7747,88 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
             if (br_info) |info| {
                 var bw: u32 = pos + 1;
                 switch (info.fixed) {
-                    1 => { if (bw < bie) { if (bool_replacements.contains(br_result[bw])) any_replaced = true; bw += 1; } },
-                    2 => {
-                        if (bw < bie) { if (bool_replacements.contains(br_result[bw])) any_replaced = true; bw += 1; }
-                        if (bw < bie) { bw += 1; } // result_id, skip
+                    1 => {
+                        if (bw < bie) {
+                            if (bool_replacements.contains(br_result[bw])) any_replaced = true;
+                            bw += 1;
+                        }
                     },
-                    3 => { if (bw < bie) { bw += 1; } }, // result_id, skip
+                    2 => {
+                        if (bw < bie) {
+                            if (bool_replacements.contains(br_result[bw])) any_replaced = true;
+                            bw += 1;
+                        }
+                        if (bw < bie) {
+                            bw += 1;
+                        } // result_id, skip
+                    },
+                    3 => {
+                        if (bw < bie) {
+                            bw += 1;
+                        }
+                    }, // result_id, skip
                     else => {},
                 }
                 if (!any_replaced) {
                     for (info.ops) |ch| {
                         if (bw >= bie) break;
                         switch (ch) {
-                            'i' => { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } bw += 1; },
-                            'I' => { while (bw < bie) : (bw += 1) { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
-                            'l' => { bw += 1; },
-                            'L', 's' => { bw = bie; },
-                            'M' => { if (bw < bie) bw += 1; while (bw < bie) : (bw += 1) { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
-                            'W' => { while (bw + 1 < bie) { bw += 1; bw += 1; if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
-                            'E' => { while (bw < bie) { const w = br_result[bw]; bw += 1; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (bw < bie) : (bw += 1) { if (bool_replacements.contains(br_result[bw])) { any_replaced = true; break; } } },
-                            else => { bw += 1; },
+                            'i' => {
+                                if (bool_replacements.contains(br_result[bw])) {
+                                    any_replaced = true;
+                                    break;
+                                }
+                                bw += 1;
+                            },
+                            'I' => {
+                                while (bw < bie) : (bw += 1) {
+                                    if (bool_replacements.contains(br_result[bw])) {
+                                        any_replaced = true;
+                                        break;
+                                    }
+                                }
+                            },
+                            'l' => {
+                                bw += 1;
+                            },
+                            'L', 's' => {
+                                bw = bie;
+                            },
+                            'M' => {
+                                if (bw < bie) bw += 1;
+                                while (bw < bie) : (bw += 1) {
+                                    if (bool_replacements.contains(br_result[bw])) {
+                                        any_replaced = true;
+                                        break;
+                                    }
+                                }
+                            },
+                            'W' => {
+                                while (bw + 1 < bie) {
+                                    bw += 1;
+                                    bw += 1;
+                                    if (bool_replacements.contains(br_result[bw])) {
+                                        any_replaced = true;
+                                        break;
+                                    }
+                                }
+                            },
+                            'E' => {
+                                while (bw < bie) {
+                                    const w = br_result[bw];
+                                    bw += 1;
+                                    if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                                }
+                                while (bw < bie) : (bw += 1) {
+                                    if (bool_replacements.contains(br_result[bw])) {
+                                        any_replaced = true;
+                                        break;
+                                    }
+                                }
+                            },
+                            else => {
+                                bw += 1;
+                            },
                         }
                     }
                 }
@@ -6532,28 +7843,92 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                 br_buf.append(alloc, bhdr) catch return br_result; // header
                 var bw: u32 = pos + 1;
                 switch (info.fixed) {
-                    1 => { if (bw < bie) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; } },
-                    2 => {
-                        if (bw < bie) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; }
-                        if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } // result_id
+                    1 => {
+                        if (bw < bie) {
+                            br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            bw += 1;
+                        }
                     },
-                    3 => { if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } },
+                    2 => {
+                        if (bw < bie) {
+                            br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            bw += 1;
+                        }
+                        if (bw < bie) {
+                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            bw += 1;
+                        } // result_id
+                    },
+                    3 => {
+                        if (bw < bie) {
+                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            bw += 1;
+                        }
+                    },
                     else => {},
                 }
                 for (info.ops) |ch| {
                     if (bw >= bie) break;
                     switch (ch) {
-                        'i' => { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; },
-                        'I' => { while (bw < bie) : (bw += 1) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; } },
-                        'l' => { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; },
-                        'L', 's' => { while (bw < bie) : (bw += 1) { br_buf.append(alloc, br_result[bw]) catch return br_result; } },
-                        'M' => { if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } while (bw < bie) : (bw += 1) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; } },
-                        'W' => { while (bw + 1 < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; bw += 1; } if (bw < bie) { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; } },
-                        'E' => { while (bw < bie) { const w = br_result[bw]; bw += 1; br_buf.append(alloc, w) catch return br_result; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (bw < bie) : (bw += 1) { br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result; } },
-                        else => { br_buf.append(alloc, br_result[bw]) catch return br_result; bw += 1; },
+                        'i' => {
+                            br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            bw += 1;
+                        },
+                        'I' => {
+                            while (bw < bie) : (bw += 1) {
+                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            }
+                        },
+                        'l' => {
+                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            bw += 1;
+                        },
+                        'L', 's' => {
+                            while (bw < bie) : (bw += 1) {
+                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            }
+                        },
+                        'M' => {
+                            if (bw < bie) {
+                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                                bw += 1;
+                            }
+                            while (bw < bie) : (bw += 1) {
+                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            }
+                        },
+                        'W' => {
+                            while (bw + 1 < bie) {
+                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                                bw += 1;
+                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                                bw += 1;
+                            }
+                            if (bw < bie) {
+                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                                bw += 1;
+                            }
+                        },
+                        'E' => {
+                            while (bw < bie) {
+                                const w = br_result[bw];
+                                bw += 1;
+                                br_buf.append(alloc, w) catch return br_result;
+                                if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                            }
+                            while (bw < bie) : (bw += 1) {
+                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            }
+                        },
+                        else => {
+                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            bw += 1;
+                        },
                     }
                 }
-                while (bw < bie) : (bw += 1) { br_buf.append(alloc, br_result[bw]) catch return br_result; }
+                while (bw < bie) : (bw += 1) {
+                    br_buf.append(alloc, br_result[bw]) catch return br_result;
+                }
                 br_out.appendSlice(alloc, br_buf.items) catch return br_result;
                 br_buf.deinit(alloc);
             } else {
@@ -6740,47 +8115,47 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
         comp_reps.deinit(alloc);
     }
 
-for (replacements.items, 0..) |rep, rep_idx| {
+    for (replacements.items, 0..) |rep, rep_idx| {
         _ = rep_idx;
         outer: {
-        pos = 5;
-        while (pos < words.len) {
-            const hdr = words[pos];
-            const wc: u32 = hdr >> 16;
-            if (wc == 0) break;
-            const ie = pos + wc;
-            if (ie > words.len) break;
-            const op: u16 = @truncate(hdr & 0xFFFF);
-            if (op == 59 and wc >= 4 and words[pos + 2] == rep.var_id) {
-                remove_set.set(pos);
+            pos = 5;
+            while (pos < words.len) {
+                const hdr = words[pos];
+                const wc: u32 = hdr >> 16;
+                if (wc == 0) break;
+                const ie = pos + wc;
+                if (ie > words.len) break;
+                const op: u16 = @truncate(hdr & 0xFFFF);
+                if (op == 59 and wc >= 4 and words[pos + 2] == rep.var_id) {
+                    remove_set.set(pos);
+                }
+                pos = ie;
             }
-            pos = ie;
-        }
-        for (rep.ac_positions.items) |p| remove_set.set(p);
-        for (rep.store_positions.items) |p| remove_set.set(p);
+            for (rep.ac_positions.items) |p| remove_set.set(p);
+            for (rep.store_positions.items) |p| remove_set.set(p);
 
-        var comp_vals = try alloc.alloc(u32, rep.comp_count);
-        @memset(comp_vals, 0);
-        for (rep.ac_positions.items) |ac_pos| {
-            const ac_res = words[ac_pos + 2];
-            const ac_idx_id = words[ac_pos + 4];
-            const ac_idx = const_vals.get(ac_idx_id) orelse {
-                // Non-constant index — skip this variable
-                break :outer;
-            };
-            for (rep.store_positions.items) |sp| {
-                if (words[sp + 1] == ac_res and ac_idx < rep.comp_count) {
-                    comp_vals[ac_idx] = words[sp + 2];
-                    break;
+            var comp_vals = try alloc.alloc(u32, rep.comp_count);
+            @memset(comp_vals, 0);
+            for (rep.ac_positions.items) |ac_pos| {
+                const ac_res = words[ac_pos + 2];
+                const ac_idx_id = words[ac_pos + 4];
+                const ac_idx = const_vals.get(ac_idx_id) orelse {
+                    // Non-constant index — skip this variable
+                    break :outer;
+                };
+                for (rep.store_positions.items) |sp| {
+                    if (words[sp + 1] == ac_res and ac_idx < rep.comp_count) {
+                        comp_vals[ac_idx] = words[sp + 2];
+                        break;
+                    }
                 }
             }
-        }
-        try comp_reps.append(alloc, .{
-            .load_pos = rep.load_pos,
-            .vec_type = rep.vec_type,
-            .load_result = rep.load_result,
-            .comp_vals = comp_vals,
-        });
+            try comp_reps.append(alloc, .{
+                .load_pos = rep.load_pos,
+                .vec_type = rep.vec_type,
+                .load_result = rep.load_result,
+                .comp_vals = comp_vals,
+            });
         }
     }
 
@@ -7004,7 +8379,8 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
                 var cur: u32 = 0;
                 while (bp < words.len) {
                     if (bp == store_pos) break :blk cur;
-                    const bh = words[bp]; const bwc: u32 = bh >> 16;
+                    const bh = words[bp];
+                    const bwc: u32 = bh >> 16;
                     if (bwc == 0) break;
                     const bop: u16 = @truncate(bh & 0xFFFF);
                     if (bop == 248 and bwc >= 2) cur = words[bp + 1]; // OpLabel
@@ -7020,7 +8396,8 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
                     var bp: u32 = 5;
                     var cur: u32 = 0;
                     while (bp < words.len) {
-                        const bh = words[bp]; const bwc: u32 = bh >> 16;
+                        const bh = words[bp];
+                        const bwc: u32 = bh >> 16;
                         if (bwc == 0) break;
                         const bop: u16 = @truncate(bh & 0xFFFF);
                         if (bop == 248 and bwc >= 2) cur = words[bp + 1]; // OpLabel
@@ -7031,7 +8408,10 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
                     }
                     break :blk cur;
                 };
-                if (load_block_id != store_block_id) { same_block = false; break; }
+                if (load_block_id != store_block_id) {
+                    same_block = false;
+                    break;
+                }
             }
             if (!same_block) continue;
             // Verify: every AC result is accounted for (loaded with known index)
@@ -7041,9 +8421,15 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
                 const ac_res = ae.key_ptr.*;
                 var found = false;
                 for (member_reads.items) |mr| {
-                    if (mr.ac_id == ac_res) { found = true; break; }
+                    if (mr.ac_id == ac_res) {
+                        found = true;
+                        break;
+                    }
                 }
-                if (!found) { all_ac_loaded = false; break; }
+                if (!found) {
+                    all_ac_loaded = false;
+                    break;
+                }
             }
             if (!all_ac_loaded) continue;
 
@@ -7170,7 +8556,9 @@ pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error
     var entry_func_id: u32 = 0;
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7191,7 +8579,9 @@ pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7210,7 +8600,9 @@ pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error
             var return_pos: u32 = 0;
 
             while (inner < words.len) {
-                const ihdr = words[inner]; const iwc: u32 = ihdr >> 16; const iop: u16 = @truncate(ihdr & 0xFFFF);
+                const ihdr = words[inner];
+                const iwc: u32 = ihdr >> 16;
+                const iop: u16 = @truncate(ihdr & 0xFFFF);
                 if (iwc == 0) break;
                 const iie = inner + iwc;
                 if (iie > words.len) break;
@@ -7265,7 +8657,9 @@ pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error
     var callee_return_type: u32 = 0;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7281,7 +8675,9 @@ pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error
     // Find the call instruction in the entry function
     pos = func_start;
     while (pos < func_end) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > func_end) break;
@@ -7298,7 +8694,9 @@ pub fn elimTrivialEntryPoint(alloc: std.mem.Allocator, words: []const u32) error
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7476,25 +8874,79 @@ pub fn elimIdentityShuffle(alloc: std.mem.Allocator, words: []const u32) error{O
         var wi: u32 = pos + 1;
         switch (info.fixed) {
             0 => {},
-            1 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
-            2 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
-                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
-                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
-                'M' => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
-                'W' => { while (wi + 1 < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
-                'E' => { while (wi < ie) { const w = words[wi]; wi += 1; result.append(alloc, w) catch return words; if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words; },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                'i' => {
+                    result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+                },
+                'M' => {
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                        result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
+                },
+                'E' => {
+                    while (wi < ie) {
+                        const w = words[wi];
+                        wi += 1;
+                        result.append(alloc, w) catch return words;
+                        if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                    }
+                    while (wi < ie) : (wi += 1) result.append(alloc, sub_map.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
@@ -7527,7 +8979,9 @@ pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) er
 
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7553,7 +9007,9 @@ pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) er
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7594,7 +9050,9 @@ pub fn foldShuffleFromComposite(alloc: std.mem.Allocator, words: []const u32) er
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7633,7 +9091,9 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
     defer void_types.deinit();
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7649,7 +9109,9 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
     defer pure_funcs.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7658,7 +9120,9 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
             var has_side_effect = false;
             var fp = ie;
             while (fp < words.len) {
-                const fh = words[fp]; const fwc: u32 = fh >> 16; const fop: u16 = @truncate(fh & 0xFFFF);
+                const fh = words[fp];
+                const fwc: u32 = fh >> 16;
+                const fop: u16 = @truncate(fh & 0xFFFF);
                 if (fwc == 0) break;
                 const fie = fp + fwc;
                 if (fie > words.len) break;
@@ -7683,7 +9147,9 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
     defer dead_calls.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -7707,7 +9173,10 @@ pub fn elimDeadVoidCalls(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
-        if (dead_calls.contains(pos)) { pos = ie; continue; }
+        if (dead_calls.contains(pos)) {
+            pos = ie;
+            continue;
+        }
         result.appendSliceAssumeCapacity(words[pos..ie]);
         pos = ie;
     }
@@ -7793,7 +9262,10 @@ pub fn elimDeadVarStores(alloc: std.mem.Allocator, words: []const u32) error{Out
         // Skip OpStore to dead vars
         if (opcode == 62 and wc >= 3) { // OpStore
             const ptr = words[pos + 1];
-            if (ptr < bound and dead_store_vars.isSet(ptr)) { pos = ie; continue; }
+            if (ptr < bound and dead_store_vars.isSet(ptr)) {
+                pos = ie;
+                continue;
+            }
         }
         result2.appendSliceAssumeCapacity(words[pos..ie]);
         pos = ie;
@@ -7860,9 +9332,15 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
             var wi: u32 = pos + 1;
             // Skip fixed operands
             switch (info.fixed) {
-                1 => { wi += 1; },
-                2 => { wi += 2; },
-                3 => { wi += 1; },
+                1 => {
+                    wi += 1;
+                },
+                2 => {
+                    wi += 2;
+                },
+                3 => {
+                    wi += 1;
+                },
                 else => {},
             }
             // Process variable operands using getOpInfo
@@ -7875,28 +9353,57 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
                         }
                         wi += 1;
                     },
-                    'I' => { while (wi < ie) : (wi += 1) {
-                        if (words[wi] > 0 and words[wi] < bound) {
-                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                    'I' => {
+                        while (wi < ie) : (wi += 1) {
+                            if (words[wi] > 0 and words[wi] < bound) {
+                                if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                            }
                         }
-                    }},
-                    'l' => { wi += 1; },
-                    'L' => { wi = ie; },
-                    's' => { wi = ie; },
-                    'M' => { if (wi < ie) { wi += 1; while (wi < ie) : (wi += 1) {
-                        if (words[wi] > 0 and words[wi] < bound) {
-                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                    },
+                    'l' => {
+                        wi += 1;
+                    },
+                    'L' => {
+                        wi = ie;
+                    },
+                    's' => {
+                        wi = ie;
+                    },
+                    'M' => {
+                        if (wi < ie) {
+                            wi += 1;
+                            while (wi < ie) : (wi += 1) {
+                                if (words[wi] > 0 and words[wi] < bound) {
+                                    if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                                }
+                            }
                         }
-                    }}},
-                    'W' => { while (wi + 1 < ie) { wi += 1; if (words[wi] > 0 and words[wi] < bound) {
-                        if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
-                    } wi += 1; } if (wi < ie) wi += 1; },
-                    'E' => { while (wi < ie) { const ww = words[wi]; wi += 1; if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) {
-                        if (words[wi] > 0 and words[wi] < bound) {
-                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                    },
+                    'W' => {
+                        while (wi + 1 < ie) {
+                            wi += 1;
+                            if (words[wi] > 0 and words[wi] < bound) {
+                                if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                            }
+                            wi += 1;
                         }
-                    }},
-                    else => { wi += 1; },
+                        if (wi < ie) wi += 1;
+                    },
+                    'E' => {
+                        while (wi < ie) {
+                            const ww = words[wi];
+                            wi += 1;
+                            if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) break;
+                        }
+                        while (wi < ie) : (wi += 1) {
+                            if (words[wi] > 0 and words[wi] < bound) {
+                                if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                            }
+                        }
+                    },
+                    else => {
+                        wi += 1;
+                    },
                 }
             }
         }
@@ -8017,7 +9524,9 @@ pub fn copyMemoryOpt(alloc: std.mem.Allocator, words: []const u32) error{OutOfMe
                     var dst_is_ac_result = false;
                     var pac: u32 = 5;
                     while (pac < words.len) {
-                        const pac_h = words[pac]; const pac_wc: u32 = pac_h >> 16; const pac_op: u16 = @truncate(pac_h & 0xFFFF);
+                        const pac_h = words[pac];
+                        const pac_wc: u32 = pac_h >> 16;
+                        const pac_op: u16 = @truncate(pac_h & 0xFFFF);
                         if (pac_wc == 0) break;
                         const pac_ie = pac + pac_wc;
                         if (pac_ie > words.len) break;
@@ -8267,8 +9776,18 @@ pub fn validateCopyMemory(alloc: std.mem.Allocator, words: []const u32) error{Ou
             continue;
         };
         switch (info.fixed) {
-            2 => { if (pos + 2 < ie) { const rid = words[pos + 2]; if (rid > 0 and rid < bound) defined_ids.set(rid); } },
-            3 => { if (pos + 1 < ie) { const rid = words[pos + 1]; if (rid > 0 and rid < bound) defined_ids.set(rid); } },
+            2 => {
+                if (pos + 2 < ie) {
+                    const rid = words[pos + 2];
+                    if (rid > 0 and rid < bound) defined_ids.set(rid);
+                }
+            },
+            3 => {
+                if (pos + 1 < ie) {
+                    const rid = words[pos + 1];
+                    if (rid > 0 and rid < bound) defined_ids.set(rid);
+                }
+            },
             else => {},
         }
         pos = ie;
@@ -8287,7 +9806,8 @@ pub fn validateCopyMemory(alloc: std.mem.Allocator, words: []const u32) error{Ou
             const dst = words[pos + 1];
             const src = words[pos + 2];
             if ((dst == 0 or dst >= bound or !defined_ids.isSet(dst)) or
-                (src == 0 or src >= bound or !defined_ids.isSet(src))) {
+                (src == 0 or src >= bound or !defined_ids.isSet(src)))
+            {
                 any_invalid = true;
                 break;
             }
@@ -8377,9 +9897,15 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
             };
             var wi: u32 = pos + 1;
             switch (info.fixed) {
-                1 => { wi += 1; },
-                2 => { wi += 2; },
-                3 => { wi += 1; },
+                1 => {
+                    wi += 1;
+                },
+                2 => {
+                    wi += 2;
+                },
+                3 => {
+                    wi += 1;
+                },
                 else => {},
             }
             for (info.ops) |ch| {
@@ -8391,28 +9917,57 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
                         }
                         wi += 1;
                     },
-                    'I' => { while (wi < ie) : (wi += 1) {
-                        if (words[wi] > 0 and words[wi] < bound) {
-                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                    'I' => {
+                        while (wi < ie) : (wi += 1) {
+                            if (words[wi] > 0 and words[wi] < bound) {
+                                if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                            }
                         }
-                    }},
-                    'l' => { wi += 1; },
-                    'L' => { wi = ie; },
-                    's' => { wi = ie; },
-                    'M' => { if (wi < ie) { wi += 1; while (wi < ie) : (wi += 1) {
-                        if (words[wi] > 0 and words[wi] < bound) {
-                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                    },
+                    'l' => {
+                        wi += 1;
+                    },
+                    'L' => {
+                        wi = ie;
+                    },
+                    's' => {
+                        wi = ie;
+                    },
+                    'M' => {
+                        if (wi < ie) {
+                            wi += 1;
+                            while (wi < ie) : (wi += 1) {
+                                if (words[wi] > 0 and words[wi] < bound) {
+                                    if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                                }
+                            }
                         }
-                    }}},
-                    'W' => { while (wi + 1 < ie) { wi += 1; if (words[wi] > 0 and words[wi] < bound) {
-                        if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
-                    } wi += 1; } if (wi < ie) wi += 1; },
-                    'E' => { while (wi < ie) { const ww = words[wi]; wi += 1; if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) break; } while (wi < ie) : (wi += 1) {
-                        if (words[wi] > 0 and words[wi] < bound) {
-                            if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                    },
+                    'W' => {
+                        while (wi + 1 < ie) {
+                            wi += 1;
+                            if (words[wi] > 0 and words[wi] < bound) {
+                                if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                            }
+                            wi += 1;
                         }
-                    }},
-                    else => { wi += 1; },
+                        if (wi < ie) wi += 1;
+                    },
+                    'E' => {
+                        while (wi < ie) {
+                            const ww = words[wi];
+                            wi += 1;
+                            if ((ww & 0xFF) == 0 or ((ww >> 8) & 0xFF) == 0 or ((ww >> 16) & 0xFF) == 0 or ((ww >> 24) & 0xFF) == 0) break;
+                        }
+                        while (wi < ie) : (wi += 1) {
+                            if (words[wi] > 0 and words[wi] < bound) {
+                                if (use_count.getPtr(words[wi])) |cnt| cnt.* += 1;
+                            }
+                        }
+                    },
+                    else => {
+                        wi += 1;
+                    },
                 }
             }
         }
@@ -8475,7 +10030,6 @@ pub fn elimIdentityStores(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
     return result4.toOwnedSlice(alloc) catch return words;
 }
-
 
 /// Eliminate dead functions: functions that are never called and are not entry points.
 /// After elimDeadVoidCalls removes the calls, the function bodies become dead.
@@ -8664,15 +10218,15 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
     // Find all OpSelectionMerge + OpBranchConditional pairs
     // and check if their targets have matching ACs
     const HoistTarget = struct {
-        merge_pos: u32,      // position of OpSelectionMerge
-        branch_pos: u32,     // position of OpBranchConditional
-        header_end: u32,     // end of header block (position of SelectionMerge)
-        ac_result: u32,      // result ID of the hoisted AC (reuse one from a target)
+        merge_pos: u32, // position of OpSelectionMerge
+        branch_pos: u32, // position of OpBranchConditional
+        header_end: u32, // end of header block (position of SelectionMerge)
+        ac_result: u32, // result ID of the hoisted AC (reuse one from a target)
         ac_result_type: u32, // result type
-        ac_base: u32,        // base operand
+        ac_base: u32, // base operand
         ac_indices_start: u32, // start index in indices_buf
-        ac_indices_len: u32,   // number of indices
-        dup_results: []u32,    // AC result IDs to replace with ac_result
+        ac_indices_len: u32, // number of indices
+        dup_results: []u32, // AC result IDs to replace with ac_result
     };
 
     var targets = std.ArrayListUnmanaged(HoistTarget).empty;
@@ -8769,8 +10323,8 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
                     for (true_acs.items, 0..) |tac, ti| {
                         for (false_acs.items, 0..) |fac, fi| {
                             if (tac.result_type == fac.result_type and tac.base == fac.base and tac.idx_len == fac.idx_len) {
-                                const t_indices = indices_buf.items[tac.idx_start..tac.idx_start + tac.idx_len];
-                                const f_indices = indices_buf.items[fac.idx_start..fac.idx_start + fac.idx_len];
+                                const t_indices = indices_buf.items[tac.idx_start .. tac.idx_start + tac.idx_len];
+                                const f_indices = indices_buf.items[fac.idx_start .. fac.idx_start + fac.idx_len];
                                 if (std.mem.eql(u32, t_indices, f_indices)) {
                                     // Match found! Hoist to header block.
                                     // Reuse the true branch's AC result.
@@ -8786,7 +10340,7 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
                                         .ac_base = tac.base,
                                         .ac_indices_start = tac.idx_start,
                                         .ac_indices_len = tac.idx_len,
-                                        .dup_results = dup_buf.items[dups_start .. dup_buf.items.len],
+                                        .dup_results = dup_buf.items[dups_start..dup_buf.items.len],
                                     }) catch return words;
 
                                     // Mark these as used so we don't match them again
@@ -8871,7 +10425,7 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
         for (targets.items) |t| {
             if (pos == t.merge_pos) {
                 // Insert the hoisted AC just before OpSelectionMerge
-                const indices = indices_buf.items[t.ac_indices_start..t.ac_indices_start + t.ac_indices_len];
+                const indices = indices_buf.items[t.ac_indices_start .. t.ac_indices_start + t.ac_indices_len];
                 const ac_wc: u16 = @intCast(4 + t.ac_indices_len);
                 result.append(alloc, (@as(u32, ac_wc) << 16) | 65) catch return words;
                 result.append(alloc, t.ac_result_type) catch return words;
@@ -8905,46 +10459,93 @@ pub fn hoistInvariantACs(alloc: std.mem.Allocator, words: []const u32) error{Out
         switch (info.fixed) {
             0 => {},
             1 => {
-                if (wi < ie) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; wi += 1; }
+                if (wi < ie) {
+                    const w = words[wi];
+                    result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                    wi += 1;
+                }
             },
             2 => {
-                if (wi < ie) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } // result ID, don't sub
+                if (wi < ie) {
+                    const w = words[wi];
+                    result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                } // result ID, don't sub
             },
             3 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } // result ID, don't sub
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                } // result ID, don't sub
             },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; wi += 1; },
-                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; } },
-                'L', 's' => { while (wi < ie) : (wi += 1) { result.append(alloc, words[wi]) catch return words; } },
+                'i' => {
+                    const w = words[wi];
+                    result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) {
+                        const w = words[wi];
+                        result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                    }
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) {
+                        result.append(alloc, words[wi]) catch return words;
+                    }
+                },
                 'M' => {
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
-                    while (wi < ie) : (wi += 1) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
+                    while (wi < ie) : (wi += 1) {
+                        const w = words[wi];
+                        result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                    }
                 },
                 'W' => {
                     while (wi + 1 < ie) {
                         result.append(alloc, words[wi]) catch return words; // literal
                         wi += 1;
-                        const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; // target
+                        const w = words[wi];
+                        result.append(alloc, sub_map.get(w) orelse w) catch return words; // target
                         wi += 1;
                     }
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     var in_str = true;
                     while (wi < ie and in_str) : (wi += 1) {
-                        const w = words[wi]; result.append(alloc, w) catch return words;
+                        const w = words[wi];
+                        result.append(alloc, w) catch return words;
                         if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) in_str = false;
                     }
-                    while (wi < ie) : (wi += 1) { const w = words[wi]; result.append(alloc, sub_map.get(w) orelse w) catch return words; }
+                    while (wi < ie) : (wi += 1) {
+                        const w = words[wi];
+                        result.append(alloc, sub_map.get(w) orelse w) catch return words;
+                    }
                 },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
@@ -8984,7 +10585,9 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     var cur_block: u32 = 0;
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -8997,12 +10600,26 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             if (op == 62 and wc >= 3) try b.stores.put(alloc, words[pos + 1], words[pos + 2]);
             if (op == 61 and wc >= 4) try b.loads.put(alloc, words[pos + 3], words[pos + 2]);
             if (op == 249 and wc >= 2) try b.succs.append(alloc, words[pos + 1]);
-            if (op == 250 and wc >= 4) { try b.succs.append(alloc, words[pos + 2]); try b.succs.append(alloc, words[pos + 3]); }
-            if (op == 251 and wc >= 3) { try b.succs.append(alloc, words[pos + 2]); var i: u32 = 4; while (i < wc) : (i += 2) try b.succs.append(alloc, words[pos + i]); }
+            if (op == 250 and wc >= 4) {
+                try b.succs.append(alloc, words[pos + 2]);
+                try b.succs.append(alloc, words[pos + 3]);
+            }
+            if (op == 251 and wc >= 3) {
+                try b.succs.append(alloc, words[pos + 2]);
+                var i: u32 = 4;
+                while (i < wc) : (i += 2) try b.succs.append(alloc, words[pos + i]);
+            }
         }
         pos = ie;
     }
-    { var it = block_map.iterator(); while (it.next()) |e| { for (e.value_ptr.succs.items) |s| { if (block_map.getPtr(s)) |sb| try sb.preds.append(alloc, e.key_ptr.*); } } }
+    {
+        var it = block_map.iterator();
+        while (it.next()) |e| {
+            for (e.value_ptr.succs.items) |s| {
+                if (block_map.getPtr(s)) |sb| try sb.preds.append(alloc, e.key_ptr.*);
+            }
+        }
+    }
 
     // ---- Phase 2: Find candidates ----
     // Look for merge blocks (2+ preds) where a variable is stored in ALL predecessors.
@@ -9020,8 +10637,12 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         defer func_var_ids.deinit(alloc);
         pos = 5;
         while (pos < words.len) {
-            const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
-            if (wc == 0) break; const ie = pos + wc; if (ie > words.len) break;
+            const hdr = words[pos];
+            const wc: u32 = hdr >> 16;
+            const op: u16 = @truncate(hdr & 0xFFFF);
+            if (wc == 0) break;
+            const ie = pos + wc;
+            if (ie > words.len) break;
             if (op == 59 and wc >= 4 and words[pos + 3] == 7) { // OpVariable Function
                 try func_var_ids.put(alloc, words[pos + 2], {});
             }
@@ -9030,7 +10651,8 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
         var bit = block_map.iterator();
         while (bit.next()) |entry| {
-            const bid = entry.key_ptr.*; const block = entry.value_ptr.*;
+            const bid = entry.key_ptr.*;
+            const block = entry.value_ptr.*;
             if (block.preds.items.len < 2) continue;
 
             // For each predecessor, get the set of stored variables
@@ -9070,9 +10692,17 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                 while (cit.next()) |ce| {
                     if (ce.key_ptr.* == bid) continue;
                     var is_pred = false;
-                    for (block.preds.items) |p| { if (ce.key_ptr.* == p) { is_pred = true; break; } }
+                    for (block.preds.items) |p| {
+                        if (ce.key_ptr.* == p) {
+                            is_pred = true;
+                            break;
+                        }
+                    }
                     if (is_pred) continue;
-                    if (ce.value_ptr.stores.contains(var_id)) { bad = true; break; }
+                    if (ce.value_ptr.stores.contains(var_id)) {
+                        bad = true;
+                        break;
+                    }
                 }
                 if (bad) continue;
 
@@ -9082,9 +10712,16 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                 var has_ac = false;
                 var acp: u32 = 5;
                 while (acp < words.len) {
-                    const ach = words[acp]; const acwc: u32 = ach >> 16; const acop: u16 = @truncate(ach & 0xFFFF);
-                    if (acwc == 0) break; const acie = acp + acwc; if (acie > words.len) break;
-                    if (acop == 65 and acwc >= 5 and words[acp + 3] == var_id) { has_ac = true; break; }
+                    const ach = words[acp];
+                    const acwc: u32 = ach >> 16;
+                    const acop: u16 = @truncate(ach & 0xFFFF);
+                    if (acwc == 0) break;
+                    const acie = acp + acwc;
+                    if (acie > words.len) break;
+                    if (acop == 65 and acwc >= 5 and words[acp + 3] == var_id) {
+                        has_ac = true;
+                        break;
+                    }
                     acp = acie;
                 }
                 if (has_ac) continue;
@@ -9102,16 +10739,26 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
                             if (rtype == 0) {
                                 var p2: u32 = 5;
                                 while (p2 < words.len) {
-                                    const h = words[p2]; const ww: u32 = h >> 16; const o: u16 = @truncate(h & 0xFFFF);
-                                    if (ww == 0) break; const e = p2 + ww; if (e > words.len) break;
-                                    if (o == 61 and ww >= 4 and words[p2 + 2] == al.value_ptr.*) { rtype = words[p2 + 1]; break; }
+                                    const h = words[p2];
+                                    const ww: u32 = h >> 16;
+                                    const o: u16 = @truncate(h & 0xFFFF);
+                                    if (ww == 0) break;
+                                    const e = p2 + ww;
+                                    if (e > words.len) break;
+                                    if (o == 61 and ww >= 4 and words[p2 + 2] == al.value_ptr.*) {
+                                        rtype = words[p2 + 1];
+                                        break;
+                                    }
                                     p2 = e;
                                 }
                             }
                         }
                     }
                 }
-                if (all_loads.items.len == 0 or rtype == 0) { all_loads.deinit(alloc); continue; }
+                if (all_loads.items.len == 0 or rtype == 0) {
+                    all_loads.deinit(alloc);
+                    continue;
+                }
 
                 const first_load = all_loads.items[0];
                 try cands.append(alloc, .{ .merge_block = bid, .var_id = var_id, .first_load_result = first_load, .result_type = rtype, .pred_count = @as(u32, @intCast(block.preds.items.len)), .all_load_results = all_loads });
@@ -9161,7 +10808,10 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         if (dominator_store_val == null) {
             for (mb_preds) |pred| {
                 if (block_map.get(pred)) |pb| {
-                    if (pb.stores.get(c.var_id)) |val| { dominator_store_val = val; break; }
+                    if (pb.stores.get(c.var_id)) |val| {
+                        dominator_store_val = val;
+                        break;
+                    }
                 }
             }
         }
@@ -9197,13 +10847,26 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     cur_block = 0;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
-        if (wc == 0) break; const ie = pos + wc; if (ie > words.len) break;
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
         if (op == 248) cur_block = words[pos + 1];
-        if (op == 59 and wc >= 4 and remove_vars.contains(words[pos + 2])) { pos = ie; continue; }
-        if (op == 61 and wc >= 4 and load_map.contains(words[pos + 2])) { pos = ie; continue; }
+        if (op == 59 and wc >= 4 and remove_vars.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
+        if (op == 61 and wc >= 4 and load_map.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
         if (op == 62 and wc >= 3) {
-            if (remove_stores.contains((@as(u64, cur_block) << 32) | @as(u64, words[pos + 1]))) { pos = ie; continue; }
+            if (remove_stores.contains((@as(u64, cur_block) << 32) | @as(u64, words[pos + 1]))) {
+                pos = ie;
+                continue;
+            }
         }
         out_words += wc;
         if (op == 248) {
@@ -9228,16 +10891,29 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     cur_block = 0;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
-        if (wc == 0) break; const ie = pos + wc; if (ie > words.len) break;
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        const ie = pos + wc;
+        if (ie > words.len) break;
         if (op == 248) cur_block = words[pos + 1];
-        if (op == 59 and wc >= 4 and remove_vars.contains(words[pos + 2])) { pos = ie; continue; }
-        if (op == 61 and wc >= 4 and load_map.contains(words[pos + 2])) { pos = ie; continue; }
+        if (op == 59 and wc >= 4 and remove_vars.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
+        if (op == 61 and wc >= 4 and load_map.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
         if (op == 62 and wc >= 3) {
-            if (remove_stores.contains((@as(u64, cur_block) << 32) | @as(u64, words[pos + 1]))) { pos = ie; continue; }
+            if (remove_stores.contains((@as(u64, cur_block) << 32) | @as(u64, words[pos + 1]))) {
+                pos = ie;
+                continue;
+            }
         }
         // Copy instruction
-        @memcpy(out[opos..opos + wc], words[pos..ie]);
+        @memcpy(out[opos .. opos + wc], words[pos..ie]);
         opos += wc;
         // Insert OpPhi after OpLabel for merge blocks
         if (op == 248) {
@@ -9266,40 +10942,79 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
     // Use pred_load_map as override for loads in predecessor blocks (to avoid circular phi refs)
     var spos: u32 = 5;
     while (spos < out.len) {
-        const shdr = out[spos]; const swc: u32 = shdr >> 16; const sop: u16 = @truncate(shdr & 0xFFFF);
-        if (swc == 0) break; const sie = spos + swc; if (sie > out.len) break;
-        const info = compact_ids.getOpInfo(sop) orelse { spos = sie; continue; };
+        const shdr = out[spos];
+        const swc: u32 = shdr >> 16;
+        const sop: u16 = @truncate(shdr & 0xFFFF);
+        if (swc == 0) break;
+        const sie = spos + swc;
+        if (sie > out.len) break;
+        const info = compact_ids.getOpInfo(sop) orelse {
+            spos = sie;
+            continue;
+        };
         var wi: u32 = spos + 1;
         switch (info.fixed) {
-            1 => { if (wi < sie) wi += 1; },
-            2 => { if (wi + 1 < sie) wi += 2; },
-            3 => { if (wi < sie) wi += 1; },
+            1 => {
+                if (wi < sie) wi += 1;
+            },
+            2 => {
+                if (wi + 1 < sie) wi += 2;
+            },
+            3 => {
+                if (wi < sie) wi += 1;
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= sie) break;
             switch (ch) {
                 'i' => {
-                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
-                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
+                    if (pred_load_map.get(out[wi])) |v| {
+                        out[wi] = v;
+                    } else if (load_map.get(out[wi])) |v| {
+                        out[wi] = v;
+                    }
                     wi += 1;
                 },
-                'l' => { wi += 1; },
-                'I' => { while (wi < sie) : (wi += 1) {
-                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
-                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
-                } },
-                'L', 's' => { while (wi < sie) : (wi += 1) {} },
-                'M' => { if (wi < sie) wi += 1; while (wi < sie) : (wi += 1) {
-                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
-                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
-                } },
-                'W' => { while (wi + 1 < sie) { wi += 1; // skip literal, now at target
-                    if (pred_load_map.get(out[wi])) |v| { out[wi] = v; }
-                    else if (load_map.get(out[wi])) |v| { out[wi] = v; }
-                    wi += 1; // advance past target
-                } },
-                else => { wi += 1; },
+                'l' => {
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < sie) : (wi += 1) {
+                        if (pred_load_map.get(out[wi])) |v| {
+                            out[wi] = v;
+                        } else if (load_map.get(out[wi])) |v| {
+                            out[wi] = v;
+                        }
+                    }
+                },
+                'L', 's' => {
+                    while (wi < sie) : (wi += 1) {}
+                },
+                'M' => {
+                    if (wi < sie) wi += 1;
+                    while (wi < sie) : (wi += 1) {
+                        if (pred_load_map.get(out[wi])) |v| {
+                            out[wi] = v;
+                        } else if (load_map.get(out[wi])) |v| {
+                            out[wi] = v;
+                        }
+                    }
+                },
+                'W' => {
+                    while (wi + 1 < sie) {
+                        wi += 1; // skip literal, now at target
+                        if (pred_load_map.get(out[wi])) |v| {
+                            out[wi] = v;
+                        } else if (load_map.get(out[wi])) |v| {
+                            out[wi] = v;
+                        }
+                        wi += 1; // advance past target
+                    }
+                },
+                else => {
+                    wi += 1;
+                },
             }
         }
         spos = sie;
@@ -9321,7 +11036,9 @@ pub fn elimUnusedImports(alloc: std.mem.Allocator, words: []const u32) error{Out
     defer imports.deinit(alloc);
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9336,7 +11053,9 @@ pub fn elimUnusedImports(alloc: std.mem.Allocator, words: []const u32) error{Out
     // OpExtInst format: header | result_type | result_id | import_id | instruction | operands...
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9353,7 +11072,9 @@ pub fn elimUnusedImports(alloc: std.mem.Allocator, words: []const u32) error{Out
     result.appendSliceAssumeCapacity(words[0..5]);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9371,7 +11092,6 @@ pub fn elimUnusedImports(alloc: std.mem.Allocator, words: []const u32) error{Out
 /// used as pointer operands in OpLoad, OpStore, OpAccessChain, OpCopyMemory, etc.)
 /// Removes the variable from OpEntryPoint, its decorations, names, and the variable itself.
 /// Subsequent DCE will cascade to remove dead types.
-
 /// Eliminate unused global variables (OpVariable in global scope that are never
 /// used as pointer operands in OpLoad, OpStore, OpAccessChain, OpCopyMemory, etc.)
 /// Removes the variable from OpEntryPoint, its decorations, names, and the variable itself.
@@ -9390,7 +11110,9 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     var in_func = false;
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9413,7 +11135,9 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     defer defined_ids.deinit();
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9423,9 +11147,24 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
             continue;
         };
         switch (info.fixed) {
-            1 => { if (wc >= 2) { const rid = words[pos + 1]; if (rid < bound) defined_ids.set(rid); } },
-            2 => { if (wc >= 3) { const rid = words[pos + 2]; if (rid < bound) defined_ids.set(rid); } },
-            3 => { if (wc >= 2) { const rid = words[pos + 1]; if (rid < bound) defined_ids.set(rid); } },
+            1 => {
+                if (wc >= 2) {
+                    const rid = words[pos + 1];
+                    if (rid < bound) defined_ids.set(rid);
+                }
+            },
+            2 => {
+                if (wc >= 3) {
+                    const rid = words[pos + 2];
+                    if (rid < bound) defined_ids.set(rid);
+                }
+            },
+            3 => {
+                if (wc >= 2) {
+                    const rid = words[pos + 1];
+                    if (rid < bound) defined_ids.set(rid);
+                }
+            },
             else => {},
         }
         // Also mark OpVariable result IDs
@@ -9440,7 +11179,9 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     defer orphaned.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9470,7 +11211,9 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
     defer use_count.deinit(alloc);
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         // Skip: OpEntryPoint(15), OpName(5), OpMemberName(6), OpDecorate(71), OpMemberDecorate(72)
@@ -9482,16 +11225,23 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
                 var wi: u32 = pos + 1;
                 switch (inf.fixed) {
                     0 => {},
-                    1 => { if (wi < ie) wi += 1; }, // type only, skip
-                    2 => { if (wi < ie) wi += 1; if (wi < ie) wi += 1; }, // type + result, skip
-                    3 => { if (wi < ie) { // result_only: word[1] is result
-                        const rid = words[wi];
-                        if (global_vars.contains(rid)) {
-                            const g = try use_count.getOrPut(alloc, rid);
-                            if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                    1 => {
+                        if (wi < ie) wi += 1;
+                    }, // type only, skip
+                    2 => {
+                        if (wi < ie) wi += 1;
+                        if (wi < ie) wi += 1;
+                    }, // type + result, skip
+                    3 => {
+                        if (wi < ie) { // result_only: word[1] is result
+                            const rid = words[wi];
+                            if (global_vars.contains(rid)) {
+                                const g = try use_count.getOrPut(alloc, rid);
+                                if (g.found_existing) g.value_ptr.* += 1 else g.value_ptr.* = 1;
+                            }
+                            wi += 1;
                         }
-                        wi += 1;
-                    }},
+                    },
                     else => {},
                 }
                 // Process operand types
@@ -9506,8 +11256,12 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
                             }
                             wi += 1;
                         },
-                        'l' => { wi += 1; }, // single literal
-                        'L', 's' => { wi = ie; }, // consume rest as literals
+                        'l' => {
+                            wi += 1;
+                        }, // single literal
+                        'L', 's' => {
+                            wi = ie;
+                        }, // consume rest as literals
                         'I' => { // ID variadic
                             while (wi < ie) : (wi += 1) {
                                 const word = words[wi];
@@ -9544,7 +11298,8 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
                             while (wi < ie and in_str) : (wi += 1) {
                                 const sw = words[wi];
                                 if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or
-                                    ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) {
+                                    ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0)
+                                {
                                     in_str = false;
                                 }
                             }
@@ -9556,7 +11311,9 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
                                 }
                             }
                         },
-                        else => { wi += 1; },
+                        else => {
+                            wi += 1;
+                        },
                     }
                 }
                 // Handle any remaining words (shouldn't happen but be safe)
@@ -9600,7 +11357,9 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9613,7 +11372,8 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
             while (str_end < ie) : (str_end += 1) {
                 const sw = words[str_end];
                 if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or
-                    ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) {
+                    ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0)
+                {
                     found_null = true;
                     str_end += 1; // include this word
                     break;
@@ -9649,11 +11409,20 @@ pub fn elimUnusedGlobals(alloc: std.mem.Allocator, words: []const u32) error{Out
         }
 
         // Skip OpName for unused
-        if (op == 5 and wc >= 3 and unused.contains(words[pos + 1])) { pos = ie; continue; }
+        if (op == 5 and wc >= 3 and unused.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
         // Skip OpDecorate for unused
-        if (op == 71 and wc >= 3 and unused.contains(words[pos + 1])) { pos = ie; continue; }
+        if (op == 71 and wc >= 3 and unused.contains(words[pos + 1])) {
+            pos = ie;
+            continue;
+        }
         // Skip OpVariable for unused
-        if (op == 59 and wc >= 4 and unused.contains(words[pos + 2])) { pos = ie; continue; }
+        if (op == 59 and wc >= 4 and unused.contains(words[pos + 2])) {
+            pos = ie;
+            continue;
+        }
 
         try result.appendSlice(alloc, words[pos..ie]);
         pos = ie;
@@ -9673,38 +11442,82 @@ pub fn stripDeadDebugInfo(alloc: std.mem.Allocator, words: []const u32) error{Ou
     defer live.deinit();
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
         // Skip debug/decoration
-        if (op == 5 or op == 6 or op == 71 or op == 72) { pos = ie; continue; }
-        const info = compact_ids.getOpInfo(op) orelse { pos = ie; continue; };
+        if (op == 5 or op == 6 or op == 71 or op == 72) {
+            pos = ie;
+            continue;
+        }
+        const info = compact_ids.getOpInfo(op) orelse {
+            pos = ie;
+            continue;
+        };
         var wi: u32 = pos + 1;
         switch (info.fixed) {
-            1 => { if (wi < ie and words[wi] < bound) live.set(words[wi]); wi += 1; },
-            2 => { if (wi < ie and words[wi] < bound) live.set(words[wi]); wi += 1; if (wi < ie) wi += 1; },
-            3 => { if (wi < ie) wi += 1; },
+            1 => {
+                if (wi < ie and words[wi] < bound) live.set(words[wi]);
+                wi += 1;
+            },
+            2 => {
+                if (wi < ie and words[wi] < bound) live.set(words[wi]);
+                wi += 1;
+                if (wi < ie) wi += 1;
+            },
+            3 => {
+                if (wi < ie) wi += 1;
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { if (words[wi] < bound) live.set(words[wi]); wi += 1; },
-                'l' => { wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) { if (words[wi] < bound) live.set(words[wi]); } },
-                'L', 's' => { wi = ie; },
-                'M' => { if (wi < ie) wi += 1; while (wi < ie) : (wi += 1) { if (words[wi] < bound) live.set(words[wi]); } },
-                'W' => { while (wi + 1 < ie) { wi += 1; if (words[wi] < bound) live.set(words[wi]); wi += 1; } if (wi < ie) wi += 1; },
+                'i' => {
+                    if (words[wi] < bound) live.set(words[wi]);
+                    wi += 1;
+                },
+                'l' => {
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) {
+                        if (words[wi] < bound) live.set(words[wi]);
+                    }
+                },
+                'L', 's' => {
+                    wi = ie;
+                },
+                'M' => {
+                    if (wi < ie) wi += 1;
+                    while (wi < ie) : (wi += 1) {
+                        if (words[wi] < bound) live.set(words[wi]);
+                    }
+                },
+                'W' => {
+                    while (wi + 1 < ie) {
+                        wi += 1;
+                        if (words[wi] < bound) live.set(words[wi]);
+                        wi += 1;
+                    }
+                    if (wi < ie) wi += 1;
+                },
                 'E' => {
                     while (wi < ie) : (wi += 1) {
                         const sw = words[wi];
                         if ((sw & 0xFF) == 0 or ((sw >> 8) & 0xFF) == 0 or
                             ((sw >> 16) & 0xFF) == 0 or ((sw >> 24) & 0xFF) == 0) break;
                     }
-                    while (wi < ie) : (wi += 1) { if (words[wi] < bound) live.set(words[wi]); }
+                    while (wi < ie) : (wi += 1) {
+                        if (words[wi] < bound) live.set(words[wi]);
+                    }
                 },
-                else => { wi += 1; },
+                else => {
+                    wi += 1;
+                },
             }
         }
         pos = ie;
@@ -9717,7 +11530,9 @@ pub fn stripDeadDebugInfo(alloc: std.mem.Allocator, words: []const u32) error{Ou
     var removed: u32 = 0;
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const op: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
         if (ie > words.len) break;
@@ -9730,11 +11545,18 @@ pub fn stripDeadDebugInfo(alloc: std.mem.Allocator, words: []const u32) error{Ou
             const t = words[pos + 1];
             if (t > 0 and t < bound and !live.isSet(t)) skip = true;
         }
-        if (skip) { removed += 1; pos = ie; continue; }
+        if (skip) {
+            removed += 1;
+            pos = ie;
+            continue;
+        }
         try result.appendSlice(alloc, words[pos..ie]);
         pos = ie;
     }
-    if (removed == 0) { result.deinit(alloc); return words; }
+    if (removed == 0) {
+        result.deinit(alloc);
+        return words;
+    }
     return result.toOwnedSlice(alloc) catch return words;
 }
 
@@ -9753,7 +11575,9 @@ pub fn dedupFunctionTypes(alloc: std.mem.Allocator, words: []const u32) error{Ou
     // First pass: find duplicate function types (OpTypeFunction = opcode 33)
     var pos: u32 = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         if (opcode == 33 and wc >= 3) {
             const result_id = words[pos + 1];
@@ -9781,7 +11605,9 @@ pub fn dedupFunctionTypes(alloc: std.mem.Allocator, words: []const u32) error{Ou
 
     pos = 5;
     while (pos < words.len) {
-        const hdr = words[pos]; const wc: u32 = hdr >> 16; const opcode: u16 = @truncate(hdr & 0xFFFF);
+        const hdr = words[pos];
+        const wc: u32 = hdr >> 16;
+        const opcode: u16 = @truncate(hdr & 0xFFFF);
         if (wc == 0) break;
         const ie = pos + wc;
 
@@ -9795,28 +11621,72 @@ pub fn dedupFunctionTypes(alloc: std.mem.Allocator, words: []const u32) error{Ou
         if (replacements.count() > 0) {
             const info = compact_ids.getOpInfo(opcode) orelse {
                 result.appendSlice(alloc, words[pos..ie]) catch return words;
-                pos = ie; continue;
+                pos = ie;
+                continue;
             };
             var wi: u32 = pos + 1;
             try result.append(alloc, hdr);
             switch (info.fixed) {
-                1 => { if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } },
-                2 => {
-                    if (wi < ie) { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; }
-                    if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; }
+                1 => {
+                    if (wi < ie) {
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                        wi += 1;
+                    }
                 },
-                3 => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+                2 => {
+                    if (wi < ie) {
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                        wi += 1;
+                    }
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                },
+                3 => {
+                    if (wi < ie) {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    }
+                },
                 else => {},
             }
             for (info.ops) |ch| {
                 if (wi >= ie) break;
                 switch (ch) {
-                    'i' => { try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; },
-                    'l' => { try result.append(alloc, words[wi]); wi += 1; },
-                    'I' => { while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                    'L', 's' => { while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]); },
-                    'M' => { if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); },
-                    'W' => { while (wi + 1 < ie) { try result.append(alloc, words[wi]); wi += 1; try result.append(alloc, replacements.get(words[wi]) orelse words[wi]); wi += 1; } if (wi < ie) { try result.append(alloc, words[wi]); wi += 1; } },
+                    'i' => {
+                        try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                        wi += 1;
+                    },
+                    'l' => {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    },
+                    'I' => {
+                        while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    },
+                    'L', 's' => {
+                        while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
+                    },
+                    'M' => {
+                        if (wi < ie) {
+                            try result.append(alloc, words[wi]);
+                            wi += 1;
+                        }
+                        while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                    },
+                    'W' => {
+                        while (wi + 1 < ie) {
+                            try result.append(alloc, words[wi]);
+                            wi += 1;
+                            try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
+                            wi += 1;
+                        }
+                        if (wi < ie) {
+                            try result.append(alloc, words[wi]);
+                            wi += 1;
+                        }
+                    },
                     'E' => {
                         while (wi < ie) : (wi += 1) {
                             try result.append(alloc, words[wi]);
@@ -9825,7 +11695,10 @@ pub fn dedupFunctionTypes(alloc: std.mem.Allocator, words: []const u32) error{Ou
                         }
                         while (wi < ie) : (wi += 1) try result.append(alloc, replacements.get(words[wi]) orelse words[wi]);
                     },
-                    else => { try result.append(alloc, words[wi]); wi += 1; },
+                    else => {
+                        try result.append(alloc, words[wi]);
+                        wi += 1;
+                    },
                 }
             }
             while (wi < ie) : (wi += 1) try result.append(alloc, words[wi]);
@@ -9853,8 +11726,13 @@ pub fn fixTypeOrdering(alloc: std.mem.Allocator, words: []const u32) error{OutOf
     var global_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
     var func_sec = std.ArrayList(u32).initCapacity(alloc, words.len) catch return alloc.dupe(u32, words);
     defer {
-        preamble.deinit(alloc); debug_sec.deinit(alloc); annot_sec.deinit(alloc);
-        type_sec.deinit(alloc); const_sec.deinit(alloc); global_sec.deinit(alloc); func_sec.deinit(alloc);
+        preamble.deinit(alloc);
+        debug_sec.deinit(alloc);
+        annot_sec.deinit(alloc);
+        type_sec.deinit(alloc);
+        const_sec.deinit(alloc);
+        global_sec.deinit(alloc);
+        func_sec.deinit(alloc);
     }
 
     preamble.appendSliceAssumeCapacity(words[0..5]);
@@ -10064,8 +11942,13 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
         const ie = pos + wc;
         if (ie > words.len) break;
         switch (opcode) {
-            54 => { in_function = true; first_label = true; },
-            56 => { in_function = false; },
+            54 => {
+                in_function = true;
+                first_label = true;
+            },
+            56 => {
+                in_function = false;
+            },
             248 => if (wc >= 2) {
                 const lbl = words[pos + 1];
                 label_pos.put(alloc, lbl, pos) catch {};
@@ -10111,45 +11994,74 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
                     249 => { // OpBranch
                         if (bwc >= 2) {
                             const t = words[bp + 1];
-                            if (t >= 1 and t < bound and !reachable.isSet(t)) { reachable.set(t); changed = true; }
+                            if (t >= 1 and t < bound and !reachable.isSet(t)) {
+                                reachable.set(t);
+                                changed = true;
+                            }
                         }
                     },
                     250 => { // OpBranchConditional
                         if (bwc >= 4) {
-                            const t1 = words[bp + 2]; const t2 = words[bp + 3];
-                            if (t1 >= 1 and t1 < bound and !reachable.isSet(t1)) { reachable.set(t1); changed = true; }
-                            if (t2 >= 1 and t2 < bound and !reachable.isSet(t2)) { reachable.set(t2); changed = true; }
+                            const t1 = words[bp + 2];
+                            const t2 = words[bp + 3];
+                            if (t1 >= 1 and t1 < bound and !reachable.isSet(t1)) {
+                                reachable.set(t1);
+                                changed = true;
+                            }
+                            if (t2 >= 1 and t2 < bound and !reachable.isSet(t2)) {
+                                reachable.set(t2);
+                                changed = true;
+                            }
                         }
                     },
                     251 => { // OpSwitch
                         if (bwc >= 3) {
                             const dt = words[bp + 2];
-                            if (dt >= 1 and dt < bound and !reachable.isSet(dt)) { reachable.set(dt); changed = true; }
+                            if (dt >= 1 and dt < bound and !reachable.isSet(dt)) {
+                                reachable.set(dt);
+                                changed = true;
+                            }
                             var si: u32 = bp + 3;
                             while (si + 1 < bie) : (si += 2) {
                                 const ct = words[si + 1];
-                                if (ct >= 1 and ct < bound and !reachable.isSet(ct)) { reachable.set(ct); changed = true; }
+                                if (ct >= 1 and ct < bound and !reachable.isSet(ct)) {
+                                    reachable.set(ct);
+                                    changed = true;
+                                }
                             }
                         }
                     },
                     246 => { // OpLoopMerge — merge and continue targets are reachable
                         if (bwc >= 3) {
-                            const m = words[bp + 1]; const c = words[bp + 2];
-                            if (m >= 1 and m < bound and !reachable.isSet(m)) { reachable.set(m); changed = true; }
-                            if (c >= 1 and c < bound and !reachable.isSet(c)) { reachable.set(c); changed = true; }
+                            const m = words[bp + 1];
+                            const c = words[bp + 2];
+                            if (m >= 1 and m < bound and !reachable.isSet(m)) {
+                                reachable.set(m);
+                                changed = true;
+                            }
+                            if (c >= 1 and c < bound and !reachable.isSet(c)) {
+                                reachable.set(c);
+                                changed = true;
+                            }
                         }
                     },
                     247 => { // OpSelectionMerge
                         if (bwc >= 2) {
                             const m = words[bp + 1];
-                            if (m >= 1 and m < bound and !reachable.isSet(m)) { reachable.set(m); changed = true; }
+                            if (m >= 1 and m < bound and !reachable.isSet(m)) {
+                                reachable.set(m);
+                                changed = true;
+                            }
                         }
                     },
                     245 => { // OpPhi: parent labels are structural predecessors — keep them
                         var pi: u32 = bp + 3;
                         while (pi + 1 < bie) : (pi += 2) {
                             const p = words[pi + 1];
-                            if (p >= 1 and p < bound and !reachable.isSet(p)) { reachable.set(p); changed = true; }
+                            if (p >= 1 and p < bound and !reachable.isSet(p)) {
+                                reachable.set(p);
+                                changed = true;
+                            }
                         }
                     },
                     else => {},
@@ -10206,7 +12118,10 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
             in_unreachable = false;
         }
 
-        if (in_unreachable) { pos = ie; continue; }
+        if (in_unreachable) {
+            pos = ie;
+            continue;
+        }
 
         // Fix OpPhi: remove entries whose parent label was removed
         if (opcode == 245 and wc >= 5) { // OpPhi
@@ -10225,8 +12140,14 @@ pub fn elimUnreachableBlocks(alloc: std.mem.Allocator, words: []const u32) error
                 if (parent >= 1 and parent < bound and unreachable_labels.isSet(parent)) {
                     continue; // parent removed, skip entry
                 }
-                phi_buf.append(alloc, val) catch { phi_ok = false; break; };
-                phi_buf.append(alloc, parent) catch { phi_ok = false; break; };
+                phi_buf.append(alloc, val) catch {
+                    phi_ok = false;
+                    break;
+                };
+                phi_buf.append(alloc, parent) catch {
+                    phi_ok = false;
+                    break;
+                };
             }
             if (phi_ok and phi_buf.items.len >= 4) {
                 // Emit fixed OpPhi with only valid entries
@@ -10354,23 +12275,52 @@ pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) e
         var wi: u32 = pos + 1;
         switch (info.fixed) {
             0 => {},
-            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
-            2 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } // skip result
+            1 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                } // skip result
+            },
+            3 => {
+                if (wi < ie) {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
             if (wi >= ie) break;
             switch (ch) {
-                'i' => { result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; wi += 1; },
-                'l' => { result.append(alloc, words[wi]) catch return words; wi += 1; },
-                'I' => { while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; },
-                'L', 's' => { while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words; },
+                'i' => {
+                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    wi += 1;
+                },
+                'l' => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
+                'I' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                },
+                'L', 's' => {
+                    while (wi < ie) : (wi += 1) result.append(alloc, words[wi]) catch return words;
+                },
                 'M' => {
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                     while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
                 },
                 'W' => {
@@ -10380,16 +12330,24 @@ pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) e
                         result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; // target
                         wi += 1;
                     }
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     while (wi < ie) {
-                        const w = words[wi]; result.append(alloc, w) catch return words; wi += 1;
+                        const w = words[wi];
+                        result.append(alloc, w) catch return words;
+                        wi += 1;
                         if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
                     }
                     while (wi < ie) : (wi += 1) result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
                 },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         // Append any remaining words
@@ -10496,12 +12454,28 @@ pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{Ou
         var wi: u32 = pos + 1;
         switch (info.fixed) {
             0 => {},
-            1 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
-            2 => {
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
-                if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+            1 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
             },
-            3 => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
+            2 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
+            3 => {
+                if (wi < ie) {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                }
+            },
             else => {},
         }
         for (info.ops) |ch| {
@@ -10511,14 +12485,28 @@ pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{Ou
                     result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
                     wi += 1;
                 },
-                'I' => { while (wi < ie) : (wi += 1) {
-                    result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
-                }},
-                'l' => { if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; } },
-                'L' => { wi = ie; },
-                's' => { wi = ie; },
+                'I' => {
+                    while (wi < ie) : (wi += 1) {
+                        result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
+                    }
+                },
+                'l' => {
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
+                },
+                'L' => {
+                    wi = ie;
+                },
+                's' => {
+                    wi = ie;
+                },
                 'M' => {
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                     while (wi < ie) : (wi += 1) {
                         result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
                     }
@@ -10530,7 +12518,10 @@ pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{Ou
                         result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words; // target
                         wi += 1;
                     }
-                    if (wi < ie) { result.append(alloc, words[wi]) catch return words; wi += 1; }
+                    if (wi < ie) {
+                        result.append(alloc, words[wi]) catch return words;
+                        wi += 1;
+                    }
                 },
                 'E' => {
                     while (wi < ie) {
@@ -10543,7 +12534,10 @@ pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{Ou
                         result.append(alloc, replacements.get(words[wi]) orelse words[wi]) catch return words;
                     }
                 },
-                else => { result.append(alloc, words[wi]) catch return words; wi += 1; },
+                else => {
+                    result.append(alloc, words[wi]) catch return words;
+                    wi += 1;
+                },
             }
         }
         // Copy any remaining words

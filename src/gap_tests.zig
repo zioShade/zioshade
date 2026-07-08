@@ -823,7 +823,10 @@ test "gap: vec3.xyz should be a no-op, not emit OpVectorShuffle" {
         \\}
     ;
     const module = try compileToIR(testing.allocator, source);
-    defer { module.deinit(); testing.allocator.destroy(module); }
+    defer {
+        module.deinit();
+        testing.allocator.destroy(module);
+    }
 
     // Should NOT emit a vector_shuffle for v.xyz on a vec3
     const shuffle_count = countTag(module, .vector_shuffle);
@@ -841,7 +844,10 @@ test "gap: vec4.xyz should emit VectorShuffle (not identity)" {
         \\}
     ;
     const module = try compileToIR(testing.allocator, source);
-    defer { module.deinit(); testing.allocator.destroy(module); }
+    defer {
+        module.deinit();
+        testing.allocator.destroy(module);
+    }
 
     // vec4.xyz IS a swizzle (drops .w), so it should emit a shuffle
     const shuffle_count = countTag(module, .vector_shuffle);
@@ -1174,7 +1180,10 @@ test "gap: discard emits OpKill" {
         \\}
     ;
     const module = try compileToIR(testing.allocator, source);
-    defer { module.deinit(); testing.allocator.destroy(module); }
+    defer {
+        module.deinit();
+        testing.allocator.destroy(module);
+    }
 
     try testing.expect(findTag(module, .kill) != null);
 }
@@ -1247,7 +1256,10 @@ test "gap: v += u emits vector add" {
         \\}
     ;
     const module = try compileToIR(testing.allocator, source);
-    defer { module.deinit(); testing.allocator.destroy(module); }
+    defer {
+        module.deinit();
+        testing.allocator.destroy(module);
+    }
 
     try testing.expect(findTag(module, .fadd) != null);
 }

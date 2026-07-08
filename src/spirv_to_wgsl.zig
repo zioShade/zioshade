@@ -142,26 +142,87 @@ fn writeInverseHelpers(w: anytype) !void {
 /// Canonical GLSL.std.450 instruction name, for diagnostics only.
 fn glslStd450Name(op: u32) []const u8 {
     return switch (op) {
-        1 => "Round", 2 => "RoundEven", 3 => "Trunc", 4 => "FAbs", 5 => "SAbs",
-        6 => "FSign", 7 => "SSign", 8 => "Floor", 9 => "Ceil", 10 => "Fract",
-        11 => "Radians", 12 => "Degrees", 13 => "Sin", 14 => "Cos", 15 => "Tan",
-        16 => "Asin", 17 => "Acos", 18 => "Atan", 19 => "Sinh", 20 => "Cosh",
-        21 => "Tanh", 22 => "Asinh", 23 => "Acosh", 24 => "Atanh", 25 => "Atan2",
-        26 => "Pow", 27 => "Exp", 28 => "Log", 29 => "Exp2", 30 => "Log2",
-        31 => "Sqrt", 32 => "InverseSqrt", 33 => "Determinant", 34 => "MatrixInverse",
-        35 => "Modf", 36 => "ModfStruct", 37 => "FMin", 38 => "UMin", 39 => "SMin",
-        40 => "FMax", 41 => "UMax", 42 => "SMax", 43 => "FClamp", 44 => "UClamp",
-        45 => "SClamp", 46 => "FMix", 47 => "IMix", 48 => "Step", 49 => "SmoothStep",
-        50 => "Fma", 51 => "Frexp", 52 => "FrexpStruct", 53 => "Ldexp",
-        54 => "PackSnorm4x8", 55 => "PackUnorm4x8", 56 => "PackSnorm2x16",
-        57 => "PackUnorm2x16", 58 => "PackHalf2x16", 59 => "PackDouble2x32",
-        60 => "UnpackSnorm2x16", 61 => "UnpackUnorm2x16", 62 => "UnpackHalf2x16",
-        63 => "UnpackSnorm4x8", 64 => "UnpackUnorm4x8", 65 => "UnpackDouble2x32",
-        66 => "Length", 67 => "Distance", 68 => "Cross", 69 => "Normalize",
-        70 => "FaceForward", 71 => "Reflect", 72 => "Refract", 73 => "FindILsb",
-        74 => "FindSMsb", 75 => "FindUMsb", 76 => "InterpolateAtCentroid",
-        77 => "InterpolateAtSample", 78 => "InterpolateAtOffset", 79 => "NMin",
-        80 => "NMax", 81 => "NClamp",
+        1 => "Round",
+        2 => "RoundEven",
+        3 => "Trunc",
+        4 => "FAbs",
+        5 => "SAbs",
+        6 => "FSign",
+        7 => "SSign",
+        8 => "Floor",
+        9 => "Ceil",
+        10 => "Fract",
+        11 => "Radians",
+        12 => "Degrees",
+        13 => "Sin",
+        14 => "Cos",
+        15 => "Tan",
+        16 => "Asin",
+        17 => "Acos",
+        18 => "Atan",
+        19 => "Sinh",
+        20 => "Cosh",
+        21 => "Tanh",
+        22 => "Asinh",
+        23 => "Acosh",
+        24 => "Atanh",
+        25 => "Atan2",
+        26 => "Pow",
+        27 => "Exp",
+        28 => "Log",
+        29 => "Exp2",
+        30 => "Log2",
+        31 => "Sqrt",
+        32 => "InverseSqrt",
+        33 => "Determinant",
+        34 => "MatrixInverse",
+        35 => "Modf",
+        36 => "ModfStruct",
+        37 => "FMin",
+        38 => "UMin",
+        39 => "SMin",
+        40 => "FMax",
+        41 => "UMax",
+        42 => "SMax",
+        43 => "FClamp",
+        44 => "UClamp",
+        45 => "SClamp",
+        46 => "FMix",
+        47 => "IMix",
+        48 => "Step",
+        49 => "SmoothStep",
+        50 => "Fma",
+        51 => "Frexp",
+        52 => "FrexpStruct",
+        53 => "Ldexp",
+        54 => "PackSnorm4x8",
+        55 => "PackUnorm4x8",
+        56 => "PackSnorm2x16",
+        57 => "PackUnorm2x16",
+        58 => "PackHalf2x16",
+        59 => "PackDouble2x32",
+        60 => "UnpackSnorm2x16",
+        61 => "UnpackUnorm2x16",
+        62 => "UnpackHalf2x16",
+        63 => "UnpackSnorm4x8",
+        64 => "UnpackUnorm4x8",
+        65 => "UnpackDouble2x32",
+        66 => "Length",
+        67 => "Distance",
+        68 => "Cross",
+        69 => "Normalize",
+        70 => "FaceForward",
+        71 => "Reflect",
+        72 => "Refract",
+        73 => "FindILsb",
+        74 => "FindSMsb",
+        75 => "FindUMsb",
+        76 => "InterpolateAtCentroid",
+        77 => "InterpolateAtSample",
+        78 => "InterpolateAtOffset",
+        79 => "NMin",
+        80 => "NMax",
+        81 => "NClamp",
         else => "Unknown",
     };
 }
@@ -378,8 +439,16 @@ fn frexpModfField(module: *const ParsedModule, source_id: u32, idx: u32) ?[]cons
     const d = getDef(module, source_id) orelse return null;
     if (d.op != .ExtInst or d.words.len < 5) return null;
     return switch (d.words[4]) {
-        52 => switch (idx) { 0 => "fract", 1 => "exp", else => null }, // FrexpStruct
-        36 => switch (idx) { 0 => "fract", 1 => "whole", else => null }, // ModfStruct
+        52 => switch (idx) {
+            0 => "fract",
+            1 => "exp",
+            else => null,
+        }, // FrexpStruct
+        36 => switch (idx) {
+            0 => "fract",
+            1 => "whole",
+            else => null,
+        }, // ModfStruct
         else => null,
     };
 }
@@ -1059,88 +1128,86 @@ fn emitDepthCompare(
 // which is what the GL_EXT_buffer_reference fixture trips over.
 const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     // Keywords (§ Keyword Summary)
-    .{ "alias", {} },         .{ "break", {} },         .{ "case", {} },
-    .{ "const", {} },         .{ "const_assert", {} },  .{ "continue", {} },
-    .{ "continuing", {} },    .{ "default", {} },       .{ "diagnostic", {} },
-    .{ "discard", {} },       .{ "else", {} },          .{ "enable", {} },
-    .{ "false", {} },         .{ "fn", {} },            .{ "for", {} },
-    .{ "if", {} },            .{ "let", {} },           .{ "loop", {} },
-    .{ "override", {} },      .{ "requires", {} },      .{ "return", {} },
-    .{ "struct", {} },        .{ "switch", {} },        .{ "true", {} },
-    .{ "var", {} },           .{ "while", {} },
+    .{ "alias", {} },                        .{ "break", {} },                         .{ "case", {} },
+    .{ "const", {} },                        .{ "const_assert", {} },                  .{ "continue", {} },
+    .{ "continuing", {} },                   .{ "default", {} },                       .{ "diagnostic", {} },
+    .{ "discard", {} },                      .{ "else", {} },                          .{ "enable", {} },
+    .{ "false", {} },                        .{ "fn", {} },                            .{ "for", {} },
+    .{ "if", {} },                           .{ "let", {} },                           .{ "loop", {} },
+    .{ "override", {} },                     .{ "requires", {} },                      .{ "return", {} },
+    .{ "struct", {} },                       .{ "switch", {} },                        .{ "true", {} },
+    .{ "var", {} },                          .{ "while", {} },
     // Reserved words (§ Reserved Words)
-    .{ "NULL", {} },          .{ "Self", {} },          .{ "abstract", {} },
-    .{ "active", {} },        .{ "alignas", {} },       .{ "alignof", {} },
-    .{ "as", {} },            .{ "asm", {} },           .{ "asm_fragment", {} },
-    .{ "async", {} },         .{ "attribute", {} },     .{ "auto", {} },
-    .{ "await", {} },         .{ "become", {} },        .{ "binding_array", {} },
-    .{ "cast", {} },          .{ "catch", {} },         .{ "class", {} },
-    .{ "co_await", {} },      .{ "co_return", {} },     .{ "co_yield", {} },
-    .{ "coherent", {} },      .{ "column_major", {} },  .{ "common", {} },
-    .{ "compile", {} },       .{ "compile_fragment", {} }, .{ "concept", {} },
-    .{ "const_cast", {} },    .{ "consteval", {} },     .{ "constexpr", {} },
-    .{ "constinit", {} },     .{ "crate", {} },         .{ "debugger", {} },
-    .{ "decltype", {} },      .{ "delete", {} },        .{ "demote", {} },
-    .{ "demote_to_helper", {} }, .{ "do", {} },         .{ "dynamic_cast", {} },
-    .{ "enum", {} },          .{ "explicit", {} },      .{ "export", {} },
-    .{ "extends", {} },       .{ "extern", {} },        .{ "external", {} },
-    .{ "fallthrough", {} },   .{ "filter", {} },        .{ "final", {} },
-    .{ "finally", {} },       .{ "friend", {} },        .{ "from", {} },
-    .{ "fxgroup", {} },       .{ "get", {} },           .{ "goto", {} },
-    .{ "groupshared", {} },   .{ "highp", {} },         .{ "impl", {} },
-    .{ "implements", {} },    .{ "import", {} },        .{ "inline", {} },
-    .{ "instanceof", {} },    .{ "interface", {} },     .{ "layout", {} },
-    .{ "lowp", {} },          .{ "macro", {} },         .{ "macro_rules", {} },
-    .{ "match", {} },         .{ "mediump", {} },       .{ "meta", {} },
-    .{ "mod", {} },           .{ "module", {} },        .{ "move", {} },
-    .{ "mut", {} },           .{ "mutable", {} },       .{ "namespace", {} },
-    .{ "new", {} },           .{ "nil", {} },           .{ "noexcept", {} },
-    .{ "noinline", {} },      .{ "nointerpolation", {} }, .{ "non_coherent", {} },
-    .{ "noncoherent", {} },   .{ "noperspective", {} }, .{ "null", {} },
-    .{ "nullptr", {} },       .{ "of", {} },            .{ "operator", {} },
-    .{ "package", {} },       .{ "packoffset", {} },    .{ "partition", {} },
-    .{ "pass", {} },          .{ "patch", {} },         .{ "pixelfragment", {} },
-    .{ "precise", {} },       .{ "precision", {} },     .{ "premerge", {} },
-    .{ "priv", {} },          .{ "protected", {} },     .{ "pub", {} },
-    .{ "public", {} },        .{ "readonly", {} },      .{ "ref", {} },
-    .{ "regardless", {} },    .{ "register", {} },      .{ "reinterpret_cast", {} },
-    .{ "require", {} },       .{ "resource", {} },      .{ "restrict", {} },
-    .{ "self", {} },          .{ "set", {} },           .{ "shared", {} },
-    .{ "sizeof", {} },        .{ "smooth", {} },        .{ "snorm", {} },
-    .{ "static", {} },        .{ "static_assert", {} }, .{ "static_cast", {} },
-    .{ "std", {} },           .{ "subroutine", {} },    .{ "super", {} },
-    .{ "target", {} },        .{ "template", {} },      .{ "this", {} },
-    .{ "thread_local", {} },  .{ "throw", {} },         .{ "trait", {} },
-    .{ "try", {} },           .{ "type", {} },          .{ "typedef", {} },
-    .{ "typeid", {} },        .{ "typename", {} },      .{ "typeof", {} },
-    .{ "union", {} },         .{ "unless", {} },        .{ "unorm", {} },
-    .{ "unsafe", {} },        .{ "unsized", {} },       .{ "use", {} },
-    .{ "using", {} },         .{ "varying", {} },       .{ "virtual", {} },
-    .{ "volatile", {} },      .{ "wgsl", {} },          .{ "where", {} },
-    .{ "with", {} },          .{ "writeonly", {} },     .{ "yield", {} },
+                            .{ "NULL", {} },
+    .{ "Self", {} },                         .{ "abstract", {} },                      .{ "active", {} },
+    .{ "alignas", {} },                      .{ "alignof", {} },                       .{ "as", {} },
+    .{ "asm", {} },                          .{ "asm_fragment", {} },                  .{ "async", {} },
+    .{ "attribute", {} },                    .{ "auto", {} },                          .{ "await", {} },
+    .{ "become", {} },                       .{ "binding_array", {} },                 .{ "cast", {} },
+    .{ "catch", {} },                        .{ "class", {} },                         .{ "co_await", {} },
+    .{ "co_return", {} },                    .{ "co_yield", {} },                      .{ "coherent", {} },
+    .{ "column_major", {} },                 .{ "common", {} },                        .{ "compile", {} },
+    .{ "compile_fragment", {} },             .{ "concept", {} },                       .{ "const_cast", {} },
+    .{ "consteval", {} },                    .{ "constexpr", {} },                     .{ "constinit", {} },
+    .{ "crate", {} },                        .{ "debugger", {} },                      .{ "decltype", {} },
+    .{ "delete", {} },                       .{ "demote", {} },                        .{ "demote_to_helper", {} },
+    .{ "do", {} },                           .{ "dynamic_cast", {} },                  .{ "enum", {} },
+    .{ "explicit", {} },                     .{ "export", {} },                        .{ "extends", {} },
+    .{ "extern", {} },                       .{ "external", {} },                      .{ "fallthrough", {} },
+    .{ "filter", {} },                       .{ "final", {} },                         .{ "finally", {} },
+    .{ "friend", {} },                       .{ "from", {} },                          .{ "fxgroup", {} },
+    .{ "get", {} },                          .{ "goto", {} },                          .{ "groupshared", {} },
+    .{ "highp", {} },                        .{ "impl", {} },                          .{ "implements", {} },
+    .{ "import", {} },                       .{ "inline", {} },                        .{ "instanceof", {} },
+    .{ "interface", {} },                    .{ "layout", {} },                        .{ "lowp", {} },
+    .{ "macro", {} },                        .{ "macro_rules", {} },                   .{ "match", {} },
+    .{ "mediump", {} },                      .{ "meta", {} },                          .{ "mod", {} },
+    .{ "module", {} },                       .{ "move", {} },                          .{ "mut", {} },
+    .{ "mutable", {} },                      .{ "namespace", {} },                     .{ "new", {} },
+    .{ "nil", {} },                          .{ "noexcept", {} },                      .{ "noinline", {} },
+    .{ "nointerpolation", {} },              .{ "non_coherent", {} },                  .{ "noncoherent", {} },
+    .{ "noperspective", {} },                .{ "null", {} },                          .{ "nullptr", {} },
+    .{ "of", {} },                           .{ "operator", {} },                      .{ "package", {} },
+    .{ "packoffset", {} },                   .{ "partition", {} },                     .{ "pass", {} },
+    .{ "patch", {} },                        .{ "pixelfragment", {} },                 .{ "precise", {} },
+    .{ "precision", {} },                    .{ "premerge", {} },                      .{ "priv", {} },
+    .{ "protected", {} },                    .{ "pub", {} },                           .{ "public", {} },
+    .{ "readonly", {} },                     .{ "ref", {} },                           .{ "regardless", {} },
+    .{ "register", {} },                     .{ "reinterpret_cast", {} },              .{ "require", {} },
+    .{ "resource", {} },                     .{ "restrict", {} },                      .{ "self", {} },
+    .{ "set", {} },                          .{ "shared", {} },                        .{ "sizeof", {} },
+    .{ "smooth", {} },                       .{ "snorm", {} },                         .{ "static", {} },
+    .{ "static_assert", {} },                .{ "static_cast", {} },                   .{ "std", {} },
+    .{ "subroutine", {} },                   .{ "super", {} },                         .{ "target", {} },
+    .{ "template", {} },                     .{ "this", {} },                          .{ "thread_local", {} },
+    .{ "throw", {} },                        .{ "trait", {} },                         .{ "try", {} },
+    .{ "type", {} },                         .{ "typedef", {} },                       .{ "typeid", {} },
+    .{ "typename", {} },                     .{ "typeof", {} },                        .{ "union", {} },
+    .{ "unless", {} },                       .{ "unorm", {} },                         .{ "unsafe", {} },
+    .{ "unsized", {} },                      .{ "use", {} },                           .{ "using", {} },
+    .{ "varying", {} },                      .{ "virtual", {} },                       .{ "volatile", {} },
+    .{ "wgsl", {} },                         .{ "where", {} },                         .{ "with", {} },
+    .{ "writeonly", {} },                    .{ "yield", {} },
     // Predeclared scalar / address-space / type names that are also illegal
     // as identifiers — kept from the previous (pre-spec) list for back-compat.
-    .{ "array", {} },         .{ "atomic", {} },        .{ "bool", {} },
-    .{ "f16", {} },           .{ "f32", {} },           .{ "function", {} },
-    .{ "i32", {} },           .{ "mat2x2", {} },        .{ "mat2x3", {} },
-    .{ "mat2x4", {} },        .{ "mat3x2", {} },        .{ "mat3x3", {} },
-    .{ "mat3x4", {} },        .{ "mat4x2", {} },        .{ "mat4x3", {} },
-    .{ "mat4x4", {} },        .{ "private", {} },       .{ "ptr", {} },
-    .{ "storage", {} },       .{ "u32", {} },           .{ "uniform", {} },
-    .{ "vec2", {} },          .{ "vec3", {} },          .{ "vec4", {} },
-    .{ "workgroup", {} },
+                            .{ "array", {} },
+    .{ "atomic", {} },                       .{ "bool", {} },                          .{ "f16", {} },
+    .{ "f32", {} },                          .{ "function", {} },                      .{ "i32", {} },
+    .{ "mat2x2", {} },                       .{ "mat2x3", {} },                        .{ "mat2x4", {} },
+    .{ "mat3x2", {} },                       .{ "mat3x3", {} },                        .{ "mat3x4", {} },
+    .{ "mat4x2", {} },                       .{ "mat4x3", {} },                        .{ "mat4x4", {} },
+    .{ "private", {} },                      .{ "ptr", {} },                           .{ "storage", {} },
+    .{ "u32", {} },                          .{ "uniform", {} },                       .{ "vec2", {} },
+    .{ "vec3", {} },                         .{ "vec4", {} },                          .{ "workgroup", {} },
     // Predeclared texture / sampler types (§ Texture Types, § Sampler Types).
     // Not strictly reserved by the spec, but shadowing them produces output
     // that confuses naga's diagnostics and may break under future revisions.
-    .{ "sampler", {} },                  .{ "sampler_comparison", {} },
-    .{ "texture_1d", {} },               .{ "texture_2d", {} },
-    .{ "texture_2d_array", {} },         .{ "texture_3d", {} },
-    .{ "texture_cube", {} },             .{ "texture_cube_array", {} },
-    .{ "texture_multisampled_2d", {} },  .{ "texture_depth_2d", {} },
-    .{ "texture_depth_2d_array", {} },   .{ "texture_depth_cube", {} },
-    .{ "texture_depth_cube_array", {} }, .{ "texture_depth_multisampled_2d", {} },
-    .{ "texture_storage_1d", {} },       .{ "texture_storage_2d", {} },
-    .{ "texture_storage_2d_array", {} }, .{ "texture_storage_3d", {} },
+    .{ "sampler", {} },                      .{ "sampler_comparison", {} },            .{ "texture_1d", {} },
+    .{ "texture_2d", {} },                   .{ "texture_2d_array", {} },              .{ "texture_3d", {} },
+    .{ "texture_cube", {} },                 .{ "texture_cube_array", {} },            .{ "texture_multisampled_2d", {} },
+    .{ "texture_depth_2d", {} },             .{ "texture_depth_2d_array", {} },        .{ "texture_depth_cube", {} },
+    .{ "texture_depth_cube_array", {} },     .{ "texture_depth_multisampled_2d", {} }, .{ "texture_storage_1d", {} },
+    .{ "texture_storage_2d", {} },           .{ "texture_storage_2d_array", {} },      .{ "texture_storage_3d", {} },
     .{ "texture_external", {} },
     // Predeclared builtin FUNCTION names that zioshade EMITS as calls AND that are
     // ALSO legal GLSL identifiers — i.e. WGSL builtins whose GLSL counterpart has
@@ -1154,19 +1221,15 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     // colliding user identifier (→ `name_`) leaves the call intact. (Most other
     // WGSL builtins — min/max/dot/mix/… — are ALSO GLSL builtins, so they can't
     // be GLSL identifiers and need no entry.) (#170)
-    .{ "bitcast", {} },                  .{ "select", {} },
-    .{ "dpdx", {} },                     .{ "dpdy", {} },
-    .{ "dpdxCoarse", {} },               .{ "dpdxFine", {} },
-    .{ "dpdyCoarse", {} },               .{ "dpdyFine", {} },
-    .{ "quantizeToF16", {} },            .{ "arrayLength", {} },
-    .{ "countOneBits", {} },             .{ "reverseBits", {} },
-    .{ "extractBits", {} },              .{ "insertBits", {} },
-    .{ "firstLeadingBit", {} },          .{ "firstTrailingBit", {} },
-    .{ "pack2x16float", {} },            .{ "pack2x16snorm", {} },
-    .{ "pack2x16unorm", {} },            .{ "pack4x8snorm", {} },
-    .{ "pack4x8unorm", {} },             .{ "unpack2x16float", {} },
-    .{ "unpack2x16snorm", {} },          .{ "unpack2x16unorm", {} },
-    .{ "unpack4x8snorm", {} },           .{ "unpack4x8unorm", {} },
+                .{ "bitcast", {} },                       .{ "select", {} },
+    .{ "dpdx", {} },                         .{ "dpdy", {} },                          .{ "dpdxCoarse", {} },
+    .{ "dpdxFine", {} },                     .{ "dpdyCoarse", {} },                    .{ "dpdyFine", {} },
+    .{ "quantizeToF16", {} },                .{ "arrayLength", {} },                   .{ "countOneBits", {} },
+    .{ "reverseBits", {} },                  .{ "extractBits", {} },                   .{ "insertBits", {} },
+    .{ "firstLeadingBit", {} },              .{ "firstTrailingBit", {} },              .{ "pack2x16float", {} },
+    .{ "pack2x16snorm", {} },                .{ "pack2x16unorm", {} },                 .{ "pack4x8snorm", {} },
+    .{ "pack4x8unorm", {} },                 .{ "unpack2x16float", {} },               .{ "unpack2x16snorm", {} },
+    .{ "unpack2x16unorm", {} },              .{ "unpack4x8snorm", {} },                .{ "unpack4x8unorm", {} },
     // WGSL texture builtin functions. Their GLSL counterparts have DIFFERENT
     // names (texture→textureSample, texelFetch→textureLoad, textureSize→
     // textureDimensions, imageStore→textureStore, textureQueryLevels→
@@ -1177,14 +1240,11 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     // textureSampleBias / textureSampleBaseClampToEdge are reserved PROACTIVELY —
     // zioshade does not emit them yet (the ImageSample Bias/MinLod operands are not
     // currently lowered), but reserving a real WGSL builtin name is always safe. (#170)
-    .{ "textureSample", {} },            .{ "textureSampleBias", {} },
-    .{ "textureSampleLevel", {} },       .{ "textureSampleGrad", {} },
-    .{ "textureSampleCompare", {} },     .{ "textureSampleCompareLevel", {} },
-    .{ "textureSampleBaseClampToEdge", {} }, .{ "textureGather", {} },
-    .{ "textureGatherCompare", {} },     .{ "textureLoad", {} },
-    .{ "textureStore", {} },             .{ "textureDimensions", {} },
-    .{ "textureNumLayers", {} },         .{ "textureNumLevels", {} },
-    .{ "textureNumSamples", {} },
+    .{ "textureSample", {} },                .{ "textureSampleBias", {} },             .{ "textureSampleLevel", {} },
+    .{ "textureSampleGrad", {} },            .{ "textureSampleCompare", {} },          .{ "textureSampleCompareLevel", {} },
+    .{ "textureSampleBaseClampToEdge", {} }, .{ "textureGather", {} },                 .{ "textureGatherCompare", {} },
+    .{ "textureLoad", {} },                  .{ "textureStore", {} },                  .{ "textureDimensions", {} },
+    .{ "textureNumLayers", {} },             .{ "textureNumLevels", {} },              .{ "textureNumSamples", {} },
 });
 
 fn isWgslKeyword(name: []const u8) bool {
@@ -1875,8 +1935,9 @@ fn wgslStorageTextureType(module: *const ParsedModule, image_type_id: u32, acces
 fn isIntegerWgslType(type_name: []const u8) bool {
     const names = [_][]const u8{
         "i32",   "u32",
-        "vec2i", "vec3i", "vec4i",
-        "vec2u", "vec3u", "vec4u",
+        "vec2i", "vec3i",
+        "vec4i", "vec2u",
+        "vec3u", "vec4u",
     };
     for (names) |n| {
         if (std.mem.eql(u8, type_name, n)) return true;
@@ -1944,9 +2005,15 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
         const id = inst.words[1];
         const target = getDef(module, id) orelse continue;
         switch (target.op) {
-            .Constant, .ConstantTrue, .ConstantFalse, .ConstantComposite,
-            .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
-            .SpecConstantComposite, .SpecConstantOp,
+            .Constant,
+            .ConstantTrue,
+            .ConstantFalse,
+            .ConstantComposite,
+            .SpecConstant,
+            .SpecConstantTrue,
+            .SpecConstantFalse,
+            .SpecConstantComposite,
+            .SpecConstantOp,
             => continue,
             else => {},
         }
@@ -2156,7 +2223,13 @@ fn appendMatrixTail(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
         if (def != null and def.?.op == .Constant and def.?.words.len > 3) {
             const val = def.?.words[3];
             if (ti != null and ti.?.op == .TypeVector) {
-                try buf.appendSlice(alloc, switch (val) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" });
+                try buf.appendSlice(alloc, switch (val) {
+                    0 => ".x",
+                    1 => ".y",
+                    2 => ".z",
+                    3 => ".w",
+                    else => ".x",
+                });
                 cur_type = ti.?.words[2];
             } else {
                 try buf.print(alloc, "[{d}]", .{val});
@@ -2225,7 +2298,11 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
 
                 if (is_vector) {
                     try buf.appendSlice(alloc, switch (val) {
-                        0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x",
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => ".x",
                     });
                     if (current_type_id) |tid| {
                         const ti = getDef(module, tid);
@@ -2377,9 +2454,18 @@ fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
 fn collectAtomicFields(module: *const ParsedModule, out: *AtomicFieldMap) !void {
     for (module.instructions) |inst| {
         const is_atomic = switch (inst.op) {
-            .AtomicIAdd, .AtomicISub, .AtomicAnd, .AtomicOr, .AtomicXor,
-            .AtomicUMin, .AtomicSMin, .AtomicUMax, .AtomicSMax,
-            .AtomicFAddEXT, .AtomicExchange, .AtomicCompareExchange,
+            .AtomicIAdd,
+            .AtomicISub,
+            .AtomicAnd,
+            .AtomicOr,
+            .AtomicXor,
+            .AtomicUMin,
+            .AtomicSMin,
+            .AtomicUMax,
+            .AtomicSMax,
+            .AtomicFAddEXT,
+            .AtomicExchange,
+            .AtomicCompareExchange,
             => true,
             else => false,
         };
@@ -2433,9 +2519,18 @@ fn collectAtomicFields(module: *const ParsedModule, out: *AtomicFieldMap) !void 
 fn collectAtomicVars(module: *const ParsedModule, out: *std.AutoHashMap(u32, void)) !void {
     for (module.instructions) |inst| {
         const is_atomic = switch (inst.op) {
-            .AtomicIAdd, .AtomicISub, .AtomicAnd, .AtomicOr, .AtomicXor,
-            .AtomicUMin, .AtomicSMin, .AtomicUMax, .AtomicSMax,
-            .AtomicFAddEXT, .AtomicExchange, .AtomicCompareExchange,
+            .AtomicIAdd,
+            .AtomicISub,
+            .AtomicAnd,
+            .AtomicOr,
+            .AtomicXor,
+            .AtomicUMin,
+            .AtomicSMin,
+            .AtomicUMax,
+            .AtomicSMax,
+            .AtomicFAddEXT,
+            .AtomicExchange,
+            .AtomicCompareExchange,
             => true,
             else => false,
         };
@@ -2549,29 +2644,82 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
             if (inst.words.len > 1) return common.resolvePointeeType(module, inst.words[1]);
             return null;
         },
-        .Load, .CopyObject, .CompositeConstruct, .CompositeInsert,
-        .FunctionCall, .Phi, .Select, .CopyLogical, .FunctionParameter,
+        .Load,
+        .CopyObject,
+        .CompositeConstruct,
+        .CompositeInsert,
+        .FunctionCall,
+        .Phi,
+        .Select,
+        .CopyLogical,
+        .FunctionParameter,
         .Undef,
         // Composite constants carry their result type in words[1] too — needed so
         // an OpCompositeExtract from an inline `array<...>(...)` constant is typed
         // as an array (indexed `[i]`), not swizzled `.x`.
-        .ConstantComposite, .SpecConstantComposite,
-        .Constant, .ConstantTrue, .ConstantFalse, .SpecConstant,
-        .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
-        .UConvert, .SConvert, .FConvert, .Bitcast, .QuantizeToF16,
-        .VectorShuffle, .CompositeExtract, .VectorTimesScalar,
-        .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector,
-        .MatrixTimesMatrix, .OuterProduct, .Transpose, .ImageSampleImplicitLod,
-        .ImageSampleExplicitLod, .ImageFetch, .ImageRead,
-        .FNegate, .SNegate, .Not, .LogicalNot,
+        .ConstantComposite,
+        .SpecConstantComposite,
+        .Constant,
+        .ConstantTrue,
+        .ConstantFalse,
+        .SpecConstant,
+        .ConvertFToS,
+        .ConvertSToF,
+        .ConvertUToF,
+        .ConvertFToU,
+        .UConvert,
+        .SConvert,
+        .FConvert,
+        .Bitcast,
+        .QuantizeToF16,
+        .VectorShuffle,
+        .CompositeExtract,
+        .VectorTimesScalar,
+        .MatrixTimesScalar,
+        .VectorTimesMatrix,
+        .MatrixTimesVector,
+        .MatrixTimesMatrix,
+        .OuterProduct,
+        .Transpose,
+        .ImageSampleImplicitLod,
+        .ImageSampleExplicitLod,
+        .ImageFetch,
+        .ImageRead,
+        .FNegate,
+        .SNegate,
+        .Not,
+        .LogicalNot,
         .ExtInst,
-        .FAdd, .FSub, .FMul, .FDiv, .FRem, .FMod,
-        .IAdd, .ISub, .IMul, .SDiv, .UDiv, .SMod, .UMod,
-        .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical,
-        .BitwiseAnd, .BitwiseOr, .BitwiseXor,
-        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual,
-        .LogicalAnd, .LogicalOr, .LogicalEqual, .LogicalNotEqual,
+        .FAdd,
+        .FSub,
+        .FMul,
+        .FDiv,
+        .FRem,
+        .FMod,
+        .IAdd,
+        .ISub,
+        .IMul,
+        .SDiv,
+        .UDiv,
+        .SMod,
+        .UMod,
+        .ShiftRightLogical,
+        .ShiftRightArithmetic,
+        .ShiftLeftLogical,
+        .BitwiseAnd,
+        .BitwiseOr,
+        .BitwiseXor,
+        .FOrdLessThan,
+        .FOrdGreaterThan,
+        .FOrdLessThanEqual,
+        .FOrdGreaterThanEqual,
+        .FOrdEqual,
+        .FOrdNotEqual,
+        .FUnordNotEqual,
+        .LogicalAnd,
+        .LogicalOr,
+        .LogicalEqual,
+        .LogicalNotEqual,
         => {
             // words[1] is result type (may be pointer)
             if (inst.words.len > 1) {
@@ -2701,8 +2849,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // — it is handled by the texture's sampler_comparison partner.
     for (module.instructions) |inst| {
         const is_dref = switch (inst.op) {
-            .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod,
-            .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod,
+            .ImageSampleDrefImplicitLod,
+            .ImageSampleDrefExplicitLod,
+            .ImageSampleProjDrefImplicitLod,
+            .ImageSampleProjDrefExplicitLod,
             .ImageDrefGather,
             => true,
             else => false,
@@ -2718,7 +2868,6 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             return error.UnsupportedOp;
         }
     }
-
 
     // Built-ins with no representable standard-WGSL entry-point I/O form must fail
     // loud, not leak the identifier (naga reject) or get misclassified as a
@@ -3562,7 +3711,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             const ptr_inst = getDef(&module, cb.type_id);
             const actual_type = if (ptr_inst) |pi|
                 if (pi.op == .TypePointer and pi.words.len > 3) pi.words[3] else cb.type_id
-            else cb.type_id;
+            else
+                cb.type_id;
             break :blk try wgslType(&module, actual_type, &names, arena);
         };
         // Anonymous block (`buffer B { … };` with no instance name): glslang names the
@@ -3612,7 +3762,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         const ptr_inst2 = getDef(&module, cb.type_id);
         const actual_type2 = if (ptr_inst2) |pi|
             if (pi.op == .TypePointer and pi.words.len > 3) pi.words[3] else cb.type_id
-        else cb.type_id;
+        else
+            cb.type_id;
         const is_bare_array = blk: {
             const ti = getDef(&module, actual_type2);
             break :blk ti != null and ti.?.op == .TypeArray;
@@ -3989,7 +4140,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         // Find the FunctionParameter instruction for this param
                         var param_id: u32 = 0;
                         var pidx: usize = 0;
-                        for (module.instructions[fidx + 1..]) |pinst| {
+                        for (module.instructions[fidx + 1 ..]) |pinst| {
                             if (pinst.op == .FunctionParameter and pinst.words.len > 2) {
                                 if (pidx == pi) {
                                     param_id = pinst.words[2];
@@ -4026,7 +4177,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // Look up param names from the function body
             var found_name: ?[]const u8 = null;
             var pidx: usize = 0;
-            for (module.instructions[fidx + 1..]) |pinst| {
+            for (module.instructions[fidx + 1 ..]) |pinst| {
                 if (pinst.op == .FunctionParameter and pinst.words.len > 2) {
                     if (pidx == pi) {
                         found_name = names.get(pinst.words[2]);
@@ -4131,7 +4282,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         for (output_vars.items, 0..) |ovid, i| {
             const loc = getDecVal(&decorations, ovid, .location) orelse i;
             const var_name = names.get(ovid) orelse continue;
-            try w.print("    @location({d}) {s}: vec4f,\n", .{loc, var_name});
+            try w.print("    @location({d}) {s}: vec4f,\n", .{ loc, var_name });
         }
         try w.writeAll("}\n\n");
         use_frag_mrt_struct = true;
@@ -4395,7 +4546,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
 
     if (is_compute) {
         const ls = module.local_size;
-        try w.print("@compute @workgroup_size({d}, {d}, {d})\nfn main(", .{ls[0], ls[1], ls[2]});
+        try w.print("@compute @workgroup_size({d}, {d}, {d})\nfn main(", .{ ls[0], ls[1], ls[2] });
     } else {
         try w.print("{s}\nfn main(", .{entry_stage});
     }
@@ -5032,7 +5183,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // Skip FunctionParameter instructions (parameters declared in function signature)
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
-        if (inst.op == .Label) { i += 1; break; }
+        if (inst.op == .Label) {
+            i += 1;
+            break;
+        }
         if (inst.op == .FunctionParameter) continue;
         break;
     }
@@ -5080,7 +5234,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 var is_loop_phi = false;
                 var pk: usize = si + 1;
                 while (pk < @min(si + 30, module.instructions.len)) : (pk += 1) {
-                    if (module.instructions[pk].op == .LoopMerge) { is_loop_phi = true; break; }
+                    if (module.instructions[pk].op == .LoopMerge) {
+                        is_loop_phi = true;
+                        break;
+                    }
                     if (module.instructions[pk].op == .SelectionMerge or module.instructions[pk].op == .Label or module.instructions[pk].op == .FunctionEnd) break;
                 }
                 if (is_loop_phi) continue;
@@ -5447,9 +5604,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // Replace all occurrences of old_name in val
                 while (std.mem.indexOf(u8, updated, old_name)) |pos| {
                     // Check word boundaries to avoid partial matches
-                    const before_ok = pos == 0 or switch (updated[pos - 1]) { ' ', '(', ',', '[', '+', '-', '*', '/', '=' => true, else => false };
+                    const before_ok = pos == 0 or switch (updated[pos - 1]) {
+                        ' ', '(', ',', '[', '+', '-', '*', '/', '=' => true,
+                        else => false,
+                    };
                     const after_idx = pos + old_name.len;
-                    const after_ok = after_idx >= updated.len or switch (updated[after_idx]) { ' ', ')', ',', ']', '+', '-', '*', '/', '=', '.', '\t' => true, else => false };
+                    const after_ok = after_idx >= updated.len or switch (updated[after_idx]) {
+                        ' ', ')', ',', ']', '+', '-', '*', '/', '=', '.', '\t' => true,
+                        else => false,
+                    };
                     if (before_ok and after_ok) {
                         const replacement = try std.mem.concat(alloc, u8, &[_][]const u8{ updated[0..pos], new_name, updated[after_idx..] });
                         updated = replacement;
@@ -5613,7 +5776,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (finst.words.len > 2 and finst.words[2] == result_id) continue;
                     var found = false;
                     for (finst.words[@min(3, finst.words.len)..]) |fw| {
-                        if (fw == result_id) { found = true; break; }
+                        if (fw == result_id) {
+                            found = true;
+                            break;
+                        }
                     }
                     if (found) {
                         if (finst.words.len > 2) {
@@ -5652,9 +5818,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // Check it's actually a variable reference (word boundary)
                         // Simple heuristic: name is preceded by space, (, or start; followed by ), +, -, *, /, ,, space, or end
                         const pos = std.mem.indexOf(u8, expr, dead_name).?;
-                        const before_ok = pos == 0 or switch (expr[pos - 1]) { ' ', '(', ',', '=', '\t' => true, else => false };
+                        const before_ok = pos == 0 or switch (expr[pos - 1]) {
+                            ' ', '(', ',', '=', '\t' => true,
+                            else => false,
+                        };
                         const after_idx = pos + dead_name.len;
-                        const after_ok = after_idx >= expr.len or switch (expr[after_idx]) { ' ', ')', ',', '+', '-', '*', '/', '\t', '\n' => true, else => false };
+                        const after_ok = after_idx >= expr.len or switch (expr[after_idx]) {
+                            ' ', ')', ',', '+', '-', '*', '/', '\t', '\n' => true,
+                            else => false,
+                        };
                         if (before_ok and after_ok) {
                             revive.append(arena, dead_id) catch {};
                             break;
@@ -5694,7 +5866,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FunctionEnd => {
                 while (if_depth > 0) : (if_depth -= 1) {
                     indent -= 1;
-                    try writeInd(w, indent); try w.writeAll("}");
+                    try writeInd(w, indent);
+                    try w.writeAll("}");
                     try w.writeAll("\n");
                 }
                 return;
@@ -5754,9 +5927,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         }
                                     }
                                     if (use_init and init_val_name != null) {
-                                        try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val_name.? });
+                                        try writeInd(w, indent);
+                                        try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val_name.? });
                                     } else {
-                                        try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ phi_result.?, phi_type });
+                                        try writeInd(w, indent);
+                                        try w.print("var {s}: {s};\n", .{ phi_result.?, phi_type });
                                     }
                                 }
                             }
@@ -5771,12 +5946,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const default_label = inst.words[2];
                     const merge_label = pending_merge;
                     if (merge_label != null) {
-                        try writeInd(w, indent); try w.print("switch {s} {{\n", .{selector});
+                        try writeInd(w, indent);
+                        try w.print("switch {s} {{\n", .{selector});
                         const case_ind = indent + 1;
                         const body_ind = indent + 2;
                         // Emit default case (WGSL requires exactly one default)
                         if (default_label != merge_label.?) {
-                            try writeInd(w, case_ind); try w.writeAll("default: {\n");
+                            try writeInd(w, case_ind);
+                            try w.writeAll("default: {\n");
                             // Skip to default label block, emit until merge
                             var si: usize = i + 1;
                             while (si < module.instructions.len) : (si += 1) {
@@ -5794,11 +5971,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     break;
                                 }
                             }
-                            try writeInd(w, case_ind); try w.writeAll("}\n");
+                            try writeInd(w, case_ind);
+                            try w.writeAll("}\n");
                         } else {
                             // Default targets merge — emit empty default (WGSL requires it)
-                            try writeInd(w, case_ind); try w.writeAll("default: {\n");
-                            try writeInd(w, case_ind); try w.writeAll("}\n");
+                            try writeInd(w, case_ind);
+                            try w.writeAll("default: {\n");
+                            try writeInd(w, case_ind);
+                            try w.writeAll("}\n");
                         }
                         // Emit case targets
                         var wi: usize = 3;
@@ -5806,7 +5986,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const case_val = inst.words[wi];
                             const target_label = inst.words[wi + 1];
                             if (target_label == merge_label.?) continue;
-                            try writeInd(w, case_ind); try w.print("case {d}: {{\n", .{case_val});
+                            try writeInd(w, case_ind);
+                            try w.print("case {d}: {{\n", .{case_val});
                             // Find and emit target block
                             var si: usize = i + 1;
                             while (si < module.instructions.len) : (si += 1) {
@@ -5823,9 +6004,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     break;
                                 }
                             }
-                            try writeInd(w, case_ind); try w.writeAll("}\n");
+                            try writeInd(w, case_ind);
+                            try w.writeAll("}\n");
                         }
-                        try writeInd(w, indent); try w.writeAll("}\n");
+                        try writeInd(w, indent);
+                        try w.writeAll("}\n");
                         // Skip all instructions until merge label
                         var skip_i: usize = i + 1;
                         while (skip_i < module.instructions.len) : (skip_i += 1) {
@@ -5867,7 +6050,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const phi_end = phi_updates.items.len;
                     phi_group_open = false;
                     try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header, .phi_start = phi_start, .phi_end = phi_end });
-                    try writeInd(w, indent); try w.writeAll("loop {\n");
+                    try writeInd(w, indent);
+                    try w.writeAll("loop {\n");
                     indent += 1;
                     // Replay deferred loop header instructions inside the loop
                     if (defer_active and defer_start != null) {
@@ -5924,7 +6108,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     {
                         var pk = i + 1;
                         while (pk < @min(i + 20, module.instructions.len)) : (pk += 1) {
-                            if (module.instructions[pk].op == .LoopMerge) { lm_follows = true; break; }
+                            if (module.instructions[pk].op == .LoopMerge) {
+                                lm_follows = true;
+                                break;
+                            }
                             if (module.instructions[pk].op == .FunctionEnd or module.instructions[pk].op == .Label) break;
                         }
                     }
@@ -5962,7 +6149,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (!already_declared) {
                         const phi_type = try wgslType(module, inst.words[1], names, arena);
                         const init_val = names.get(init_value_id) orelse "0";
-                        try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
+                        try writeInd(w, indent);
+                        try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val });
                     }
                     if (lm_follows and !phi_group_open) {
                         // First loop-header phi of this loop: open the group once so
@@ -6008,7 +6196,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (inlined != null) {
                             dead_conditions.put(inst.words[1], {}) catch {};
                         }
-                        try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
+                        try writeInd(w, indent);
+                        try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
                     } else if (pending_merge != null) {
                         const merge_label = pending_merge.?;
                         // Check if this is a break/continue inside a loop. The break
@@ -6036,13 +6225,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // if (cond) { break; }
                             const inlined2 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
                             if (inlined2 != null) dead_conditions.put(inst.words[1], {}) catch {};
-                            try writeInd(w, indent); try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
+                            try writeInd(w, indent);
+                            try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
                             pending_merge = null;
                         } else if (false_is_break) {
                             // if (!(cond)) { break; }
                             const inlined3 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
                             if (inlined3 != null) dead_conditions.put(inst.words[1], {}) catch {};
-                            try writeInd(w, indent); try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
+                            try writeInd(w, indent);
+                            try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
                             pending_merge = null;
                         } else if (true_is_continue) {
                             // Emit phi computation + updates before continue, inside the if block
@@ -6053,7 +6244,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // dispatch (it is not in the deferred loop-header region), so it
                             // already exists as a `let`; inlining would leave that `let` dangling
                             // AND duplicate the expression. Referencing the existing name is clean.
-                            try writeInd(w, indent); try w.print("if ({s}) {{\n", .{condition});
+                            try writeInd(w, indent);
+                            try w.print("if ({s}) {{\n", .{condition});
                             if (loop_stack.items.len > 0) {
                                 const cur = loop_stack.items[loop_stack.items.len - 1];
                                 // Scan forward for the continue block and emit phi-relevant computations
@@ -6093,17 +6285,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     const pu = phi_updates.items[idx];
                                     const res_name = names.get(pu.result_id) orelse continue;
                                     const val_name = names.get(pu.value_id) orelse continue;
-                                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                    try writeInd(w, indent + 1);
+                                    try w.print("{s} = {s};\n", .{ res_name, val_name });
                                 }
                             }
-                            try writeInd(w, indent + 1); try w.writeAll("continue;\n");
-                            try writeInd(w, indent); try w.writeAll("}\n");
+                            try writeInd(w, indent + 1);
+                            try w.writeAll("continue;\n");
+                            try writeInd(w, indent);
+                            try w.writeAll("}\n");
                             pending_merge = null;
                         } else if (false_is_continue) {
                             // Emit phi computation + updates before continue, inside the if block.
                             // Reference the already-emitted condition name (see true_is_continue
                             // note above — inlining here would dangle the eager `let`).
-                            try writeInd(w, indent); try w.print("if (!({s})) {{\n", .{condition});
+                            try writeInd(w, indent);
+                            try w.print("if (!({s})) {{\n", .{condition});
                             if (loop_stack.items.len > 0) {
                                 const cur = loop_stack.items[loop_stack.items.len - 1];
                                 var ci: usize = i + 1;
@@ -6140,15 +6336,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     const pu = phi_updates.items[idx];
                                     const res_name = names.get(pu.result_id) orelse continue;
                                     const val_name = names.get(pu.value_id) orelse continue;
-                                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                    try writeInd(w, indent + 1);
+                                    try w.print("{s} = {s};\n", .{ res_name, val_name });
                                 }
                             }
-                            try writeInd(w, indent + 1); try w.writeAll("continue;\n");
-                            try writeInd(w, indent); try w.writeAll("}\n");
+                            try writeInd(w, indent + 1);
+                            try w.writeAll("continue;\n");
+                            try writeInd(w, indent);
+                            try w.writeAll("}\n");
                             pending_merge = null;
                         } else {
                             // Regular if/else
-                            try writeInd(w, indent); try w.print("if ({s}) {{\n", .{condition});
+                            try writeInd(w, indent);
+                            try w.print("if ({s}) {{\n", .{condition});
                             try merge_stack.append(arena, merge_label);
                             if_depth += 1;
                             indent += 1;
@@ -6176,7 +6376,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     const pu = phi_updates.items[idx];
                                     const res_name = names.get(pu.result_id) orelse continue;
                                     const val_name = names.get(pu.value_id) orelse continue;
-                                    try writeInd(w, indent); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                    try writeInd(w, indent);
+                                    try w.print("{s} = {s};\n", .{ res_name, val_name });
                                 }
                             }
                             continue;
@@ -6203,7 +6404,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     if (sp.pred_label == cp) {
                                         const res_name = names.get(sp.result_id) orelse continue;
                                         const val_name = names.get(sp.value_id) orelse continue;
-                                        try writeInd(w, indent); try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                        try writeInd(w, indent);
+                                        try w.print("{s} = {s};\n", .{ res_name, val_name });
                                     }
                                 }
                             }
@@ -6215,7 +6417,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const cur_merge = merge_stack.items[merge_stack.items.len - 1];
                             if (target == cur_merge) {
                                 indent -= 1;
-                                try writeInd(w, indent); try w.writeAll("} else {");
+                                try writeInd(w, indent);
+                                try w.writeAll("} else {");
                                 try w.writeAll("\n");
                                 indent += 1;
                                 pending_false_label = null;
@@ -6237,7 +6440,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const top = loop_stack.items[loop_stack.items.len - 1];
                         if (label_id == top.merge) {
                             indent -= 1;
-                            try writeInd(w, indent); try w.writeAll("}\n"); // close loop
+                            try writeInd(w, indent);
+                            try w.writeAll("}\n"); // close loop
                             _ = loop_stack.pop();
                             if (loop_stack.items.len > 0) {
                                 const prev = loop_stack.items[loop_stack.items.len - 1];
@@ -6260,7 +6464,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const cur_merge = merge_stack.items[merge_stack.items.len - 1];
                         if (label_id == cur_merge) {
                             indent -= 1;
-                            try writeInd(w, indent); try w.writeAll("}");
+                            try writeInd(w, indent);
+                            try w.writeAll("}");
                             try w.writeAll("\n");
                             _ = merge_stack.pop();
                             if_depth -= 1;
@@ -6283,7 +6488,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         while (k < module.instructions.len) : (k += 1) {
                             switch (module.instructions[k].op) {
                                 .Phi => has_phi = true,
-                                .LoopMerge => { is_loop_header = true; break; },
+                                .LoopMerge => {
+                                    is_loop_header = true;
+                                    break;
+                                },
                                 .Label, .Branch, .BranchConditional, .Switch, .SelectionMerge, .Return, .ReturnValue, .Kill, .Unreachable, .FunctionEnd => break,
                                 else => {},
                             }
@@ -6318,11 +6526,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             vn = uniq;
                         }
                         try declared_local_names.put(try arena.dupe(u8, vn), {});
-                        try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ vn, rt });
+                        try writeInd(w, indent);
+                        try w.print("var {s}: {s};\n", .{ vn, rt });
                     } else if (sc == .Private) {
                         const rt = try wgslType(module, inst.words[1], names, arena);
                         const vn = names.get(inst.words[2]) orelse "v";
-                        try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ vn, rt });
+                        try writeInd(w, indent);
+                        try w.print("var {s}: {s};\n", .{ vn, rt });
                     }
                     // Output/Input/Uniform/UniformConstant variables handled in entry point setup
                 }
@@ -6423,7 +6633,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                     }
                     const let_or_var: []const u8 = if (std.mem.startsWith(u8, result_name, "_inout_")) "var" else "let";
-                    try writeInd(w, indent); try w.print("{s} {s}: {s} = {s};\n", .{ let_or_var, result_name, rt, expr });
+                    try writeInd(w, indent);
+                    try w.print("{s} {s}: {s} = {s};\n", .{ let_or_var, result_name, rt, expr });
                     if (expr_allocated) alloc.free(expr);
                 }
             },
@@ -6484,7 +6695,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         expr_allocated = true;
                     }
                 }
-                try writeInd(w, indent); try w.print("{s} = {s};\n", .{ expr, val });
+                try writeInd(w, indent);
+                try w.print("{s} = {s};\n", .{ expr, val });
                 if (expr_allocated) alloc.free(expr);
             },
 
@@ -6525,7 +6737,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     }
                 }
                 if (!is_struct_result and !is_matrix_result and all_same and num_comps > 1 and first_comp != null) {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, first_comp.? });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, first_comp.? });
                 } else {
                     // Check for leading sequential extracts from the same source
                     // e.g., vec4f(v.x, v.y, v.z, 1.0) → vec4f(v, 1.0) or vec4f(v.xyz, 1.0)
@@ -6596,7 +6809,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const comp_name = names.get(comp_id) orelse "0";
                             try parts.appendSlice(arena, comp_name);
                         }
-                        try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
                     } else {
                         // General case: emit all components
                         var parts = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
@@ -6606,7 +6820,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const comp_name = names.get(comp_id) orelse "0";
                             try parts.appendSlice(alloc, comp_name);
                         }
-                        try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, parts.items });
                     }
                 }
             },
@@ -6683,7 +6898,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 if (idx + 2 < cti.words.len) current_type = cti.words[idx + 2] else current_type = null;
                                 continue;
                             } else if (cti.op == .TypeVector) {
-                                const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                                const sw = switch (idx) {
+                                    0 => ".x",
+                                    1 => ".y",
+                                    2 => ".z",
+                                    3 => ".w",
+                                    else => ".x",
+                                };
                                 try expr.appendSlice(alloc, sw);
                                 if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
                                 continue;
@@ -6697,7 +6918,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Fallback: array index
                     try expr.print(alloc, "[{d}]", .{idx});
                 }
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, expr.items });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, expr.items });
             },
 
             // CopyObject
@@ -6747,7 +6969,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // Check if all components come from the same source vector (single-source swizzle)
                 var single_source = true;
                 for (inst.words[5..]) |idx| {
-                    if (idx >= v1_count) { single_source = false; break; }
+                    if (idx >= v1_count) {
+                        single_source = false;
+                        break;
+                    }
                 }
                 if (single_source) {
                     // All from v1 — emit as v1.xyzw swizzle
@@ -6757,17 +6982,25 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     for (inst.words[5..]) |idx| {
                         if (idx < 4) try sw.append(arena, chars[idx]);
                     }
-                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}.{s};\n", .{ result_name, rt, v1, sw.items });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = {s}.{s};\n", .{ result_name, rt, v1, sw.items });
                 } else {
                     // Mixed sources — construct from components
-                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
                     var first = true;
                     for (inst.words[5..]) |idx| {
                         if (!first) try w.writeAll(", ");
                         first = false;
                         const src = if (idx < v1_count) v1 else v2;
                         const comp = idx % v1_count;
-                        const sw = switch (comp) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                        const sw = switch (comp) {
+                            0 => ".x",
+                            1 => ".y",
+                            2 => ".z",
+                            3 => ".w",
+                            else => ".x",
+                        };
                         try w.print("{s}{s}", .{ src, sw });
                     }
                     try w.writeAll(");\n");
@@ -6790,7 +7023,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .ShiftRightLogical, .ShiftRightArithmetic => try emitShift(module, names, &inline_exprs, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("let {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
             .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent),
             .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => {
@@ -6827,7 +7061,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .LogicalNotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
             .LogicalNot => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("let {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
             },
 
             // Select (ternary)
@@ -6844,24 +7079,31 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     std.mem.startsWith(u8, rt, "array") or
                     (inst.words.len > 1 and (isStructType(module, inst.words[1]) or isArrayType(module, inst.words[1]))))
                 {
-                    try writeInd(w, indent); try w.print("var {s}: {s};\n", .{ result_name, rt });
-                    try writeInd(w, indent); try w.print("if ({s}) {{\n", .{cond});
-                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, true_val });
-                    try writeInd(w, indent); try w.writeAll("} else {\n");
-                    try writeInd(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, false_val });
-                    try writeInd(w, indent); try w.writeAll("}\n");
+                    try writeInd(w, indent);
+                    try w.print("var {s}: {s};\n", .{ result_name, rt });
+                    try writeInd(w, indent);
+                    try w.print("if ({s}) {{\n", .{cond});
+                    try writeInd(w, indent + 1);
+                    try w.print("{s} = {s};\n", .{ result_name, true_val });
+                    try writeInd(w, indent);
+                    try w.writeAll("} else {\n");
+                    try writeInd(w, indent + 1);
+                    try w.print("{s} = {s};\n", .{ result_name, false_val });
+                    try writeInd(w, indent);
+                    try w.writeAll("}\n");
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
                 }
             },
 
             // Conversions
-            .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU,
-            .UConvert, .SConvert, .FConvert => {
+            .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const val = names.get(inst.words[3]) orelse "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, val });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, val });
             },
             .Bitcast => {
                 // Bitcast in WGSL: bitcast<T>(value)
@@ -6877,9 +7119,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 } else false;
                 if (is_same_type) {
                     // Same-type bitcast: just assign the value directly
-                    try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, val });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, val });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
                 }
             },
 
@@ -6928,9 +7172,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, bias, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, bias, off_suffix });
                     } else {
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, bias, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, bias, off_suffix });
                     }
                 } else {
                     // Non-Bias path. The only image operand WGSL's plain textureSample
@@ -6951,9 +7197,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
                     } else {
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
                     }
                 }
             },
@@ -6995,9 +7243,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleGrad({s}, {s}, {s}{s}, i32(round({s}{s})), {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, ddx, ddy, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSampleGrad({s}, {s}, {s}{s}, i32(round({s}{s})), {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, ddx, ddy, off_suffix });
                     } else {
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleGrad({s}, {s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, ddx, ddy, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSampleGrad({s}, {s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, ddx, ddy, off_suffix });
                     }
                 } else {
                     // Non-Grad path: explicit Lod (0x2), optionally with a CONSTANT
@@ -7024,9 +7274,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod, off_suffix });
                     } else {
-                        try writeInd(w, indent); try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod, off_suffix });
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod, off_suffix });
                     }
                 }
             },
@@ -7075,7 +7327,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // Return
             .Return => {
                 if (inout_return) |ret_name| {
-                    try writeInd(w, indent); try w.print("return {s};\n", .{ret_name});
+                    try writeInd(w, indent);
+                    try w.print("return {s};\n", .{ret_name});
                 } else {
                     // Entry function. The FINAL return (terminator of the last
                     // block, at top level) is collapsed into the wrapper's trailing
@@ -7088,7 +7341,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         switch (early_return) {
                             .none => {},
                             .stmt => |s| {
-                                try writeInd(w, indent); try w.print("{s}\n", .{s});
+                                try writeInd(w, indent);
+                                try w.print("{s}\n", .{s});
                             },
                             .honest_error => return recordUnsupportedEarlyReturn(),
                         }
@@ -7125,19 +7379,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 return error.UnsupportedExtInst;
                             };
                             const m = names.get(inst.words[5]) orelse "m";
-                            try writeInd(w, indent); try w.print("let {s}: {s} = spvInverse{d}({s});\n", .{ result_name, rt, dim, m });
+                            try writeInd(w, indent);
+                            try w.print("let {s}: {s} = spvInverse{d}({s});\n", .{ result_name, rt, dim, m });
                         } else if (instruction == 51 or instruction == 35) {
                             const x = names.get(inst.words[5]) orelse "0";
                             const builtin = if (instruction == 51) "frexp" else "modf";
                             const second_field = if (instruction == 51) "exp" else "whole";
                             const tmp = std.fmt.allocPrint(arena, "{s}_sm", .{result_name}) catch "_sm";
-                            try writeInd(w, indent); try w.print("let {s} = {s}({s});\n", .{ tmp, builtin, x });
+                            try writeInd(w, indent);
+                            try w.print("let {s} = {s}({s});\n", .{ tmp, builtin, x });
                             if (inst.words.len > 6) {
                                 if (names.get(inst.words[6])) |ptr_name| {
-                                    try writeInd(w, indent); try w.print("{s} = {s}.{s};\n", .{ ptr_name, tmp, second_field });
+                                    try writeInd(w, indent);
+                                    try w.print("{s} = {s}.{s};\n", .{ ptr_name, tmp, second_field });
                                 }
                             }
-                            try writeInd(w, indent); try w.print("let {s}: {s} = {s}.fract;\n", .{ result_name, rt, tmp });
+                            try writeInd(w, indent);
+                            try w.print("let {s}: {s} = {s}.fract;\n", .{ result_name, rt, tmp });
                         } else if (instruction == 52 or instruction == 36) {
                             // FrexpStruct (52) / ModfStruct (36): the result IS the
                             // {fract, exp|whole} struct, consumed by OpCompositeExtract.
@@ -7149,11 +7407,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // CompositeExtract arms. (#170)
                             const x = names.get(inst.words[5]) orelse "0";
                             const builtin = if (instruction == 52) "frexp" else "modf";
-                            try writeInd(w, indent); try w.print("let {s} = {s}({s});\n", .{ result_name, builtin, x });
+                            try writeInd(w, indent);
+                            try w.print("let {s} = {s}({s});\n", .{ result_name, builtin, x });
                         } else if (scalarGeomLower(arena, module, names, instruction, inst.words[1], inst.words[5..])) |sexpr| {
                             // Scalar geometric builtin WGSL lacks (normalize/length/
                             // distance/reflect on a scalar) — emit the equivalent.
-                            try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, sexpr });
+                            try writeInd(w, indent);
+                            try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, sexpr });
                         } else {
                             // Shared name mapping (single source of truth; honest-errors unmapped ops).
                             const func_name = try glslStd450WgslName(instruction);
@@ -7178,9 +7438,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // is an identity when the types already match (valid WGSL).
                             const is_bitscan = instruction == 73 or instruction == 74 or instruction == 75;
                             if (is_bitscan) {
-                                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
+                                try writeInd(w, indent);
+                                try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
                             } else {
-                                try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                                try writeInd(w, indent);
+                                try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
                             }
                         }
                     }
@@ -7236,12 +7498,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try writeInd(w, indent);
                         try w.print("{s} = {s}({s});\n", .{ inout_arg_name, func_name, args.items });
                     } else {
-                        try writeInd(w, indent); try w.print("{s}({s});\n", .{ func_name, args.items });
+                        try writeInd(w, indent);
+                        try w.print("{s}({s});\n", .{ func_name, args.items });
                     }
                 } else if (std.mem.eql(u8, rt, "void")) {
-                    try writeInd(w, indent); try w.print("{s}({s});\n", .{ func_name, args.items });
+                    try writeInd(w, indent);
+                    try w.print("{s}({s});\n", .{ func_name, args.items });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
                 }
             },
 
@@ -7251,11 +7516,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .BitwiseAnd => try emitBinOp(module, names, &inline_exprs, inst, "&", w, arena, indent),
             .Not => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("let {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
             .BitReverse => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent); try w.print("let {s}: {s} = reverseBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = reverseBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
             .BitCount => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
@@ -7265,7 +7532,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // vec3<i32>, got vec3<u32>"). Wrap in rt(...) to match; it is an
                 // identity when the argument is already signed. (Same shape as the
                 // findMSB/findLSB bit-scan wrap.) (#170)
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(countOneBits({s}));\n", .{ names.get(inst.words[2]) orelse "v", rt, rt, names.get(inst.words[3]) orelse "0" });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = {s}(countOneBits({s}));\n", .{ names.get(inst.words[2]) orelse "v", rt, rt, names.get(inst.words[3]) orelse "0" });
             },
             // SPIR-V bitfield ops: WGSL has insertBits(e, newbits, offset, count)
             // and extractBits(e, offset, count). The S/U variants of extract
@@ -7324,19 +7592,32 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // rejects subgroups entirely (even `enable subgroups;` is unsupported),
             // so that output was SILENT-WRONG (zioshade exited 0 but naga rejected).
             // Fail loud with a named error instead.
-            .SubgroupAllKHR, .GroupNonUniformAll,
-            .SubgroupAnyKHR, .GroupNonUniformAny,
+            .SubgroupAllKHR,
+            .GroupNonUniformAll,
+            .SubgroupAnyKHR,
+            .GroupNonUniformAny,
             .GroupNonUniformElect,
-            .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst,
+            .GroupNonUniformBroadcast,
+            .GroupNonUniformBroadcastFirst,
             .GroupNonUniformBallot,
-            .GroupNonUniformShuffle, .GroupNonUniformShuffleXor,
-            .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown,
-            .GroupNonUniformIAdd, .GroupNonUniformFAdd,
-            .GroupNonUniformIMul, .GroupNonUniformFMul,
-            .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin,
-            .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax,
-            .GroupNonUniformBitwiseAnd, .GroupNonUniformLogicalAnd,
-            .GroupNonUniformBitwiseOr, .GroupNonUniformLogicalOr,
+            .GroupNonUniformShuffle,
+            .GroupNonUniformShuffleXor,
+            .GroupNonUniformShuffleUp,
+            .GroupNonUniformShuffleDown,
+            .GroupNonUniformIAdd,
+            .GroupNonUniformFAdd,
+            .GroupNonUniformIMul,
+            .GroupNonUniformFMul,
+            .GroupNonUniformSMin,
+            .GroupNonUniformUMin,
+            .GroupNonUniformFMin,
+            .GroupNonUniformSMax,
+            .GroupNonUniformUMax,
+            .GroupNonUniformFMax,
+            .GroupNonUniformBitwiseAnd,
+            .GroupNonUniformLogicalAnd,
+            .GroupNonUniformBitwiseOr,
+            .GroupNonUniformLogicalOr,
             .GroupNonUniformBitwiseXor,
             => {
                 last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL/naga does not support subgroup operations ({s})", .{@tagName(inst.op)}) catch null;
@@ -7346,17 +7627,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // Return value
             .ReturnValue => {
                 const val = names.get(inst.words[1]) orelse "v";
-                try writeInd(w, indent); try w.print("return {s};\n", .{val});
+                try writeInd(w, indent);
+                try w.print("return {s};\n", .{val});
             },
 
             // Kill (discard in fragment)
             .Kill => {
-                try writeInd(w, indent); try w.writeAll("discard;\n");
+                try writeInd(w, indent);
+                try w.writeAll("discard;\n");
             },
 
             // Unreachable
             .Unreachable => {
-                try writeInd(w, indent); try w.writeAll("unreachable;\n");
+                try writeInd(w, indent);
+                try w.writeAll("unreachable;\n");
             },
 
             // Undef — zero-initialize
@@ -7364,7 +7648,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (inst.words.len > 2) {
                     const rt = try wgslType(module, inst.words[1], names, arena);
                     const rn = names.get(inst.words[2]) orelse "v";
-                    try writeInd(w, indent); try w.print("var {s}: {s}; // undef\n", .{ rn, rt });
+                    try writeInd(w, indent);
+                    try w.print("var {s}: {s}; // undef\n", .{ rn, rt });
                 }
             },
 
@@ -7447,7 +7732,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 if (idx + 2 < cti.words.len) current_type = cti.words[idx + 2] else current_type = null;
                                 continue;
                             } else if (cti.op == .TypeVector) {
-                                const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                                const sw = switch (idx) {
+                                    0 => ".x",
+                                    1 => ".y",
+                                    2 => ".z",
+                                    3 => ".w",
+                                    else => ".x",
+                                };
                                 try access.appendSlice(arena, sw);
                                 if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
                                 continue;
@@ -7463,14 +7754,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                     }
                     // Fallback: use vector swizzle
-                    const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => "[0]" };
+                    const sw = switch (idx) {
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => "[0]",
+                    };
                     try access.appendSlice(arena, sw);
                 }
                 // Copy the base composite into a MUTABLE local, then overwrite the
                 // indexed component with the inserted object (`var`, not `let`, so
                 // the member assignment is legal WGSL).
-                try writeInd(w, indent); try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, composite });
-                try writeInd(w, indent); try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
+                try writeInd(w, indent);
+                try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, composite });
+                try writeInd(w, indent);
+                try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
             },
 
             // VectorExtractDynamic
@@ -7479,7 +7778,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const vector = names.get(inst.words[3]) orelse "vec";
                 const index = names.get(inst.words[4]) orelse "i";
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}[{s}];\n", .{ result_name, rt, vector, index });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = {s}[{s}];\n", .{ result_name, rt, vector, index });
             },
 
             // Transpose
@@ -7556,7 +7856,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureNumLevels({s}));\n", .{ result_name, rt, rt, image });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = {s}(textureNumLevels({s}));\n", .{ result_name, rt, rt, image });
             },
 
             // ImageQuerySamples — WGSL textureNumSamples returns UNSIGNED (u32);
@@ -7565,7 +7866,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s}(textureNumSamples({s}));\n", .{ result_name, rt, rt, image });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = {s}(textureNumSamples({s}));\n", .{ result_name, rt, rt, image });
             },
 
             // ImageQueryLod (GLSL textureQueryLod) — WGSL has NO equivalent
@@ -7650,9 +7952,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, cs, coord, ls, offset_suffix });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, cs, coord, ls, offset_suffix });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, offset_suffix });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, offset_suffix });
                 }
             },
 
@@ -7682,9 +7986,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls, dref });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls, dref });
                 } else {
-                    try writeInd(w, indent); try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
                 }
             },
 
@@ -7825,7 +8131,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .ReadClockKHR => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
-                try writeInd(w, indent); try w.print("let {s}: {s} = 0u; // ReadClockKHR stub\n", .{ result_name, rt });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = 0u; // ReadClockKHR stub\n", .{ result_name, rt });
             },
 
             // ImageRead (storage image load)
@@ -7886,7 +8193,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const val = names.get(inst.words[3]) orelse "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, val });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, val });
             },
 
             // CopyMemory
@@ -7894,7 +8202,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (inst.words.len >= 3) {
                     const dst = names.get(inst.words[1]) orelse "dst";
                     const src = names.get(inst.words[2]) orelse "src";
-                    try writeInd(w, indent); try w.print("{s} = {s};\n", .{ dst, src });
+                    try writeInd(w, indent);
+                    try w.print("{s} = {s};\n", .{ dst, src });
                 }
             },
 
@@ -7925,10 +8234,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // ControlBarrier / MemoryBarrier
             .ControlBarrier => {
-                try writeInd(w, indent); try w.writeAll("workgroupBarrier();\n");
+                try writeInd(w, indent);
+                try w.writeAll("workgroupBarrier();\n");
             },
             .MemoryBarrier => {
-                try writeInd(w, indent); try w.writeAll("storageBarrier();\n");
+                try writeInd(w, indent);
+                try w.writeAll("storageBarrier();\n");
             },
 
             // Atomic operations
@@ -7952,7 +8263,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // The value is words[6], NOT words[4] (which is the scope — emitting it
                 // stored the scope constant instead of the data: silent-wrong).
                 const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = atomicExchange(&{s}, {s});\n", .{ rn, rt, ptr, val });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = atomicExchange(&{s}, {s});\n", .{ rn, rt, ptr, val });
             },
             .AtomicCompareExchange => {
                 if (atomicPtrIsImage(module, names, inst.words[3])) {
@@ -7972,7 +8284,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // (silent-wrong: naga accepts it but the comparison is against the wrong value).
                 const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
                 const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
-                try writeInd(w, indent); try w.print("let {s}: {s} = atomicCompareExchangeWeak(&{s}, {s}, {s}).old_value;\n", .{ rn, rt, ptr, cmp, val });
+                try writeInd(w, indent);
+                try w.print("let {s}: {s} = atomicCompareExchangeWeak(&{s}, {s}, {s}).old_value;\n", .{ rn, rt, ptr, cmp, val });
             },
 
             // QCOM image-processing (GL_QCOM_image_processing: textureWeightedQCOM,
@@ -8052,7 +8365,8 @@ fn emitOuterProduct(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
         try buf.writer(arena).print("{s} * {s}.{s}", .{ u, v, common.swizzleChar(i) });
     }
     try buf.appendSlice(arena, ")");
-    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, buf.items });
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, buf.items });
 }
 
 // #254: if both operands of a float +/-/*/÷/% are 32-bit float constants and the IEEE
@@ -8163,7 +8477,8 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     // Wrap compound expressions in parens for correct precedence
     const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
     const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
-    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
 }
 
 /// Emit a WGSL shift (`<<` / `>>`) for any of OpShiftLeftLogical,
@@ -8258,7 +8573,7 @@ fn isCompoundExpr(s: []const u8) bool {
                     }
                     // Two-char ops: <=, >=, ==, !=, <<, >>
                     if (i + 3 < s.len and s[i + 3] == ' ') {
-                        const op_pair = s[i + 1..i + 3];
+                        const op_pair = s[i + 1 .. i + 3];
                         if (std.mem.eql(u8, op_pair, "<=") or std.mem.eql(u8, op_pair, ">=") or
                             std.mem.eql(u8, op_pair, "==") or std.mem.eql(u8, op_pair, "!=") or
                             std.mem.eql(u8, op_pair, "<<") or std.mem.eql(u8, op_pair, ">>"))
@@ -8268,11 +8583,11 @@ fn isCompoundExpr(s: []const u8) bool {
                     }
                     // "or" and "and" keywords
                     if (i + 3 < s.len and s[i + 3] == ' ') {
-                        const kw = s[i + 1..i + 3];
+                        const kw = s[i + 1 .. i + 3];
                         if (std.mem.eql(u8, kw, "or")) return true;
                     }
                     if (i + 4 < s.len and s[i + 4] == ' ') {
-                        const kw = s[i + 1..i + 4];
+                        const kw = s[i + 1 .. i + 4];
                         if (std.mem.eql(u8, kw, "and")) return true;
                     }
                 }
@@ -8332,11 +8647,7 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
     const cond_def = getDef(module, cond_id) orelse return null;
     switch (cond_def.op) {
         // Comparison ops — inline as "lhs op rhs"
-        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .SLessThan, .SGreaterThan, .SLessThanEqual,
-        .SGreaterThanEqual, .ULessThan, .UGreaterThan, .ULessThanEqual,
-        .UGreaterThanEqual, .IEqual, .INotEqual
-        => {
+        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .SLessThan, .SGreaterThan, .SLessThanEqual, .SGreaterThanEqual, .ULessThan, .UGreaterThan, .ULessThanEqual, .UGreaterThanEqual, .IEqual, .INotEqual => {
             if (cond_def.words.len < 5) return null;
             // Resolve operands through CopyObject/Load chains to use live variable names
             const lhs = resolveSourceName(module, names, cond_def.words[3], 0) orelse return null;
@@ -8391,7 +8702,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 if (sc == .Function or sc == .Private) {
                     const rt = try wgslType(module, inst.words[1], names, arena);
                     const vn = names.get(inst.words[2]) orelse "v";
-                    try writeIndentStatic(w, indent); try w.print("var {s}: {s};\n", .{ vn, rt });
+                    try writeIndentStatic(w, indent);
+                    try w.print("var {s}: {s};\n", .{ vn, rt });
                 }
             }
         },
@@ -8401,7 +8713,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // Skip inlined loads (result name == pointer name means load was inlined)
             if (!std.mem.eql(u8, result_name, ptr)) {
                 const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, ptr });
+                try writeIndentStatic(w, indent);
+                try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, ptr });
             }
         },
         .Store => {
@@ -8421,7 +8734,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // Skip store to depth output (handled by FragmentOutput struct return)
             const ptr_name = names.get(inst.words[1]);
             if (ptr_name != null and std.mem.eql(u8, ptr_name.?, "gl_FragDepth")) return;
-            try writeIndentStatic(w, indent); try w.print("{s} = {s};\n", .{ ptr, val });
+            try writeIndentStatic(w, indent);
+            try w.print("{s} = {s};\n", .{ ptr, val });
         },
         .AccessChain => {
             // Rename result to composite.field expression
@@ -8468,7 +8782,13 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                             current_type = if (idx + 2 < cti.words.len) cti.words[idx + 2] else null;
                             continue;
                         } else if (cti.op == .TypeVector) {
-                            const sw = switch (idx) { 0 => ".x", 1 => ".y", 2 => ".z", 3 => ".w", else => ".x" };
+                            const sw = switch (idx) {
+                                0 => ".x",
+                                1 => ".y",
+                                2 => ".z",
+                                3 => ".w",
+                                else => ".x",
+                            };
                             expr.appendSlice(alloc, sw) catch return;
                             current_type = if (cti.words.len > 2) cti.words[2] else null;
                             continue;
@@ -8498,12 +8818,18 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             if (std.mem.startsWith(u8, rt, "struct") or std.mem.startsWith(u8, rt, "array") or
                 isStructType(module, inst.words[1]) or isArrayType(module, inst.words[1]))
             {
-                try writeIndentStatic(w, indent); try w.print("var {s}: {s};\n", .{ result_name, rt });
-                try writeIndentStatic(w, indent); try w.print("if ({s}) {{\n", .{cond});
-                try writeIndentStatic(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, true_val });
-                try writeIndentStatic(w, indent); try w.writeAll("} else {\n");
-                try writeIndentStatic(w, indent + 1); try w.print("{s} = {s};\n", .{ result_name, false_val });
-                try writeIndentStatic(w, indent); try w.writeAll("}\n");
+                try writeIndentStatic(w, indent);
+                try w.print("var {s}: {s};\n", .{ result_name, rt });
+                try writeIndentStatic(w, indent);
+                try w.print("if ({s}) {{\n", .{cond});
+                try writeIndentStatic(w, indent + 1);
+                try w.print("{s} = {s};\n", .{ result_name, true_val });
+                try writeIndentStatic(w, indent);
+                try w.writeAll("} else {\n");
+                try writeIndentStatic(w, indent + 1);
+                try w.print("{s} = {s};\n", .{ result_name, false_val });
+                try writeIndentStatic(w, indent);
+                try w.writeAll("}\n");
             } else {
                 try writeIndentStatic(w, indent);
                 try w.print("let {s}: {s} = select({s}, {s}, {s});\n", .{ result_name, rt, false_val, true_val, cond });
@@ -8513,7 +8839,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             const rt = try wgslType(module, inst.words[1], names, arena);
             const result_name = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[3]) orelse "0";
-            try writeIndentStatic(w, indent); try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = bitcast<{s}>({s});\n", .{ result_name, rt, rt, val });
         },
         // IsNan/IsInf must be handled here too (the loop/switch REPLAY path), or
         // `isnan`/`isinf` used in a loop CONDITION (deferred into the loop-header replay
@@ -8560,11 +8887,13 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                         return error.UnsupportedExtInst;
                     };
                     const m = names.get(inst.words[5]) orelse "m";
-                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = spvInverse{d}({s});\n", .{ result_name, rt, dim, m });
+                    try writeIndentStatic(w, indent);
+                    try w.print("let {s}: {s} = spvInverse{d}({s});\n", .{ result_name, rt, dim, m });
                     return;
                 }
                 if (scalarGeomLower(arena, module, names, instruction, inst.words[1], inst.words[5..])) |sexpr| {
-                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, sexpr });
+                    try writeIndentStatic(w, indent);
+                    try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, sexpr });
                     return;
                 }
                 const func_name = try glslStd450WgslName(instruction);
@@ -8580,9 +8909,11 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 // the main emit path; identity cast when types already match).
                 const is_bitscan = instruction == 73 or instruction == 74 or instruction == 75;
                 if (is_bitscan) {
-                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
+                    try writeIndentStatic(w, indent);
+                    try w.print("let {s}: {s} = {s}({s}({s}));\n", .{ result_name, rt, rt, func_name, args.items });
                 } else {
-                    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                    try writeIndentStatic(w, indent);
+                    try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
                 }
             }
         },
@@ -8602,7 +8933,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 if (ci > 0) try args.appendSlice(arena, ", ");
                 try args.appendSlice(arena, names.get(comp_id) orelse "0");
             }
-            try writeIndentStatic(w, indent); try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, args.items });
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, args.items });
         },
         .SelectionMerge, .LoopMerge => {
             // Structured control-flow merge hints — they carry no result id and
@@ -8691,7 +9023,9 @@ fn getConvFunc(op: spirv.Op) ?[]const u8 {
         .ConvertFToS => "i32",
         .ConvertSToF => "f32",
         .ConvertUToF => "f32",
-        .UConvert => switch (op) { else => null },
+        .UConvert => switch (op) {
+            else => null,
+        },
         .FConvert => "f32",
         .SConvert => "i32",
         .SNegate => "-",
@@ -8711,7 +9045,8 @@ fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         if (ai > 0) try args.appendSlice(arena, ", ");
         try args.appendSlice(arena, names.get(arg_id) orelse "0");
     }
-    try writeIndentStatic(w, indent); try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
+    try writeIndentStatic(w, indent);
+    try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
 }
 
 // (emitSubgroupArith removed in #170 G5 Pass 2: subgroup ops are now an honest
@@ -8751,7 +9086,8 @@ fn emitAtomicBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
     // The atomic RMW result is an immutable SSA value — bind with `let`, matching the
     // AtomicExchange / AtomicCompareExchange emitters (was `var`, an inconsistency).
-    try writeIndentStatic(w, indent); try w.print("let {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = atomic{s}(&{s}, {s});\n", .{ result_name, rt, op, ptr, val });
 }
 
 // Get the WGSL function name for a GLSL.std.450 instruction opcode, for the
@@ -8825,13 +9161,7 @@ fn getExtInstName(instruction: u32) ?[]const u8 {
 // Check if an opcode is an inlineable arithmetic op
 fn isInlineableArithOp(op: spirv.Op) bool {
     return switch (op) {
-        .FMul, .FAdd, .FSub, .FDiv, .FMod, .FNegate,
-        .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod,
-        .VectorTimesScalar, .MatrixTimesScalar,
-        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual,
-        .ExtInst
-        => true,
+        .FMul, .FAdd, .FSub, .FDiv, .FMod, .FNegate, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .ExtInst => true,
         else => false,
     };
 }
@@ -8880,12 +9210,7 @@ fn buildInlineExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u3
             return buf.items;
         },
         // Binary arithmetic ops: lhs op rhs
-        .FMul, .FAdd, .FSub, .FDiv, .FMod,
-        .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod,
-        .VectorTimesScalar, .MatrixTimesScalar,
-        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual,
-        .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual
-        => {
+        .FMul, .FAdd, .FSub, .FDiv, .FMod, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual => {
             if (inst.words.len < 5) return null;
             const op_sym = getInlineBinOp(inst.op) orelse return null;
             const lhs = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, depth + 1);
@@ -9054,4 +9379,3 @@ fn needsParensForOp(sub_expr: []const u8, parent_op: spirv.Op, is_lhs: bool) boo
     // Conservative: wrap all compound expressions in parens when inside another op
     return true;
 }
-

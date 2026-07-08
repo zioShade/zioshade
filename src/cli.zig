@@ -83,21 +83,7 @@ pub fn main() !void {
             i += 1;
             if (i >= args.len) fatal("missing argument after --stage", .{});
             const s = args[i];
-            if (std.mem.eql(u8, s, "vertex")) stage_override = .vertex
-            else if (std.mem.eql(u8, s, "fragment")) stage_override = .fragment
-            else if (std.mem.eql(u8, s, "compute")) stage_override = .compute
-            else if (std.mem.eql(u8, s, "geometry")) stage_override = .geometry
-            else if (std.mem.eql(u8, s, "tessellation_control")) stage_override = .tessellation_control
-            else if (std.mem.eql(u8, s, "tessellation_evaluation")) stage_override = .tessellation_evaluation
-            else if (std.mem.eql(u8, s, "mesh")) stage_override = .mesh
-            else if (std.mem.eql(u8, s, "task")) stage_override = .task
-            else if (std.mem.eql(u8, s, "raygen")) stage_override = .raygen
-            else if (std.mem.eql(u8, s, "closesthit")) stage_override = .closesthit
-            else if (std.mem.eql(u8, s, "miss")) stage_override = .miss
-            else if (std.mem.eql(u8, s, "intersection")) stage_override = .intersection
-            else if (std.mem.eql(u8, s, "anyhit")) stage_override = .anyhit
-            else if (std.mem.eql(u8, s, "callable")) stage_override = .callable
-            else fatal("unknown stage: {s}", .{s});
+            if (std.mem.eql(u8, s, "vertex")) stage_override = .vertex else if (std.mem.eql(u8, s, "fragment")) stage_override = .fragment else if (std.mem.eql(u8, s, "compute")) stage_override = .compute else if (std.mem.eql(u8, s, "geometry")) stage_override = .geometry else if (std.mem.eql(u8, s, "tessellation_control")) stage_override = .tessellation_control else if (std.mem.eql(u8, s, "tessellation_evaluation")) stage_override = .tessellation_evaluation else if (std.mem.eql(u8, s, "mesh")) stage_override = .mesh else if (std.mem.eql(u8, s, "task")) stage_override = .task else if (std.mem.eql(u8, s, "raygen")) stage_override = .raygen else if (std.mem.eql(u8, s, "closesthit")) stage_override = .closesthit else if (std.mem.eql(u8, s, "miss")) stage_override = .miss else if (std.mem.eql(u8, s, "intersection")) stage_override = .intersection else if (std.mem.eql(u8, s, "anyhit")) stage_override = .anyhit else if (std.mem.eql(u8, s, "callable")) stage_override = .callable else fatal("unknown stage: {s}", .{s});
         } else if (std.mem.eql(u8, args[i], "--entry-point")) {
             i += 1;
             if (i >= args.len) fatal("missing argument after --entry-point", .{});
@@ -454,7 +440,7 @@ fn printMembers(members: []const zioshade.reflection.Member, indent: usize) void
         }
         if (m.coherent) p(" coherent", .{});
         if (m.is_volatile) p(" volatile", .{});
-        if (m.@"restrict") p(" restrict", .{});
+        if (m.restrict) p(" restrict", .{});
         p("\n", .{});
         if (m.members) |inner| printMembers(inner, indent + 1);
     }
@@ -492,12 +478,8 @@ fn doReflect(alloc: std.mem.Allocator, input: []const u8, json_output: bool) !vo
     p("Storage Buffers: {d}\n", .{resources.storage_buffers.len});
     for (resources.storage_buffers) |sb| {
         p("  {s}: set={d} binding={d} size={d} block_size={d}{s}{s}{s}{s}{s}\n", .{
-            sb.name, sb.set, sb.binding, sb.size, sb.block_size,
-            if (sb.readonly) " readonly" else "",
-            if (sb.writeonly) " writeonly" else "",
-            if (sb.coherent) " coherent" else "",
-            if (sb.is_volatile) " volatile" else "",
-            if (sb.@"restrict") " restrict" else "",
+            sb.name,                              sb.set,                                 sb.binding,                           sb.size,                                 sb.block_size,
+            if (sb.readonly) " readonly" else "", if (sb.writeonly) " writeonly" else "", if (sb.coherent) " coherent" else "", if (sb.is_volatile) " volatile" else "", if (sb.restrict) " restrict" else "",
         });
         printMembers(sb.members, 0);
     }

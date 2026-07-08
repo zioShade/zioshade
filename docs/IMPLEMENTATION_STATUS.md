@@ -36,7 +36,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Cross-compilers (HLSL, GLSL, MSL, WGSL) | ~12,000 |
 | Optimizer (compact_ids_passes) | ~10,200 |
 | Preprocessor | ~1,800 |
-| `spirv-val` conformance passing | 2076 PASS / 0 FAIL / 14 XFAIL / 8 SKIP / 2098 total — exits 0 (`zig build conformance`; see `docs/STATUS.md`) |
+| Conformance passing | 2104 PASS / 0 FP-regression / 11 XFAIL (`zig build strict-gate`); full spirv-val-validated counts in [`docs/STATUS.md`](STATUS.md) (single source of truth) |
 | External DXC SPIR-V fixtures | 47 / 51 compile (4 limited by DXC SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | 470 / 470 |
 | Fuzzer iterations (clean) | 1,000,000 (run `just fuzz-million` to reproduce; ad-hoc: `zig build fuzz -- --count N`) |
@@ -57,7 +57,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 2076 PASS / 0 FAIL / 14 XFAIL (honest rejections) / 8 SKIP / 2098 total — exits 0 | ✅ |
+| spirv-val conformance | Reference | 2104 PASS / 0 FP-regression / 11 XFAIL (honest rejections), exits 0; counts in `docs/STATUS.md` | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
 
@@ -167,7 +167,7 @@ DXC and the Metal compiler are **platform SDK tools** that produce GPU-specific 
 
 ### 3.1 SPIR-V Validation
 
-**2,076** runnable fixtures pass `spirv-val` — the official SPIR-V validator (see `docs/STATUS.md`, the generated single source of truth; counts updated 2026-06-06). 14 known-unsupported fixtures are now **honestly rejected** as `error.SemanticFailed` (XFAIL) instead of silently emitting hollow SPIR-V; 8 skipped; 2,098 total. The suite exits **0**. The 14 XFAIL fixtures cover: 64-bit int/float types (`fp64`, `int64`), OpExtInst new-form texture builtins (`newTexture`), AMD extensions (`gcn_shader`, `shader_ballot`, `nvAtomicFp16Vec`), clock extension (`shader-clock`), ray/type-mismatch (`ray_sphere_test`, `image-query`), and other unmodeled constructs (`extended-arithmetic`, `spv.AofA`, `spv.double`, `struct-material`). (`spec-constant-work-group-size` was XFAIL but now **passes** since the top-level const-cache dangling-id fix.) These are expected honest rejections, not regressions.
+Runnable fixtures pass `spirv-val`, the official SPIR-V validator (see `docs/STATUS.md`, the single source of truth for counts; `zig build strict-gate` reports **2104 PASS / 0 FP-regression / 11 XFAIL**). 11 known-unsupported fixtures are **honestly rejected** as `error.SemanticFailed` (XFAIL) instead of silently emitting hollow SPIR-V. The suite exits **0**. The 11 XFAIL fixtures (the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig`) cover: 64-bit int/float types (`fp64`, `int64`, `spv.double`), OpExtInst new-form texture builtins (`newTexture`, `spv.newTexture`), AMD/NV extensions (`gcn_shader`, `shader_ballot`, `spv.nvAtomicFp16Vec`), the clock extension (`shader-clock`), arrays-of-arrays (`spv.AofA`), and `struct-material`. (`extended-arithmetic`, `image-query`, `ray_sphere_test`, and `spec-constant-work-group-size` were previously XFAIL but now **pass**.) These are expected honest rejections, not regressions.
 
 ### 3.2 DXC Validation
 
@@ -314,7 +314,7 @@ A comprehensive plan to close the remaining gaps and reach drop-in parity with g
 
 These are tracked openly so consumers can decide whether zioshade fits their use case today.
 
-- **CI workflow committed, not yet green.** A 3-OS GitHub Actions matrix (`.github/workflows/ci.yml`: build/test, spirv-val conformance, fuzz smoke, C-ABI smoke) is committed but has not yet been observed passing in CI due to a GitHub Actions billing block; conformance is currently verified locally via `zig build conformance` / `just`.
+- **CI.** A 3-OS GitHub Actions matrix (`.github/workflows/ci.yml`: `zig fmt` gate, build/test, spirv-val conformance, fuzz smoke, C-ABI smoke) runs on every push and PR. It uses `mlugg/setup-zig@v2` for the 0.15.2 toolchain and installs the distro `spirv-tools` package for `spirv-val` on Linux. Status is reflected in the CI badge in the README.
 - **Lib-vs-lib benchmark (cross-compiler) published:** `just lib-bench` links **SPIRV-Cross in-process** (its C API, from the Vulkan SDK static libs) and times zioshade vs SPIRV-Cross on the *same* SPIR-V → GLSL/HLSL/MSL. Honest result (no subprocess): zioshade is ~**1.4–1.6× faster** on the median cell — roughly at parity on a trivial GLSL shader (~0.6×) and up to ~2.6× faster on math/control-flow-heavy MSL. (Numbers are machine-relative; rerun locally.) A zioshade-vs-glslang in-process comparison for the **GLSL→SPIR-V** direction (`glslang_c_interface.h`) is not yet wired — the front-end half of the bench remains.
 - **`spirv-val` is the conformance oracle, not glslang reference output.** Some test fixtures in `tests/spirv-cross/` are known to fail reference compilation with `glslangValidator` even though zioshade accepts them — see `docs/REFERENCE_FAILURE_ANALYSIS.md`.
 - **Cross-compiler control flow (G2 partial).** A module-level structurization pre-pass (`src/cfg_structurize.zig`, run by every backend) recovers missing `OpSelectionMerge`s for unstructured-but-reducible `if`/`switch` headers via dominator/post-dominator analysis, so externally-optimized SPIR-V with stripped selection merges compiles faithfully (byte-identical no-op on already-structured input). Unstructured **loops** (missing `OpLoopMerge`) and irreducible CFGs still **fail loud** (`error.UnstructuredControlFlow`) — never miscompiled. Loop-merge recovery primitives exist (`recoverLoopMerges`/`spliceLoopMerges`, unit-tested) but composing them with selection recovery is future work; valid Shader SPIR-V is always structured, so this only affects malformed/hand-authored input.
