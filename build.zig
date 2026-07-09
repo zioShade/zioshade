@@ -1,11 +1,15 @@
 const std = @import("std");
 const builtin = @import("builtin");
+const bcompat = @import("build_compat.zig");
 
 pub fn build(b: *std.Build) void {
-    // Fail with one actionable line on unsupported Zig versions rather than a
-    // cryptic linkLibrary/stdlib error deep in the build. zioshade pins 0.15.2.
-    if (builtin.zig_version.minor != 15) {
-        @compileError("zioshade requires Zig 0.15.2. See the README (mise install, or ziglang.org/download/0.15.2). 0.16 support is tracked in issue #424.");
+    // Supported Zig range: 0.15.2 is the hard floor (older fails to compile with
+    // an actionable message); newer versions are best-effort via capability
+    // detection here and in src/compat.zig. Tested window is the last three
+    // releases (see .github/workflows/ci.yml and the README version policy).
+    const min_zig = std.SemanticVersion{ .major = 0, .minor = 15, .patch = 2 };
+    if (comptime builtin.zig_version.order(min_zig) == .lt) {
+        @compileError("zioshade requires Zig 0.15.2 or newer. See the README.");
     }
 
     const target = b.standardTargetOptions(.{});
@@ -30,7 +34,7 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib);
 
-    // CLI tool — build with: zig build cli
+    // CLI tool - build with: zig build cli
     const cli_step = b.step("cli", "Build the zioshade CLI tool");
     const cli_mod = b.createModule(.{
         .root_source_file = b.path("src/cli.zig"),
@@ -91,7 +95,7 @@ pub fn build(b: *std.Build) void {
         release_step.dependOn(&rt_install.step);
     }
 
-    // C ABI libraries (M7.2) — build with: zig build c-lib
+    // C ABI libraries (M7.2) - build with: zig build c-lib
     //
     // Produces both a static and a shared library so external consumers can
     // pick whichever suits their distribution model. The shared variant gets
@@ -126,7 +130,7 @@ pub fn build(b: *std.Build) void {
         .linkage = .dynamic,
     });
     // Install only when the user explicitly asks for `zig build c-lib`,
-    // not on every default build — both artifacts are >1m to compile.
+    // not on every default build - both artifacts are >1m to compile.
     const install_c_static = b.addInstallArtifact(c_static, .{});
     const install_c_shared = b.addInstallArtifact(c_shared, .{});
     const install_c_headers = b.addInstallDirectory(.{
@@ -138,7 +142,7 @@ pub fn build(b: *std.Build) void {
     c_lib_step.dependOn(&install_c_shared.step);
     c_lib_step.dependOn(&install_c_headers.step);
 
-    // C consumer example (M7.3) — build with: zig build c-example
+    // C consumer example (M7.3) - build with: zig build c-example
     //
     // Compiles `examples/c/main.c` against the public C header and links it
     // against the static C ABI library. We pick the static handle so the
@@ -159,11 +163,11 @@ pub fn build(b: *std.Build) void {
         .name = "c-example",
         .root_module = c_example_mod,
     });
-    c_example_exe.linkLibrary(c_static);
+    c_example_mod.linkLibrary(c_static);
     b.installArtifact(c_example_exe);
     c_example_step.dependOn(&c_example_exe.step);
 
-    // `zig build run-c-example` — actually execute the C consumer.
+    // `zig build run-c-example` - actually execute the C consumer.
     const run_c_example_step = b.step("run-c-example", "Run the C ABI example");
     const run_c_example = b.addRunArtifact(c_example_exe);
     run_c_example_step.dependOn(&run_c_example.step);
@@ -202,14 +206,14 @@ pub fn build(b: *std.Build) void {
         test_step.dependOn(&run_mod_tests.step);
     }
 
-    // SPIR-V validation step — run with: zig build validate
+    // SPIR-V validation step - run with: zig build validate
     // Requires spirv-val on PATH (from Vulkan SDK or SPIRV-Tools build).
     const validate_step = b.step("validate", "Run spirv-val on generated SPIR-V binaries");
     const validate_run = b.addSystemCommand(&.{"spirv-val"});
     validate_run.addArg("--help");
     validate_step.dependOn(&validate_run.step);
 
-    // Shader conformance tests — run with: zig build conformance
+    // Shader conformance tests - run with: zig build conformance
     // Compiles real shaders from glslang/SPIRV-Cross/Ghostty and validates with spirv-val
     const conformance_step = b.step("conformance", "Run shader conformance tests (glslang + SPIRV-Cross + Ghostty)");
     const runner_mod = b.createModule(.{
@@ -234,14 +238,14 @@ pub fn build(b: *std.Build) void {
     const build_runner_step = b.step("build-runner", "Build the conformance runner executable");
     build_runner_step.dependOn(&runner_exe.step);
 
-    // Enumerate analyzer false-positive candidates — run with: zig build enumerate-fp
+    // Enumerate analyzer false-positive candidates - run with: zig build enumerate-fp
     // Walks all fixture suites, compiles each with tolerate+strict, reports divergences.
     const enumerate_step = b.step("enumerate-fp", "List analyzer false-positive candidates (strict vs tolerate)");
     const run_enumerate = b.addRunArtifact(runner_exe);
     run_enumerate.addArg("--strict-enumerate");
     enumerate_step.dependOn(&run_enumerate.step);
 
-    // Continuous strict-gate — run with: zig build strict-gate
+    // Continuous strict-gate - run with: zig build strict-gate
     // Walks all fixture suites, compiles each with compileToSPIRV (fail-loud after flip),
     // exits non-zero if any curated-valid fixture is newly rejected (FP regression).
     // Known-unsupported fixtures in KNOWN_UNSUPPORTED are counted as XFAIL (not failures).
@@ -250,7 +254,7 @@ pub fn build(b: *std.Build) void {
     run_strict_gate.addArg("--strict-gate");
     strict_gate_step.dependOn(&run_strict_gate.step);
 
-    // HLSL backend tests — run with: zig build test-hlsl
+    // HLSL backend tests - run with: zig build test-hlsl
     const hlsl_test_step = b.step("test-hlsl", "Run HLSL backend tests (GLSL → SPIR-V → HLSL pipeline)");
     const hlsl_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/hlsl_tests.zig"),
@@ -259,7 +263,7 @@ pub fn build(b: *std.Build) void {
     });
     hlsl_test_mod.addImport("zioshade", zioshade_mod);
 
-    // Reflection tests — run with: zig build test-reflection
+    // Reflection tests - run with: zig build test-reflection
     const refl_test_step = b.step("test-reflection", "Run SPIR-V reflection API tests");
     const refl_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/reflection_tests.zig"),
@@ -273,7 +277,7 @@ pub fn build(b: *std.Build) void {
     refl_test_step.dependOn(&run_refl_tests.step);
     test_step.dependOn(&run_refl_tests.step);
 
-    // Correctness tests (G1/G4/G10) — run with: zig build test-correctness
+    // Correctness tests (G1/G4/G10) - run with: zig build test-correctness
     const corr_test_step = b.step("test-correctness", "Run correctness tests for reflection, GLSL versions, HLSL SM5");
     const corr_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/correctness_tests.zig"),
@@ -287,7 +291,7 @@ pub fn build(b: *std.Build) void {
     corr_test_step.dependOn(&run_corr_tests.step);
     test_step.dependOn(&run_corr_tests.step);
 
-    // Analyzer strict self-test — run with: zig build test-analyzer-strict
+    // Analyzer strict self-test - run with: zig build test-analyzer-strict
     const analyzer_strict_test_step = b.step("test-analyzer-strict", "Run analyzer strict-mode self-test (harness sanity check)");
     const analyzer_strict_mod = b.createModule(.{
         .root_source_file = b.path("tests/analyzer_strict_tests.zig"),
@@ -301,7 +305,7 @@ pub fn build(b: *std.Build) void {
     analyzer_strict_test_step.dependOn(&run_analyzer_strict.step);
     test_step.dependOn(&run_analyzer_strict.step);
 
-    // Diagnostic tests (G3) — run with: zig build test-diagnostic
+    // Diagnostic tests (G3) - run with: zig build test-diagnostic
     const diag_test_step = b.step("test-diagnostic", "Run diagnostic quality tests");
     const diag_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/diagnostic_tests.zig"),
@@ -315,7 +319,7 @@ pub fn build(b: *std.Build) void {
     diag_test_step.dependOn(&run_diag_tests.step);
     test_step.dependOn(&run_diag_tests.step);
 
-    // C ABI tests (M7.2) — run with: zig build test-c-abi
+    // C ABI tests (M7.2) - run with: zig build test-c-abi
     const c_abi_test_step = b.step("test-c-abi", "Run C ABI export-wrapper tests");
     const c_abi_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/c_abi_tests.zig"),
@@ -339,7 +343,7 @@ pub fn build(b: *std.Build) void {
     c_abi_test_step.dependOn(&run_c_abi_tests.step);
     test_step.dependOn(&run_c_abi_tests.step);
 
-    // Specialization-constant cross-compile tests (M3) — run with: zig build test-spec-const
+    // Specialization-constant cross-compile tests (M3) - run with: zig build test-spec-const
     const spec_test_step = b.step("test-spec-const", "Run specialization-constant cross-compile tests");
     const spec_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/spec_const_tests.zig"),
@@ -353,7 +357,7 @@ pub fn build(b: *std.Build) void {
     spec_test_step.dependOn(&run_spec_tests.step);
     test_step.dependOn(&run_spec_tests.step);
 
-    // WGSL packing + bitfield tests (M4) — run with: zig build test-wgsl-pack
+    // WGSL packing + bitfield tests (M4) - run with: zig build test-wgsl-pack
     const wpack_test_step = b.step("test-wgsl-pack", "Run WGSL packing/bitfield cross-compile tests");
     const wpack_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wgsl_packing_bitfield_tests.zig"),
@@ -367,7 +371,7 @@ pub fn build(b: *std.Build) void {
     wpack_test_step.dependOn(&run_wpack_tests.step);
     test_step.dependOn(&run_wpack_tests.step);
 
-    // Semantic-level bitfield built-in tests — run with: zig build test-bitfield-builtin
+    // Semantic-level bitfield built-in tests - run with: zig build test-bitfield-builtin
     // Covers GLSL 400+ `bitfieldInsert` and `bitfieldExtract` (signed + unsigned)
     // including vector forms. Complements wgsl_packing_bitfield_tests (which
     // hand-crafts SPIR-V) by exercising the real semantic path end-to-end.
@@ -391,7 +395,7 @@ pub fn build(b: *std.Build) void {
     hlsl_test_step.dependOn(&run_hlsl_tests.step);
     test_step.dependOn(&run_hlsl_tests.step);
 
-    // DXC batch test (M5.3) — run with: zig build test-dxc [-- <dxc> <spv_dir> <sm>]
+    // DXC batch test (M5.3) - run with: zig build test-dxc [-- <dxc> <spv_dir> <sm>]
     // Stage-aware: detects each SPIR-V fixture's execution model and selects
     // the matching DXC target profile (ps_*, cs_*, ms_*, as_*); stages we don't
     // yet emit valid HLSL for (vertex/raygen/...) are reported as SKIP.
@@ -415,7 +419,7 @@ pub fn build(b: *std.Build) void {
     }
     dxc_test_step.dependOn(&run_dxc_test.step);
 
-    // GLSL backend tests — run with: zig build test-glsl
+    // GLSL backend tests - run with: zig build test-glsl
     const glsl_test_step = b.step("test-glsl", "Run GLSL backend tests (GLSL → SPIR-V → GLSL pipeline)");
     const glsl_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/glsl_tests.zig"),
@@ -430,7 +434,7 @@ pub fn build(b: *std.Build) void {
     glsl_test_step.dependOn(&run_glsl_tests.step);
     test_step.dependOn(&run_glsl_tests.step);
 
-    // MSL backend tests — run with: zig build test-msl
+    // MSL backend tests - run with: zig build test-msl
     const msl_test_step = b.step("test-msl", "Run MSL backend tests (GLSL → SPIR-V → MSL pipeline)");
     const msl_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/msl_tests.zig"),
@@ -445,7 +449,7 @@ pub fn build(b: *std.Build) void {
     msl_test_step.dependOn(&run_msl_tests.step);
     test_step.dependOn(&run_msl_tests.step);
 
-    // WGSL backend tests — run with: zig build test-wgsl
+    // WGSL backend tests - run with: zig build test-wgsl
     const wgsl_test_step = b.step("test-wgsl", "Run WGSL backend tests (GLSL → SPIR-V → WGSL pipeline)");
     const wgsl_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/wgsl_tests.zig"),
@@ -553,7 +557,7 @@ pub fn build(b: *std.Build) void {
     }));
     test_step.dependOn(&run_mesh_reg_tests.step);
 
-    // Mesh codegen body tests (M5.2 v3 — OpStore emission for mesh outputs)
+    // Mesh codegen body tests (M5.2 v3 - OpStore emission for mesh outputs)
     const mesh_codegen_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/mesh_codegen_tests.zig"),
         .target = target,
@@ -721,7 +725,7 @@ pub fn build(b: *std.Build) void {
     ray_tracing_test_step.dependOn(&run_ray_tracing_tests.step);
     test_step.dependOn(&run_ray_tracing_tests.step);
 
-    // Tool: dump any shader — run with: zig build dump-shader -- <prefix.glsl> <shader.glsl> <output_prefix>
+    // Tool: dump any shader - run with: zig build dump-shader -- <prefix.glsl> <shader.glsl> <output_prefix>
     // Generates .hlsl, .glsl, .msl, .spv
     const dump_shader_step = b.step("dump-shader", "Dump shader to all output formats (HLSL/GLSL/MSL/SPIR-V)");
     const dump_shader_mod = b.createModule(.{
@@ -760,7 +764,7 @@ pub fn build(b: *std.Build) void {
     });
     dump_focus_step.dependOn(&run_dump_focus.step);
 
-    // Benchmark — run with: zig build bench
+    // Benchmark - run with: zig build bench
     const bench_step = b.step("bench", "Run quick shader benchmark");
     const bench_mod = b.createModule(.{
         .root_source_file = b.path("tools/bench_quick.zig"),
@@ -785,7 +789,7 @@ pub fn build(b: *std.Build) void {
     // don't pin a machine-specific version path. Treat a set-but-empty value as
     // unset; fall back to a last-resort hardcoded path only if the env var is gone.
     const env_vk_sdk: ?[]const u8 = blk: {
-        const v = std.process.getEnvVarOwned(b.allocator, "VULKAN_SDK") catch break :blk null;
+        const v = bcompat.getEnvVarOwned(b.allocator, "VULKAN_SDK") orelse break :blk null;
         break :blk if (v.len == 0) null else v;
     };
     const vk_sdk = b.option([]const u8, "vulkan-sdk", "Vulkan SDK root (for spirv-cross libs/headers); defaults to $VULKAN_SDK") orelse env_vk_sdk orelse "C:/VulkanSDK/1.4.341.1";
@@ -804,18 +808,20 @@ pub fn build(b: *std.Build) void {
     });
     lib_bench_mod.addImport("zioshade", zioshade_msvc);
     lib_bench_mod.addIncludePath(.{ .cwd_relative = spvc_inc });
-    const lib_bench_exe = b.addExecutable(.{ .name = "lib-bench", .root_module = lib_bench_mod });
-    lib_bench_exe.linkLibC();
-    lib_bench_exe.addLibraryPath(.{ .cwd_relative = spvc_lib });
+    // Link C runtime and spirv-cross on the module (0.16 moved these off the
+    // Compile step; the module form works on both 0.15 and 0.16).
+    lib_bench_mod.link_libc = true;
+    lib_bench_mod.addLibraryPath(.{ .cwd_relative = spvc_lib });
     for ([_][]const u8{
         "spirv-cross-c",   "spirv-cross-core", "spirv-cross-glsl",    "spirv-cross-hlsl",
         "spirv-cross-msl", "spirv-cross-cpp",  "spirv-cross-reflect", "spirv-cross-util",
-    }) |l| lib_bench_exe.linkSystemLibrary(l);
+    }) |l| lib_bench_mod.linkSystemLibrary(l, .{});
+    const lib_bench_exe = b.addExecutable(.{ .name = "lib-bench", .root_module = lib_bench_mod });
     const run_lib_bench = b.addRunArtifact(lib_bench_exe);
     if (b.args) |a| for (a) |arg| run_lib_bench.addArg(arg);
     lib_bench_step.dependOn(&run_lib_bench.step);
 
-    // Tool: dump SPIR-V binary — run with: zig build dump-spv
+    // Tool: dump SPIR-V binary - run with: zig build dump-spv
     const dump_spv_step = b.step("dump-spv", "Compile GLSL to SPIR-V binary");
     const dump_spv_mod = b.createModule(.{
         .root_source_file = b.path("tools/dump_spv.zig"),
@@ -848,7 +854,7 @@ pub fn build(b: *std.Build) void {
         step.dependOn(&run.step);
     }
 
-    // DXC HLSL validation — run with: zig build validate-hlsl
+    // DXC HLSL validation - run with: zig build validate-hlsl
     // Requires dxc.exe on PATH (from Vulkan SDK or Windows SDK)
     const validate_hlsl_step = b.step("validate-hlsl", "Validate wintty shader HLSL output with DXC");
     const dxc_run = b.addSystemCommand(&.{"dxc"});
@@ -868,21 +874,21 @@ pub fn build(b: *std.Build) void {
     });
     validate_hlsl_step.dependOn(&dxc_focus.step);
 
-    // glslangValidator GLSL validation — run with: zig build validate-glsl
+    // glslangValidator GLSL validation - run with: zig build validate-glsl
     const validate_glsl_step = b.step("validate-glsl", "Validate wintty shader GLSL output with glslangValidator");
     const glsl_val_crt = b.addSystemCommand(&.{ "glslangValidator", "-S", "frag", "tests/wintty/crt_output.glsl" });
     validate_glsl_step.dependOn(&glsl_val_crt.step);
     const glsl_val_focus = b.addSystemCommand(&.{ "glslangValidator", "-S", "frag", "tests/wintty/focus_output.glsl" });
     validate_glsl_step.dependOn(&glsl_val_focus.step);
 
-    // Run all validations — run with: zig build validate
+    // Run all validations - run with: zig build validate
     const validate_all_step = b.step("validate-all", "Validate all shader outputs (HLSL + GLSL)");
     validate_all_step.dependOn(&dxc_run.step);
     validate_all_step.dependOn(&dxc_focus.step);
     validate_all_step.dependOn(&glsl_val_crt.step);
     validate_all_step.dependOn(&glsl_val_focus.step);
 
-    // Tool: SPIR-V to GLSL — run with: zig build spv-to-glsl -- <input.spv> <output.glsl>
+    // Tool: SPIR-V to GLSL - run with: zig build spv-to-glsl -- <input.spv> <output.glsl>
     const spv_to_glsl_step = b.step("spv-to-glsl", "Convert SPIR-V to GLSL via zioshade");
     const spv_to_glsl_mod = b.createModule(.{
         .root_source_file = b.path("tools/spv_to_glsl.zig"),
@@ -900,7 +906,7 @@ pub fn build(b: *std.Build) void {
     }
     spv_to_glsl_step.dependOn(&run_spv_to_glsl.step);
 
-    // Tool: SPIR-V to HLSL — run with: zig build spv-to-hlsl -- <input.spv> <output.hlsl>
+    // Tool: SPIR-V to HLSL - run with: zig build spv-to-hlsl -- <input.spv> <output.hlsl>
     const spv_to_hlsl_step = b.step("spv-to-hlsl", "Convert SPIR-V to HLSL via zioshade");
     const spv_to_hlsl_mod = b.createModule(.{
         .root_source_file = b.path("tools/spv_to_hlsl.zig"),
@@ -918,7 +924,7 @@ pub fn build(b: *std.Build) void {
     }
     spv_to_hlsl_step.dependOn(&run_spv_to_hlsl.step);
 
-    // Tool: SPIR-V dump — compile GLSL through zioshade and dump SPIR-V binary
+    // Tool: SPIR-V dump - compile GLSL through zioshade and dump SPIR-V binary
     const spv_dump_step = b.step("spv-dump", "Compile GLSL to SPIR-V via zioshade and dump binary");
     const spv_dump_mod = b.createModule(.{
         .root_source_file = b.path("tools/spv_dump.zig"),
@@ -954,7 +960,7 @@ pub fn build(b: *std.Build) void {
     }
     spv_noopt_step.dependOn(&run_spv_noopt.step);
 
-    // Tool: Fuzz test — generate random GLSL and validate through zioshade
+    // Tool: Fuzz test - generate random GLSL and validate through zioshade
     const fuzz_step = b.step("fuzz", "Run structured GLSL fuzzer");
     const fuzz_mod = b.createModule(.{
         .root_source_file = b.path("tools/fuzz_test.zig"),
@@ -972,7 +978,7 @@ pub fn build(b: *std.Build) void {
     }
     fuzz_step.dependOn(&run_fuzz.step);
 
-    // Real-world WGSL validation — run with: zig build test-realworld
+    // Real-world WGSL validation - run with: zig build test-realworld
     const realworld_step = b.step("test-realworld", "Run real-world WGSL validation (requires naga)");
     const realworld_mod = b.createModule(.{
         .root_source_file = b.path("tests/realworld_tests.zig"),
@@ -990,7 +996,7 @@ pub fn build(b: *std.Build) void {
     }
     realworld_step.dependOn(&run_realworld.step);
 
-    // Head-to-head benchmark — runs zioshade vs glslang+spirv-cross subprocess.
+    // Head-to-head benchmark - runs zioshade vs glslang+spirv-cross subprocess.
     // Build/run with: zig build bench-compare
     const bench_compare_step = b.step("bench-compare", "Run zioshade vs glslang+spirv-cross head-to-head benchmark");
     const bench_compare_mod = b.createModule(.{
@@ -1009,7 +1015,7 @@ pub fn build(b: *std.Build) void {
     }
     bench_compare_step.dependOn(&run_bench_compare.step);
 
-    // Examples — build with: zig build examples
+    // Examples - build with: zig build examples
     // Each example is a real installable executable that imports the zioshade
     // module so it cannot drift out of sync with the library API.
     const examples_step = b.step("examples", "Build the example programs in examples/");
@@ -1029,7 +1035,7 @@ pub fn build(b: *std.Build) void {
         examples_step.dependOn(&ex_install.step);
     }
 
-    // WASM playground module — build with: zig build wasm
+    // WASM playground module - build with: zig build wasm
     //
     // Compiles the library plus the thin C-ABI shim in src/wasm.zig to a
     // freestanding wasm32 module for the browser playground under web/. The
