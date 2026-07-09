@@ -57,7 +57,7 @@ const PerShaderResult = struct {
 };
 
 pub fn main() !void {
-    var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_impl = std.heap.DebugAllocator(.{}){};
     defer _ = gpa_impl.deinit();
     const alloc = gpa_impl.allocator();
 

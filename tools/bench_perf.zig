@@ -2,7 +2,7 @@ const std = @import("std");
 const zioshade = @import("zioshade");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .never_unmap = true, .retain_metadata = false }){};
+    var gpa = std.heap.DebugAllocator(.{ .never_unmap = true, .retain_metadata = false }){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

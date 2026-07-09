@@ -2843,7 +2843,7 @@ fn emitInstruction(
                     defer g_hoist_stripping = false;
                     var hbuf: std.ArrayList(u8) = .empty;
                     defer hbuf.deinit(alloc);
-                    try emitInstruction(m, names, decs, inst, hbuf.writer(alloc), alloc, is_frag, ovid);
+                    try emitInstruction(m, names, decs, inst, compat.listWriter(&hbuf, alloc), alloc, is_frag, ovid);
                     try common.writeHoistedAssign(w, hbuf.items, names.get(rid) orelse "");
                     return;
                 }

@@ -178,6 +178,36 @@ pub fn dirReadFileAlloc(io: IoType, dir: Dir, alloc: std.mem.Allocator, sub_path
     }
 }
 
+// ---- Path-based one-shot file helpers ----
+//
+// These hide the whole 0.15/0.16 filesystem-plus-Io split from callers: on 0.16
+// file IO needs a std.Io context, which they construct and tear down internally;
+// on 0.15 the io is void and these fall through to plain std.fs. Callers pass
+// only an allocator and a path, so the rest of the source stays version-agnostic.
+// One-shot (a fresh io per call), so intended for cold paths like reading a
+// shader or an #include, not hot loops. COMPAT(0.15): keep once the floor moves.
+
+/// Read an entire file at `path` (relative to cwd) into caller-owned bytes.
+pub fn readFileByPath(alloc: std.mem.Allocator, path: []const u8, limit: usize) ![]u8 {
+    var main_io = MainIo().init(alloc);
+    defer main_io.deinit();
+    return dirReadFileAlloc(main_io.io(), cwd(), alloc, path, limit);
+}
+
+/// Write `data` to `path` (relative to cwd), creating or truncating it.
+pub fn writeFileByPath(alloc: std.mem.Allocator, path: []const u8, data: []const u8) !void {
+    var main_io = MainIo().init(alloc);
+    defer main_io.deinit();
+    return dirWriteFile(main_io.io(), cwd(), path, data);
+}
+
+/// Delete the file at `path` (relative to cwd).
+pub fn deleteFileByPath(alloc: std.mem.Allocator, path: []const u8) !void {
+    var main_io = MainIo().init(alloc);
+    defer main_io.deinit();
+    return dirDeleteFile(main_io.io(), cwd(), path);
+}
+
 // ---- File operations ----
 
 pub fn fileClose(io: IoType, file: File) void {
@@ -337,27 +367,34 @@ pub fn processRun(io: IoType, alloc: std.mem.Allocator, argv: []const []const u8
 /// Keeps machine-specific absolute SDK paths out of the tree so tests/tools stay
 /// portable across machines / CI / non-Windows. Callers that spawn the result
 /// should degrade a spawn failure to a skip rather than a hard failure.
+/// Read an environment variable, caller-owned, or null if unset or unreadable.
+/// Zig 0.16 removed std.process.getEnvVarOwned (env access moved behind std.Io),
+/// so this centralizes the split and degrades to null on 0.16, where callers
+/// fall back to a PATH lookup. Selected by capability, not version number.
+/// COMPAT(0.15): simplify when the floor moves to 0.16.
+pub fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) ?[]const u8 {
+    if (comptime @hasDecl(std.process, "getEnvVarOwned")) {
+        return std.process.getEnvVarOwned(alloc, name) catch null;
+    } else {
+        return null;
+    }
+}
+
 pub fn resolveVulkanTool(allocator: std.mem.Allocator, tool: []const u8) ![]const u8 {
     const exe = if (builtin.os.tag == .windows)
         try std.fmt.allocPrint(allocator, "{s}.exe", .{tool})
     else
         try allocator.dupe(u8, tool);
-    if (std.process.getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
+    if (getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
         defer allocator.free(sdk);
         // Treat a set-but-empty value as unset so we fall back to PATH rather
         // than building a bogus relative "Bin/<tool>" path.
         if (sdk.len == 0) return exe;
         defer allocator.free(exe);
         return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
-    } else |err| switch (err) {
-        // Not set - fall back to PATH lookup by bare name.
-        error.EnvironmentVariableNotFound => return exe,
-        // Propagate real failures (OOM; InvalidWtf8 can't occur for an ASCII key).
-        else => |e| {
-            allocator.free(exe);
-            return e;
-        },
     }
+    // Unset or unreadable: fall back to PATH lookup by bare name.
+    return exe;
 }
 
 /// Resolve the spirv-val executable; thin wrapper over `resolveVulkanTool`.
