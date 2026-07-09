@@ -1,16 +1,32 @@
-//! Compatibility layer for Zig 0.15.2 and 0.16.0.
+//! Compatibility layer across supported Zig versions.
 //!
-//! Uses comptime (`is_0_16`) to select the correct API branch.
-//! The untaken branch is dead-code-eliminated, so no 0.16-only types
-//! leak into 0.15 builds (and vice versa).
+//! Selection is by CAPABILITY DETECTION, not version number, so a newer Zig
+//! that keeps an API shape works untouched (forward compatibility). The untaken
+//! comptime branch is not analyzed, so no version-only types leak across builds.
 //!
-//! All APIs work on both 0.15.2 and 0.16.0.
+//! Supported range: Zig 0.15.2 is the hard floor (enforced below); the tested
+//! window is the last three releases (see the README version policy). Anything
+//! newer is best-effort. Mark each version-specific shim with a `COMPAT(x.y)`
+//! comment noting when it can be deleted once the floor moves past it.
 
 const std = @import("std");
 const builtin = @import("builtin");
 
-/// Comptime flag: true when compiling with Zig >= 0.16.0.
-pub const is_0_16 = builtin.zig_version.minor >= 16;
+/// Hard floor. Anything older than this is unsupported and fails to compile
+/// here with an actionable message rather than a cryptic stdlib error later.
+pub const min_zig = std.SemanticVersion{ .major = 0, .minor = 15, .patch = 2 };
+comptime {
+    if (builtin.zig_version.order(min_zig) == .lt) {
+        @compileError("zioshade requires Zig 0.15.2 or newer. See the README.");
+    }
+}
+
+/// True when the new `std.Io` filesystem API is present (Zig 0.16+). Detected by
+/// capability (`std.Io.Dir` exists), not by version number: 0.15.2 has `std.Io`
+/// but no `std.Io.Dir`, and a future release that keeps `std.Io.Dir` still
+/// selects this branch with no code change. COMPAT(0.15): when the floor moves
+/// to 0.16, this is always true and the `else` branches below can be deleted.
+pub const is_0_16 = @hasDecl(std, "Io") and @hasDecl(std.Io, "Dir");
 
 // ---- Allocator ----
 
@@ -334,7 +350,7 @@ pub fn resolveVulkanTool(allocator: std.mem.Allocator, tool: []const u8) ![]cons
         defer allocator.free(exe);
         return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
     } else |err| switch (err) {
-        // Not set — fall back to PATH lookup by bare name.
+        // Not set - fall back to PATH lookup by bare name.
         error.EnvironmentVariableNotFound => return exe,
         // Propagate real failures (OOM; InvalidWtf8 can't occur for an ASCII key).
         else => |e| {

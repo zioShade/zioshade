@@ -32,19 +32,31 @@ jobs:
         run: zig fmt --check src
 
   build-test:
-    name: build & test (${{ matrix.os }})
+    name: build & test (${{ matrix.os }}, zig ${{ matrix.zig }})
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
+        # Supported floor and tested window. 0.15.2 is the hard floor and is
+        # required on every OS. Newer Zig versions are added here as they ship;
+        # keep the last three releases and drop the oldest per the README policy.
+        zig: ["0.15.2"]
+        include:
+          # 0.16 builds via build.zig but the source still needs the std.Io /
+          # Writergate migration (tracked in #424), so keep it visible but
+          # non-blocking until that lands, then promote it to the matrix above.
+          - os: ubuntu-latest
+            zig: "0.16.0"
+            experimental: true
     runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Zig 0.15.2
+      - name: Install Zig ${{ matrix.zig }}
         uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ matrix.zig }}
           use-cache: true
 
       - name: zig version
