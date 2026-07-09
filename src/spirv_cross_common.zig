@@ -5,6 +5,7 @@
 //! and helper utilities used by all cross-compilation backends (HLSL, GLSL, MSL).
 
 const std = @import("std");
+const compat = @import("compat.zig");
 const spirv = @import("spirv.zig");
 
 // ---------------------------------------------------------------------------
@@ -654,15 +655,15 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     const wgsl_scalar: []const u8 = if (std.mem.eql(u8, scalar_raw, "float")) "f32" else if (std.mem.eql(u8, scalar_raw, "int")) "i32" else if (std.mem.eql(u8, scalar_raw, "uint")) "u32" else scalar_raw;
                     var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
                     defer buf.deinit(alloc);
-                    buf.writer(alloc).print("vec{d}<{s}>(", .{ count, wgsl_scalar }) catch continue;
+                    compat.listWriter(&buf, alloc).print("vec{d}<{s}>(", .{ count, wgsl_scalar }) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
-                        if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
+                        if (i > 0) compat.listWriter(&buf, alloc).writeAll(", ") catch continue;
                         const bc = wgslNonFiniteBitcast(alloc, module, comp_id);
                         defer if (bc) |s| alloc.free(s);
                         const comp_name = bc orelse (names.get(comp_id) orelse "0.0");
-                        buf.writer(alloc).writeAll(comp_name) catch continue;
+                        compat.listWriter(&buf, alloc).writeAll(comp_name) catch continue;
                     }
-                    buf.writer(alloc).writeAll(")") catch continue;
+                    compat.listWriter(&buf, alloc).writeAll(")") catch continue;
                     const lit = buf.toOwnedSlice(alloc) catch continue;
                     if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     continue;
@@ -671,15 +672,15 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     const struct_name = names.get(type_id) orelse "Struct";
                     var buf = std.ArrayList(u8).initCapacity(alloc, 128) catch continue;
                     defer buf.deinit(alloc);
-                    buf.writer(alloc).print("{s}(", .{struct_name}) catch continue;
+                    compat.listWriter(&buf, alloc).print("{s}(", .{struct_name}) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
-                        if (i > 0) buf.writer(alloc).writeAll(", ") catch continue;
+                        if (i > 0) compat.listWriter(&buf, alloc).writeAll(", ") catch continue;
                         const bc = wgslNonFiniteBitcast(alloc, module, comp_id);
                         defer if (bc) |s| alloc.free(s);
                         const comp_name = bc orelse (names.get(comp_id) orelse "0.0");
-                        buf.writer(alloc).writeAll(comp_name) catch continue;
+                        compat.listWriter(&buf, alloc).writeAll(comp_name) catch continue;
                     }
-                    buf.writer(alloc).writeAll(")") catch continue;
+                    compat.listWriter(&buf, alloc).writeAll(")") catch continue;
                     const lit = buf.toOwnedSlice(alloc) catch continue;
                     if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     continue;
@@ -704,15 +705,15 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     // rejects. wgslTypeName() resolves all of these recursively.
                     const elem_name = wgslTypeName(alloc, module, names, elem_type_id) catch (alloc.dupe(u8, "f32") catch continue);
                     defer alloc.free(elem_name);
-                    buf2.writer(alloc).print("array<{s}, {d}>(", .{ elem_name, count_val }) catch continue;
+                    compat.listWriter(&buf2, alloc).print("array<{s}, {d}>(", .{ elem_name, count_val }) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
-                        if (i > 0) buf2.writer(alloc).writeAll(", ") catch continue;
+                        if (i > 0) compat.listWriter(&buf2, alloc).writeAll(", ") catch continue;
                         const bc2 = wgslNonFiniteBitcast(alloc, module, comp_id);
                         defer if (bc2) |s| alloc.free(s);
                         const comp_name2 = bc2 orelse (names.get(comp_id) orelse "0.0");
-                        buf2.writer(alloc).writeAll(comp_name2) catch continue;
+                        compat.listWriter(&buf2, alloc).writeAll(comp_name2) catch continue;
                     }
-                    buf2.writer(alloc).writeAll(")") catch continue;
+                    compat.listWriter(&buf2, alloc).writeAll(")") catch continue;
                     const lit2 = buf2.toOwnedSlice(alloc) catch continue;
                     if (names.fetchPut(rid, lit2) catch null) |old| alloc.free(old.value);
                     continue;
@@ -731,13 +732,13 @@ pub fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names
                     const scalar_type: []const u8 = if (std.mem.eql(u8, scalar_type_raw, "float")) "f" else if (std.mem.eql(u8, scalar_type_raw, "int")) "i" else if (std.mem.eql(u8, scalar_type_raw, "uint")) "u" else scalar_type_raw;
                     var buf3 = std.ArrayList(u8).initCapacity(alloc, 128) catch continue;
                     defer buf3.deinit(alloc);
-                    buf3.writer(alloc).print("mat{d}x{d}{s}(", .{ col_count, col_size, scalar_type }) catch continue;
+                    compat.listWriter(&buf3, alloc).print("mat{d}x{d}{s}(", .{ col_count, col_size, scalar_type }) catch continue;
                     for (inst.words[3..], 0..) |comp_id, i| {
-                        if (i > 0) buf3.writer(alloc).writeAll(", ") catch continue;
+                        if (i > 0) compat.listWriter(&buf3, alloc).writeAll(", ") catch continue;
                         const comp_name3 = names.get(comp_id) orelse "0.0";
-                        buf3.writer(alloc).writeAll(comp_name3) catch continue;
+                        compat.listWriter(&buf3, alloc).writeAll(comp_name3) catch continue;
                     }
-                    buf3.writer(alloc).writeAll(")") catch continue;
+                    compat.listWriter(&buf3, alloc).writeAll(")") catch continue;
                     const lit3 = buf3.toOwnedSlice(alloc) catch continue;
                     if (names.fetchPut(rid, lit3) catch null) |old| alloc.free(old.value);
                     continue;
@@ -1269,13 +1270,13 @@ pub fn writeHoistedAssign(w: anytype, rendered: []const u8, name: []const u8) !v
 test "writeHoistedAssign strips the type from a declaration line" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try writeHoistedAssign(buf.writer(std.testing.allocator), "    float v106 = v98 + v103;\n", "v106");
+    try writeHoistedAssign(compat.listWriter(&buf, std.testing.allocator), "    float v106 = v98 + v103;\n", "v106");
     try std.testing.expectEqualStrings("    v106 = v98 + v103;\n", buf.items);
 }
 
 test "writeHoistedAssign passes unknown shapes through verbatim" {
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(std.testing.allocator);
-    try writeHoistedAssign(buf.writer(std.testing.allocator), "    foo(v106);\n", "v106");
+    try writeHoistedAssign(compat.listWriter(&buf, std.testing.allocator), "    foo(v106);\n", "v106");
     try std.testing.expectEqualStrings("    foo(v106);\n", buf.items);
 }

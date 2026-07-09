@@ -25,6 +25,7 @@
 // (`zioshade_last_error_*`) read state owned by the calling thread.
 
 const std = @import("std");
+const compat = zioshade.compat;
 const zioshade = @import("zioshade");
 
 // ---------------------------------------------------------------------------
@@ -49,7 +50,7 @@ const ZIOSHADE_ERR_INVALID_INPUT: c_int = 7;
 // buffers via the `zioshade_free_*` helpers, and the GPA itself lives until
 // process exit. This matches what consumers of a typical C library expect.
 
-threadlocal var gpa: std.heap.GeneralPurposeAllocator(.{}) = .{};
+threadlocal var gpa: compat.Gpa(.{}) = .{};
 
 fn alloc() std.mem.Allocator {
     return gpa.allocator();

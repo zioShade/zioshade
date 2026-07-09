@@ -4,7 +4,7 @@ const zioshade = @import("zioshade");
 /// SPIR-V to HLSL cross-compiler CLI.
 /// Usage: zig build spv-to-hlsl -- <input.spv> <output.hlsl>
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
