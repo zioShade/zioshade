@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](#license)
 [![Sponsor](https://img.shields.io/github/sponsors/deblasis)](https://github.com/sponsors/deblasis)
 
-> **Requires Zig 0.15.2.** 0.16 support is tracked in [#424](https://github.com/deblasis/zioshade/issues/424).
+> **Requires Zig 0.15.2 or newer** (see [Supported Zig versions](#supported-zig-versions)). Full 0.16 support is in progress ([#424](https://github.com/deblasis/zioshade/issues/424)): the build system works on 0.16, the source std.Io migration is landing.
 
 ## Why this exists
 
@@ -174,6 +174,16 @@ See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the compl
 **How do I pronounce it?** ZEE-oh-shade.
 
 **Version policy?** SemVer on the public API exported from `src/root.zig`, currently `0.2.0`. Pre-1.0, so minor bumps may break API. Requires Zig 0.15.2; 0.16 is tracked in [#424](https://github.com/deblasis/zioshade/issues/424).
+
+## Supported Zig versions
+
+Zig has no stability guarantee before 1.0, so zioshade tracks a rolling window rather than a single pin:
+
+- **Floor: Zig 0.15.2.** Anything older fails to compile with a clear message. The floor rarely moves.
+- **Tested window: the last three Zig releases**, enforced by the CI matrix. As a new Zig ships it is added and the oldest is eventually dropped from CI (it loses *guaranteed* support but is not deliberately broken).
+- **Newer than the window: best effort.** Version-divergent code is isolated in `src/compat.zig` (runtime) and `build_compat.zig` (build), selected by *capability detection* (`@hasDecl`) rather than version numbers, so a release that keeps an API shape works untouched.
+
+Current status: the build system runs on 0.15.2 and 0.16; the source is fully supported on 0.15.2, with the 0.16 `std.Io` migration in progress ([#424](https://github.com/deblasis/zioshade/issues/424)). Contributors on a newer Zig can build with [mise](https://mise.jdx.dev) (`mise install`) to get the pinned 0.15.2 in the meantime.
 
 ## Building
 
