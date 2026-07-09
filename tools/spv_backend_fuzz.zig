@@ -4,7 +4,7 @@ const zioshade = @import("zioshade");
 /// Fuzz-test all SPIR-V backends with random valid SPIR-V modules.
 /// The backends should never crash — at worst return an error.
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

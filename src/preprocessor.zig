@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 const std = @import("std");
+const compat = @import("compat.zig");
 const builtin = @import("builtin");
 const lexer = @import("lexer.zig");
 
@@ -441,9 +442,7 @@ pub const Preprocessor = struct {
                 var full_path_buf: [4096]u8 = undefined;
                 const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}{s}", .{ dir_part, path }) catch return error.FileNotFound;
 
-                const file = std.fs.cwd().openFile(full_path, .{}) catch return error.FileNotFound;
-                defer file.close();
-                const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+                const raw = compat.readFileByPath(self.alloc, full_path, 10 * 1024 * 1024) catch return error.FileNotFound;
                 // Null-terminate for lexer
                 const z = try self.alloc.dupeZ(u8, raw);
                 self.alloc.free(raw);
@@ -456,9 +455,7 @@ pub const Preprocessor = struct {
                 var full_path_buf: [4096]u8 = undefined;
                 const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
 
-                const file = std.fs.cwd().openFile(full_path, .{}) catch continue;
-                defer file.close();
-                const raw = try file.readToEndAlloc(self.alloc, 10 * 1024 * 1024);
+                const raw = compat.readFileByPath(self.alloc, full_path, 10 * 1024 * 1024) catch continue;
                 const z = try self.alloc.dupeZ(u8, raw);
                 self.alloc.free(raw);
                 try self.included_sources.append(self.alloc, z);

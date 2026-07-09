@@ -152,7 +152,7 @@ fn firstErrorKey(alloc: std.mem.Allocator, stderr_str: []const u8) ![]u8 {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 

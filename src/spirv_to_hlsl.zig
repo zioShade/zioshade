@@ -3567,7 +3567,7 @@ fn emitInstruction(
                     defer g_hoist_stripping = false;
                     var hbuf: std.ArrayList(u8) = .empty;
                     defer hbuf.deinit(alloc);
-                    try emitInstruction(module, names, decorations, inst, hbuf.writer(alloc), alloc, is_fragment, is_vertex, output_var_id);
+                    try emitInstruction(module, names, decorations, inst, compat.listWriter(&hbuf, alloc), alloc, is_fragment, is_vertex, output_var_id);
                     try common.writeHoistedAssign(w, hbuf.items, names.get(rid) orelse "");
                     return;
                 }

@@ -42,9 +42,9 @@ jobs:
         # keep the last three releases and drop the oldest per the README policy.
         zig: ["0.15.2"]
         include:
-          # 0.16 builds via build.zig but the source still needs the std.Io /
-          # Writergate migration (tracked in #424), so keep it visible but
-          # non-blocking until that lands, then promote it to the matrix above.
+          # The library builds on 0.16; the CLI and test harness still need the
+          # 0.16 process-API migration (args/Child/env, tracked in #424). Keep
+          # this non-blocking until that lands, then promote it into the matrix.
           - os: ubuntu-latest
             zig: "0.16.0"
             experimental: true

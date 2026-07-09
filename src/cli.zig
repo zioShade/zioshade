@@ -1,8 +1,9 @@
 const std = @import("std");
+const compat = zioshade.compat;
 const zioshade = @import("zioshade");
 
 pub fn main() !void {
-    var gpa_impl = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa_impl = std.heap.DebugAllocator(.{}){};
     defer _ = gpa_impl.deinit();
     const alloc = gpa_impl.allocator();
 
@@ -250,7 +251,7 @@ fn readInput(alloc: std.mem.Allocator, path: ?[]const u8, use_stdin: bool) ![:0]
 }
 
 fn readSource(alloc: std.mem.Allocator, path: []const u8) ![:0]const u8 {
-    const raw = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |err| switch (err) {
+    const raw = compat.readFileByPath(alloc, path, 10 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => fatal("cannot open '{s}'", .{path}),
         else => fatal("cannot read '{s}': {s}", .{ path, @errorName(err) }),
     };
@@ -264,7 +265,7 @@ fn readSource(alloc: std.mem.Allocator, path: []const u8) ![:0]const u8 {
 }
 
 fn readSpv(alloc: std.mem.Allocator, path: []const u8) ![]const u32 {
-    const raw = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |err| switch (err) {
+    const raw = compat.readFileByPath(alloc, path, 10 * 1024 * 1024) catch |err| switch (err) {
         error.FileNotFound => fatal("cannot open '{s}'", .{path}),
         else => fatal("cannot read '{s}': {s}", .{ path, @errorName(err) }),
     };
