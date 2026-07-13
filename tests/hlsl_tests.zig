@@ -56,23 +56,16 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     defer alloc.free(tmp_src);
     const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/hlsl_test_{s}.spv", .{name});
     defer alloc.free(tmp_spv);
-    {
-        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
-        defer src_file.close();
-        try src_file.writeAll(std.mem.sliceTo(source, 0));
-    }
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
     const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
-    }) catch return error.SkipZigTest;
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
-    const spv_file = std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only }) catch return error.SkipZigTest;
-    defer spv_file.close();
-    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
     defer alloc.free(data);
     const words = try alloc.alloc(u32, data.len / 4);
     for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
@@ -14029,7 +14022,7 @@ test "HLSL: sample-parameter with gl_SampleMaskIn[0]" {
 
 
 test "HLSL: barycentric-khr from SPIR-V binary" {
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/barycentric-khr.spv", 1024 * 1024);
+    const spv_data = try zioshade.compat.readFileByPath(alloc, "tests/spirv_bins/barycentric-khr.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
@@ -14046,7 +14039,7 @@ test "HLSL: barycentric-nv with overlapping per-vertex arrays is an honest error
     // output asserted here (nointerpolation + SV_Barycentrics) is dxc-INVALID
     // ("Semantic 'TEXCOORD' overlap") — the correct lowering needs
     // GetAttributeAtVertex, not arrays. Until that's implemented, fail loud.
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/barycentric-nv.spv", 1024 * 1024);
+    const spv_data = try zioshade.compat.readFileByPath(alloc, "tests/spirv_bins/barycentric-nv.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
@@ -14060,7 +14053,7 @@ test "HLSL: single-array-member SSBO unwraps to RWStructuredBuffer<elem> (dxc 20
     // rejects ("structured buffer elements cannot be larger than 2048 bytes").
     // (This test previously asserted the dxc-INVALID `struct UBO` /
     // `RWStructuredBuffer<UBO>` form — it was rubber-stamping a silent-wrong.)
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/complex-expression-in-access-chain.spv", 1024 * 1024);
+    const spv_data = try zioshade.compat.readFileByPath(alloc, "tests/spirv_bins/complex-expression-in-access-chain.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
@@ -14082,7 +14075,7 @@ test "HLSL: single-array-member SSBO unwraps to RWStructuredBuffer<elem> (dxc 20
 //   layout(std430, binding=0) buffer Buf { float data[]; } b;
 //   void main() { b.data[0] = 1.0; }
 test "HLSL: compute SSBO with runtime array drops struct wrapper" {
-    const spv_data = try std.fs.cwd().readFileAlloc(alloc, "tests/spirv_bins/compute_minimal.spv", 1024 * 1024);
+    const spv_data = try zioshade.compat.readFileByPath(alloc, "tests/spirv_bins/compute_minimal.spv", 1024 * 1024);
     defer alloc.free(spv_data);
     const spv_u32_len = spv_data.len / 4;
     const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];

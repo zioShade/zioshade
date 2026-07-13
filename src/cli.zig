@@ -2,17 +2,33 @@ const std = @import("std");
 const compat = zioshade.compat;
 const zioshade = @import("zioshade");
 
-pub fn main() !void {
-    var gpa_impl = std.heap.DebugAllocator(.{}){};
+// The main entry point differs by Zig version: 0.16 passes command-line args
+// and environment through a `std.process.Init.Minimal` parameter, while 0.15
+// exposes them via the global `std.process.argsAlloc`. Select the matching
+// signature at comptime so only the version-correct one is analyzed; both hand
+// off to `run` once `compat` has captured whatever init state it needs.
+pub const main = if (compat.is_0_16) main_0_16 else main_0_15;
+
+fn main_0_15() !void {
+    return run();
+}
+
+fn main_0_16(init: compat.MainInit) !void {
+    compat.setMainInit(init);
+    return run();
+}
+
+fn run() !void {
+    var gpa_impl = compat.Gpa(.{}){};
     defer _ = gpa_impl.deinit();
     const alloc = gpa_impl.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try compat.argsAlloc(alloc);
+    defer compat.argsFree(alloc, args);
 
     if (args.len < 2) {
         std.debug.print(
-            \\zioshade — GLSL/SPIR-V shader compiler
+            \\zioshade - GLSL/SPIR-V shader compiler
             \\
             \\Usage: zioshade <command> <input> [options]
             \\
@@ -237,8 +253,7 @@ fn detectStage(path: []const u8) ?zioshade.Stage {
 
 fn readInput(alloc: std.mem.Allocator, path: ?[]const u8, use_stdin: bool) ![:0]const u8 {
     if (use_stdin or path == null) {
-        const stdin_file = std.fs.File.stdin();
-        const raw = try stdin_file.readToEndAlloc(alloc, 10 * 1024 * 1024);
+        const raw = try compat.readStdinAlloc(alloc, 10 * 1024 * 1024);
         var buf = try std.ArrayListUnmanaged(u8).initCapacity(alloc, raw.len + 1);
         defer buf.deinit(alloc);
         try buf.appendSlice(alloc, raw);
@@ -279,11 +294,10 @@ fn readSpv(alloc: std.mem.Allocator, path: []const u8) ![]const u32 {
 
 fn writeOutput(output_path: ?[]const u8, data: []const u8) !void {
     if (output_path) |path| {
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = data });
+        try compat.writeFileByPath(std.heap.page_allocator, path, data);
     } else {
-        const stdout_file = std.fs.File.stdout();
-        try stdout_file.writeAll(data);
-        try stdout_file.writeAll("\n");
+        try compat.writeStdout(data);
+        try compat.writeStdout("\n");
     }
 }
 
@@ -298,7 +312,7 @@ fn doCompile(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8
     defer alloc.free(spv);
     const bytes = std.mem.sliceAsBytes(spv);
     if (output) |path| {
-        try std.fs.cwd().writeFile(.{ .sub_path = path, .data = bytes });
+        try compat.writeFileByPath(alloc, path, bytes);
         std.debug.print("SPIR-V: {d} words ({d} bytes) -> {s}\n", .{ spv.len, bytes.len, path });
     } else {
         std.debug.print("error: binary SPIR-V output requires -o <path>\n", .{});
