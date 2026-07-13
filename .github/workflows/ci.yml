@@ -42,14 +42,14 @@ jobs:
         # keep the last three releases and drop the oldest per the README policy.
         zig: ["0.15.2"]
         include:
-          # The library builds on 0.16; the CLI and test harness still need the
-          # 0.16 process-API migration (args/Child/env, tracked in #424). Keep
-          # this non-blocking until that lands, then promote it into the matrix.
+          # 0.16 is a required check: the library, CLI, C ABI, and full test
+          # suite build and pass on it (the std.Io / process-API divergence is
+          # centralized in src/compat.zig). Linux for now; broaden to macOS and
+          # Windows once observed green. The only 0.16 holdout is the standalone
+          # dev tools under tools/ (not built by these steps), tracked in #424.
           - os: ubuntu-latest
             zig: "0.16.0"
-            experimental: true
     runs-on: ${{ matrix.os }}
-    continue-on-error: ${{ matrix.experimental == true }}
     steps:
       - uses: actions/checkout@v4
 

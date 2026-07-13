@@ -42,19 +42,26 @@ pub const max_path_bytes = std.fs.max_path_bytes;
 
 pub const IoType = if (is_0_16) std.Io else void;
 
-/// I/O context for test code.
-pub fn testIo() IoType {
-    if (is_0_16) {
-        return std.testing.io;
-    }
-}
-
 /// I/O context wrapper for main/executable code.
+///
+/// On 0.16 the Threaded I/O carries the process environment so that spawning a
+/// child by bare name (e.g. "spirv-val") resolves it against PATH. The env is
+/// sourced by context: the test runner installs it at `std.testing.environ` in
+/// test binaries, and `setMainInit` stashes it from `std.process.Init` for
+/// executables. Without it, `std.process.run` takes argv[0] literally and every
+/// bare-name oracle spawn fails with FileNotFound (0.15's POSIX exec searched
+/// PATH regardless, which is why this only bites on 0.16). COMPAT(0.15).
 pub fn MainIo() type {
     return if (is_0_16) struct {
         inner: std.Io.Threaded,
         pub fn init(gpa: std.mem.Allocator) @This() {
-            return .{ .inner = std.Io.Threaded.init(gpa, .{}) };
+            const environ = if (builtin.is_test)
+                std.testing.environ
+            else if (main_init_set)
+                main_init_storage.environ
+            else
+                std.process.Environ.empty;
+            return .{ .inner = std.Io.Threaded.init(gpa, .{ .environ = environ }) };
         }
         pub fn deinit(self: *@This()) void {
             self.inner.deinit();
@@ -72,16 +79,30 @@ pub fn MainIo() type {
 }
 
 // ---- Random ----
+//
+// `randomInt` names temp files that concurrently-running test binaries must not
+// collide on (the whole reason the callers moved off a shared path). On 0.15
+// this is std.crypto.random. On 0.16 crypto.random was removed and the clock
+// moved behind std.Io, so we seed a PRNG from entropy reachable without an Io
+// context: the address of a stack local (ASLR differs per process, and stacks
+// differ per thread) mixed with a process-global atomic counter (distinct per
+// call). A fixed seed would defeat the point by handing every process the same
+// "random" name. COMPAT(0.15): revisit if a non-Io entropy source returns.
 
 threadlocal var prng_state: if (is_0_16) std.Random.DefaultPrng else void = if (is_0_16) .init(0) else {};
 threadlocal var prng_inited: bool = false;
+var seed_counter: if (is_0_16) std.atomic.Value(u64) else void = if (is_0_16) .init(0) else {};
 
 fn ensurePrng() void {
     if (!prng_inited) {
         if (is_0_16) {
-            // Simple deterministic seed. For non-crypto purposes this is fine.
-            // The seed varies per compilation due to builtin.zig_version.
-            const seed: u64 = 0xdeadbeefcafebabe;
+            var stack_anchor: u8 = 0;
+            const addr: u64 = @intFromPtr(&stack_anchor);
+            const counter = seed_counter.fetchAdd(1, .monotonic);
+            var seed = addr ^ 0x9e3779b97f4a7c15;
+            seed = seed *% 0xff51afd7ed558ccd;
+            seed ^= counter;
+            seed = seed *% 0xc4ceb9fe1a85ec53;
             prng_state = std.Random.DefaultPrng.init(seed);
         }
         prng_inited = true;
@@ -208,6 +229,88 @@ pub fn deleteFileByPath(alloc: std.mem.Allocator, path: []const u8) !void {
     return dirDeleteFile(main_io.io(), cwd(), path);
 }
 
+/// Read all of stdin into caller-owned bytes (up to `limit`). Hides the
+/// 0.15/0.16 File + Io split: on 0.16 stdin reads need a std.Io context,
+/// constructed internally over the page allocator (fine for a CLI one-shot).
+pub fn readStdinAlloc(alloc: std.mem.Allocator, limit: usize) ![]u8 {
+    if (is_0_16) {
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        const in = std.Io.File.stdin();
+        var buf: [4096]u8 = undefined;
+        var reader = in.reader(threaded.io(), &buf);
+        return try reader.interface.allocRemaining(alloc, @enumFromInt(limit));
+    } else {
+        const in = std.fs.File.stdin();
+        return try in.readToEndAlloc(alloc, limit);
+    }
+}
+
+/// Create (or truncate) the file at absolute `abs_path` and write `data`.
+/// Hides the 0.15/0.16 split (createFileAbsolute moved behind std.Io on 0.16).
+/// Intended for tests/tools that stage oracle inputs under the system temp dir.
+pub fn writeFileAbsolute(alloc: std.mem.Allocator, abs_path: []const u8, data: []const u8) !void {
+    if (is_0_16) {
+        var main_io = MainIo().init(alloc);
+        defer main_io.deinit();
+        const io = main_io.io();
+        const file = try std.Io.Dir.createFileAbsolute(io, abs_path, .{});
+        defer file.close(io);
+        try file.writePositionalAll(io, data, 0);
+    } else {
+        const file = try std.fs.createFileAbsolute(abs_path, .{});
+        defer file.close();
+        try file.writeAll(data);
+    }
+}
+
+/// Delete the file at absolute `abs_path`. Hides the 0.15/0.16 split. Intended
+/// to clean up oracle temp files staged with `writeFileAbsolute`.
+pub fn deleteFileAbsolute(alloc: std.mem.Allocator, abs_path: []const u8) !void {
+    if (is_0_16) {
+        var main_io = MainIo().init(alloc);
+        defer main_io.deinit();
+        return std.Io.Dir.deleteFileAbsolute(main_io.io(), abs_path);
+    } else {
+        return std.fs.deleteFileAbsolute(abs_path);
+    }
+}
+
+/// Read the entire file at absolute `abs_path` into caller-owned bytes.
+/// Hides the 0.15/0.16 split (openFileAbsolute moved behind std.Io on 0.16).
+pub fn readFileAbsolute(alloc: std.mem.Allocator, abs_path: []const u8, limit: usize) ![]u8 {
+    if (is_0_16) {
+        var main_io = MainIo().init(alloc);
+        defer main_io.deinit();
+        const io = main_io.io();
+        const file = try std.Io.Dir.openFileAbsolute(io, abs_path, .{ .mode = .read_only });
+        defer file.close(io);
+        var buf: [4096]u8 = undefined;
+        var file_reader = file.reader(io, &buf);
+        return try file_reader.interface.allocRemaining(alloc, @enumFromInt(limit));
+    } else {
+        const file = try std.fs.openFileAbsolute(abs_path, .{ .mode = .read_only });
+        defer file.close();
+        return try file.readToEndAlloc(alloc, limit);
+    }
+}
+
+/// Write `bytes` to stdout. Hides the 0.15/0.16 File + Io split: on 0.16 stdout
+/// writes need a std.Io context, constructed internally over the page allocator
+/// (fine for a CLI one-shot); on 0.15 this is a plain File.writeAll. Allocator
+/// free so callers that only have a path/data pair need not thread one through.
+pub fn writeStdout(bytes: []const u8) !void {
+    if (is_0_16) {
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        const out = std.Io.File.stdout();
+        try out.writeStreamingAll(threaded.io(), bytes);
+    } else {
+        const out = std.fs.File.stdout();
+        try out.writeAll(bytes);
+    }
+}
+
 // ---- File operations ----
 
 pub fn fileClose(io: IoType, file: File) void {
@@ -233,14 +336,6 @@ pub fn fileReadToEndAlloc(io: IoType, file: File, alloc: std.mem.Allocator, limi
         return try file_reader.interface.allocRemaining(alloc, .unlimited);
     } else {
         return try file.readToEndAlloc(alloc, limit);
-    }
-}
-
-pub fn fileRealpath(io: IoType, dir: Dir, sub_path: []const u8, buffer: []u8) ![]u8 {
-    if (is_0_16) {
-        return dir.realpath(io, sub_path, buffer);
-    } else {
-        return dir.realpath(sub_path, buffer);
     }
 }
 
@@ -279,14 +374,18 @@ pub fn setMainInit(init: MainInit) void {
     }
 }
 
+/// Command-line argument list. The inner slices are non-const so this matches
+/// 0.15's `std.process.argsFree` parameter type; reads still coerce to const.
+pub const Args = []const [:0]u8;
+
 /// Get command-line arguments.
-pub fn argsAlloc(alloc: std.mem.Allocator) ![]const [:0]const u8 {
+pub fn argsAlloc(alloc: std.mem.Allocator) !Args {
     if (is_0_16) {
         var arena = std.heap.ArenaAllocator.init(alloc);
         defer arena.deinit();
         var it = try main_init_storage.args.iterateAllocator(arena.allocator());
         defer it.deinit();
-        var list: std.array_list.Aligned([:0]const u8, null) = .empty;
+        var list: std.array_list.Aligned([:0]u8, null) = .empty;
         errdefer {
             for (list.items) |a| alloc.free(a);
             list.deinit(alloc);
@@ -302,7 +401,7 @@ pub fn argsAlloc(alloc: std.mem.Allocator) ![]const [:0]const u8 {
 }
 
 /// Free args allocated by argsAlloc.
-pub fn argsFree(alloc: std.mem.Allocator, args: []const [:0]const u8) void {
+pub fn argsFree(alloc: std.mem.Allocator, args: Args) void {
     if (is_0_16) {
         for (args) |a| alloc.free(a);
         alloc.free(args);
@@ -330,7 +429,12 @@ pub const ProcessTerm = union(enum) {
 
 pub fn processRun(io: IoType, alloc: std.mem.Allocator, argv: []const []const u8) !ProcessResult {
     if (is_0_16) {
-        const result = std.process.run(alloc, io, .{ .argv = argv }) catch |err| {
+        // `.expand_arg0 = .expand` restores PATH lookup for a bare `argv[0]`
+        // (e.g. "spirv-val"). On 0.15 the POSIX exec path searched PATH even with
+        // no_expand; 0.16's new spawn takes argv[0] literally unless told to
+        // expand, so without this every bare-name oracle spawn returns
+        // FileNotFound and callers silently skip. COMPAT(0.15).
+        const result = std.process.run(alloc, io, .{ .argv = argv, .expand_arg0 = .expand }) catch |err| {
             if (err == error.FileNotFound) return error.FileNotFound;
             return err;
         };

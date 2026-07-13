@@ -9,7 +9,7 @@
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](#license)
 [![Sponsor](https://img.shields.io/github/sponsors/deblasis)](https://github.com/sponsors/deblasis)
 
-> **Requires Zig 0.15.2 or newer** (see [Supported Zig versions](#supported-zig-versions)). The library builds on both 0.15.2 and 0.16; the CLI and test harness still need the 0.16 process-API migration ([#424](https://github.com/deblasis/zioshade/issues/424)).
+> **Requires Zig 0.15.2 or newer** (see [Supported Zig versions](#supported-zig-versions)). The library, CLI, C ABI, and full test suite build and pass on both 0.15.2 and 0.16.
 
 ## Why this exists
 
@@ -159,7 +159,7 @@ See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the compl
 ## Roadmap
 
 - **WGSL opcode depth** toward SPIRV-Cross parity: [#170](https://github.com/deblasis/zioshade/issues/170).
-- **Zig 0.16 support**: [#424](https://github.com/deblasis/zioshade/issues/424).
+- **Zig 0.16 dev tools**: the library, CLI, C ABI, and test suite already build and pass on 0.16; the standalone dev tools under `tools/` are the last holdout ([#424](https://github.com/deblasis/zioshade/issues/424)).
 - **GLSL backend fixes** for legacy / array-of-structs / loose-uniform edge cases: [#417](https://github.com/deblasis/zioshade/issues/417), [#418](https://github.com/deblasis/zioshade/issues/418), [#419](https://github.com/deblasis/zioshade/issues/419), [#420](https://github.com/deblasis/zioshade/issues/420).
 - **Front-end lib-vs-lib benchmark** against `libglslang.a` (the GLSL to SPIR-V half is not yet wired).
 
@@ -173,7 +173,7 @@ See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the compl
 
 **How do I pronounce it?** ZEE-oh-shade.
 
-**Version policy?** SemVer on the public API exported from `src/root.zig`, currently `0.2.0`. Pre-1.0, so minor bumps may break API. Requires Zig 0.15.2; 0.16 is tracked in [#424](https://github.com/deblasis/zioshade/issues/424).
+**Version policy?** SemVer on the public API exported from `src/root.zig`, currently `0.3.0`. Pre-1.0, so minor bumps may break API. Builds on Zig 0.15.2 through 0.16 (see [Supported Zig versions](#supported-zig-versions)).
 
 ## Supported Zig versions
 
@@ -183,7 +183,7 @@ Zig has no stability guarantee before 1.0, so zioshade tracks a rolling window r
 - **Tested window: the last three Zig releases**, enforced by the CI matrix. As a new Zig ships it is added and the oldest is eventually dropped from CI (it loses *guaranteed* support but is not deliberately broken).
 - **Newer than the window: best effort.** Version-divergent code is isolated in `src/compat.zig` (runtime) and `build_compat.zig` (build), selected by *capability detection* (`@hasDecl`) rather than version numbers, so a release that keeps an API shape works untouched.
 
-Current status: the build system runs on 0.15.2 and 0.16; the source is fully supported on 0.15.2, with the 0.16 `std.Io` migration in progress ([#424](https://github.com/deblasis/zioshade/issues/424)). Contributors on a newer Zig can build with [mise](https://mise.jdx.dev) (`mise install`) to get the pinned 0.15.2 in the meantime.
+Current status: the library, CLI, C ABI, and complete test suite build and pass on both 0.15.2 and 0.16. The `std.Io` / process-API divergence between the two is centralized in `src/compat.zig`. The one remaining 0.16 gap is the standalone developer tools under `tools/` ([#424](https://github.com/deblasis/zioshade/issues/424)); they are not part of the library, CLI, or shipped test steps. Contributors who prefer the pinned toolchain can `mise install` to get 0.15.2.
 
 ## Building
 
@@ -196,7 +196,7 @@ zig build conformance        # spirv-val conformance suite (needs spirv-val on P
 zig build fuzz -- --count N  # fuzzer (headline: 1,000,000 clean via `just fuzz-million`)
 ```
 
-All commands require **Zig 0.15.2**: either `mise install` then `mise exec -- zig ...`, or a direct 0.15.2 install from [ziglang.org/download/0.15.2](https://ziglang.org/download/0.15.2/).
+These commands work on **Zig 0.15.2 through 0.16**. For the pinned floor toolchain, `mise install` then `mise exec -- zig ...`, or install 0.15.2 directly from [ziglang.org/download/0.15.2](https://ziglang.org/download/0.15.2/).
 
 ## Contributing
 
