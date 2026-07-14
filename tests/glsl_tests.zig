@@ -1238,6 +1238,89 @@ test "GLSL_CB: uniform block member access uses instance.member format" {
     try assertNotContains(glsl, "= Globals_m1;");
 }
 
+// === Struct member access + gl_FragColor regressions (#418, #419, #420) ===
+
+test "GLSL #420: gl_FragColor without #version lowers to located _fragColor" {
+    // A legacy fragment shader with no #version directive that writes gl_FragColor
+    // must synthesize a non-reserved, explicitly located output (spirv-cross parity),
+    // never a bare `out vec4 gl_FragColor;` (rejected on core profiles).
+    const source =
+        \\void main() {
+        \\    gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "layout(location = 0) out vec4 _fragColor;");
+    try assertNotContains(glsl, "out vec4 gl_FragColor");
+}
+
+test "GLSL #419: runtime index into UBO array resolves struct member name" {
+    // A non-constant index followed by a struct-member index must descend into the
+    // array element type so the member resolves to `.color`, not a second `[n]`.
+    const source =
+        \\#version 430
+        \\struct Light { vec4 color; vec4 pos; };
+        \\layout(binding = 0, std140) uniform Lights { Light lights[4]; };
+        \\flat in int i;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = lights[i].color;
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, ".color");
+    try assertNotContains(glsl, "[i][0]");
+    try assertNotContains(glsl, "u_m0[i][0]");
+}
+
+test "GLSL #419: constant index into runtime SSBO array resolves struct members" {
+    // A CONSTANT index into a runtime (unsized) array must still advance the type
+    // through TypeRuntimeArray so the following member index resolves to `.color`/
+    // `.pos` instead of the mis-read `elems[0][0]`/`elems[0][1]`.
+    const source =
+        \\#version 430
+        \\layout(local_size_x = 1) in;
+        \\struct S { vec4 color; vec4 pos; };
+        \\layout(std430, binding = 0) buffer B { S elems[]; };
+        \\void main() {
+        \\    elems[0].color = elems[0].pos;
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .compute);
+    defer alloc.free(glsl);
+    try assertContains(glsl, ".color");
+    try assertContains(glsl, ".pos");
+    try assertNotContains(glsl, "elems[0][0]");
+    try assertNotContains(glsl, "elems[0][1]");
+}
+
+test "GLSL #418: SSBO element struct is declared before the buffer block" {
+    // The element struct of a runtime array must be forward-declared BEFORE the
+    // buffer block that uses it, or the struct is referenced before declaration.
+    const source =
+        \\#version 430
+        \\layout(local_size_x = 1) in;
+        \\struct Particle { vec4 pos; vec4 vel; };
+        \\layout(std430, binding = 0) buffer Particles { Particle particles[]; };
+        \\void main() {
+        \\    particles[0].pos = particles[0].vel;
+        \\}
+    ;
+    const glsl = try compileToGlslStage(source, .compute);
+    defer alloc.free(glsl);
+    const struct_pos = std.mem.indexOf(u8, glsl, "struct Particle") orelse {
+        std.debug.print("Expected `struct Particle` in output:\n{s}\n", .{glsl});
+        return error.TestExpectedFind;
+    };
+    const buffer_pos = std.mem.indexOf(u8, glsl, "buffer") orelse {
+        std.debug.print("Expected `buffer` in output:\n{s}\n", .{glsl});
+        return error.TestExpectedFind;
+    };
+    try std.testing.expect(struct_pos < buffer_pos);
+}
+
 test "glsl: bitfieldReverse roundtrip" {
     const src =
         \\#version 450

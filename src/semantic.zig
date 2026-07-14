@@ -1910,6 +1910,9 @@ const Analyzer = struct {
                 // `layout(location = 0) out vec4 _fragColor;`. The scope symbol
                 // below stays keyed by "gl_FragColor" so source that writes
                 // gl_FragColor still resolves to this variable.
+                // The fixed location 0 cannot collide: legacy gl_FragColor
+                // shaders are old-style and never declare their own explicit
+                // location-0 output, so nothing else claims that slot.
                 const is_frag_color = std.mem.eql(u8, b.name, "gl_FragColor");
                 self.globals.append(self.alloc, .{
                     .name = if (is_frag_color) "_fragColor" else b.name,
