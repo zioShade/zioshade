@@ -1213,7 +1213,7 @@ fn spirvValOrSkip(spv: []const u32) !void {
     const tool = zioshade.compat.resolveVulkanTool(alloc, "spirv-val") catch return error.SkipZigTest;
     defer alloc.free(tool);
 
-    const spv_path = try std.fmt.allocPrint(alloc, "/tmp/zs_cor_{x}.spv", .{zioshade.compat.randomInt(u64)});
+    const spv_path = try zioshade.compat.tempFilePathFmt(alloc, "zs_cor_{x}.spv", .{zioshade.compat.randomInt(u64)});
     defer alloc.free(spv_path);
     defer zioshade.compat.deleteFileAbsolute(alloc, spv_path) catch {};
     try zioshade.compat.writeFileAbsolute(alloc, spv_path, std.mem.sliceAsBytes(spv));
@@ -1275,4 +1275,54 @@ test "frontend #170: dynamic m[i][j] cross-compiles to all four backends" {
     const glsl = try zioshade.spirvToGLSL(alloc, spv, .{});
     defer alloc.free(glsl);
     try std.testing.expect(glsl.len > 0);
+}
+
+// =============================================================================
+// SubpassData input attachments (subpassLoad)
+//
+// OpImageRead on a SubpassData image requires its coordinate to be a constant:
+// an OpConstantComposite of (0,0) or an OpConstantNull, NOT a function-scope
+// OpCompositeConstruct. The frontend built the ivec2(0,0) with a plain
+// composite_construct, so spirv-val rejected every subpassLoad module ("Expected
+// Coordinate for a SubpassData image to be a OpConstantComposite of (0,0) or
+// OpConstantNull"). The fix upgrades the coordinate to a constant composite,
+// which codegen hoists into the module constants section.
+// =============================================================================
+
+const subpass_load_src =
+    \\#version 450
+    \\layout(input_attachment_index=0, set=0, binding=0) uniform subpassInput inp;
+    \\layout(location=0) out vec4 o;
+    \\void main(){ o = subpassLoad(inp); }
+;
+
+const subpass_load_ms_src =
+    \\#version 450
+    \\layout(input_attachment_index=0, set=0, binding=0) uniform subpassInputMS inp;
+    \\layout(location=0) out vec4 o;
+    \\void main(){ o = subpassLoad(inp, 0); }
+;
+
+// The subpass tests below assert the coordinate is a constant even where
+// spirv-val is not installed (spirvValOrSkip would skip) via the module-level
+// spirvHasOpcode scanner defined earlier in this file.
+
+test "frontend: subpassLoad emits a constant SubpassData coordinate (valid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc, subpass_load_src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The coordinate must be a module-scope OpConstantComposite (44), never a
+    // function-scope OpCompositeConstruct (80) that spirv-val would reject.
+    try std.testing.expect(spirvHasOpcode(spv, 44));
+    try std.testing.expect(!spirvHasOpcode(spv, 80));
+    try spirvValOrSkip(spv);
+}
+
+test "frontend: multisampled subpassLoad emits a constant coordinate (valid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc, subpass_load_ms_src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 44));
+    try std.testing.expect(!spirvHasOpcode(spv, 80));
+    try spirvValOrSkip(spv);
 }

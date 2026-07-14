@@ -13,9 +13,9 @@ const ShaderTest = struct {
 
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     // Write source to temp file
-    const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}.frag", .{name});
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.frag", .{name});
     defer alloc.free(tmp_src);
-    const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}.spv", .{name});
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.spv", .{name});
     defer alloc.free(tmp_spv);
 
     try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
@@ -48,9 +48,9 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
 /// glslang IR shape — notably gl_Position wrapped in a member-decorated
 /// `gl_PerVertex` Block — which zioshade's own frontend never emits.
 fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
-    const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}.vert", .{name});
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.vert", .{name});
     defer alloc.free(tmp_src);
-    const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}_vert.spv", .{name});
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}_vert.spv", .{name});
     defer alloc.free(tmp_spv);
 
     try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
@@ -166,7 +166,7 @@ fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
     alloc.free(probe.stderr);
     if (!((probe.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
 
-    const tmp_path = try std.fmt.allocPrint(alloc, "/tmp/zs_wgsl_{x}.wgsl", .{zioshade.compat.randomInt(u64)});
+    const tmp_path = try zioshade.compat.tempFilePathFmt(alloc, "zs_wgsl_{x}.wgsl", .{zioshade.compat.randomInt(u64)});
     defer alloc.free(tmp_path);
     defer zioshade.compat.deleteFileAbsolute(alloc, tmp_path) catch {};
     try zioshade.compat.writeFileAbsolute(alloc, tmp_path, wgsl);
@@ -191,7 +191,7 @@ fn spirvValValidateOrSkip(spirv: []const u32, label: []const u8) !void {
     alloc.free(probe.stderr);
     if (!((probe.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
 
-    const tmp_path = try std.fmt.allocPrint(alloc, "/tmp/zs_wgsl_{x}.spv", .{zioshade.compat.randomInt(u64)});
+    const tmp_path = try zioshade.compat.tempFilePathFmt(alloc, "zs_wgsl_{x}.spv", .{zioshade.compat.randomInt(u64)});
     defer alloc.free(tmp_path);
     defer zioshade.compat.deleteFileAbsolute(alloc, tmp_path) catch {};
     try zioshade.compat.writeFileAbsolute(alloc, tmp_path, std.mem.sliceAsBytes(spirv));

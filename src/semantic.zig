@@ -6838,12 +6838,20 @@ const Analyzer = struct {
                             const loaded = try self.emitLoadCached(arg_tids.items[0].id, arg_tids.items[0].ty);
                             img_id = loaded;
                         }
-                        // Create ivec2(0, 0) coordinate
+                        // Create the ivec2(0, 0) coordinate. SPIR-V requires the
+                        // coordinate of an OpImageRead on a SubpassData image to be
+                        // an OpConstantComposite of (0,0) or an OpConstantNull, not a
+                        // function-scope OpCompositeConstruct (spirv-val: "Expected
+                        // Coordinate for a SubpassData image to be a OpConstantComposite
+                        // of (0,0) or OpConstantNull"). emitCompositeConstruct upgrades
+                        // to constant_composite because both operands are constant, so
+                        // codegen hoists it into the module constants section.
                         const zero_id = try self.getConstInt(0, .int);
                         const coord_ops = try self.alloc.alloc(ir.Instruction.Operand, 2);
                         coord_ops[0] = .{ .id = zero_id };
                         coord_ops[1] = .{ .id = zero_id };
-                        const coord_id = try self.emitPureOp(.composite_construct, coord_ops, .ivec2);
+                        const coord_id = self.allocId();
+                        try self.emitCompositeConstruct(coord_id, coord_ops, .ivec2);
                         // OpImageRead — with optional Sample operand for MS
                         if (arg_tids.items.len >= 2) {
                             // MS subpassLoad: subpassLoad(img, sampleIndex)
