@@ -21,6 +21,16 @@ fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (i >= m.instructions.len) return null;
     return m.instructions[i];
 }
+/// Element type reached by descending one composite level: the element type of an
+/// array (fixed or runtime), the column type of a matrix, or the component type of
+/// a vector. Used per access-chain index for the runtime-index descent (#419).
+fn elemType(m: *const ParsedModule, tid: u32) ?u32 {
+    const t = getDef(m, tid) orelse return null;
+    return switch (t.op) {
+        .TypeArray, .TypeRuntimeArray, .TypeMatrix, .TypeVector => t.words[2],
+        else => null,
+    };
+}
 fn getTypeOf(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
     return switch (inst.op) {
@@ -298,7 +308,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                             cur_type = tinst.words[2];
                         } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
                             cur_type = tinst.words[val + 2];
-                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray or tinst.op == .TypeMatrix) {
                             cur_type = tinst.words[2];
                         } else {
                             cur_type = null;
@@ -308,19 +318,11 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
             } else {
                 writer.print("[{s}]", .{names.get(index_id) orelse "i"});
                 // Runtime index: descend into the element type (see #419 above).
-                if (cur_type) |tid2| {
-                    if (getDef(m, tid2)) |tinst2| {
-                        cur_type = if (tinst2.op == .TypeArray or tinst2.op == .TypeRuntimeArray or tinst2.op == .TypeMatrix or tinst2.op == .TypeVector) tinst2.words[2] else null;
-                    }
-                }
+                if (cur_type) |tid2| cur_type = elemType(m, tid2);
             }
         } else {
             writer.print("[{s}]", .{names.get(index_id) orelse "i"});
-            if (cur_type) |tid2| {
-                if (getDef(m, tid2)) |tinst2| {
-                    cur_type = if (tinst2.op == .TypeArray or tinst2.op == .TypeRuntimeArray or tinst2.op == .TypeMatrix or tinst2.op == .TypeVector) tinst2.words[2] else null;
-                }
-            }
+            if (cur_type) |tid2| cur_type = elemType(m, tid2);
         }
     }
     if (!writer.overflowed()) {
@@ -375,7 +377,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                             cur_type = tinst.words[2];
                         } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
                             cur_type = tinst.words[val + 2];
-                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray or tinst.op == .TypeMatrix) {
                             cur_type = tinst.words[2];
                         } else {
                             cur_type = null;
@@ -464,7 +466,7 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                             cur_type = tinst.words[2];
                         } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
                             cur_type = tinst.words[val + 2];
-                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray or tinst.op == .TypeMatrix) {
                             cur_type = tinst.words[2];
                         } else {
                             cur_type = null;
@@ -476,19 +478,11 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 // Runtime (non-constant) index: descend into the element type, so a
                 // following struct-member index resolves to a member name instead of
                 // being misread as another array index and printed as [n] (#419).
-                if (cur_type) |tid2| {
-                    if (getDef(m, tid2)) |tinst2| {
-                        cur_type = if (tinst2.op == .TypeArray or tinst2.op == .TypeRuntimeArray or tinst2.op == .TypeMatrix or tinst2.op == .TypeVector) tinst2.words[2] else null;
-                    }
-                }
+                if (cur_type) |tid2| cur_type = elemType(m, tid2);
             }
         } else {
             try w.print("[{s}]", .{names.get(index_id) orelse "i"});
-            if (cur_type) |tid2| {
-                if (getDef(m, tid2)) |tinst2| {
-                    cur_type = if (tinst2.op == .TypeArray or tinst2.op == .TypeRuntimeArray or tinst2.op == .TypeMatrix or tinst2.op == .TypeVector) tinst2.words[2] else null;
-                }
-            }
+            if (cur_type) |tid2| cur_type = elemType(m, tid2);
         }
     }
 }
