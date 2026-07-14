@@ -834,7 +834,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
 /// #177 Item 1's inlined Zig structs). Scalar/vector/matrix/sampler members
 /// carry their spirv-cross spelling in `type` (`float`/`vec4`/`mat4`/...).
 pub fn toJson(alloc: std.mem.Allocator, res: *const ShaderResources) ![]u8 {
-    var buf = std.ArrayList(u8){};
+    var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(alloc);
     const w = JsonWriter{ .alloc = alloc, .buf = &buf };
 
@@ -859,7 +859,7 @@ pub fn toJson(alloc: std.mem.Allocator, res: *const ShaderResources) ![]u8 {
 
     // types map — collect every distinct struct type referenced by any buffer.
     {
-        var collected = std.ArrayList(StructType){};
+        var collected: std.ArrayList(StructType) = .empty;
         defer collected.deinit(alloc);
         for (res.uniform_buffers) |r| try collectStructs(alloc, &collected, r.type_id, r.type_name, r.members);
         for (res.storage_buffers) |r| try collectStructs(alloc, &collected, r.type_id, r.type_name, r.members);

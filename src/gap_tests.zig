@@ -1763,7 +1763,7 @@ test "gap: textureGatherOffsets with NON-const offsets array is an honest error 
 /// Collect the `Format` operand of every `OpTypeImage` whose `Sampled` operand
 /// is 2 (a storage image). Caller owns the returned slice.
 fn collectStorageImageFormats(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
-    var out: std.ArrayListUnmanaged(u32) = .{};
+    var out: std.ArrayListUnmanaged(u32) = .empty;
     errdefer out.deinit(alloc);
     var i: usize = 5;
     while (i < words.len) {
@@ -1802,7 +1802,7 @@ fn firstImageArrayedForDim(words: []const u32, dim: u32) ?u32 {
 /// resolves to `OpTypeInt` (an `i*` sampler) and whose `Dim` equals `dim`.
 fn firstIntImageArrayedForDim(words: []const u32, dim: u32) ?u32 {
     // Pass 1: collect all OpTypeInt result IDs.
-    var int_ids: std.ArrayListUnmanaged(u32) = .{};
+    var int_ids: std.ArrayListUnmanaged(u32) = .empty;
     defer int_ids.deinit(testing.allocator);
     var i: usize = 5;
     while (i < words.len) {
@@ -1949,7 +1949,7 @@ fn imageDimArrayedOfType(words: []const u32, type_id: u32) ?DimArrayed {
 /// type, so this tells us which Dim/Arrayed each extraction claims. The
 /// undefined-id / clobber bug makes distinct sources collapse or point at id 0.
 fn collectOpImageDimArrayed(alloc: std.mem.Allocator, words: []const u32) ![]DimArrayed {
-    var out: std.ArrayListUnmanaged(DimArrayed) = .{};
+    var out: std.ArrayListUnmanaged(DimArrayed) = .empty;
     errdefer out.deinit(alloc);
     var i: usize = 5;
     while (i < words.len) {
@@ -1976,7 +1976,7 @@ fn collectOpImageDimArrayed(alloc: std.mem.Allocator, words: []const u32) ![]Dim
 /// extraction claims. The clobber bug makes two distinct-Arrayed sources both
 /// point at the same OpTypeImage.
 fn collectOpImageArrayed(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
-    var out: std.ArrayListUnmanaged(u32) = .{};
+    var out: std.ArrayListUnmanaged(u32) = .empty;
     errdefer out.deinit(alloc);
     var i: usize = 5;
     while (i < words.len) {
