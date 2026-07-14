@@ -53,6 +53,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Zig 0.15.2 cannot link libSystem against the Xcode 16 SDK the runner
+      # selects by default (every libc symbol comes back "undefined", starting
+      # with __availability_version_check). Point the toolchain at the Command
+      # Line Tools SDK, which Zig 0.15.2 links cleanly. Applies to every later
+      # step via GITHUB_ENV. The ls is a diagnostic if the image layout changes.
+      - name: Use Command Line Tools SDK (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ls /Library/Developer/CommandLineTools/SDKs || true
+          echo "DEVELOPER_DIR=/Library/Developer/CommandLineTools" >> "$GITHUB_ENV"
+
+      # Install the oracle validators so the differential tests (wgsl_tests via
+      # glslang, correctness_tests via spirv-val) actually run instead of taking
+      # their tool-absent SkipZigTest path. Linux only: apt has both; the other
+      # OSes keep skipping (spirv-val is covered separately by the conformance
+      # job) so we avoid the heavier per-OS SDK installs here.
+      - name: Install oracle validators (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools spirv-tools
+
       - name: Install Zig ${{ matrix.zig }}
         uses: mlugg/setup-zig@v2
         with:
@@ -143,6 +165,10 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # See build-test: Zig 0.15.2 needs the Command Line Tools SDK on macOS.
+      - name: Use Command Line Tools SDK (macOS)
+        if: runner.os == 'macOS'
+        run: echo "DEVELOPER_DIR=/Library/Developer/CommandLineTools" >> "$GITHUB_ENV"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2

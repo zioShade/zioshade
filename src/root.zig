@@ -1090,14 +1090,18 @@ pub fn reflectGLSL(alloc: std.mem.Allocator, source: [:0]const u8, options: Comp
 pub fn validateSPIRV(alloc: std.mem.Allocator, spirv_words: []const u32) !bool {
     // Stage the words in a uniquely-named temp file under the system temp dir and
     // hand spirv-val its absolute path (a spawned child resolves an absolute path
-    // regardless of cwd). Writing under /tmp rather than the caller's cwd keeps
-    // this working when the cwd is read-only: a failed write there would `catch
-    // return false`, but per the doc comment `false` means "spirv-val not found",
-    // so a cwd write error would be misreported as a missing tool. Deliberately
-    // avoids realpath and any test-only filesystem infra (tmpDir/testing.io) so
-    // this one public entry point works identically from tests and the CLI.
+    // regardless of cwd). Writing under the OS temp dir rather than the caller's
+    // cwd keeps this working when the cwd is read-only: a failed write there would
+    // `catch return false`, but per the doc comment `false` means "spirv-val not
+    // found", so a cwd write error would be misreported as a missing tool. The
+    // temp dir comes from compat.tempFilePath so the path is valid on Windows too
+    // (a hardcoded "/tmp" is not). Deliberately avoids realpath and any test-only
+    // filesystem infra (tmpDir/testing.io) so this one public entry point works
+    // identically from tests and the CLI.
     const rand = compat.randomInt(u64);
-    const name = try std.fmt.allocPrint(alloc, "/tmp/.zioshade-val-{x}.spv", .{rand});
+    const base = try std.fmt.allocPrint(alloc, ".zioshade-val-{x}.spv", .{rand});
+    defer alloc.free(base);
+    const name = try compat.tempFilePath(alloc, base);
     defer alloc.free(name);
 
     const bytes = std.mem.sliceAsBytes(spirv_words);
