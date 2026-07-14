@@ -11,6 +11,13 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32, descriptor_set: u32 = 0 };
+
+// A loose (non-block) uniform gathered into the synthesized `_Globals` block
+// (#417). The synthesized block itself is represented as a CbufferDecl named
+// "_Globals" with type_id 0 (no backing SPIR-V struct), so it flows through the
+// param/call/argument-buffer plumbing like any other uniform block; only its
+// struct-member emission is special-cased.
+const LooseUniform = struct { name: []const u8, type_id: u32 };
 /// `is_depth` marks a comparison/shadow sampler (its OpTypeImage Depth operand
 /// is 1, e.g. `sampler2DShadow`). Such a texture's MSL `.sample_compare` /
 /// `.gather_compare` methods are members of `depth2d<float>`, NOT
@@ -1824,6 +1831,8 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
 
     var cbuffers = std.ArrayList(CbufferDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
     defer cbuffers.deinit(aa);
+    var loose_uniforms = std.ArrayList(LooseUniform).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer loose_uniforms.deinit(aa);
     var textures = std.ArrayList(TextureDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
     defer textures.deinit(aa);
     // Per-storage-image read/write usage → picks the MSL access:: qualifier.
@@ -1835,7 +1844,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // buffer). Collected here so collectResources can suppress the suffix for them.
     var atomic_images = try collectAtomicImages(&module, aa);
     defer atomic_images.deinit();
-    collectResources(&module, &names, &decs, &cbuffers, &textures, &img_access, &atomic_images, aa);
+    collectResources(&module, &names, &decs, &cbuffers, &textures, &loose_uniforms, &img_access, &atomic_images, aa);
 
     // Stage inputs (layout(location) in ...). Collected with their ORIGINAL
     // names BEFORE any body-emit rename, so the `main0_in` struct fields use
@@ -1933,6 +1942,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     var emitted_names_msl = std.StringHashMap(void).init(aa);
     defer emitted_names_msl.deinit();
     for (cbuffers.items) |cb| {
+        // The synthesized _Globals block (type_id 0) has no backing SPIR-V struct
+        // to forward-declare its members from; skip it here (#417).
+        if (cb.type_id == 0) continue;
         // Propagate errors (not `catch {}`): these forward decls now emit full
         // std140/std430 member layouts via emitStructMembers, which can honest-
         // error on an unsupported member. Swallowing it would write a truncated
@@ -1945,7 +1957,16 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // Emit uniform blocks as structs
     for (cbuffers.items) |cb| {
         try w.print("struct {s}\n{{\n", .{cb.name});
-        try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa, &member_offsets, &decs);
+        if (cb.type_id == 0) {
+            // Synthesized _Globals block: members come from the gathered loose
+            // uniforms, not a SPIR-V struct type (#417).
+            for (loose_uniforms.items) |lu| {
+                const mt = mslType(&module, lu.type_id, &names, aa) catch "float";
+                try w.print("    {s} {s};\n", .{ mt, lu.name });
+            }
+        } else {
+            try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa, &member_offsets, &decs);
+        }
         try w.writeAll("};\n\n");
     }
 
@@ -2527,7 +2548,7 @@ fn collectMemberOffsets(m: *const ParsedModule, offsets: *std.AutoHashMap(Member
     }
 }
 
-fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), img_access: *const std.AutoHashMap(u32, ImageAccess), atomic_images: *const std.AutoHashMap(u32, void), alloc: std.mem.Allocator) void {
+fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), loose: *std.ArrayList(LooseUniform), img_access: *const std.AutoHashMap(u32, ImageAccess), atomic_images: *const std.AutoHashMap(u32, void), alloc: std.mem.Allocator) void {
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const rt = inst.words[1];
@@ -2541,6 +2562,18 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                 if (hasDec(decs, rid, .buffer_block)) continue;
                 const binding = getDecVal(decs, rid, .binding) orelse 0;
                 const set = getDecVal(decs, rid, .descriptor_set) orelse 0;
+                // A loose (non-block) uniform points at a scalar/vector/matrix/array,
+                // not a struct. Gather it into the synthesized _Globals block and
+                // qualify body references as `_Globals_1.<name>` (#417); MSL has no
+                // bare global uniform, so an empty per-uniform struct loses the value.
+                const pti = getDef(m, pt);
+                if (pti == null or pti.?.op != .TypeStruct) {
+                    const orig = alloc.dupe(u8, names.get(rid) orelse "u") catch continue;
+                    loose.append(alloc, .{ .name = orig, .type_id = pt }) catch {};
+                    const qualified = std.fmt.allocPrint(alloc, "_Globals_1.{s}", .{orig}) catch continue;
+                    _ = names.put(rid, qualified) catch {};
+                    continue;
+                }
                 cb.append(alloc, .{ .name = names.get(rid) orelse "Globals", .type_id = pt, .binding = binding, .descriptor_set = set }) catch {};
             },
             .UniformConstant => {
@@ -2578,6 +2611,16 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
             },
             else => {},
         }
+    }
+    // Represent the synthesized default block as one cbuffer entry so it flows
+    // through the param/call/argument-buffer plumbing like a normal UBO. type_id
+    // 0 marks it as backed by `loose` rather than a SPIR-V struct (#417).
+    if (loose.items.len > 0) {
+        var b: u32 = 0;
+        for (cb.items) |c| {
+            if (c.binding >= b) b = c.binding + 1;
+        }
+        cb.append(alloc, .{ .name = "_Globals", .type_id = 0, .binding = b, .descriptor_set = 0 }) catch {};
     }
 }
 
