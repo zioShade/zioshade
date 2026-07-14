@@ -36,24 +36,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macOS is pinned to macos-13, not macos-latest: Zig 0.15.2 cannot link
-        # libSystem against the macOS 15/26 SDKs the newer runner images ship
+        # 0.15.2 is the hard floor, tested on Linux and Windows. macOS is
+        # deliberately absent from the 0.15.2 row: Zig 0.15.2 cannot link
+        # libSystem against the macOS 15/26 SDKs the current runner images ship
         # (every libc symbol comes back undefined, led by
-        # __availability_version_check, and those images carry no older SDK to
-        # fall back to). macos-13 ships the macOS 13/14 SDK Zig 0.15.2 links
-        # cleanly. Revisit when the Zig floor moves past 0.15.2.
-        os: [ubuntu-latest, macos-13, windows-latest]
-        # Supported floor and tested window. 0.15.2 is the hard floor and is
-        # required on every OS. Newer Zig versions are added here as they ship;
-        # keep the last three releases and drop the oldest per the README policy.
+        # __availability_version_check), and the one image with an old-enough SDK
+        # (macos-13) has effectively no runners available. macOS is instead
+        # covered on 0.16 below, whose macho linker handles the modern SDK.
+        os: [ubuntu-latest, windows-latest]
         zig: ["0.15.2"]
         include:
           # 0.16 is a required check: the library, CLI, C ABI, and full test
           # suite build and pass on it (the std.Io / process-API divergence is
-          # centralized in src/compat.zig). Linux for now; broaden to macOS and
-          # Windows once observed green. The only 0.16 holdout is the standalone
-          # dev tools under tools/ (not built by these steps), tracked in #424.
+          # centralized in src/compat.zig). Runs on Linux and, as the macOS
+          # coverage, macos-latest. The only 0.16 holdout is the standalone dev
+          # tools under tools/ (not built by these steps), tracked in #424.
           - os: ubuntu-latest
+            zig: "0.16.0"
+          - os: macos-latest
             zig: "0.16.0"
     runs-on: ${{ matrix.os }}
     steps:
@@ -156,15 +156,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # macos-13 for the same reason as build-test: Zig 0.15.2 links libSystem
-        # only against the older SDK that image ships.
-        os: [ubuntu-latest, macos-13, windows-latest]
+        # Same toolchain split as build-test: 0.15.2 on Linux and Windows, and
+        # macOS on 0.16 (Zig 0.15.2 cannot link the modern macOS SDK, and the
+        # old-SDK macos-13 image has no runners available).
+        include:
+          - os: ubuntu-latest
+            zig: "0.15.2"
+          - os: windows-latest
+            zig: "0.15.2"
+          - os: macos-latest
+            zig: "0.16.0"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
-          version: 0.15.2
+          version: ${{ matrix.zig }}
           use-cache: true
       - name: Build C ABI library and example
         run: |
