@@ -36,7 +36,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macOS is pinned to macos-13, not macos-latest: Zig 0.15.2 cannot link
+        # libSystem against the macOS 15/26 SDKs the newer runner images ship
+        # (every libc symbol comes back undefined, led by
+        # __availability_version_check, and those images carry no older SDK to
+        # fall back to). macos-13 ships the macOS 13/14 SDK Zig 0.15.2 links
+        # cleanly. Revisit when the Zig floor moves past 0.15.2.
+        os: [ubuntu-latest, macos-13, windows-latest]
         # Supported floor and tested window. 0.15.2 is the hard floor and is
         # required on every OS. Newer Zig versions are added here as they ship;
         # keep the last three releases and drop the oldest per the README policy.
@@ -52,17 +58,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-
-      # Zig 0.15.2 cannot link libSystem against the Xcode 16 SDK the runner
-      # selects by default (every libc symbol comes back "undefined", starting
-      # with __availability_version_check). Point the toolchain at the Command
-      # Line Tools SDK, which Zig 0.15.2 links cleanly. Applies to every later
-      # step via GITHUB_ENV. The ls is a diagnostic if the image layout changes.
-      - name: Use Command Line Tools SDK (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          ls /Library/Developer/CommandLineTools/SDKs || true
-          echo "DEVELOPER_DIR=/Library/Developer/CommandLineTools" >> "$GITHUB_ENV"
 
       # Install the oracle validators so the differential tests (wgsl_tests via
       # glslang, correctness_tests via spirv-val) actually run instead of taking
@@ -161,14 +156,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # macos-13 for the same reason as build-test: Zig 0.15.2 links libSystem
+        # only against the older SDK that image ships.
+        os: [ubuntu-latest, macos-13, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      # See build-test: Zig 0.15.2 needs the Command Line Tools SDK on macOS.
-      - name: Use Command Line Tools SDK (macOS)
-        if: runner.os == 'macOS'
-        run: echo "DEVELOPER_DIR=/Library/Developer/CommandLineTools" >> "$GITHUB_ENV"
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
