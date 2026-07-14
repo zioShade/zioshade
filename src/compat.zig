@@ -102,6 +102,13 @@ fn ensurePrng() void {
             var seed = addr ^ 0x9e3779b97f4a7c15;
             seed = seed *% 0xff51afd7ed558ccd;
             seed ^= counter;
+            // Cross-process entropy: with ASLR disabled two processes can share
+            // both the stack address AND counter=0, yielding an identical seed and
+            // a temp-file collision. Mixing in the current thread id breaks the
+            // tie: on Linux the main thread's id is the pid, so it varies per
+            // process. Cross-platform via std.Thread; no libc dependency.
+            const tid = std.Thread.getCurrentId();
+            seed ^= (@as(u64, tid) *% 0x100000001b3);
             seed = seed *% 0xc4ceb9fe1a85ec53;
             prng_state = std.Random.DefaultPrng.init(seed);
         }
@@ -333,7 +340,7 @@ pub fn fileReadToEndAlloc(io: IoType, file: File, alloc: std.mem.Allocator, limi
     if (is_0_16) {
         var buf: [4096]u8 = undefined;
         var file_reader = file.reader(io, &buf);
-        return try file_reader.interface.allocRemaining(alloc, .unlimited);
+        return try file_reader.interface.allocRemaining(alloc, @enumFromInt(limit));
     } else {
         return try file.readToEndAlloc(alloc, limit);
     }
@@ -342,11 +349,7 @@ pub fn fileReadToEndAlloc(io: IoType, file: File, alloc: std.mem.Allocator, limi
 // ---- Walker ----
 
 pub fn dirWalk(dir: Dir, alloc: std.mem.Allocator) !if (is_0_16) std.Io.Dir.Walker else std.fs.Dir.Walker {
-    if (is_0_16) {
-        return dir.walk(alloc);
-    } else {
-        return dir.walk(alloc);
-    }
+    return dir.walk(alloc);
 }
 
 pub fn walkerNext(io: IoType, walker: anytype) !?@TypeOf(walker.*).Entry {
@@ -392,6 +395,7 @@ pub fn argsAlloc(alloc: std.mem.Allocator) !Args {
         }
         while (it.next()) |arg| {
             const owned = try alloc.dupeZ(u8, arg);
+            errdefer alloc.free(owned);
             try list.append(alloc, owned);
         }
         return try list.toOwnedSlice(alloc);
@@ -434,10 +438,7 @@ pub fn processRun(io: IoType, alloc: std.mem.Allocator, argv: []const []const u8
         // no_expand; 0.16's new spawn takes argv[0] literally unless told to
         // expand, so without this every bare-name oracle spawn returns
         // FileNotFound and callers silently skip. COMPAT(0.15).
-        const result = std.process.run(alloc, io, .{ .argv = argv, .expand_arg0 = .expand }) catch |err| {
-            if (err == error.FileNotFound) return error.FileNotFound;
-            return err;
-        };
+        const result = try std.process.run(alloc, io, .{ .argv = argv, .expand_arg0 = .expand });
         return .{
             .term = .{ .exited = switch (result.term) {
                 .exited => |code| code,
@@ -464,13 +465,6 @@ pub fn processRun(io: IoType, alloc: std.mem.Allocator, argv: []const []const u8
 
 // ---- Tooling paths ----
 
-/// Resolve a Vulkan SDK CLI tool by basename. Prefer `$VULKAN_SDK/Bin/<tool>[.exe]`
-/// (`.exe` appended only on Windows); fall back to the bare name on PATH when
-/// VULKAN_SDK is unset or set-but-empty. Caller owns the returned slice.
-///
-/// Keeps machine-specific absolute SDK paths out of the tree so tests/tools stay
-/// portable across machines / CI / non-Windows. Callers that spawn the result
-/// should degrade a spawn failure to a skip rather than a hard failure.
 /// Read an environment variable, caller-owned, or null if unset or unreadable.
 /// Zig 0.16 removed std.process.getEnvVarOwned (env access moved behind std.Io),
 /// so this centralizes the split and degrades to null on 0.16, where callers
@@ -484,6 +478,13 @@ pub fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) ?[]const u8 {
     }
 }
 
+/// Resolve a Vulkan SDK CLI tool by basename. Prefer `$VULKAN_SDK/Bin/<tool>[.exe]`
+/// (`.exe` appended only on Windows); fall back to the bare name on PATH when
+/// VULKAN_SDK is unset or set-but-empty. Caller owns the returned slice.
+///
+/// Keeps machine-specific absolute SDK paths out of the tree so tests/tools stay
+/// portable across machines / CI / non-Windows. Callers that spawn the result
+/// should degrade a spawn failure to a skip rather than a hard failure.
 pub fn resolveVulkanTool(allocator: std.mem.Allocator, tool: []const u8) ![]const u8 {
     const exe = if (builtin.os.tag == .windows)
         try std.fmt.allocPrint(allocator, "{s}.exe", .{tool})
@@ -566,4 +567,39 @@ pub fn StackBufWriter(comptime size: usize) type {
             return self.pos >= self.buf.len;
         }
     };
+}
+
+// ---- Tests ----
+
+test "resolveVulkanTool falls back to bare tool name without VULKAN_SDK" {
+    // With VULKAN_SDK unset (or set-but-empty), and on 0.16 where env access is
+    // unavailable without an Io context, resolution degrades to the bare name.
+    const alloc = std.testing.allocator;
+    const got = try resolveVulkanTool(alloc, "spirv-val");
+    defer alloc.free(got);
+    const expected = if (builtin.os.tag == .windows) "spirv-val.exe" else "spirv-val";
+    try std.testing.expectEqualStrings(expected, got);
+}
+
+test "absolute file helpers round-trip bytes under the temp dir" {
+    const alloc = std.testing.allocator;
+    const rand = randomInt(u64);
+    const path = try std.fmt.allocPrint(alloc, "/tmp/.zioshade-compat-test-{x}.bin", .{rand});
+    defer alloc.free(path);
+
+    const payload = "zioshade compat round-trip\x00\x01\x02\xff";
+    try writeFileAbsolute(alloc, path, payload);
+    defer deleteFileAbsolute(alloc, path) catch {};
+
+    const got = try readFileAbsolute(alloc, path, 1 << 20);
+    defer alloc.free(got);
+    try std.testing.expectEqualStrings(payload, got);
+}
+
+test "randomInt advances the PRNG within a process" {
+    // Two draws in the same process must differ (the PRNG advances), otherwise
+    // callers naming temp files would collide with themselves.
+    const a = randomInt(u64);
+    const b = randomInt(u64);
+    try std.testing.expect(a != b);
 }

@@ -1088,18 +1088,21 @@ pub fn reflectGLSL(alloc: std.mem.Allocator, source: [:0]const u8, options: Comp
 /// Validate a SPIR-V binary using spirv-val. Returns true if validation passed,
 /// false if spirv-val is not found on PATH.
 pub fn validateSPIRV(alloc: std.mem.Allocator, spirv_words: []const u32) !bool {
-    // Write the words to a uniquely-named temp file in the current directory,
-    // then hand spirv-val its relative name: a spawned child inherits our cwd,
-    // so the relative path resolves for it. Deliberately avoids realpath and any
-    // test-only filesystem infra (tmpDir/testing.io) so this one public entry
-    // point works identically from the library tests and the installed CLI.
+    // Stage the words in a uniquely-named temp file under the system temp dir and
+    // hand spirv-val its absolute path (a spawned child resolves an absolute path
+    // regardless of cwd). Writing under /tmp rather than the caller's cwd keeps
+    // this working when the cwd is read-only: a failed write there would `catch
+    // return false`, but per the doc comment `false` means "spirv-val not found",
+    // so a cwd write error would be misreported as a missing tool. Deliberately
+    // avoids realpath and any test-only filesystem infra (tmpDir/testing.io) so
+    // this one public entry point works identically from tests and the CLI.
     const rand = compat.randomInt(u64);
-    const name = try std.fmt.allocPrint(alloc, ".zioshade-val-{x}.spv", .{rand});
+    const name = try std.fmt.allocPrint(alloc, "/tmp/.zioshade-val-{x}.spv", .{rand});
     defer alloc.free(name);
 
     const bytes = std.mem.sliceAsBytes(spirv_words);
-    compat.writeFileByPath(alloc, name, bytes) catch return false;
-    defer compat.deleteFileByPath(alloc, name) catch {};
+    compat.writeFileAbsolute(alloc, name, bytes) catch return false;
+    defer compat.deleteFileAbsolute(alloc, name) catch {};
 
     var main_io = compat.MainIo().init(alloc);
     defer main_io.deinit();
