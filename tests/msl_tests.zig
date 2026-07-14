@@ -4166,3 +4166,48 @@ test "msl: raymarcher with inlined-function loops has no use-before-declaration 
     try assertContains(out, "while (true)");
     try assertNoUseBeforeDecl(out);
 }
+
+test "T417.LOOSE: loose non-block uniforms are gathered into struct _Globals" {
+    // #417: MSL has no bare global uniform, so loose (non-block) uniforms are
+    // synthesized into a single `struct _Globals` bound as `_Globals_1`. Body
+    // references must be qualified as `_Globals_1.<name>`, never a bare
+    // undefined `iResolution` nor an empty per-uniform `struct iResolution {}`.
+    const source =
+        \\#version 430
+        \\uniform vec2 iResolution;
+        \\uniform float iTime;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(iResolution / iTime, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "struct _Globals");
+    try assertContains(msl, "float2 iResolution");
+    try assertContains(msl, "_Globals_1.iResolution");
+    // No stray empty per-uniform struct named after the loose uniform.
+    try assertNotContains(msl, "struct iResolution");
+}
+
+test "T417.SSBO: _Globals buffer slot does not collide with an SSBO" {
+    // #417 correctness bug: in MSL, UBOs and SSBOs share the [[buffer(N)]]
+    // index space. When a loose uniform coexists with an SSBO, _Globals must
+    // take a slot ABOVE the SSBO's binding, not `max(cbuffer)+1` (which was 0
+    // and aliased the SSBO at binding 0 onto the same [[buffer(0)]]).
+    const source =
+        \\#version 430
+        \\layout(local_size_x = 1) in;
+        \\uniform vec2 iResolution;
+        \\layout(std430, binding = 0) buffer B { vec4 data[]; };
+        \\void main() {
+        \\    data[0] = vec4(iResolution, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // The SSBO keeps [[buffer(0)]]; _Globals must NOT also claim buffer(0).
+    try assertContains(msl, "[[buffer(0)]]");
+    try assertContains(msl, "_Globals_1 [[buffer(1)]]");
+    try assertNotContains(msl, "_Globals_1 [[buffer(0)]]");
+}
