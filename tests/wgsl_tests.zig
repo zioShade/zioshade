@@ -18,28 +18,21 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}.spv", .{name});
     defer alloc.free(tmp_spv);
 
-    {
-        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
-        defer src_file.close();
-        try src_file.writeAll(std.mem.sliceTo(source, 0));
-    }
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
 
     const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
-    }) catch return error.SkipZigTest;
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
     // If glslang rejects the source the `.spv` is never written; skip rather than
     // surface a confusing FileNotFound from the open below (mirrors the exit-code
     // guard in nagaValidateOrSkip).
-    if (!(result.term == .Exited and result.term.Exited == 0)) return error.SkipZigTest;
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
 
-    const spv_file = try std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only });
-    defer spv_file.close();
-    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    const data = try zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024);
     // Convert bytes to u32 words with proper alignment
     const words_len = data.len / 4;
     const words = try alloc.alloc(u32, words_len);
@@ -60,28 +53,21 @@ fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/wgsl_test_{s}_vert.spv", .{name});
     defer alloc.free(tmp_spv);
 
-    {
-        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
-        defer src_file.close();
-        try src_file.writeAll(std.mem.sliceTo(source, 0));
-    }
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
 
     const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
-    }) catch return error.SkipZigTest;
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
     // If glslang rejects the source the `.spv` is never written; skip rather than
     // surface a confusing FileNotFound from the open below (mirrors the exit-code
     // guard in nagaValidateOrSkip).
-    if (!(result.term == .Exited and result.term.Exited == 0)) return error.SkipZigTest;
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
 
-    const spv_file = try std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only });
-    defer spv_file.close();
-    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    const data = try zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024);
     const words_len = data.len / 4;
     const words = try alloc.alloc(u32, words_len);
     for (0..words_len) |i| {
@@ -173,27 +159,22 @@ fn rewriteFirstOpcode(words: []const u32, from_op: u16, to_op: u16) ![]u32 {
 // while the output is still invalid. naga is the ground truth. When naga isn't
 // installed we SKIP rather than fail, keeping `zig build test` hermetic.
 fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
-    const probe = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "naga", "--version" },
-    }) catch return error.SkipZigTest;
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const probe = zioshade.compat.processRun(main_io.io(), alloc, &.{ "naga", "--version" }) catch return error.SkipZigTest;
     alloc.free(probe.stdout);
     alloc.free(probe.stderr);
-    if (!(probe.term == .Exited and probe.term.Exited == 0)) return error.SkipZigTest;
+    if (!((probe.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "out.wgsl", .data = wgsl });
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try tmp.dir.realpath("out.wgsl", &path_buf);
+    const tmp_path = try std.fmt.allocPrint(alloc, "/tmp/zs_wgsl_{x}.wgsl", .{zioshade.compat.randomInt(u64)});
+    defer alloc.free(tmp_path);
+    defer zioshade.compat.deleteFileAbsolute(alloc, tmp_path) catch {};
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_path, wgsl);
 
-    const result = try std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "naga", "--input-kind", "wgsl", tmp_path },
-    });
+    const result = try zioshade.compat.processRun(main_io.io(), alloc, &.{ "naga", "--input-kind", "wgsl", tmp_path });
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
-    if (result.term == .Exited and result.term.Exited == 0) return;
+    if ((result.term.exitedCode() orelse 1) == 0) return;
     std.debug.print("naga REJECTED WGSL for [{s}]:\n{s}\n{s}\n--- WGSL ---\n{s}\n", .{ label, result.stdout, result.stderr, wgsl });
     return error.NagaValidationFailed;
 }
@@ -203,27 +184,22 @@ fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
 // spirv-val is missing, so asserting on it directly fails spuriously on
 // machines without the Vulkan SDK and `zig build test` stops being hermetic.
 fn spirvValValidateOrSkip(spirv: []const u32, label: []const u8) !void {
-    const probe = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "spirv-val", "--version" },
-    }) catch return error.SkipZigTest;
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const probe = zioshade.compat.processRun(main_io.io(), alloc, &.{ "spirv-val", "--version" }) catch return error.SkipZigTest;
     alloc.free(probe.stdout);
     alloc.free(probe.stderr);
-    if (!(probe.term == .Exited and probe.term.Exited == 0)) return error.SkipZigTest;
+    if (!((probe.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "out.spv", .data = std.mem.sliceAsBytes(spirv) });
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try tmp.dir.realpath("out.spv", &path_buf);
+    const tmp_path = try std.fmt.allocPrint(alloc, "/tmp/zs_wgsl_{x}.spv", .{zioshade.compat.randomInt(u64)});
+    defer alloc.free(tmp_path);
+    defer zioshade.compat.deleteFileAbsolute(alloc, tmp_path) catch {};
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_path, std.mem.sliceAsBytes(spirv));
 
-    const result = try std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "spirv-val", tmp_path },
-    });
+    const result = try zioshade.compat.processRun(main_io.io(), alloc, &.{ "spirv-val", tmp_path });
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
-    if (result.term == .Exited and result.term.Exited == 0) return;
+    if ((result.term.exitedCode() orelse 1) == 0) return;
     std.debug.print("spirv-val REJECTED SPIR-V for [{s}]:\n{s}\n{s}\n", .{ label, result.stdout, result.stderr });
     return error.SpirvValValidationFailed;
 }
@@ -252,18 +228,18 @@ fn compileCompToWgsl(source: [:0]const u8) ![]const u8 {
 /// frontend. Used for cases whose cross-function structure zioshade's inliner
 /// collapses for small inline shaders — the real fixture preserves the helper.
 fn compileFileToWgsl(path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const src = try file.readToEndAllocOptions(alloc, 1 << 20, null, .of(u8), 0);
+    const bytes = try zioshade.compat.readFileByPath(alloc, path, 1 << 20);
+    defer alloc.free(bytes);
+    const src = try alloc.dupeZ(u8, bytes);
     defer alloc.free(src);
     return compileToWgsl(src);
 }
 
 /// Same as compileFileToWgsl but compiles at the VERTEX stage (for `.vert` fixtures).
 fn compileFileVertToWgsl(path: []const u8) ![]const u8 {
-    const file = try std.fs.cwd().openFile(path, .{});
-    defer file.close();
-    const src = try file.readToEndAllocOptions(alloc, 1 << 20, null, .of(u8), 0);
+    const bytes = try zioshade.compat.readFileByPath(alloc, path, 1 << 20);
+    defer alloc.free(bytes);
+    const src = try alloc.dupeZ(u8, bytes);
     defer alloc.free(src);
     return compileVertToWgsl(src);
 }

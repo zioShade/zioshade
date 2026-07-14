@@ -17,7 +17,9 @@ const alloc = std.testing.allocator;
 
 /// Compile GLSL to SPIR-V using glslangValidator, return the SPIR-V words
 fn compileToSpirvViaGlslang(allocator: std.mem.Allocator, source: [:0]const u8, stage: zioshade.Stage) ![]u32 {
-    const io = compat.testIo();
+    var main_io = compat.MainIo().init(allocator);
+    defer main_io.deinit();
+    const io = main_io.io();
     const dir = compat.cwd();
 
     // Ensure .zig-cache exists
@@ -79,7 +81,9 @@ fn spirvCrossToGlsl(allocator: std.mem.Allocator, spirv: []const u32) ![]u8 {
 /// callers pass `false` for plain desktop GLSL (Vulkan semantics would otherwise
 /// keep `layout(binding=)` at every version and change the 420pack guard logic).
 fn spirvCrossToGlslVersion(allocator: std.mem.Allocator, spirv: []const u32, version: u32, vulkan_semantics: bool) ![]u8 {
-    const io = compat.testIo();
+    var main_io = compat.MainIo().init(allocator);
+    defer main_io.deinit();
+    const io = main_io.io();
     const dir = compat.cwd();
 
     // Write SPIR-V to temp file
@@ -506,7 +510,6 @@ test "cross-compare: nested loops with break" {
     try std.testing.expect(result.match);
 }
 
-
 test "cross-compare: branching with multiple conditions" {
     const source =
         \\#version 450
@@ -597,7 +600,9 @@ test "cross-compare: for loop with uniform bound" {
 /// compiles cleanly (exit 0). This is the strongest gate: glslang itself is the
 /// authority on which `#version`/`layout` combinations are legal.
 fn assertGlslangAccepts(allocator: std.mem.Allocator, name: []const u8, glsl: []const u8, stage: zioshade.Stage) !void {
-    const io = compat.testIo();
+    var main_io = compat.MainIo().init(allocator);
+    defer main_io.deinit();
+    const io = main_io.io();
     const dir = compat.cwd();
     compat.dirMakePath(io, dir, ".zig-cache") catch {};
 
@@ -971,7 +976,9 @@ test "glsl-version structural: vertex output location dropped below 410, kept at
 /// whether the OpTypeArray/OpConstantComposite layout is structurally valid.
 /// Skips (error.SkipZigTest) when spirv-val cannot be spawned at all.
 fn spirvValAccepts(allocator: std.mem.Allocator, spirv_words: []const u32) !bool {
-    const io = compat.testIo();
+    var main_io = compat.MainIo().init(allocator);
+    defer main_io.deinit();
+    const io = main_io.io();
     const dir = compat.cwd();
     compat.dirMakePath(io, dir, ".zig-cache") catch {};
 

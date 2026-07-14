@@ -1088,18 +1088,25 @@ pub fn reflectGLSL(alloc: std.mem.Allocator, source: [:0]const u8, options: Comp
 /// Validate a SPIR-V binary using spirv-val. Returns true if validation passed,
 /// false if spirv-val is not found on PATH.
 pub fn validateSPIRV(alloc: std.mem.Allocator, spirv_words: []const u32) !bool {
-    const io = compat.testIo();
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const tmpfile = try compat.dirCreateFile(io, tmp.dir, "shader.spv", .{});
-    defer compat.fileClose(io, tmpfile);
+    // Stage the words in a uniquely-named temp file under the system temp dir and
+    // hand spirv-val its absolute path (a spawned child resolves an absolute path
+    // regardless of cwd). Writing under /tmp rather than the caller's cwd keeps
+    // this working when the cwd is read-only: a failed write there would `catch
+    // return false`, but per the doc comment `false` means "spirv-val not found",
+    // so a cwd write error would be misreported as a missing tool. Deliberately
+    // avoids realpath and any test-only filesystem infra (tmpDir/testing.io) so
+    // this one public entry point works identically from tests and the CLI.
+    const rand = compat.randomInt(u64);
+    const name = try std.fmt.allocPrint(alloc, "/tmp/.zioshade-val-{x}.spv", .{rand});
+    defer alloc.free(name);
+
     const bytes = std.mem.sliceAsBytes(spirv_words);
-    try compat.fileWriteAll(io, tmpfile, bytes);
+    compat.writeFileAbsolute(alloc, name, bytes) catch return false;
+    defer compat.deleteFileAbsolute(alloc, name) catch {};
 
-    var path_buf: [compat.max_path_bytes]u8 = undefined;
-    const spv_path = try compat.fileRealpath(io, tmp.dir, "shader.spv", &path_buf);
-
-    const result = compat.processRun(io, alloc, &.{ "spirv-val", spv_path }) catch return false;
+    var main_io = compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = compat.processRun(main_io.io(), alloc, &.{ "spirv-val", name }) catch return false;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
     return (result.term.exitedCode() orelse 1) == 0;

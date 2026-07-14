@@ -179,7 +179,7 @@ test "G1: invalid SPIR-V magic returns error" {
 
 test "G1: too-short SPIR-V returns error" {
     const alloc = std.testing.allocator;
-    const short_spv = [_]u32{ 0x07230203 };
+    const short_spv = [_]u32{0x07230203};
     const result = zioshade.reflectSPIRV(alloc, &short_spv);
     try std.testing.expectError(error.InvalidSPIRV, result);
 }
@@ -1213,20 +1213,17 @@ fn spirvValOrSkip(spv: []const u32) !void {
     const tool = zioshade.compat.resolveVulkanTool(alloc, "spirv-val") catch return error.SkipZigTest;
     defer alloc.free(tool);
 
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    {
-        const f = try tmp.dir.createFile("m.spv", .{});
-        defer f.close();
-        try f.writeAll(std.mem.sliceAsBytes(spv));
-    }
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const spv_path = try tmp.dir.realpath("m.spv", &path_buf);
+    const spv_path = try std.fmt.allocPrint(alloc, "/tmp/zs_cor_{x}.spv", .{zioshade.compat.randomInt(u64)});
+    defer alloc.free(spv_path);
+    defer zioshade.compat.deleteFileAbsolute(alloc, spv_path) catch {};
+    try zioshade.compat.writeFileAbsolute(alloc, spv_path, std.mem.sliceAsBytes(spv));
 
-    const r = std.process.Child.run(.{ .allocator = alloc, .argv = &.{ tool, spv_path } }) catch return error.SkipZigTest;
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const r = zioshade.compat.processRun(main_io.io(), alloc, &.{ tool, spv_path }) catch return error.SkipZigTest;
     defer alloc.free(r.stdout);
     defer alloc.free(r.stderr);
-    if (!(r.term == .Exited and r.term.Exited == 0)) {
+    if (!((r.term.exitedCode() orelse 1) == 0)) {
         std.debug.print("spirv-val rejected the module:\n{s}\n{s}\n", .{ r.stdout, r.stderr });
         return error.TestSpirvValFailed;
     }

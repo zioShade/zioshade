@@ -1972,17 +1972,16 @@ test "#include with string literal" {
     // Use a per-process-unique filename so parallel test binaries (several import
     // preprocessor.zig and run this same test concurrently) cannot race on a shared
     // path: one process's `defer deleteFile` removing the file mid-read in another.
-    const token = std.crypto.random.int(u64);
+    const token = compat.randomInt(u64);
     const inc_name = try std.fmt.allocPrint(alloc, "test_include_helper_{x}.glsl", .{token});
     defer alloc.free(inc_name);
 
     // Create a temp include file
-    const cwd = std.fs.cwd();
-    cwd.writeFile(.{ .sub_path = inc_name, .data = "float helper_func() { return 1.0; }" }) catch |err| {
+    compat.writeFileByPath(alloc, inc_name, "float helper_func() { return 1.0; }") catch |err| {
         std.debug.print("SKIP: could not create include file: {}\n", .{err});
         return;
     };
-    defer cwd.deleteFile(inc_name) catch {};
+    defer compat.deleteFileByPath(alloc, inc_name) catch {};
 
     var pp = Preprocessor.init(alloc);
     defer pp.deinit();
@@ -2011,16 +2010,15 @@ test "#include cycle detection" {
 
     // Per-process-unique filename: parallel test binaries run this same test
     // concurrently and would otherwise race on a shared on-disk path.
-    const token = std.crypto.random.int(u64);
+    const token = compat.randomInt(u64);
     const inc_name = try std.fmt.allocPrint(alloc, "test_cycle_{x}.glsl", .{token});
     defer alloc.free(inc_name);
 
     // Create a file that includes itself (self-reference uses the same unique name)
     const file_data = try std.fmt.allocPrint(alloc, "#include \"{s}\"\nvoid main() {{}}", .{inc_name});
     defer alloc.free(file_data);
-    const cwd = std.fs.cwd();
-    cwd.writeFile(.{ .sub_path = inc_name, .data = file_data }) catch return;
-    defer cwd.deleteFile(inc_name) catch {};
+    compat.writeFileByPath(alloc, inc_name, file_data) catch return;
+    defer compat.deleteFileByPath(alloc, inc_name) catch {};
 
     var pp = Preprocessor.init(alloc);
     defer pp.deinit();
@@ -2042,14 +2040,13 @@ test "#pragma once prevents re-inclusion" {
     // Per-process-unique filename: parallel test binaries run this same test
     // concurrently and would otherwise race on a shared on-disk path (this is the
     // "pragma_once flake" that intermittently produced 1827/1829).
-    const token = std.crypto.random.int(u64);
+    const token = compat.randomInt(u64);
     const inc_name = try std.fmt.allocPrint(alloc, "test_pragma_once_{x}.h", .{token});
     defer alloc.free(inc_name);
 
     // Create a header file with #pragma once
-    const cwd = std.fs.cwd();
-    cwd.writeFile(.{ .sub_path = inc_name, .data = "#pragma once\nfloat ONCE_VAR = 1.0;\n" }) catch return;
-    defer cwd.deleteFile(inc_name) catch {};
+    compat.writeFileByPath(alloc, inc_name, "#pragma once\nfloat ONCE_VAR = 1.0;\n") catch return;
+    defer compat.deleteFileByPath(alloc, inc_name) catch {};
 
     var pp = Preprocessor.init(alloc);
     defer pp.deinit();

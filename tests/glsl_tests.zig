@@ -42,23 +42,16 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     defer alloc.free(tmp_src);
     const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/glsl_test_{s}.spv", .{name});
     defer alloc.free(tmp_spv);
-    {
-        const src_file = try std.fs.createFileAbsolute(tmp_src, .{});
-        defer src_file.close();
-        try src_file.writeAll(std.mem.sliceTo(source, 0));
-    }
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
     const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
     defer alloc.free(glslang);
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ glslang, "-V", tmp_src, "-o", tmp_spv },
-    }) catch return error.SkipZigTest;
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
-    const spv_file = std.fs.openFileAbsolute(tmp_spv, .{ .mode = .read_only }) catch return error.SkipZigTest;
-    defer spv_file.close();
-    const data = try spv_file.readToEndAlloc(alloc, 1024 * 1024);
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
     defer alloc.free(data);
     const words = try alloc.alloc(u32, data.len / 4);
     for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
