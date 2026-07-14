@@ -1961,7 +1961,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             // Synthesized _Globals block: members come from the gathered loose
             // uniforms, not a SPIR-V struct type (#417).
             for (loose_uniforms.items) |lu| {
-                const mt = mslType(&module, lu.type_id, &names, aa) catch "float";
+                const mt = try mslType(&module, lu.type_id, &names, aa);
                 try w.print("    {s} {s};\n", .{ mt, lu.name });
             }
         } else {
@@ -2549,6 +2549,16 @@ fn collectMemberOffsets(m: *const ParsedModule, offsets: *std.AutoHashMap(Member
 }
 
 fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), loose: *std.ArrayList(LooseUniform), img_access: *const std.AutoHashMap(u32, ImageAccess), atomic_images: *const std.AutoHashMap(u32, void), alloc: std.mem.Allocator) void {
+    // In MSL, UBOs and SSBOs share the single [[buffer(N)]] index space, so the
+    // synthesized _Globals block must be placed above the max binding over BOTH
+    // (a loose uniform colliding with an SSBO at the same slot would alias the
+    // same [[buffer(N)]]) (#417).
+    var max_buf_binding: ?u32 = null;
+    const trackBinding = struct {
+        fn f(cur: *?u32, b: u32) void {
+            if (cur.* == null or b > cur.*.?) cur.* = b;
+        }
+    }.f;
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const rt = inst.words[1];
@@ -2559,8 +2569,12 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         const pt = pi.words[3];
         switch (sc) {
             .Uniform => {
-                if (hasDec(decs, rid, .buffer_block)) continue;
                 const binding = getDecVal(decs, rid, .binding) orelse 0;
+                if (hasDec(decs, rid, .buffer_block)) {
+                    // SSBO (Uniform + BufferBlock): shares the MSL buffer index space.
+                    trackBinding(&max_buf_binding, binding);
+                    continue;
+                }
                 const set = getDecVal(decs, rid, .descriptor_set) orelse 0;
                 // A loose (non-block) uniform points at a scalar/vector/matrix/array,
                 // not a struct. Gather it into the synthesized _Globals block and
@@ -2568,13 +2582,22 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                 // bare global uniform, so an empty per-uniform struct loses the value.
                 const pti = getDef(m, pt);
                 if (pti == null or pti.?.op != .TypeStruct) {
-                    const orig = alloc.dupe(u8, names.get(rid) orelse "u") catch continue;
+                    // names.get returns arena-owned bytes that stay valid across the
+                    // later names.put (put replaces the map value, it does not free the
+                    // old backing bytes), so no dupe is needed (matches HLSL) (#417).
+                    const orig = names.get(rid) orelse "u";
                     loose.append(alloc, .{ .name = orig, .type_id = pt }) catch {};
                     const qualified = std.fmt.allocPrint(alloc, "_Globals_1.{s}", .{orig}) catch continue;
                     _ = names.put(rid, qualified) catch {};
                     continue;
                 }
+                trackBinding(&max_buf_binding, binding);
                 cb.append(alloc, .{ .name = names.get(rid) orelse "Globals", .type_id = pt, .binding = binding, .descriptor_set = set }) catch {};
+            },
+            .StorageBuffer => {
+                // SSBO (SPIR-V 1.3+ storage-class form): shares the MSL buffer
+                // index space with UBOs, so track it for _Globals slot selection.
+                trackBinding(&max_buf_binding, getDecVal(decs, rid, .binding) orelse 0);
             },
             .UniformConstant => {
                 const pei = getDef(m, pt) orelse continue;
@@ -2616,10 +2639,14 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
     // through the param/call/argument-buffer plumbing like a normal UBO. type_id
     // 0 marks it as backed by `loose` rather than a SPIR-V struct (#417).
     if (loose.items.len > 0) {
-        var b: u32 = 0;
+        // Place _Globals above the max binding over ALL uniform and storage
+        // buffers so it never aliases another buffer's [[buffer(N)]] slot (#417).
+        var b: u32 = if (max_buf_binding) |mb| mb + 1 else 0;
         for (cb.items) |c| {
             if (c.binding >= b) b = c.binding + 1;
         }
+        // descriptor_set = 0 is deliberate: _Globals is a synthetic host-bound
+        // block with no SPIR-V descriptor set of its own, so it lands in set 0.
         cb.append(alloc, .{ .name = "_Globals", .type_id = 0, .binding = b, .descriptor_set = 0 }) catch {};
     }
 }

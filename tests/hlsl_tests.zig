@@ -14965,3 +14965,27 @@ test "hlsl: raymarcher with inlined-function loops has no use-before-declaration
     try assertContains(out, "while (true)");
     try assertNoUseBeforeDecl(out);
 }
+
+test "T417.LOOSE: loose non-block uniforms are gathered into cbuffer _Globals" {
+    // #417: loose (non-block) uniforms have no HLSL bare-global equivalent, so
+    // they are synthesized into a single `cbuffer _Globals`. Regression guard:
+    // each loose uniform must land as a member of that cbuffer, and must NOT
+    // spawn a per-uniform `cbuffer iResolution {}` (which loses the value).
+    const source =
+        \\#version 430
+        \\uniform vec2 iResolution;
+        \\uniform float iTime;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    fragColor = vec4(iResolution / iTime, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "cbuffer _Globals");
+    try assertContains(hlsl, "float2 iResolution");
+    try assertContains(hlsl, "iTime");
+    // No stray empty per-uniform cbuffer named after the loose uniform.
+    try assertNotContains(hlsl, "cbuffer iResolution");
+    try assertNotContains(hlsl, "cbuffer iTime");
+}

@@ -804,7 +804,7 @@ pub fn spirvToHLSL(
         }
         try w.print("cbuffer _Globals : register(b{d})\n{{\n", .{lb});
         for (loose_uniforms.items) |lu| {
-            const ty = hlslType(&module, lu.type_id, &names, aa) catch "float";
+            const ty = try hlslType(&module, lu.type_id, &names, aa);
             try w.print("    {s} {s};\n", .{ ty, lu.name });
         }
         try w.writeAll("};\n\n");
