@@ -958,7 +958,10 @@ pub fn commonEmitOneStructForwardDecl(
             }
             try w.writeAll("};\n");
         },
-        .TypeArray => if (inst.words.len > 2) try commonEmitOneStructForwardDecl(ctx, names, inst.words[2], w, alloc, emitted, emitted_names, type_fn, member_fn),
+        // TypeRuntimeArray shares the element-type word layout with TypeArray
+        // (words[2]); without it an SSBO tail array `T elems[]` never recurses
+        // into T, so the struct is emitted after its first use (#418).
+        .TypeArray, .TypeRuntimeArray => if (inst.words.len > 2) try commonEmitOneStructForwardDecl(ctx, names, inst.words[2], w, alloc, emitted, emitted_names, type_fn, member_fn),
         .TypeMatrix, .TypeVector => if (inst.words.len > 2) try commonEmitOneStructForwardDecl(ctx, names, inst.words[2], w, alloc, emitted, emitted_names, type_fn, member_fn),
         else => {},
     }
