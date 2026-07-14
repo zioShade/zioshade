@@ -302,6 +302,53 @@ pub fn readFileAbsolute(alloc: std.mem.Allocator, abs_path: []const u8, limit: u
     }
 }
 
+/// Return the OS temporary directory as a caller-owned absolute path, with any
+/// trailing separator stripped. Honors TMPDIR/TEMP/TMP (CI runners and Windows
+/// set these to a user-writable location), falling back to a platform default
+/// when the environment is unreadable, as on 0.16 where env access sits behind
+/// std.Io and getEnvVarOwned degrades to null.
+///
+/// Tests and dev tools stage oracle input/output files here. A hardcoded "/tmp"
+/// is not a valid path on Windows (createFileAbsolute fails with FileNotFound /
+/// OBJECT_PATH_NOT_FOUND), which is why this indirection exists.
+pub fn tempDir(alloc: std.mem.Allocator) ![]u8 {
+    // On Windows the runner sets TEMP/TMP; POSIX conventionally uses TMPDIR.
+    const names = if (builtin.os.tag == .windows)
+        [_][]const u8{ "TEMP", "TMP" }
+    else
+        [_][]const u8{ "TMPDIR", "TMP" };
+    for (names) |name| {
+        if (getEnvVarOwned(alloc, name)) |val| {
+            defer alloc.free(val);
+            // Strip trailing separators so a subsequent path.join is clean.
+            const seps = if (builtin.os.tag == .windows) "\\/" else "/";
+            var end = val.len;
+            while (end > 0 and std.mem.indexOfScalar(u8, seps, val[end - 1]) != null) end -= 1;
+            if (end == 0) continue; // unset, empty, or all-separators: try next
+            return alloc.dupe(u8, val[0..end]);
+        }
+    }
+    return alloc.dupe(u8, if (builtin.os.tag == .windows) "C:\\Windows\\Temp" else "/tmp");
+}
+
+/// Join the OS temp directory with `name` into a caller-owned absolute path.
+/// Convenience over `tempDir` for the common "stage a file under temp" case;
+/// picks the correct path separator for the host so callers stay portable.
+pub fn tempFilePath(alloc: std.mem.Allocator, name: []const u8) ![]u8 {
+    const dir = try tempDir(alloc);
+    defer alloc.free(dir);
+    return std.fs.path.join(alloc, &.{ dir, name });
+}
+
+/// `tempFilePath` with a formatted basename, so the many test/tool sites that
+/// build a temp name from a shader name or random suffix stay a single call.
+/// The formatted basename is freed internally; only the joined path is returned.
+pub fn tempFilePathFmt(alloc: std.mem.Allocator, comptime fmt: []const u8, args: anytype) ![]u8 {
+    const base = try std.fmt.allocPrint(alloc, fmt, args);
+    defer alloc.free(base);
+    return tempFilePath(alloc, base);
+}
+
 /// Write `bytes` to stdout. Hides the 0.15/0.16 File + Io split: on 0.16 stdout
 /// writes need a std.Io context, constructed internally over the page allocator
 /// (fine for a CLI one-shot); on 0.15 this is a plain File.writeAll. Allocator
@@ -584,7 +631,9 @@ test "resolveVulkanTool falls back to bare tool name without VULKAN_SDK" {
 test "absolute file helpers round-trip bytes under the temp dir" {
     const alloc = std.testing.allocator;
     const rand = randomInt(u64);
-    const path = try std.fmt.allocPrint(alloc, "/tmp/.zioshade-compat-test-{x}.bin", .{rand});
+    const name = try std.fmt.allocPrint(alloc, ".zioshade-compat-test-{x}.bin", .{rand});
+    defer alloc.free(name);
+    const path = try tempFilePath(alloc, name);
     defer alloc.free(path);
 
     const payload = "zioshade compat round-trip\x00\x01\x02\xff";
@@ -594,6 +643,22 @@ test "absolute file helpers round-trip bytes under the temp dir" {
     const got = try readFileAbsolute(alloc, path, 1 << 20);
     defer alloc.free(got);
     try std.testing.expectEqualStrings(payload, got);
+}
+
+test "tempFilePath yields an absolute path with no doubled separator" {
+    const alloc = std.testing.allocator;
+    const dir = try tempDir(alloc);
+    defer alloc.free(dir);
+    // A trailing separator must have been stripped from the temp dir.
+    const seps = if (builtin.os.tag == .windows) "\\/" else "/";
+    try std.testing.expect(dir.len == 0 or std.mem.indexOfScalar(u8, seps, dir[dir.len - 1]) == null);
+
+    const path = try tempFilePath(alloc, "zioshade-probe.tmp");
+    defer alloc.free(path);
+    try std.testing.expect(std.fs.path.isAbsolute(path));
+    try std.testing.expect(std.mem.endsWith(u8, path, "zioshade-probe.tmp"));
+    // The join must not have produced an empty component (doubled separator).
+    try std.testing.expect(std.mem.indexOf(u8, path, "//") == null);
 }
 
 test "randomInt advances the PRNG within a process" {

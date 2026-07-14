@@ -44,9 +44,9 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
 /// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the zioshade frontend
 /// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
-    const tmp_src = try std.fmt.allocPrint(alloc, "/tmp/msl_test_{s}.frag", .{name});
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}.frag", .{name});
     defer alloc.free(tmp_src);
-    const tmp_spv = try std.fmt.allocPrint(alloc, "/tmp/msl_test_{s}.spv", .{name});
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}.spv", .{name});
     defer alloc.free(tmp_spv);
     try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
     const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
