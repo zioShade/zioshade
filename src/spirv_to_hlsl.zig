@@ -710,8 +710,10 @@ pub fn spirvToHLSL(
     defer cbuffers.deinit(aa);
     var textures = std.ArrayList(TextureDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
     defer textures.deinit(aa);
+    var loose_uniforms = std.ArrayList(LooseUniform).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer loose_uniforms.deinit(aa);
 
-    collectResources(&module, &names, &decorations, &cbuffers, &textures, aa);
+    collectResources(&module, &names, &decorations, &cbuffers, &textures, &loose_uniforms, aa);
 
     // Phase 3: emit HLSL
     var output = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
@@ -789,6 +791,23 @@ pub fn spirvToHLSL(
             try emitStructMembers(&module, &names, cb.type_id, cb.name, w, aa);
             try w.writeAll("};\n\n");
         }
+    }
+
+    // Synthesized default cbuffer for loose (non-block) uniforms (#417). cbuffer
+    // members live in global scope in HLSL, so the body's bare-name references
+    // resolve to them with no rewrite. Place it at the first register above any
+    // real cbuffer to avoid a collision.
+    if (loose_uniforms.items.len > 0) {
+        var lb: u32 = 0;
+        for (cbuffers.items) |cb| {
+            if (!cb.is_ssbo and cb.binding >= lb) lb = cb.binding + 1;
+        }
+        try w.print("cbuffer _Globals : register(b{d})\n{{\n", .{lb});
+        for (loose_uniforms.items) |lu| {
+            const ty = try hlslType(&module, lu.type_id, &names, aa);
+            try w.print("    {s} {s};\n", .{ ty, lu.name });
+        }
+        try w.writeAll("};\n\n");
     }
 
     // Emit textures
@@ -1106,6 +1125,14 @@ const CbufferDecl = struct {
     is_ssbo: bool = false,
 };
 
+// A loose (non-block) uniform: `uniform vec2 x;` rather than a uniform block.
+// These have no representation as a bare uniform in HLSL/MSL/GLSL(Vulkan), so
+// they are gathered into one synthesized default cbuffer (#417).
+const LooseUniform = struct {
+    name: []const u8,
+    type_id: u32,
+};
+
 const TextureDecl = struct {
     name: []const u8,
     binding: u32,
@@ -1346,6 +1373,7 @@ fn collectResources(
     decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
     cbuffers: *std.ArrayList(CbufferDecl),
     textures: *std.ArrayList(TextureDecl),
+    loose: *std.ArrayList(LooseUniform),
     alloc: std.mem.Allocator,
 ) void {
     for (module.instructions) |inst| {
@@ -1365,6 +1393,16 @@ fn collectResources(
                 const raw_name = names.get(result_id) orelse "Globals";
                 // Check if this is an SSBO (BufferBlock decoration on struct type, or StorageBuffer class)
                 const is_ssbo = hasDecoration(decorations, pointee_type, .buffer_block) or sc == .StorageBuffer;
+                // A loose (non-block) uniform points at a scalar/vector/matrix/array
+                // rather than a struct. Gather it into the synthesized default cbuffer
+                // instead of emitting an empty `cbuffer <name> {}` per uniform (#417).
+                if (sc == .Uniform and !is_ssbo) {
+                    const p_inst = getDef(module, pointee_type);
+                    if (p_inst == null or p_inst.?.op != .TypeStruct) {
+                        loose.append(alloc, .{ .name = raw_name, .type_id = pointee_type }) catch {};
+                        continue;
+                    }
+                }
                 // For SSBO, we need to save the clean name before tagging
                 const cb_name: []const u8 = if (is_ssbo) alloc.dupe(u8, raw_name) catch "Globals" else raw_name;
                 // Tag SSBO variable name with __ssbo_buf__ prefix so access builders know
