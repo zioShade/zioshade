@@ -1900,11 +1900,25 @@ const Analyzer = struct {
         for (&builtins) |b| {
             if (std.mem.eql(u8, name, b.name)) {
                 const id = self.allocId();
+                // gl_FragColor is a deprecated compatibility builtin with no
+                // SPIR-V BuiltIn. Emitting it verbatim yields a bare
+                // `out vec4 gl_FragColor;`, which every core-profile target
+                // rejects because gl_ names are reserved. Synthesize it instead
+                // as a normal, non-reserved, explicitly located output
+                // (_fragColor, location 0) so all backends produce valid code.
+                // This mirrors the shadertoy prefix, which declares
+                // `layout(location = 0) out vec4 _fragColor;`. The scope symbol
+                // below stays keyed by "gl_FragColor" so source that writes
+                // gl_FragColor still resolves to this variable.
+                // The fixed location 0 cannot collide: legacy gl_FragColor
+                // shaders are old-style and never declare their own explicit
+                // location-0 output, so nothing else claims that slot.
+                const is_frag_color = std.mem.eql(u8, b.name, "gl_FragColor");
                 self.globals.append(self.alloc, .{
-                    .name = b.name,
+                    .name = if (is_frag_color) "_fragColor" else b.name,
                     .ty = b.ty,
                     .qualifier = .{ .is_in = b.is_in, .is_out = b.is_out },
-                    .layout = null,
+                    .layout = if (is_frag_color) ast.Layout{ .location = 0 } else null,
                     .storage_class = b.sc,
                     .result_id = id,
                 }) catch return null;
