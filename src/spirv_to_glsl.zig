@@ -21,6 +21,16 @@ fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (i >= m.instructions.len) return null;
     return m.instructions[i];
 }
+/// Element type reached by descending one composite level: the element type of an
+/// array (fixed or runtime), the column type of a matrix, or the component type of
+/// a vector. Used per access-chain index for the runtime-index descent (#419).
+fn elemType(m: *const ParsedModule, tid: u32) ?u32 {
+    const t = getDef(m, tid) orelse return null;
+    return switch (t.op) {
+        .TypeArray, .TypeRuntimeArray, .TypeMatrix, .TypeVector => t.words[2],
+        else => null,
+    };
+}
 fn getTypeOf(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
     return switch (inst.op) {
@@ -298,7 +308,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                             cur_type = tinst.words[2];
                         } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
                             cur_type = tinst.words[val + 2];
-                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray or tinst.op == .TypeMatrix) {
                             cur_type = tinst.words[2];
                         } else {
                             cur_type = null;
@@ -307,9 +317,12 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 }
             } else {
                 writer.print("[{s}]", .{names.get(index_id) orelse "i"});
+                // Runtime index: descend into the element type (see #419 above).
+                if (cur_type) |tid2| cur_type = elemType(m, tid2);
             }
         } else {
             writer.print("[{s}]", .{names.get(index_id) orelse "i"});
+            if (cur_type) |tid2| cur_type = elemType(m, tid2);
         }
     }
     if (!writer.overflowed()) {
@@ -364,7 +377,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                             cur_type = tinst.words[2];
                         } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
                             cur_type = tinst.words[val + 2];
-                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray or tinst.op == .TypeMatrix) {
                             cur_type = tinst.words[2];
                         } else {
                             cur_type = null;
@@ -453,7 +466,7 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                             cur_type = tinst.words[2];
                         } else if (tinst.op == .TypeStruct and val + 2 < tinst.words.len) {
                             cur_type = tinst.words[val + 2];
-                        } else if (tinst.op == .TypeArray or tinst.op == .TypeMatrix) {
+                        } else if (tinst.op == .TypeArray or tinst.op == .TypeRuntimeArray or tinst.op == .TypeMatrix) {
                             cur_type = tinst.words[2];
                         } else {
                             cur_type = null;
@@ -462,9 +475,14 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                 }
             } else {
                 try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+                // Runtime (non-constant) index: descend into the element type, so a
+                // following struct-member index resolves to a member name instead of
+                // being misread as another array index and printed as [n] (#419).
+                if (cur_type) |tid2| cur_type = elemType(m, tid2);
             }
         } else {
             try w.print("[{s}]", .{names.get(index_id) orelse "i"});
+            if (cur_type) |tid2| cur_type = elemType(m, tid2);
         }
     }
 }
@@ -860,14 +878,22 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 // body accesses members as `{name}.{member}`, so the instance stays `name`;
                 // the type gets a distinct `{name}_block` tag (the tag is never referenced).
                 const block_tag = std.fmt.allocPrint(aa, "{s}_block", .{name}) catch return error.OutOfMemory;
+                const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
+                const has_block_struct = ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4;
+                // Declare any struct types referenced by this block's members (e.g. the
+                // element struct of a runtime array `T elems[]`) BEFORE the block, so the
+                // struct is not used before it is declared (#418). SSBOs are excluded from
+                // the UBO forward-decl pass above, so run it here over the same maps.
+                if (has_block_struct) {
+                    emitStructForwardDecls(&module, &names, ptr_inst.words[3], w, aa, &emitted_structs, &emitted_names) catch {};
+                }
                 try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{ shifted_binding, block_tag });
                 // Emit struct members by their ORIGINAL names (`b.lock`) for BOTH SSBO
                 // encodings: StorageBuffer-class and old-style Uniform+BufferBlock now both
                 // bypass isUniformBlockVar (see structHasBufferBlock there), so the body
                 // accesses members as `{instance}.{member}` — declare them to match. (#296)
                 const use_original = true;
-                const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
-                if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
+                if (has_block_struct) {
                     try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa, use_original);
                 }
                 try w.print("}} {s};\n\n", .{name});
