@@ -6,8 +6,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
 
     if (args.len < 2) {
         std.debug.print("Usage: test_unopt_wgsl <dir>\n", .{});
@@ -15,11 +15,8 @@ pub fn main() !void {
     }
 
     const dir_path = args[1];
-    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-    defer dir.close();
-
-    var walker = try dir.walk(alloc);
-    defer walker.deinit();
+    const entries = try zioshade.compat.walkDirAlloc(alloc, dir_path);
+    defer zioshade.compat.freeWalkEntries(alloc, entries);
 
     var total: u32 = 0;
     var ok: u32 = 0;
@@ -28,16 +25,14 @@ pub fn main() !void {
     var fail_list = std.ArrayList([]const u8).initCapacity(alloc, 32) catch return error.OutOfMemory;
     defer fail_list.deinit(alloc);
 
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
+    for (entries) |entry| {
+        if (!entry.is_file) continue;
         const path = entry.path;
         if (!std.mem.endsWith(u8, path, ".frag") and !std.mem.endsWith(u8, path, ".vert") and !std.mem.endsWith(u8, path, ".comp") and !std.mem.endsWith(u8, path, ".geom")) continue;
 
         total += 1;
 
-        const file = try dir.openFile(path, .{});
-        defer file.close();
-        const source_raw = try file.readToEndAlloc(alloc, 1024 * 1024);
+        const source_raw = try zioshade.compat.readFileByPath(alloc, path, 1024 * 1024);
         defer alloc.free(source_raw);
         const source = try alloc.dupeZ(u8, source_raw);
         defer alloc.free(source);

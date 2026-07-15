@@ -4,10 +4,10 @@ const zioshade = @import("zioshade");
 pub fn main() !void {
     const alloc = std.heap.page_allocator; // short-lived CLI; OS reclaims on exit
 
-    const prefix = try std.fs.cwd().readFileAlloc(alloc, "tests/wintty/shadertoy_prefix.glsl", 1024 * 1024);
+    const prefix = try zioshade.compat.readFileByPath(alloc, "tests/wintty/shadertoy_prefix.glsl", 1024 * 1024);
     defer alloc.free(prefix);
 
-    const crt = try std.fs.cwd().readFileAlloc(alloc, "tests/wintty/test_crt.glsl", 1024 * 1024);
+    const crt = try zioshade.compat.readFileByPath(alloc, "tests/wintty/test_crt.glsl", 1024 * 1024);
     defer alloc.free(crt);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -35,7 +35,7 @@ pub fn main() !void {
     var spirv_size: usize = 0;
 
     for (0..iterations) |_| {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = zioshade.compat.Timer.start();
         const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
         const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
