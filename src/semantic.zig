@@ -2545,6 +2545,17 @@ const Analyzer = struct {
                                 try self.heap_types.append(self.alloc, resolved_ty);
                                 ty = .{ .array = .{ .base = resolved_ty, .size = resolved } };
                             }
+                        } else if (node.data.children.len > 0 and node.data.children[0].data.children.len > 0) {
+                            // Infer an unsized array's length from its initializer
+                            // (`const float LUT[] = float[](1,2,3)` → float[3]), the
+                            // way glslang and the local var_decl path do. Without it
+                            // the size-0 type lowers to an OpTypeRuntimeArray plus an
+                            // initializer, which spirv-val rejects (a Private/global
+                            // array must be sized). The outermost length comes from the
+                            // initializer constructor's element count; the element type
+                            // is kept. Works for scalar and struct element arrays alike.
+                            const n: u32 = @intCast(node.data.children[0].data.children.len);
+                            ty = .{ .array = .{ .base = ty.array.base, .size = n } };
                         }
                     }
                     const storage_class: ir.SPIRVStorageClass = switch (node.tag) {
