@@ -4503,11 +4503,7 @@ const Analyzer = struct {
     // mismatch, where valid GLSL guarantees a numeric promotion).
     fn convertScalarTo(self: *Analyzer, tid: TypedId, target_ty: ast.Type) !u32 {
         const tag: ?ir.Instruction.Tag =
-            if (target_ty == .float and tid.ty == .int) .convert_itof
-            else if (target_ty == .float and tid.ty == .uint) .convert_utof
-            else if (target_ty == .int and tid.ty == .float) .convert_ftoi
-            else if (target_ty == .uint and tid.ty == .float) .convert_ftou
-            else null;
+            if (target_ty == .float and tid.ty == .int) .convert_itof else if (target_ty == .float and tid.ty == .uint) .convert_utof else if (target_ty == .int and tid.ty == .float) .convert_ftoi else if (target_ty == .uint and tid.ty == .float) .convert_ftou else null;
         if (tag) |t| {
             const id = self.allocId();
             const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
@@ -10122,7 +10118,19 @@ const Analyzer = struct {
             },
             .index_access => {
                 if (node.data.children.len < 2) return error.SemanticFailed;
-                const index_tid = try self.analyzeExpression(node.data.children[1]);
+                var index_tid = try self.analyzeExpression(node.data.children[1]);
+                // An index that is itself a memory access — arr[u.k], m[1][u.k] where
+                // u.k is a UBO/SSBO member — arrives as a pointer (OpAccessChain). Both
+                // OpAccessChain indices and OpVectorExtractDynamic require a scalar-int
+                // VALUE, so load it once here. Feeding the raw pointer produced invalid
+                // SPIR-V at exit 0 ("Indexes passed to OpAccessChain must be of type
+                // integer" / a pointer operand to OpVectorExtractDynamic). A constant or
+                // already-loaded index is a value (is_ptr == false) and is left as-is, so
+                // the constant-index fast paths below are unaffected.
+                if (index_tid.is_ptr) {
+                    const loaded_idx = try self.emitLoadCached(index_tid.id, index_tid.ty);
+                    index_tid = .{ .ty = index_tid.ty, .id = loaded_idx, .is_ptr = false };
+                }
                 const base_tid = try self.analyzeExpression(node.data.children[0]);
 
                 // Determine element type from base type
