@@ -336,7 +336,11 @@ pub const BuiltIn = enum(u32) {
     patch_vertices = 14,
     frag_depth = 22,
     layer = 9,
-    view_index = 10,
+    // SPV_KHR_multiview / core since SPIR-V 1.3. Must NOT be 10, which is
+    // ViewportIndex (requires the MultiViewport capability) — that mismatch made
+    // gl_ViewIndex shaders emit invalid SPIR-V (spirv-val: "Operand ... requires
+    // ... MultiViewport ...").
+    view_index = 4440,
     frag_coord = 15,
     point_coord = 16,
     front_facing = 17,

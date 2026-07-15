@@ -856,7 +856,7 @@ test "frontend: && in a loop condition stays valid SPIR-V (no broken back-edge)"
 // control flow (OpBranchConditional), not OpSelect.
 test "frontend: side-effecting ternary short-circuits (OpBranchConditional, not OpSelect)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) in vec4 iv;
         \\layout(location=0) out vec4 o;
@@ -871,7 +871,7 @@ test "frontend: side-effecting ternary short-circuits (OpBranchConditional, not 
 // The PURE ternary keeps the cheaper eager OpSelect (opcode 169) — no control flow.
 test "frontend: pure ternary keeps eager OpSelect (no short-circuit overhead)" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) in vec4 iv;
         \\layout(location=0) out vec4 o;
@@ -885,7 +885,7 @@ test "frontend: pure ternary keeps eager OpSelect (no short-circuit overhead)" {
 // (a selection_merge in the loop header would be invalid SPIR-V) — must stay valid.
 test "frontend: ternary in a loop condition stays valid SPIR-V" {
     const alloc = std.testing.allocator;
-    const spv = try glslpp.compileToSPIRV(alloc,
+    const spv = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) out vec4 o;
         \\int f(inout int n){ n++; return n; }
@@ -902,7 +902,7 @@ test "frontend: ternary in a loop condition stays valid SPIR-V" {
 // and lossless widening (then=float, else=int) still short-circuit correctly.
 test "frontend: side-effecting ternary with a lossy type mismatch honest-errors" {
     const alloc = std.testing.allocator;
-    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) in vec4 iv;
         \\layout(location=0) out vec4 o;
@@ -910,7 +910,7 @@ test "frontend: side-effecting ternary with a lossy type mismatch honest-errors"
         \\void main(){ int c=0; bool a=iv.x>0.0; float r = a ? 5 : se(c); o=vec4(r, float(c), 0, 1); }
     , .{ .stage = .fragment }));
     // float-then / int-else is a lossless widen (int→float) — still short-circuits.
-    const ok = try glslpp.compileToSPIRV(alloc,
+    const ok = try zioshade.compileToSPIRV(alloc,
         \\#version 450
         \\layout(location=0) in vec4 iv;
         \\layout(location=0) out vec4 o;
@@ -1542,4 +1542,22 @@ test "frontend: a shader with no main() honest-errors (not a no-OpEntryPoint mod
     // it is off by default so partial-unit callers (e.g. the mesh layout-only
     // fixtures) are unaffected.
     try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment, .require_entry_point = true }));
+}
+
+test "frontend #multiview: gl_ViewIndex emits the ViewIndex builtin (not ViewportIndex)" {
+    // gl_ViewIndex (GL_EXT_multiview) must lower to BuiltIn ViewIndex (4440) with
+    // the MultiView capability, NOT BuiltIn ViewportIndex (10, which needs the
+    // MultiViewport capability). The wrong constant produced invalid SPIR-V at
+    // exit 0 (found by sweeping the SPIRV-Cross corpus).
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\#extension GL_EXT_multiview : require
+        \\layout(std140, binding = 0) uniform MVPs { mat4 MVP[2]; };
+        \\layout(location = 0) in vec4 Position;
+        \\void main(){ gl_Position = MVP[gl_ViewIndex] * Position; }
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .vertex });
+    defer alloc.free(spv);
+    try spirvValOrSkip(spv);
 }
