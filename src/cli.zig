@@ -583,7 +583,11 @@ fn compileWithDiagsOrExit(
         for (diags.items) |d| alloc.free(d.message);
         diags.deinit(alloc);
     }
-    const spv = zioshade.compileToSPIRVWithDiagnostics(alloc, source, opts, &diags) catch |e| {
+    // The CLI compiles complete shaders, so a missing `main` is a hard error
+    // rather than an OpEntryPoint-less (invalid) module emitted at exit 0.
+    var cli_opts = opts;
+    cli_opts.require_entry_point = true;
+    const spv = zioshade.compileToSPIRVWithDiagnostics(alloc, source, cli_opts, &diags) catch |e| {
         // When we have structured diagnostics they already carry the file, line,
         // column, and message, so printing them is the whole story. Only fall
         // back to the bare error-name line when nothing more specific exists,
