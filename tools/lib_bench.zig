@@ -31,38 +31,38 @@ const Shader = struct {
 // benchmark is self-contained and deterministic.
 const corpus = [_]Shader{
     .{ .name = "minimal", .stage = .fragment, .src =
-        \\#version 450
-        \\layout(location=0) out vec4 o;
-        \\void main() { o = vec4(1.0, 0.5, 0.25, 1.0); }
+    \\#version 450
+    \\layout(location=0) out vec4 o;
+    \\void main() { o = vec4(1.0, 0.5, 0.25, 1.0); }
     },
     .{ .name = "ubo+texture", .stage = .fragment, .src =
-        \\#version 450
-        \\layout(binding=0) uniform U { vec4 tint; float k; } u;
-        \\layout(binding=1) uniform sampler2D tex;
-        \\layout(location=0) in vec2 uv;
-        \\layout(location=0) out vec4 o;
-        \\void main() { o = texture(tex, uv) * u.tint * u.k; }
+    \\#version 450
+    \\layout(binding=0) uniform U { vec4 tint; float k; } u;
+    \\layout(binding=1) uniform sampler2D tex;
+    \\layout(location=0) in vec2 uv;
+    \\layout(location=0) out vec4 o;
+    \\void main() { o = texture(tex, uv) * u.tint * u.k; }
     },
     .{ .name = "control-flow", .stage = .fragment, .src =
-        \\#version 450
-        \\layout(location=0) in vec2 uv;
-        \\layout(location=0) out vec4 o;
-        \\void main() {
-        \\    float s = 0.0;
-        \\    for (int i = 0; i < 8; i++) { s += sin(uv.x * float(i)) * cos(uv.y); }
-        \\    o = vec4(vec3(s), 1.0);
-        \\}
+    \\#version 450
+    \\layout(location=0) in vec2 uv;
+    \\layout(location=0) out vec4 o;
+    \\void main() {
+    \\    float s = 0.0;
+    \\    for (int i = 0; i < 8; i++) { s += sin(uv.x * float(i)) * cos(uv.y); }
+    \\    o = vec4(vec3(s), 1.0);
+    \\}
     },
     .{ .name = "math-heavy", .stage = .fragment, .src =
-        \\#version 450
-        \\layout(location=0) in vec3 p;
-        \\layout(location=0) out vec4 o;
-        \\void main() {
-        \\    vec3 q = normalize(p);
-        \\    float d = dot(q, vec3(0.577)) ;
-        \\    vec3 r = reflect(q, vec3(0.0, 1.0, 0.0));
-        \\    o = vec4(mix(q, r, clamp(d, 0.0, 1.0)), length(p));
-        \\}
+    \\#version 450
+    \\layout(location=0) in vec3 p;
+    \\layout(location=0) out vec4 o;
+    \\void main() {
+    \\    vec3 q = normalize(p);
+    \\    float d = dot(q, vec3(0.577)) ;
+    \\    vec3 r = reflect(q, vec3(0.0, 1.0, 0.0));
+    \\    o = vec4(mix(q, r, clamp(d, 0.0, 1.0)), length(p));
+    \\}
     },
 };
 
@@ -126,7 +126,6 @@ pub fn main() !void {
         }
     }
 
-    
     std.debug.print("zioshade vs SPIRV-Cross — in-process, {d} iters/cell (median ns/op)\n\n", .{iters});
     std.debug.print("{s:<14} {s:<7} {s:>12} {s:>12} {s:>8}  bytes\n", .{ "shader", "backend", "zioshade", "spirv-cross", "ratio" });
     std.debug.print("{s}", .{"--------------------------------------------------------------------------\n"});
@@ -161,13 +160,13 @@ pub fn main() !void {
             _ = spvcCompile(spirv, be);
 
             for (0..iters) |i| {
-                var t = std.time.Timer.start() catch unreachable;
+                var t = zioshade.compat.Timer.start();
                 _ = zioshadeCompile(alloc, spirv, be);
                 samples[i] = t.read();
             }
             const g_ns = median(samples);
             for (0..iters) |i| {
-                var t = std.time.Timer.start() catch unreachable;
+                var t = zioshade.compat.Timer.start();
                 _ = spvcCompile(spirv, be);
                 samples[i] = t.read();
             }

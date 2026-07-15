@@ -1035,6 +1035,32 @@ pub fn build(b: *std.Build) void {
         examples_step.dependOn(&ex_install.step);
     }
 
+    // Compile-check the standalone dev tools that no run-step builds, so they
+    // cannot silently rot against a newer Zig (this is what let the tools/ port
+    // lag on 0.16 until #424). Build-only: these import the library and take CLI
+    // args at runtime, so we compile them but never run them here.
+    const tools_check_step = b.step("tools-check", "Compile-check the standalone dev tools under tools/");
+    const tool_names = .{
+        "bench_perf",            "check_unhandled", "cross_validate_all",
+        "cross_validate_detail", "dump_crt_hlsl",   "glsl_cross",
+        "spv_backend_fuzz",      "test_unopt_all",  "test_unopt_wgsl",
+        "test_wgsl_coverage",    "wgsl_fuzz",
+    };
+    inline for (tool_names) |name| {
+        const tool_mod = b.createModule(.{
+            .root_source_file = b.path(b.fmt("tools/{s}.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+        });
+        tool_mod.addImport("zioshade", zioshade_mod);
+        const tool_exe = b.addExecutable(.{
+            .name = b.fmt("toolcheck-{s}", .{name}),
+            .root_module = tool_mod,
+        });
+        // Depend on the compile, not an install/run: we only want it to build.
+        tools_check_step.dependOn(&tool_exe.step);
+    }
+
     // WASM playground module - build with: zig build wasm
     //
     // Compiles the library plus the thin C-ABI shim in src/wasm.zig to a

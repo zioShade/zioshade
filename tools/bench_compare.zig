@@ -101,9 +101,9 @@ const Stats = struct {
 };
 
 fn findTool(env_name: []const u8, default_name: []const u8, alloc: std.mem.Allocator) ![]const u8 {
-    if (std.process.getEnvVarOwned(alloc, env_name)) |v| {
+    if (zioshade.compat.getEnvVarOwned(alloc, env_name)) |v| {
         return v;
-    } else |_| {}
+    }
     return alloc.dupe(u8, default_name);
 }
 
@@ -117,13 +117,13 @@ fn benchZioshade(alloc: std.mem.Allocator, shader: Shader) !Stats {
     var total_ns: u128 = 0;
     var iter: u64 = 0;
     while (iter < ITERS) : (iter += 1) {
-        const start = std.time.Instant.now() catch continue;
+        const start = zioshade.compat.nanoTimestamp();
         const spirv = try zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = shader.stage });
         defer alloc.free(spirv);
         const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
         defer alloc.free(hlsl);
-        const end = std.time.Instant.now() catch continue;
-        const dur_ns: u64 = end.since(start);
+        const end = zioshade.compat.nanoTimestamp();
+        const dur_ns: u64 = (end - start);
         total_ns += dur_ns;
         const dur_us = dur_ns / 1000;
         stats.min_us = @min(stats.min_us, dur_us);
@@ -153,47 +153,39 @@ fn benchReference(
     const spv_path = try std.fmt.allocPrint(alloc, "{s}{s}{s}.spv", .{ tmpdir, sep, shader.name });
     defer alloc.free(spv_path);
 
-    {
-        const f = try std.fs.createFileAbsolute(src_path, .{});
-        defer f.close();
-        try f.writeAll(std.mem.sliceTo(shader.source, 0));
-    }
+    try zioshade.compat.writeFileAbsolute(alloc, src_path, std.mem.sliceTo(shader.source, 0));
+
+    // One Io context reused for every subprocess spawn in this function.
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const io = main_io.io();
 
     var stats: Stats = .{};
     var w: u64 = 0;
     while (w < WARMUP) : (w += 1) {
-        const r = std.process.Child.run(.{
-            .allocator = alloc,
-            .argv = &.{ glslang_path, "-V", src_path, "-o", spv_path },
-        }) catch return error.WarmupFailed;
+        const r = zioshade.compat.processRun(io, alloc, &.{ glslang_path, "-V", src_path, "-o", spv_path }) catch return error.WarmupFailed;
         defer alloc.free(r.stdout);
         defer alloc.free(r.stderr);
-        if (r.term != .Exited or r.term.Exited != 0) return null;
+        if ((r.term.exitedCode() orelse 1) != 0) return null;
     }
 
     var total_ns: u128 = 0;
     var iter: u64 = 0;
     while (iter < ITERS) : (iter += 1) {
-        const start = std.time.Instant.now() catch continue;
+        const start = zioshade.compat.nanoTimestamp();
 
-        const r1 = try std.process.Child.run(.{
-            .allocator = alloc,
-            .argv = &.{ glslang_path, "-V", src_path, "-o", spv_path },
-        });
+        const r1 = try zioshade.compat.processRun(io, alloc, &.{ glslang_path, "-V", src_path, "-o", spv_path });
         alloc.free(r1.stdout);
         alloc.free(r1.stderr);
-        if (r1.term != .Exited or r1.term.Exited != 0) return null;
+        if ((r1.term.exitedCode() orelse 1) != 0) return null;
 
-        const r2 = try std.process.Child.run(.{
-            .allocator = alloc,
-            .argv = &.{ spirvx_path, "--hlsl", "--shader-model", "60", spv_path },
-        });
+        const r2 = try zioshade.compat.processRun(io, alloc, &.{ spirvx_path, "--hlsl", "--shader-model", "60", spv_path });
         defer alloc.free(r2.stdout);
         defer alloc.free(r2.stderr);
-        if (r2.term != .Exited or r2.term.Exited != 0) return null;
+        if ((r2.term.exitedCode() orelse 1) != 0) return null;
 
-        const end = std.time.Instant.now() catch continue;
-        const dur_ns: u64 = end.since(start);
+        const end = zioshade.compat.nanoTimestamp();
+        const dur_ns: u64 = (end - start);
         total_ns += dur_ns;
         const dur_us = dur_ns / 1000;
         stats.min_us = @min(stats.min_us, dur_us);
@@ -218,11 +210,11 @@ pub fn main() !void {
     var tmp_arena = std.heap.ArenaAllocator.init(alloc);
     defer tmp_arena.deinit();
     const tmp_alloc = tmp_arena.allocator();
-    const sysroot_tmp = std.process.getEnvVarOwned(tmp_alloc, "TEMP") catch
-        std.process.getEnvVarOwned(tmp_alloc, "TMPDIR") catch
+    const sysroot_tmp = zioshade.compat.getEnvVarOwned(tmp_alloc, "TEMP") orelse
+        zioshade.compat.getEnvVarOwned(tmp_alloc, "TMPDIR") orelse
         try tmp_alloc.dupe(u8, "/tmp");
-    const tmpdir = try std.fmt.allocPrint(tmp_alloc, "{s}{s}zioshade-bench-{d}", .{ sysroot_tmp, std.fs.path.sep_str, std.time.timestamp() });
-    std.fs.makeDirAbsolute(tmpdir) catch |err| switch (err) {
+    const tmpdir = try std.fmt.allocPrint(tmp_alloc, "{s}{s}zioshade-bench-{d}", .{ sysroot_tmp, std.fs.path.sep_str, @as(i64, @intCast(@divTrunc(zioshade.compat.nanoTimestamp(), std.time.ns_per_s))) });
+    zioshade.compat.makeDirAbsolute(tmp_alloc, tmpdir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
     };

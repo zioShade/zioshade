@@ -6,8 +6,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
 
     const iterations = if (args.len > 1) try std.fmt.parseInt(u32, args[1], 10) else 1000;
     const seed = if (args.len > 2) try std.fmt.parseInt(u64, args[2], 10) else 42;
@@ -22,29 +22,26 @@ pub fn main() !void {
 
     const funcs = [_][]const u8{ "sin", "cos", "tan", "abs", "sign", "floor", "ceil", "fract", "sqrt", "pow", "exp", "log", "exp2", "log2", "radians", "degrees", "min", "max", "clamp", "mix", "step", "smoothstep", "length", "distance", "normalize", "dot", "cross", "reflect", "refract" };
 
-    var shader_buf: [4096]u8 = undefined;
-
     for (0..iterations) |_| {
-        var fbs = std.io.fixedBufferStream(&shader_buf);
-        const w = fbs.writer();
+        var w = zioshade.compat.StackBufWriter(4096).init();
 
         // Generate a random fragment shader
-        w.writeAll("#version 450\n") catch continue;
-        w.writeAll("uniform vec2 u_resolution;\n") catch continue;
-        w.writeAll("out vec4 fragColor;\n\n") catch continue;
+        w.writeAll("#version 450\n");
+        w.writeAll("uniform vec2 u_resolution;\n");
+        w.writeAll("out vec4 fragColor;\n\n");
 
         // Maybe add a helper function
         if (rng.boolean()) {
-            w.writeAll("float helper(float x) {\n") catch continue;
+            w.writeAll("float helper(float x) {\n");
             const n_stmts = rng.intRangeAtMost(usize, 1, 3);
             for (0..n_stmts) |_| {
                 const f = funcs[rng.intRangeAtMost(usize, 0, funcs.len - 1)];
-                w.print("    x = {s}(x);\n", .{f}) catch continue;
+                w.print("    x = {s}(x);\n", .{f});
             }
-            w.writeAll("    return x;\n}\n\n") catch continue;
+            w.writeAll("    return x;\n}\n\n");
         }
 
-        w.writeAll("void main() {\n") catch continue;
+        w.writeAll("void main() {\n");
 
         // Generate random statements
         const n_stmts = rng.intRangeAtMost(usize, 2, 8);
@@ -54,39 +51,40 @@ pub fn main() !void {
                 0 => {
                     // Builtin function on constant
                     const f = funcs[rng.intRangeAtMost(usize, 0, funcs.len - 1)];
-                    w.print("    float a = {s}({d:.3});\n", .{ f, rng.float(f32) * 3.14 }) catch continue;
+                    w.print("    float a = {s}({d:.3});\n", .{ f, rng.float(f32) * 3.14 });
                 },
                 1 => {
                     // Vector construction
-                    w.print("    vec3 v = vec3({d:.1}, {d:.1}, {d:.1});\n", .{ rng.float(f32), rng.float(f32), rng.float(f32) }) catch continue;
+                    w.print("    vec3 v = vec3({d:.1}, {d:.1}, {d:.1});\n", .{ rng.float(f32), rng.float(f32), rng.float(f32) });
                 },
                 2 => {
                     // Gl_FragCoord usage
-                    w.writeAll("    vec2 uv = gl_FragCoord.xy / u_resolution;\n") catch continue;
+                    w.writeAll("    vec2 uv = gl_FragCoord.xy / u_resolution;\n");
                 },
                 3 => {
                     // Mix/clamp
-                    w.print("    float b = clamp({d:.2}, 0.0, 1.0);\n", .{rng.float(f32)}) catch continue;
+                    w.print("    float b = clamp({d:.2}, 0.0, 1.0);\n", .{rng.float(f32)});
                 },
                 4 => {
                     // Type conversion
-                    w.print("    int n = int({d:.0}); float f = float(n);\n", .{rng.float(f32) * 10.0}) catch continue;
+                    w.print("    int n = int({d:.0}); float f = float(n);\n", .{rng.float(f32) * 10.0});
                 },
                 else => {
                     // Simple constant
-                    w.print("    float c = {d:.3};\n", .{rng.float(f32) * 10.0}) catch continue;
+                    w.print("    float c = {d:.3};\n", .{rng.float(f32) * 10.0});
                 },
             }
         }
 
         if (rng.boolean()) {
-            w.writeAll("    fragColor = vec4(1.0, 0.0, 0.0, 1.0);\n") catch continue;
+            w.writeAll("    fragColor = vec4(1.0, 0.0, 0.0, 1.0);\n");
         } else {
-            w.writeAll("    fragColor = vec4(0.5, 0.5, 0.5, 1.0);\n") catch continue;
+            w.writeAll("    fragColor = vec4(0.5, 0.5, 0.5, 1.0);\n");
         }
-        w.writeAll("}\n") catch continue;
+        w.writeAll("}\n");
 
-        const source = fbs.getWritten();
+        if (w.overflowed()) continue;
+        const source = w.written();
         const sourceZ = try alloc.dupeZ(u8, source);
         defer alloc.free(sourceZ);
 

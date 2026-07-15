@@ -148,7 +148,7 @@ pub fn main() !void {
         var compile_errors: u32 = 0;
 
         for (0..iterations) |_| {
-            const start = std.time.Instant.now() catch continue;
+            const start = zioshade.compat.nanoTimestamp();
             const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch {
                 compile_errors += 1;
                 continue;
@@ -158,13 +158,9 @@ pub fn main() !void {
                 compile_errors += 1;
                 continue;
             };
-            const end = std.time.Instant.now() catch {
-                alloc.free(spirv);
-                alloc.free(hlsl);
-                continue;
-            };
+            const end = zioshade.compat.nanoTimestamp();
 
-            const elapsed = end.since(start);
+            const elapsed = (end - start);
             total_ns += @as(u64, @intCast(elapsed));
             min_ns = @min(min_ns, @as(u64, @intCast(elapsed)));
             spirv_size = spirv.len;
@@ -193,11 +189,11 @@ pub fn main() !void {
             defer alloc.free(spirv);
 
             for (0..iterations) |_| {
-                const start = std.time.Instant.now() catch continue;
+                const start = zioshade.compat.nanoTimestamp();
                 const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch continue;
                 defer alloc.free(hlsl);
-                const end = std.time.Instant.now() catch continue;
-                cross_ns += @as(u64, @intCast(end.since(start)));
+                const end = zioshade.compat.nanoTimestamp();
+                cross_ns += @as(u64, @intCast((end - start)));
                 cross_count += 1;
             }
         }
@@ -218,18 +214,27 @@ pub fn main() !void {
 
     for (0..iterations) |_| {
         const source = test_shaders[0].source; // Use the simple shader
-        const start = std.time.Instant.now() catch continue;
+        const start = zioshade.compat.nanoTimestamp();
         const spirv = zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment }) catch continue;
         defer alloc.free(spirv);
-        const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
+        const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch {
+            alloc.free(spirv);
+            continue;
+        };
         defer alloc.free(hlsl);
-        const glsl = zioshade.spirvToGLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
+        const glsl = zioshade.spirvToGLSL(alloc, spirv, .{}) catch {
+            alloc.free(spirv);
+            continue;
+        };
         defer alloc.free(glsl);
-        const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
+        const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch {
+            alloc.free(spirv);
+            continue;
+        };
         defer alloc.free(msl);
-        const end = std.time.Instant.now() catch continue;
+        const end = zioshade.compat.nanoTimestamp();
 
-        full_total_ns += @as(u64, @intCast(end.since(start)));
+        full_total_ns += @as(u64, @intCast((end - start)));
         full_count += 1;
     }
 

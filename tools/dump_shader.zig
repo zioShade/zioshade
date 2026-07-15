@@ -3,8 +3,8 @@ const zioshade = @import("zioshade");
 
 pub fn main() !void {
     const alloc = std.heap.page_allocator; // short-lived CLI; OS reclaims on exit
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
     if (args.len < 4) {
         std.debug.print("Usage: dump_shader <prefix.glsl> <shader.glsl> <output_prefix>\n", .{});
         std.debug.print("  Generates <output_prefix>.hlsl, .glsl, .msl, .spv\n", .{});
@@ -12,10 +12,10 @@ pub fn main() !void {
     }
     const out_prefix = args[3];
 
-    const prefix = try std.fs.cwd().readFileAlloc(alloc, args[1], 1024 * 1024);
+    const prefix = try zioshade.compat.readFileByPath(alloc, args[1], 1024 * 1024);
     defer alloc.free(prefix);
 
-    const shader = try std.fs.cwd().readFileAlloc(alloc, args[2], 1024 * 1024);
+    const shader = try zioshade.compat.readFileByPath(alloc, args[2], 1024 * 1024);
     defer alloc.free(shader);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -33,14 +33,14 @@ pub fn main() !void {
     // Write SPIR-V binary
     const spv_path = try std.fmt.allocPrint(alloc, "{s}.spv", .{out_prefix});
     defer alloc.free(spv_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = spv_path, .data = std.mem.sliceAsBytes(spirv) });
+    try zioshade.compat.writeFileByPath(alloc, spv_path, std.mem.sliceAsBytes(spirv));
 
     // Generate and write HLSL
     const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
     defer alloc.free(hlsl);
     const hlsl_path = try std.fmt.allocPrint(alloc, "{s}.hlsl", .{out_prefix});
     defer alloc.free(hlsl_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = hlsl_path, .data = hlsl });
+    try zioshade.compat.writeFileByPath(alloc, hlsl_path, hlsl);
     std.debug.print("HLSL: {d} bytes -> {s}\n", .{ hlsl.len, hlsl_path });
 
     // Generate and write GLSL
@@ -48,7 +48,7 @@ pub fn main() !void {
     defer alloc.free(glsl);
     const glsl_path = try std.fmt.allocPrint(alloc, "{s}.glsl", .{out_prefix});
     defer alloc.free(glsl_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = glsl_path, .data = glsl });
+    try zioshade.compat.writeFileByPath(alloc, glsl_path, glsl);
     std.debug.print("GLSL: {d} bytes -> {s}\n", .{ glsl.len, glsl_path });
 
     // Generate and write MSL
@@ -56,6 +56,6 @@ pub fn main() !void {
     defer alloc.free(msl);
     const msl_path = try std.fmt.allocPrint(alloc, "{s}.msl", .{out_prefix});
     defer alloc.free(msl_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = msl_path, .data = msl });
+    try zioshade.compat.writeFileByPath(alloc, msl_path, msl);
     std.debug.print("MSL: {d} bytes -> {s}\n", .{ msl.len, msl_path });
 }
