@@ -1593,3 +1593,42 @@ test "frontend: matrix column indexed by a UBO member loads the index (valid SPI
     defer alloc.free(spv);
     try spirvValOrSkip(spv);
 }
+
+// A scalar/vector/matrix module-scope `const` referenced through a function used
+// to lower to an uninitialised Private OpVariable — the initializer value appeared
+// NOWHERE in the SPIR-V (silent-wrong: backends that zero-init read 0; GLSL/MSL
+// emit an undeclared identifier). Only const ARRAYS and int/uint were registered
+// for initializer materialization. Found by the backend validity sweep.
+test "frontend: scalar const global used via a function keeps its initializer" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in float vin;
+        \\layout(location=0) out vec4 o;
+        \\const float K = 2.0;
+        \\float f(float x){ return x * K + 0.5; }
+        \\void main(){ o = vec4(f(vin)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The Private global must carry an initializer (word count 5), and the folded
+    // constant 2.0 must actually be present — not a bare uninitialised OpVariable.
+    try std.testing.expect(spirvPrivateVarHasInitializer(spv));
+    try spirvValOrSkip(spv);
+}
+
+test "frontend: vec/mat const globals via a function keep their initializers" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec3 vin;
+        \\layout(location=0) out vec4 o;
+        \\const vec3 AXIS = vec3(0.0, 1.0, 0.0);
+        \\const mat2 R = mat2(1.0, 0.0, 0.0, 1.0);
+        \\vec3 g(vec3 v){ return v * AXIS; }
+        \\vec2 h(vec2 v){ return R * v; }
+        \\void main(){ o = vec4(g(vin) + vec3(h(vin.xy), 0.0), 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvPrivateVarHasInitializer(spv));
+    try spirvValOrSkip(spv);
+}
