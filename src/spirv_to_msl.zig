@@ -3109,8 +3109,10 @@ fn std450ToMsl(val: u32) ?[]const u8 {
         8 => "floor",
         9 => "ceil",
         10 => "fract",
-        11 => "radians",
-        12 => "degrees",
+        // 11 (Radians) / 12 (Degrees) have NO MSL builtin — handled inline in the
+        // .ExtInst arm as a multiply by pi/180 or 180/pi. Intentionally NOT mapped
+        // here: a bypass would emit `radians()`/`degrees()`, which do not exist in
+        // Metal and fail to compile, rather than a visible unhandled stub.
         13 => "sin",
         14 => "cos",
         15 => "tan",
@@ -4770,7 +4772,8 @@ fn emitInstruction(
         .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
         .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
         .UMod, .SRem, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
-        .FMod, .FRem => {
+        .FRem => {
+            // OpFRem takes the sign of operand 1 (the dividend) — exactly C/Metal fmod.
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const lhs = try resolvePointer(m, names, inst.words[3], alloc);
             defer alloc.free(lhs);
@@ -4778,9 +4781,31 @@ fn emitInstruction(
             defer alloc.free(rhs);
             try w.print("    {s} {s} = fmod({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "r", lhs, rhs });
         },
+        .FMod => {
+            // OpFMod takes the sign of operand 2 (the divisor), which is GLSL mod()
+            // semantics — NOT Metal fmod() (sign of the dividend). They differ for
+            // operands of opposite sign, so lower to the sign-correct expansion the
+            // way spirv-cross does: x - y * floor(x / y).
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const lhs = try resolvePointer(m, names, inst.words[3], alloc);
+            defer alloc.free(lhs);
+            const rhs = try resolvePointer(m, names, inst.words[4], alloc);
+            defer alloc.free(rhs);
+            const rn = names.get(inst.words[2]) orelse "r";
+            try w.print("    {s} {s} = {s} - {s} * floor({s} / {s});\n", .{ rtt, rn, lhs, rhs, lhs, rhs });
+        },
         .FNegate, .SNegate => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = -{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
+        },
+        .VectorExtractDynamic => {
+            // Extract a component from a vector by a (possibly non-constant) index —
+            // e.g. matrixColumn[i]. Metal spells this vec[idx]; without this arm it
+            // fell through to `// unhandled op 77` and produced undeclared identifiers.
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const vec = names.get(inst.words[3]) orelse "v";
+            const idx = names.get(inst.words[4]) orelse "0";
+            try w.print("    {s} {s} = {s}[{s}];\n", .{ rtt, names.get(inst.words[2]) orelse "e", vec, idx });
         },
         .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitBinOp(m, names, inst, "*", w, alloc),
         .Dot => try emitCall(m, names, inst, "dot", w, alloc),
@@ -4864,9 +4889,17 @@ fn emitInstruction(
                 names.get(inst.words[5]) orelse "0",
             });
         },
-        .ConvertSToF, .ConvertUToF, .ConvertFToS, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast => {
+        .ConvertSToF, .ConvertUToF, .ConvertFToS, .ConvertFToU, .UConvert, .SConvert, .FConvert => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = {s}({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", rtt, names.get(inst.words[3]) orelse "0" });
+        },
+        .Bitcast => {
+            // OpBitcast REINTERPRETS the bit pattern (floatBitsToUint, uintBitsToFloat,
+            // …); it does not numerically convert. Metal spells that as_type<T>(x). A
+            // plain T(x) constructor would round/convert and silently produce the wrong
+            // value (e.g. floatBitsToUint(2.5) -> 2 instead of 0x40200000).
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = as_type<{s}>({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", rtt, names.get(inst.words[3]) orelse "0" });
         },
         .CompositeConstruct => {
             // C6: an array OpCompositeConstruct (`float arr[N] = float[](a,…);`)
@@ -5037,6 +5070,17 @@ fn emitInstruction(
                 }
                 try w.print("    {s} {s};\n", .{ second_type, second_name });
                 try w.print("    {s} {s} = {s}({s}, {s});\n", .{ fract_type, fract_name, func_name, input_name, second_name });
+            } else if (instruction == 11 or instruction == 12) {
+                if (inst.words.len < 6) return; // one operand
+                // radians(11) / degrees(12) have NO MSL builtin. Lower to the defining
+                // multiply like spirv-cross: radians(d) = d * pi/180, degrees(r) =
+                // r * 180/pi. The constant is cast to the (possibly vector) result type
+                // so a floatN operand multiplies componentwise without a double literal.
+                const rt = try mslType(m, inst.words[1], names, alloc);
+                const rn = names.get(inst.words[2]) orelse "v";
+                const x = names.get(inst.words[5]) orelse "x";
+                const k: []const u8 = if (instruction == 11) "0.01745329251994329577" else "57.29577951308232088";
+                try w.print("    {s} {s} = {s} * {s}({s});\n", .{ rt, rn, x, rt, k });
             } else if (instruction == 34) {
                 if (inst.words.len < 6) return; // one operand
                 // GLSL inverse(matN) — Metal has no matrix inverse() builtin, so call the

@@ -1,0 +1,15 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer InBuf { float inData[]; };
+layout(std430, binding = 1) writeonly buffer OutBuf { float outData[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    float x = inData[i];
+    vec4 v = vec4(x, x + 1.0, x * 2.0, -x);
+    vec4 w = v.wzyx + v.xxyy;
+    vec2 s = w.xy * w.zw;
+    float r = dot(w, vec4(1.0)) + s.x - s.y
+            + max(v.x, max(v.y, max(v.z, v.w)))
+            + min(v.x, min(v.y, min(v.z, v.w)));
+    outData[i] = r;
+}

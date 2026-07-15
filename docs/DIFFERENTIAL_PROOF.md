@@ -81,6 +81,50 @@ swiftc tools/ShaderCompare.swift -o /tmp/ShaderCompare
 
 ---
 
+## 2b. Execution equivalence (compute, on-GPU)
+
+The two fragment shaders above exercise the backend narrowly. To broaden the
+proof across the whole scalar / vector / matrix / intrinsic / control-flow
+surface a kernel can touch, `tools/compute_diff.sh` runs a corpus of GLSL
+compute shaders (`tools/compute_corpus/`) two ways — zioshade's MSL and
+SPIRV-Cross's MSL — on the Metal GPU over an identical input buffer, and diffs
+the **output buffers** numerically (`tools/ShaderComputeCompare.swift`).
+
+Over 12 kernels (1024 elements each) on an Apple M2:
+
+| Category (kernel) | max relative diff | result |
+|-------------------|------------------:|--------|
+| arithmetic, common math, integer/bitwise, vectors, matrices, swizzles, logic, bitcast | **0** | bit-exact |
+| transcendental, control-flow, functions/fma | ~1e-7 | ULP-level (instruction reordering) |
+
+**All 12 match.** Nine are bit-exact; three differ only at the last floating
+point bit from legitimate instruction selection in transcendental/fma code.
+
+This differential is not a rubber stamp — building it surfaced **four** MSL
+backend bugs, each confirmed by running the wrong output on the GPU. In every
+case zioshade's *frontend* SPIR-V was identical to glslang's (verified with
+`spirv-dis`); the defect was purely in SPIR-V → MSL:
+
+| SPIR-V opcode | was emitted as | correct MSL | class |
+|---------------|----------------|-------------|-------|
+| `OpFMod` | `fmod(x,y)` | `x - y*floor(x/y)` | silent-wrong for negative operands |
+| `OpBitcast` | `uint(x)` (rounds) | `as_type<uint>(x)` | silent-wrong (`floatBitsToUint(2.5)`→2 not `0x40200000`) |
+| `OpExtInst Degrees`/`Radians` | `degrees(x)`/`radians(x)` | `x * 57.29578` / `x * 0.0174533` | won't compile (no such Metal builtin) |
+| `OpVectorExtractDynamic` | `// unhandled op 77` | `vec[idx]` | won't compile (undeclared identifier) |
+
+The first two are the exact "silently emits plausible-looking wrong output"
+failure this project exists to prevent; the differential caught them because it
+executes, where a validity-only check (spirv-val) cannot. Regressions are locked
+in `tests/msl_tests.zig`.
+
+Reproduce (macOS):
+```
+zig build cli
+tools/compute_diff.sh            # builds the harness, runs the corpus, gates on any diff
+```
+
+---
+
 ## 3. Fuzz
 
 `zig build fuzz -- --count 30000 --validate` generates 30 000 structurally-random
