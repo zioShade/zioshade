@@ -143,6 +143,10 @@ pub const CompileOptions = struct {
     include_paths: []const []const u8 = &.{},
     /// Preprocessor defines to inject before compilation.
     defines: []const DefineOverride = &.{},
+    /// Honest-error if the shader has no `main` entry point, instead of emitting
+    /// an OpEntryPoint-less (invalid) module. Off by default so callers that
+    /// intentionally compile a partial unit keep working; the CLI sets it true.
+    require_entry_point: bool = false,
 };
 
 // (Removed dead `CrossCompileOptions`: it was unused by any public function and
@@ -377,7 +381,7 @@ pub fn compileToSPIRV(
     };
     defer parser.freeTree(alloc, &root_node);
 
-    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage }) catch {
+    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage, .require_entry_point = options.require_entry_point }) catch {
         semantic.stabilizeErrorContext();
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;
@@ -569,7 +573,7 @@ pub fn compileToSPIRVNoOpt(
     };
     defer parser.freeTree(alloc, &root_node);
 
-    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage }) catch {
+    var module = semantic.analyzeWithOptions(alloc, &root_node, .{ .tolerate_errors = true, .fail_on_recorded_errors = true, .stage = options.stage, .require_entry_point = options.require_entry_point }) catch {
         semantic.stabilizeErrorContext();
         last_compile_detail = .semantic_failed;
         return error.SemanticFailed;

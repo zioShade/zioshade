@@ -108,6 +108,12 @@ pub const AnalyzeOptions = struct {
     fail_on_recorded_errors: bool = false,
     /// Shader stage (needed for stage-dependent builtin variables like gl_TessLevelOuter)
     stage: ?@import("root.zig").Stage = null,
+    /// When true, honest-error if the module has no `main` entry point. Off by
+    /// default so low-level callers (unit tests analyzing a bare function, the
+    /// mesh/task layout-only fixtures) still work; the CLI's end-to-end compile
+    /// turns it on so a main-less or non-GLSL input fails loud instead of emitting
+    /// an OpEntryPoint-less module (invalid SPIR-V at exit 0).
+    require_entry_point: bool = false,
 };
 
 /// Returns the canonical name of the 64-bit type (e.g. "double", "int64_t") when
@@ -391,6 +397,30 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
     }
 
     if ((!analyzer.tolerate_errors or options.fail_on_recorded_errors) and analyzer.errors.items.len > 0) return error.SemanticFailed;
+
+    // A stage module compiled end-to-end must have an entry point. Every backend
+    // and glslang key off `main`; codegen's emitEntryPoint does
+    // `findEntryPoint() orelse return`, so a shader with no `main` would otherwise
+    // emit a module with no OpEntryPoint — invalid SPIR-V produced at exit 0, the
+    // exact silent-wrong this project forbids (surfaced by sweeping SPIRV-Cross's
+    // corpus). Opt-in via require_entry_point so low-level analysis of a bare
+    // function keeps working; the CLI turns it on.
+    if (options.require_entry_point) {
+        var has_main = false;
+        for (analyzer.functions.items) |f| {
+            if (std.mem.eql(u8, f.name, "main")) {
+                has_main = true;
+                break;
+            }
+        }
+        if (!has_main) {
+            last_error_ctx = "no-entry-point";
+            last_error_inner = "no 'main' function found";
+            last_error_line = 0;
+            last_error_column = 0;
+            return error.SemanticFailed;
+        }
+    }
 
     // Transfer ownership to module; clear analyzer fields so defer deinit doesn't double-free
     var mod: ir.Module = .{
