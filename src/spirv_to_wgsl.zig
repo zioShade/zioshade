@@ -7013,7 +7013,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FSub, .ISub => try emitBinOp(module, names, &inline_exprs, inst, "-", w, arena, indent),
             .FMul, .IMul => try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent),
             .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, &inline_exprs, inst, "/", w, arena, indent),
-            .FMod => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
+            .FMod => try emitFMod(module, names, &inline_exprs, inst, w, arena, indent),
             .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
             // All three shifts share emitShift, which applies the u32/vecN<u32>
             // amount cast and the #170 constant over-shift mask. ShiftRightArithmetic
@@ -8482,6 +8482,30 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
 }
 
+/// OpFMod takes the sign of operand 2 (the divisor) — GLSL mod() semantics. WGSL's
+/// float `%` takes the sign of operand 1 (truncated remainder, like C fmod), so it
+/// is silently wrong for operands of opposite sign. Emit the sign-correct expansion
+/// x - y * floor(x / y), matching spirv-cross's mod() helper. (Integer OpUMod /
+/// OpSMod / OpSRem keep `%`.) The non-finite constant fold is preserved so a
+/// `mod(1.0, 0.0)` still folds to a NaN bitcast rather than a naga-rejected literal.
+fn emitFMod(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    if (std.mem.eql(u8, rt, "f32")) {
+        if (constFoldNonFiniteFloat(module, inst)) |bits| {
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = bitcast<f32>(0x{x:0>8}u);\n", .{ result_name, rt, bits });
+            return;
+        }
+    }
+    const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
+    const rhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
+    const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+    const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = {s} - {s} * floor({s} / {s});\n", .{ result_name, rt, lhs, rhs, lhs, rhs });
+}
+
 /// Emit a WGSL shift (`<<` / `>>`) for any of OpShiftLeftLogical,
 /// OpShiftRightLogical, OpShiftRightArithmetic. WGSL requires the shift AMOUNT to
 /// be u32-typed with the SAME vector dimension as the base (`vecN<T> << vecN<u32>`;
@@ -8951,6 +8975,10 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         // getBinOpSymbol at all, so it used to fail loud here.)
         .ShiftLeftLogical => try emitShift(module, names, inline_exprs, inst, "<<", w, arena, indent),
         .ShiftRightLogical, .ShiftRightArithmetic => try emitShift(module, names, inline_exprs, inst, ">>", w, arena, indent),
+        // OpFMod needs the sign-of-divisor floor expansion, not `%` (see emitFMod);
+        // route it here too so a replayed FMod (switch-case body / CFG replay) is
+        // not re-emitted as the wrong `%` via getBinOpSymbol below.
+        .FMod => try emitFMod(module, names, inline_exprs, inst, w, arena, indent),
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops
@@ -8986,7 +9014,9 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .FSub => "-",
         .FMul => "*",
         .FDiv => "/",
-        .FMod, .SMod, .SRem, .FRem, .UMod => "%",
+        // OpFMod deliberately absent: WGSL float `%` has the wrong (dividend) sign,
+        // so FMod must not be inlined/replayed as `%` — it routes to emitFMod.
+        .SMod, .SRem, .FRem, .UMod => "%",
         .ShiftRightLogical => ">>",
         .ShiftLeftLogical => "<<",
         .BitwiseAnd => "&",
@@ -9162,7 +9192,9 @@ fn getExtInstName(instruction: u32) ?[]const u8 {
 // Check if an opcode is an inlineable arithmetic op
 fn isInlineableArithOp(op: spirv.Op) bool {
     return switch (op) {
-        .FMul, .FAdd, .FSub, .FDiv, .FMod, .FNegate, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .ExtInst => true,
+        // OpFMod excluded: it must not be inlined as `%` (wrong sign in WGSL); it
+        // routes to emitFMod's floor expansion as a named statement instead.
+        .FMul, .FAdd, .FSub, .FDiv, .FNegate, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .ExtInst => true,
         else => false,
     };
 }
@@ -9174,7 +9206,7 @@ fn getInlineBinOp(op: spirv.Op) ?[]const u8 {
         .FAdd, .IAdd => "+",
         .FSub, .ISub => "-",
         .FDiv, .SDiv, .UDiv => "/",
-        .FMod, .SMod => "%",
+        .SMod => "%",
         .FOrdLessThan => "<",
         .FOrdGreaterThan => ">",
         .FOrdLessThanEqual => "<=",
@@ -9210,8 +9242,9 @@ fn buildInlineExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u3
             }
             return buf.items;
         },
-        // Binary arithmetic ops: lhs op rhs
-        .FMul, .FAdd, .FSub, .FDiv, .FMod, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual => {
+        // Binary arithmetic ops: lhs op rhs (OpFMod excluded — wrong-sign `%` in
+        // WGSL; it is never inlined, see isInlineableArithOp / emitFMod)
+        .FMul, .FAdd, .FSub, .FDiv, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual => {
             if (inst.words.len < 5) return null;
             const op_sym = getInlineBinOp(inst.op) orelse return null;
             const lhs = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, depth + 1);

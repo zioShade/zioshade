@@ -51,6 +51,36 @@ no-entry-point silent-wrong were found and fixed.
 
 ---
 
+## 1b. Backend source validity (does the emitted code compile?)
+
+The corpus sweep above validates the SPIR-V frontend. `tools/backend_validity_sweep.sh`
+does the same for the cross-compiler *backends*: it emits every shader as GLSL and
+WGSL and validates the output with that ecosystem's own tool (`glslangValidator`;
+`naga` when installed). MSL validity is covered more strongly by the on-GPU
+differential in section 2b. A backend that emits source its own validator rejects
+is the silent-wrong class again, one layer out.
+
+Over the compute corpus (`tools/compute_corpus/`, 12 kernels): **GLSL 12/12 valid**.
+
+This sweep and the compute differential together found four cross-backend bugs,
+each with the zioshade frontend SPIR-V byte-identical to glslang's (the defect was
+in a specific backend):
+
+| SPIR-V opcode | backend | was | now |
+|---------------|---------|-----|-----|
+| `OpFMod` | MSL, WGSL | `fmod` / `%` (wrong sign) | `x - y*floor(x/y)` |
+| `OpBitcast` | MSL, GLSL | numeric conversion | `as_type` / `floatBitsToUint` etc. |
+| `OpVectorExtractDynamic` | MSL, GLSL | unhandled stub | `vec[idx]` |
+| vector relational (`OpFOrdGreaterThan` on vecN) | GLSL | `a > b` (scalar-only) | `greaterThan(a, b)` |
+
+(HLSL was already correct on all four.) Reproduce:
+```
+zig build cli
+tools/backend_validity_sweep.sh
+```
+
+---
+
 ## 2. Execution equivalence (MSL, on-GPU)
 
 Validity is necessary but not sufficient: valid SPIR-V can still compute the
