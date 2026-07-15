@@ -8871,6 +8871,44 @@ const Analyzer = struct {
                         .f16vec2, .f16vec3, .f16vec4 => .float16,
                         else => .void,
                     };
+                    // Constant-fold a single INT/UINT LITERAL splat into a float
+                    // vector (`vec4(1)`) to an OpConstantComposite, instead of the
+                    // runtime OpConvertSToF + OpCompositeConstruct the `need_conv`
+                    // path below would emit. Without this the splat stays
+                    // non-constant, so any enclosing `const` array built from it
+                    // (`const vec4 G[2][2] = vec4[2][2](vec4[2](vec4(1),vec4(2)),…)`)
+                    // fails to fold and its Private global silently drops the
+                    // initializer — every backend then reads uninitialised memory
+                    // (#335). The int-vector (`ivec4(1)`) and float-vector
+                    // (`vec4(1.0)`) literal splats already fold in sibling paths.
+                    if (result_scalar == .float and node.data.children.len == 1) {
+                        const child = node.data.children[0];
+                        const fval: ?f32 = blk: {
+                            if (child.tag == .int_literal) break :blk @floatFromInt(@as(i32, @bitCast(try literalWord(child))));
+                            if (child.tag == .uint_literal) break :blk @floatFromInt(try literalWord(child));
+                            break :blk null;
+                        };
+                        if (fval) |v| {
+                            const ncomp = result_ty.numComponents();
+                            const comp_id = try self.getConstFloat(v);
+                            const cc_ops = try self.alloc.alloc(ir.Instruction.Operand, ncomp);
+                            for (0..ncomp) |i| cc_ops[i] = .{ .id = comp_id };
+                            const key = self.constCompositeKey(result_ty, cc_ops);
+                            if (self.const_composite_cache.get(key)) |existing_id| {
+                                self.alloc.free(cc_ops);
+                                return .{ .ty = result_ty, .id = existing_id };
+                            }
+                            try self.instructions.append(self.alloc, .{
+                                .tag = .constant_composite,
+                                .result_type = null,
+                                .result_id = result_id,
+                                .operands = cc_ops,
+                                .ty = result_ty,
+                            });
+                            try self.const_composite_cache.put(self.alloc, key, result_id);
+                            return .{ .ty = result_ty, .id = result_id };
+                        }
+                    }
                     const need_conv = !std.meta.eql(splat_ty, result_scalar) and result_scalar != .void;
                     if (need_conv) {
                         const conv_tag: ir.Instruction.Tag = blk: {
