@@ -1326,3 +1326,71 @@ test "frontend: multisampled subpassLoad emits a constant coordinate (valid SPIR
     try std.testing.expect(!spirvHasOpcode(spv, 80));
     try spirvValOrSkip(spv);
 }
+
+// =============================================================================
+// Module-scope const array initializers (silent-wrong, all backends) — #335
+//
+// A `const` array indexed by a runtime value lowers to a Private OpVariable. Its
+// initializer must be a folded OpConstantComposite carried as the variable's 5th
+// word; without it every backend reads uninitialised memory. The remaining gap
+// was int-literal splats: `vec4(1)` emitted a runtime OpConvertSToF instead of a
+// constant, so a `const vec4 G[2][2]` built from `vec4(1)` failed to fold and its
+// Private global silently dropped the initializer. `vec4(1.0)` already folded.
+// =============================================================================
+
+/// True if the module has an OpVariable (59) in the Private (6) storage class
+/// that carries an initializer (instruction word count >= 5: type, id, class,
+/// initializer). Walks by instruction word count past the 5-word header.
+fn spirvPrivateVarHasInitializer(spv: []const u32) bool {
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc: usize = spv[i] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[i] & 0xffff);
+        // OpVariable: words are [hdr, result_type, result_id, storage_class, init?]
+        if (op == 59 and wc >= 5 and i + 3 < spv.len and spv[i + 3] == 6) return true;
+        i += wc;
+    }
+    return false;
+}
+
+const const_nested_array_src =
+    \\#version 450
+    \\const vec4 G[2][2] = vec4[2][2](vec4[2](vec4(1),vec4(2)), vec4[2](vec4(3),vec4(4)));
+    \\layout(location=0) flat in int i;
+    \\layout(location=1) flat in int j;
+    \\layout(location=0) out vec4 o;
+    \\void main(){ o = G[i][j]; }
+;
+
+test "frontend #335: const nested-array global keeps its folded initializer" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc, const_nested_array_src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The nested initializer must fold to constant composites (44) that the
+    // Private global then references as its initializer (word count 5) — not a
+    // bare uninitialised OpVariable whose values appear nowhere.
+    try std.testing.expect(spirvHasOpcode(spv, 44));
+    try std.testing.expect(spirvPrivateVarHasInitializer(spv));
+    try spirvValOrSkip(spv);
+}
+
+test "frontend #335: int-literal vector splat folds to a constant" {
+    // `vec4(1)` must be an OpConstantComposite (44), not a runtime OpConvertSToF
+    // (111) feeding an OpCompositeConstruct — the cascade root of the dropped
+    // const-array initializer above.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\const vec4 V[2] = vec4[2](vec4(1), vec4(2));
+        \\layout(location=0) flat in int i;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = V[i]; }
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 44));
+    try std.testing.expect(!spirvHasOpcode(spv, 111)); // no OpConvertSToF
+    try std.testing.expect(spirvPrivateVarHasInitializer(spv));
+    try spirvValOrSkip(spv);
+}
