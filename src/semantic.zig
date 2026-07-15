@@ -4467,6 +4467,95 @@ const Analyzer = struct {
         return .{ .ty = .bool, .id = result };
     }
 
+    // Convert a scalar value to `target_ty` (int/uint ⇄ float). Returns the id
+    // unchanged when the types already match or the conversion isn't a known
+    // scalar numeric cast (callers only use this for the rare ternary type
+    // mismatch, where valid GLSL guarantees a numeric promotion).
+    fn convertScalarTo(self: *Analyzer, tid: TypedId, target_ty: ast.Type) !u32 {
+        const tag: ?ir.Instruction.Tag =
+            if (target_ty == .float and tid.ty == .int) .convert_itof
+            else if (target_ty == .float and tid.ty == .uint) .convert_utof
+            else if (target_ty == .int and tid.ty == .float) .convert_ftoi
+            else if (target_ty == .uint and tid.ty == .float) .convert_ftou
+            else null;
+        if (tag) |t| {
+            const id = self.allocId();
+            const ops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+            ops[0] = .{ .id = tid.id };
+            try self.instructions.append(self.alloc, .{ .tag = t, .result_type = null, .result_id = id, .operands = ops, .ty = target_ty });
+            return id;
+        }
+        return tid.id;
+    }
+
+    // GLSL ternary `cond ? a : b` SHORT-CIRCUITS: only the taken branch is
+    // evaluated. glslpp emitted eager OpSelect, which evaluates BOTH arms — so a
+    // side-effecting arm fired unconditionally = silent-wrong (same class as the
+    // `&&`/`||` bug). When EITHER arm may have a side effect, lower with real
+    // control flow (memory-SSA: tmp set in whichever branch runs). The temp takes
+    // the THEN type and the ELSE value is numeric-converted to it (valid GLSL
+    // guarantees compatible arms; matching types — the norm — need no conversion).
+    // Only used outside loop conditions (a SelectionMerge in a loop header is
+    // invalid) and only for a side-effecting arm; the pure case keeps OpSelect. (#170)
+    fn analyzeTernaryShortCircuit(self: *Analyzer, node: ast.Node) Error!TypedId {
+        var cond = try self.analyzeExpression(node.data.children[0]);
+        if (cond.is_ptr) {
+            const ld = try self.emitLoadCached(cond.id, cond.ty);
+            cond = .{ .ty = cond.ty, .id = ld };
+        }
+        const cond_b = try self.boolify(cond);
+        const then_label = self.allocId();
+        const else_label = self.allocId();
+        const merge_label = self.allocId();
+        try self.unssaAllScopes();
+        try self.emitSelectionMerge(merge_label);
+        try self.emitBranchConditional(cond_b, then_label, else_label);
+        // then arm
+        try self.emitLabel(then_label);
+        var then_tid = try self.analyzeExpression(node.data.children[1]);
+        if (then_tid.is_ptr) {
+            const ld = try self.emitLoadCached(then_tid.id, then_tid.ty);
+            then_tid = .{ .ty = then_tid.ty, .id = ld };
+        }
+        const result_ty = then_tid.ty;
+        const tmp = self.allocId();
+        const vops = try self.alloc.alloc(ir.Instruction.Operand, 1);
+        vops[0] = .{ .literal_int = 7 }; // Function storage class
+        try self.instructions.append(self.alloc, .{ .tag = .local_variable, .result_type = null, .result_id = tmp, .operands = vops, .ty = result_ty });
+        try self.emitStore(tmp, then_tid.id);
+        if (!self.lastInstructionIsBranch()) try self.emitBranch(merge_label);
+        // else arm
+        try self.emitLabel(else_label);
+        var else_tid = try self.analyzeExpression(node.data.children[2]);
+        if (else_tid.is_ptr) {
+            const ld = try self.emitLoadCached(else_tid.id, else_tid.ty);
+            else_tid = .{ .ty = else_tid.ty, .id = ld };
+        }
+        // The temp is the THEN type. Matching arm types (the norm) need no conversion;
+        // a lossless numeric WIDENING of else to then (then float, else int/uint) is
+        // handled by convertScalarTo. Any OTHER mismatch — notably NARROWING (then int,
+        // else float, which would truncate) — would be a silent-wrong, so honest-error
+        // (this case is invalid SPIR-V on the eager OpSelect path too; rare). (#170)
+        if (std.meta.activeTag(else_tid.ty) != std.meta.activeTag(result_ty)) {
+            const lossless_widen = (result_ty == .float or result_ty == .double) and
+                (else_tid.ty == .int or else_tid.ty == .uint);
+            if (!lossless_widen) {
+                last_error_ctx = "ternary-short-circuit-type-mismatch";
+                last_error_inner = "ternary-short-circuit-type-mismatch";
+                last_error_line = node.loc.line;
+                last_error_column = node.loc.column;
+                return error.SemanticFailed;
+            }
+        }
+        const else_val = try self.convertScalarTo(else_tid, result_ty);
+        try self.emitStore(tmp, else_val);
+        if (!self.lastInstructionIsBranch()) try self.emitBranch(merge_label);
+        // merge
+        try self.emitLabel(merge_label);
+        const result = try self.emitLoadCached(tmp, result_ty);
+        return .{ .ty = result_ty, .id = result };
+    }
+
     fn analyzeExpression(self: *Analyzer, node: ast.Node) Error!TypedId {
         // Guard the recursive walk against a pathologically deep expression tree
         // (e.g. a flat `a+a+a+...` chain, which the iterative binary parsers build
@@ -9783,6 +9872,16 @@ const Analyzer = struct {
             },
             .ternary_op => {
                 if (node.data.children.len < 3) return error.SemanticFailed;
+                // GLSL `?:` short-circuits: only the taken arm is evaluated. When an
+                // arm may have a side effect, lower to control flow (the eager OpSelect
+                // below evaluates BOTH arms = dropped/mis-applied side effect). Pure
+                // arms keep OpSelect. Not inside a loop condition (selection_merge in a
+                // loop header is invalid). (#170)
+                if (self.in_loop_cond == 0 and
+                    (self.exprMayHaveSideEffects(node.data.children[1]) or self.exprMayHaveSideEffects(node.data.children[2])))
+                {
+                    return try self.analyzeTernaryShortCircuit(node);
+                }
                 var cond_tid = try self.analyzeExpression(node.data.children[0]);
                 var then_tid = try self.analyzeExpression(node.data.children[1]);
                 var else_tid = try self.analyzeExpression(node.data.children[2]);
