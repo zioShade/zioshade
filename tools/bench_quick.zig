@@ -121,9 +121,21 @@ pub fn main() !void {
         for (0..iterations) |_| {
             const start = zioshade.compat.nanoTimestamp();
             const spirv = zioshade.compileToSPIRV(alloc, shader.source, .{ .stage = .fragment }) catch continue;
-            const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch { alloc.free(spirv); continue; };
-            const glsl_out = zioshade.spirvToGLSL(alloc, spirv, .{}) catch { alloc.free(spirv); alloc.free(hlsl); continue; };
-            const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch { alloc.free(spirv); alloc.free(hlsl); alloc.free(glsl_out); continue; };
+            const hlsl = zioshade.spirvToHLSL(alloc, spirv, .{}) catch {
+                alloc.free(spirv);
+                continue;
+            };
+            const glsl_out = zioshade.spirvToGLSL(alloc, spirv, .{}) catch {
+                alloc.free(spirv);
+                alloc.free(hlsl);
+                continue;
+            };
+            const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch {
+                alloc.free(spirv);
+                alloc.free(hlsl);
+                alloc.free(glsl_out);
+                continue;
+            };
             const end = zioshade.compat.nanoTimestamp();
             total_ns += @as(u64, @intCast(end - start));
             alloc.free(spirv);

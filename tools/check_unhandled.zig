@@ -23,27 +23,26 @@ pub fn main() !void {
     var unhandled_count: u32 = 0;
 
     for (&dirs) |dir_path| {
-        const dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch continue;
-        var walker = try dir.walk(alloc);
-        defer walker.deinit();
+        const entries = zioshade.compat.walkDirAlloc(alloc, dir_path) catch continue;
+        defer zioshade.compat.freeWalkEntries(alloc, entries);
 
-        while (try walker.next()) |entry| {
-            if (entry.kind != .file) continue;
-            const ext = std.fs.path.extension(entry.basename);
+        for (entries) |entry| {
+            if (!entry.is_file) continue;
+            const basename = std.fs.path.basename(entry.path);
+            const ext = std.fs.path.extension(basename);
             if (!std.mem.eql(u8, ext, ".frag") and !std.mem.eql(u8, ext, ".vert") and
                 !std.mem.eql(u8, ext, ".comp") and !std.mem.eql(u8, ext, ".glsl") and
                 !std.mem.eql(u8, ext, ".v.glsl") and !std.mem.eql(u8, ext, ".f.glsl"))
                 continue;
-            if (std.mem.indexOf(u8, entry.basename, ".error.") != null) continue;
-            if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
-            if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
+            if (std.mem.indexOf(u8, basename, ".error.") != null) continue;
+            if (std.mem.indexOf(u8, basename, ".asm.") != null) continue;
+            if (std.mem.indexOf(u8, basename, ".nocompat.") != null) continue;
 
-            var path_buf: [1024]u8 = undefined;
-            const path = try std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path });
+            // `entry.path` is already the cwd-relative dir_path joined with the
+            // walk-relative path, so it is the full path to read/report.
+            const path = entry.path;
 
-            const file = std.fs.cwd().openFile(path, .{}) catch continue;
-            defer file.close();
-            const source_raw = file.readToEndAlloc(alloc, 10 * 1024 * 1024) catch continue;
+            const source_raw = zioshade.compat.readFileByPath(alloc, path, 10 * 1024 * 1024) catch continue;
             const source = try alloc.dupeZ(u8, source_raw);
             alloc.free(source_raw);
             defer alloc.free(source);

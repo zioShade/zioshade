@@ -15,25 +15,20 @@ pub fn main() !void {
     }
 
     const dir_path = args[1];
-    var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
-    defer dir.close();
-
-    var walker = try dir.walk(alloc);
-    defer walker.deinit();
+    const entries = try zioshade.compat.walkDirAlloc(alloc, dir_path);
+    defer zioshade.compat.freeWalkEntries(alloc, entries);
 
     var total: u32 = 0;
     var any_fail: u32 = 0;
 
-    while (try walker.next()) |entry| {
-        if (entry.kind != .file) continue;
+    for (entries) |entry| {
+        if (!entry.is_file) continue;
         if (!std.mem.endsWith(u8, entry.path, ".spv")) continue;
 
         total += 1;
-        const name = entry.basename;
+        const name = std.fs.path.basename(entry.path);
 
-        const file = try dir.openFile(entry.path, .{});
-        defer file.close();
-        const data = try file.readToEndAlloc(alloc, 1024 * 1024);
+        const data = try zioshade.compat.readFileByPath(alloc, entry.path, 1024 * 1024);
         defer alloc.free(data);
 
         if (data.len < 20 or data.len % 4 != 0) continue;

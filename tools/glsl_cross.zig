@@ -20,8 +20,7 @@ pub fn main() !void {
     const output_prefix = args[2];
     const target = args[3];
 
-    const dir = std.fs.cwd();
-    const glsl_src = try dir.readFileAlloc(alloc, input_path, 1024 * 1024);
+    const glsl_src = try zioshade.compat.readFileByPath(alloc, input_path, 1024 * 1024);
     defer alloc.free(glsl_src);
 
     // Null-terminate for compileToSPIRV's [:0]const u8 source.
@@ -47,6 +46,6 @@ pub fn main() !void {
 
     var out_path: [512]u8 = undefined;
     const out_name = try std.fmt.bufPrint(&out_path, "{s}_zioshade.{s}", .{ output_prefix, target });
-    try dir.writeFile(.{ .sub_path = out_name, .data = output });
+    try zioshade.compat.writeFileByPath(alloc, out_name, output);
     std.debug.print("Wrote {s}\n", .{out_name});
 }

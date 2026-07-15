@@ -35,7 +35,7 @@ pub fn main() !void {
     var spirv_size: usize = 0;
 
     for (0..iterations) |_| {
-        var timer = std.time.Timer.start() catch unreachable;
+        var timer = zioshade.compat.Timer.start();
         const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
         defer alloc.free(spirv);
         const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });

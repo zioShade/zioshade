@@ -167,8 +167,13 @@ pub fn main() !void {
     const spv_dir = if (args.len > 2) args[2] else "tests/spirv_bins";
     const sm: u32 = if (args.len > 3) try std.fmt.parseInt(u32, args[3], 10) else 60;
 
-    var dir = try std.fs.cwd().openDir(spv_dir, .{ .iterate = true });
-    defer dir.close();
+    const entries = try zioshade.compat.walkDirAlloc(alloc, spv_dir);
+    defer zioshade.compat.freeWalkEntries(alloc, entries);
+
+    // One Io context reused for every subprocess spawn below.
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const io = main_io.io();
 
     // Per-stage tallies.
     var buckets = std.AutoArrayHashMap(SpvStage, StageBucket).init(alloc);
@@ -188,14 +193,13 @@ pub fn main() !void {
     var total_fail: u32 = 0;
     var total_skip: u32 = 0;
 
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind != .file) continue;
-        const name = entry.name;
+    for (entries) |entry| {
+        if (!entry.is_file) continue;
+        const name = std.fs.path.basename(entry.path);
         if (!std.mem.endsWith(u8, name, ".spv")) continue;
 
         // Read SPIR-V binary.
-        const spv_data = dir.readFileAlloc(alloc, name, 1024 * 1024) catch |err| {
+        const spv_data = zioshade.compat.readFileByPath(alloc, entry.path, 1024 * 1024) catch |err| {
             std.debug.print("SKIP {s}: read error {}\n", .{ name, err });
             total_skip += 1;
             const b = buckets.getPtr(.unknown).?;
@@ -252,25 +256,15 @@ pub fn main() !void {
 
         // Write HLSL to a temp file (one shared name; fine because we run sequentially).
         const tmp_path = "tmp_hlsl_test.hlsl";
-        {
-            const tmp_file = try std.fs.cwd().createFile(tmp_path, .{});
-            defer tmp_file.close();
-            try tmp_file.writeAll(hlsl);
-        }
-        defer std.fs.cwd().deleteFile(tmp_path) catch {};
+        try zioshade.compat.writeFileByPath(alloc, tmp_path, hlsl);
+        defer zioshade.compat.deleteFileByPath(alloc, tmp_path) catch {};
 
         // Run DXC with the resolved profile.
-        const result = try std.process.Child.run(.{
-            .allocator = alloc,
-            .argv = &.{ dxc_path, "-T", eff_profile, "-E", "main", tmp_path },
-        });
+        const result = try zioshade.compat.processRun(io, alloc, &.{ dxc_path, "-T", eff_profile, "-E", "main", tmp_path });
         defer alloc.free(result.stdout);
         defer alloc.free(result.stderr);
 
-        const exited_ok = switch (result.term) {
-            .Exited => |code| code == 0,
-            else => false,
-        };
+        const exited_ok = (result.term.exitedCode() orelse 1) == 0;
 
         if (exited_ok) {
             bucket.pass += 1;

@@ -283,6 +283,20 @@ pub fn deleteFileAbsolute(alloc: std.mem.Allocator, abs_path: []const u8) !void 
     }
 }
 
+/// Create the directory at absolute `abs_path`. Hides the 0.15/0.16 split
+/// (std.fs.makeDirAbsolute became std.Io.Dir.createDirAbsolute on 0.16, behind
+/// std.Io). Propagates the raw error so callers can still match
+/// `error.PathAlreadyExists` (present in both error sets).
+pub fn makeDirAbsolute(alloc: std.mem.Allocator, abs_path: []const u8) !void {
+    if (is_0_16) {
+        var main_io = MainIo().init(alloc);
+        defer main_io.deinit();
+        return std.Io.Dir.createDirAbsolute(main_io.io(), abs_path, .default_dir);
+    } else {
+        return std.fs.makeDirAbsolute(abs_path);
+    }
+}
+
 /// Read the entire file at absolute `abs_path` into caller-owned bytes.
 /// Hides the 0.15/0.16 split (openFileAbsolute moved behind std.Io on 0.16).
 pub fn readFileAbsolute(alloc: std.mem.Allocator, abs_path: []const u8, limit: usize) ![]u8 {
@@ -590,6 +604,37 @@ pub fn nanoTimestamp() i128 {
         return std.time.nanoTimestamp();
     }
 }
+
+/// Monotonic-ish elapsed timer mirroring the subset of std.time.Timer that the
+/// dev bench tools use (start / read / lap / reset), hiding the 0.16 removal of
+/// std.time.Timer and std.time.Instant (timing moved behind std.Io). Backed by
+/// nanoTimestamp; `start` cannot fail here (the std API returned an error union),
+/// so callers drop the `try`/`catch`. COMPAT(0.15): revisit when the floor is 0.16.
+pub const Timer = struct {
+    start_ns: i128,
+
+    pub fn start() Timer {
+        return .{ .start_ns = nanoTimestamp() };
+    }
+
+    /// Nanoseconds elapsed since start (or the last reset).
+    pub fn read(self: Timer) u64 {
+        const d = nanoTimestamp() - self.start_ns;
+        return if (d < 0) 0 else @intCast(d);
+    }
+
+    pub fn reset(self: *Timer) void {
+        self.start_ns = nanoTimestamp();
+    }
+
+    /// Nanoseconds since the last lap/start, and restart the interval.
+    pub fn lap(self: *Timer) u64 {
+        const now = nanoTimestamp();
+        const d = now - self.start_ns;
+        self.start_ns = now;
+        return if (d < 0) 0 else @intCast(d);
+    }
+};
 
 /// Resolve a Vulkan SDK CLI tool by basename. Prefer `$VULKAN_SDK/Bin/<tool>[.exe]`
 /// (`.exe` appended only on Windows); fall back to the bare name on PATH when

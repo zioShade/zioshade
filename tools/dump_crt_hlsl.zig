@@ -7,13 +7,11 @@ pub fn main() !void {
     // run. Use the page allocator and let the OS reclaim memory on exit.
     const alloc = std.heap.page_allocator;
 
-    const cwd = std.fs.cwd();
-
     // Read files at runtime to avoid package path restrictions
-    const prefix = try cwd.readFileAlloc(alloc, "tests/wintty/shadertoy_prefix.glsl", 1024 * 1024);
+    const prefix = try zioshade.compat.readFileByPath(alloc, "tests/wintty/shadertoy_prefix.glsl", 1024 * 1024);
     defer alloc.free(prefix);
 
-    const crt = try cwd.readFileAlloc(alloc, "tests/wintty/test_crt.glsl", 1024 * 1024);
+    const crt = try zioshade.compat.readFileByPath(alloc, "tests/wintty/test_crt.glsl", 1024 * 1024);
     defer alloc.free(crt);
 
     var buf: std.ArrayListUnmanaged(u8) = .empty;
@@ -30,16 +28,16 @@ pub fn main() !void {
 
     const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
     defer alloc.free(hlsl);
-    try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.hlsl", .data = hlsl });
+    try zioshade.compat.writeFileByPath(alloc, "tests/wintty/crt_output.hlsl", hlsl);
     std.debug.print("HLSL: {d} bytes\n", .{hlsl.len});
 
     const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
     defer alloc.free(glsl);
-    try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.glsl", .data = glsl });
+    try zioshade.compat.writeFileByPath(alloc, "tests/wintty/crt_output.glsl", glsl);
     std.debug.print("GLSL: {d} bytes\n", .{glsl.len});
 
     const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
-    try cwd.writeFile(.{ .sub_path = "tests/wintty/crt_output.msl", .data = msl });
+    try zioshade.compat.writeFileByPath(alloc, "tests/wintty/crt_output.msl", msl);
     std.debug.print("MSL: {d} bytes\n", .{msl.len});
 }

@@ -29,7 +29,7 @@ pub fn main() !void {
     var pass_count: u32 = 0;
     var fail_count: u32 = 0;
     var skip_count: u32 = 0;
-    var fail_seeds: std.ArrayList(u64) = .{};
+    var fail_seeds: std.ArrayList(u64) = .empty;
     defer fail_seeds.deinit(alloc);
 
     std.debug.print("zioshade fuzzer: {} iterations, seed={}, validate={}\n", .{ count, seed, do_validate });
@@ -68,23 +68,16 @@ pub fn main() !void {
 
         if (do_validate) {
             const spv_bytes = std.mem.sliceAsBytes(result);
-            const tmp_file = std.fs.cwd().createFileZ("/tmp/zioshade_fuzz.spv", .{}) catch {
+            zioshade.compat.writeFileAbsolute(alloc, "/tmp/zioshade_fuzz.spv", spv_bytes) catch {
                 skip_count += 1;
                 continue;
             };
-            defer {
-                tmp_file.close();
-                std.fs.cwd().deleteFileZ("/tmp/zioshade_fuzz.spv") catch {};
-            }
-            tmp_file.writeAll(spv_bytes) catch {
-                skip_count += 1;
-                continue;
-            };
+            defer zioshade.compat.deleteFileAbsolute(alloc, "/tmp/zioshade_fuzz.spv") catch {};
 
-            const val_result = std.process.Child.run(.{
-                .allocator = alloc,
-                .argv = &.{ "spirv-val", "/tmp/zioshade_fuzz.spv" },
-            }) catch {
+            var main_io = zioshade.compat.MainIo().init(alloc);
+            defer main_io.deinit();
+            const io = main_io.io();
+            const val_result = zioshade.compat.processRun(io, alloc, &.{ "spirv-val", "/tmp/zioshade_fuzz.spv" }) catch {
                 skip_count += 1;
                 continue;
             };
@@ -92,7 +85,7 @@ pub fn main() !void {
                 if (val_result.stdout.len > 0) alloc.free(val_result.stdout);
                 if (val_result.stderr.len > 0) alloc.free(val_result.stderr);
             }
-            if (val_result.term.Exited != 0) {
+            if ((val_result.term.exitedCode() orelse 1) != 0) {
                 const msg = if (val_result.stderr.len > 200) val_result.stderr[0..200] else val_result.stderr;
                 std.debug.print("FAIL seed={}: spirv-val: {s}\n", .{ iter_seed, msg });
                 std.debug.print("  Source: {s}\n", .{source[0..@min(source.len, 300)]});
@@ -123,17 +116,39 @@ pub fn main() !void {
 // The seed determines which template is picked and parameters within it.
 
 const GlslType = enum {
-    float, vec2, vec3, vec4,
-    int, ivec2, ivec3, ivec4,
-    uint, uvec2, uvec3, uvec4,
-    mat2, mat3, mat4,
+    float,
+    vec2,
+    vec3,
+    vec4,
+    int,
+    ivec2,
+    ivec3,
+    ivec4,
+    uint,
+    uvec2,
+    uvec3,
+    uvec4,
+    mat2,
+    mat3,
+    mat4,
 
     pub fn name(self: GlslType) []const u8 {
         return switch (self) {
-            .float => "float", .vec2 => "vec2", .vec3 => "vec3", .vec4 => "vec4",
-            .int => "int", .ivec2 => "ivec2", .ivec3 => "ivec3", .ivec4 => "ivec4",
-            .uint => "uint", .uvec2 => "uvec2", .uvec3 => "uvec3", .uvec4 => "uvec4",
-            .mat2 => "mat2", .mat3 => "mat3", .mat4 => "mat4",
+            .float => "float",
+            .vec2 => "vec2",
+            .vec3 => "vec3",
+            .vec4 => "vec4",
+            .int => "int",
+            .ivec2 => "ivec2",
+            .ivec3 => "ivec3",
+            .ivec4 => "ivec4",
+            .uint => "uint",
+            .uvec2 => "uvec2",
+            .uvec3 => "uvec3",
+            .uvec4 => "uvec4",
+            .mat2 => "mat2",
+            .mat3 => "mat3",
+            .mat4 => "mat4",
         };
     }
     pub fn isMatrix(self: GlslType) bool {
@@ -183,7 +198,7 @@ fn generateShader(alloc: std.mem.Allocator, seed: u64) error{OutOfMemory}![:0]co
     const templates = 12;
     const pick_template = rng.intRangeAtMost(usize, 0, templates - 1);
 
-    var list = std.ArrayList(u8){};
+    var list: std.ArrayList(u8) = .empty;
     errdefer list.deinit(alloc);
 
     switch (pick_template) {
@@ -227,7 +242,12 @@ fn genArithmetic(list: *std.ArrayList(u8), alloc: std.mem.Allocator, rng: std.Ra
     const op = ops[rng.intRangeAtMost(usize, 0, ops.len - 1)];
     try Writer.f(list, alloc, "    {s} c = a {s} b;\n", .{ ty.name(), op });
     if (ty.isMatrix()) {
-        const vt = switch (ty) { .mat2 => "vec2", .mat3 => "vec3", .mat4 => "vec4", else => "vec2" };
+        const vt = switch (ty) {
+            .mat2 => "vec2",
+            .mat3 => "vec3",
+            .mat4 => "vec4",
+            else => "vec2",
+        };
         const fc = switch (ty) {
             .mat2 => "FragColor = vec4(r, 0.0, 1.0);\n",
             .mat3 => "FragColor = vec4(r, 1.0);\n",
@@ -349,7 +369,12 @@ fn genMatrixArith(list: *std.ArrayList(u8), alloc: std.mem.Allocator, rng: std.R
     try Writer.s(list, alloc, "#version 450\nlayout(location = 0) out vec4 FragColor;\nvoid main() {\n");
     const mt = pick(GlslType, &mat_types, rng);
     const tn = mt.name();
-    const vt = switch (mt) { .mat2 => "vec2", .mat3 => "vec3", .mat4 => "vec4", else => "vec2" };
+    const vt = switch (mt) {
+        .mat2 => "vec2",
+        .mat3 => "vec3",
+        .mat4 => "vec4",
+        else => "vec2",
+    };
     // Build correct FragColor assignment based on vector type
     const fc = switch (mt) {
         .mat2 => "FragColor = vec4(r, 0.0, 1.0);\n",
