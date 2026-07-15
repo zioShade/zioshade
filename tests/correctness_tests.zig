@@ -850,6 +850,78 @@ test "frontend: && in a loop condition stays valid SPIR-V (no broken back-edge)"
     try spirvValOrSkip(spv); // must be valid (the regression that scan.comp caught)
 }
 
+// #170: the ternary `?:` also short-circuits — only the taken arm is evaluated.
+// glslpp emitted eager OpSelect (evaluates BOTH arms), dropping a side-effecting
+// arm = silent-wrong (same class as `&&`/`||`). A side-effecting arm now lowers to
+// control flow (OpBranchConditional), not OpSelect.
+test "frontend: side-effecting ternary short-circuits (OpBranchConditional, not OpSelect)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\int se(inout int c){ c += 1; return 7; }
+        \\void main(){ int c=0; bool a=iv.x>0.0; int r = a ? 5 : se(c); o=vec4(float(c), float(r), 0, 1); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 250)); // OpBranchConditional
+    try spirvValOrSkip(spv);
+}
+
+// The PURE ternary keeps the cheaper eager OpSelect (opcode 169) — no control flow.
+test "frontend: pure ternary keeps eager OpSelect (no short-circuit overhead)" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float r = (iv.x > 0.0) ? iv.y : iv.z; o = vec4(r); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 169)); // OpSelect (eager, no branch)
+}
+
+// A side-effecting ternary inside a LOOP CONDITION falls back to eager OpSelect
+// (a selection_merge in the loop header would be invalid SPIR-V) — must stay valid.
+test "frontend: ternary in a loop condition stays valid SPIR-V" {
+    const alloc = std.testing.allocator;
+    const spv = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\int f(inout int n){ n++; return n; }
+        \\void main(){ int n=0; int s=0; for(int i=0;i<(n<3?f(n):0);i++){ s++; } o=vec4(float(s)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try spirvValOrSkip(spv);
+}
+
+// #170: a side-effecting ternary whose arms have MISMATCHED scalar types that need a
+// LOSSY/unhandled coercion (then=int, else=float — glslang promotes to float, but the
+// memory-SSA temp is the then type) honest-errors rather than emit a truncating
+// silent-wrong (or an int↔uint type-mismatched store = invalid SPIR-V). Matching arms
+// and lossless widening (then=float, else=int) still short-circuit correctly.
+test "frontend: side-effecting ternary with a lossy type mismatch honest-errors" {
+    const alloc = std.testing.allocator;
+    try std.testing.expectError(error.SemanticFailed, glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\float se(inout int c){ c += 1; return 2.5; }
+        \\void main(){ int c=0; bool a=iv.x>0.0; float r = a ? 5 : se(c); o=vec4(r, float(c), 0, 1); }
+    , .{ .stage = .fragment }));
+    // float-then / int-else is a lossless widen (int→float) — still short-circuits.
+    const ok = try glslpp.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\int se(inout int c){ c += 1; return 3; }
+        \\void main(){ int c=0; bool a=iv.x>0.0; float r = a ? 1.0 : se(c); o=vec4(r, float(c), 0, 1); }
+    , .{ .stage = .fragment });
+    defer alloc.free(ok);
+    try std.testing.expect(spirvHasOpcode(ok, 250)); // short-circuited (OpBranchConditional)
+    try spirvValOrSkip(ok);
+}
+
 // #170: textureProjOffset (projective sample + const offset, no lod/grad) was wrongly
 // rejected (UndeclaredIdentifier). It IS representable: OpImageSampleProjImplicitLod
 // with a ConstOffset operand (its own IR tag — image_sample_proj has no operands).
