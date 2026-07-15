@@ -6985,3 +6985,22 @@ test "wgsl: __LINE__ and __VERSION__ expand to usable integer literals (#170)" {
     defer alloc.free(wgsl);
     try nagaValidateOrSkip(wgsl, "line-version-macros");
 }
+
+// OpFMod takes the sign of the divisor (GLSL mod semantics); WGSL float `%` takes
+// the sign of the dividend, so it is silently wrong for operands of opposite sign.
+// Found by the MSL compute differential (tools/compute_diff.sh), which flagged the
+// same OpFMod mistranslation in the MSL backend. The frontend SPIR-V matches
+// glslang; the defect was purely in SPIR-V -> WGSL.
+test "OpFMod lowers to the sign-correct floor expansion, not WGSL `%`" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0, std140) uniform U { float a; } u;
+        \\void main() { fragColor = vec4(mod(u.a, 3.0), 0.0, 0.0, 1.0); }
+    ;
+    const wgsl = try compileToWgsl(source);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "floor(");
+    try assertNotContains(wgsl, "% 3.0f");
+    try nagaValidateOrSkip(wgsl, "fmod-sign");
+}

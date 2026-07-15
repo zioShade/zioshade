@@ -1346,7 +1346,6 @@ test "glsl: bitCount roundtrip" {
     try std.testing.expect(std.mem.indexOf(u8, glsl_out, "bitCount") != null);
 }
 
-
 test "T20.1: GLSL textureSize (ImageQuerySizeLod)" {
     const source =
         \\#version 450
@@ -1537,7 +1536,6 @@ test "T21.6: sign(int) via SSign (std450 #7)" {
     try assertContains(glsl, "sign(");
     try assertNotContains(glsl, "unhandled");
 }
-
 
 // Regression test for FrexpStruct/ModfStruct struct decomposition
 test "T22.1: frexp() struct decomposition (not ResType)" {
@@ -2359,8 +2357,8 @@ test "T-arrlen.2: named-instance multi-member SSBO .length() resolves the right 
     defer alloc.free(spirv);
     const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{});
     defer alloc.free(glsl);
-    try assertContains(glsl, "uint count;");     // scalar member, not an array
-    try assertContains(glsl, "float data[];");   // runtime array member with []
+    try assertContains(glsl, "uint count;"); // scalar member, not an array
+    try assertContains(glsl, "float data[];"); // runtime array member with []
     try assertContains(glsl, "b.data.length()"); // instance.member.length(), instance = `b`
     try assertNotContains(glsl, "// unhandled");
 }
@@ -2681,4 +2679,59 @@ test "glsl: raymarcher with inlined-function loops has no use-before-declaration
     defer alloc.free(glsl);
     try assertContains(glsl, "while (true)");
     try assertNoUseBeforeDecl(glsl);
+}
+
+// ---- Cross-backend regressions (found by the compute differential) ----
+// The MSL compute differential (tools/compute_diff.sh) surfaced two opcodes the
+// GLSL backend also mistranslated. The zioshade frontend SPIR-V matches glslang;
+// the defect was purely in SPIR-V -> GLSL.
+
+test "OpBitcast uses floatBitsToUint / uintBitsToFloat, not a numeric conversion (silent-wrong)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float a; } u;
+        \\void main() { if (uintBitsToFloat(floatBitsToUint(u.a) + 1u) > 0.0) discard; }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // A T(x) constructor would round/convert; floatBitsToUint(2.5) must be
+    // 0x40200000, not 2. The dedicated builtins are the only correct spelling.
+    try assertContains(glsl, "floatBitsToUint(");
+    try assertContains(glsl, "uintBitsToFloat(");
+}
+
+test "OpBitcast int variant uses floatBitsToInt / intBitsToFloat" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float a; } u;
+        \\void main() { if (intBitsToFloat(floatBitsToInt(u.a) + 1) > 0.0) discard; }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "floatBitsToInt(");
+    try assertContains(glsl, "intBitsToFloat(");
+}
+
+test "OpVectorExtractDynamic (matrix-column dynamic index) emits vec[idx], not an unhandled stub" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { mat3 m; } u;
+        \\void main() { int k = int(u.m[0][0]) & 2; if (u.m[1][k] > 0.0) discard; }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "unhandled op");
+}
+
+test "vector relational uses greaterThan(), not the scalar-only `>` operator (invalid GLSL)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { vec3 a; } u;
+        \\void main() { bvec3 g = greaterThan(u.a, vec3(0.0)); if (g.x) discard; }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // A bvecN result must use the builtin comparison family; `a > b` on vectors
+    // is a GLSL type error. Scalar comparisons still use the operator.
+    try assertContains(glsl, "greaterThan(");
 }
