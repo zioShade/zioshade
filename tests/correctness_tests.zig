@@ -1526,3 +1526,20 @@ test "frontend: unsized const array global infers its size (no runtime array)" {
         try spirvValOrSkip(spv);
     }
 }
+
+test "frontend: a shader with no main() honest-errors (not a no-OpEntryPoint module)" {
+    // Every backend and glslang key off `main`. Without it the frontend used to
+    // emit a module with no OpEntryPoint — invalid SPIR-V produced at exit 0
+    // (silent-wrong), surfaced by sweeping the SPIRV-Cross corpus. It must
+    // honest-error instead.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void helper(){ o = vec4(1.0); }
+    ;
+    // require_entry_point mirrors what the CLI sets for end-to-end compiles;
+    // it is off by default so partial-unit callers (e.g. the mesh layout-only
+    // fixtures) are unaffected.
+    try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment, .require_entry_point = true }));
+}
