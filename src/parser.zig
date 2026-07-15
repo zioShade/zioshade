@@ -2757,23 +2757,54 @@ const Parser = struct {
             },
             .identifier => {
                 _ = self.advance();
-                // Handle struct array constructors: StructName[](args...)
-                // Check if pattern is Identifier[]...( where [] repeats
-                if (self.current().tag == .l_bracket and self.peek().tag == .r_bracket) {
-                    // Looks like StructName[] pattern — consume all [] pairs
-                    const base_name = self.text(tok);
-                    var ty: ast.Type = .{ .named = base_name };
-                    var dim_count: usize = 0;
-                    while (self.current().tag == .l_bracket and self.peek().tag == .r_bracket) {
-                        _ = self.advance(); // [
-                        _ = self.advance(); // ]
-                        const arr_base = try self.createType(ty);
-                        ty = .{ .array = .{ .base = arr_base, .size = 0 } };
-                        dim_count += 1;
+                // Handle struct array constructors: StructName[](args...) and the
+                // SIZED form StructName[N]...(args...). Both lower to a
+                // type_constructor over an array-of-named type. Distinguish a
+                // constructor from ordinary array indexing (`someVar[i]`) with a
+                // lookahead: a constructor's whole bracket run is immediately
+                // followed by `(`. Without the lookahead a sized `S[3](...)` fell
+                // through to a bare identifier and the initializer failed to parse,
+                // so a `const S arr[3] = S[3](...)` never declared its symbol.
+                if (self.current().tag == .l_bracket) {
+                    var scan = self.pos;
+                    var saw_bracket = false;
+                    while (scan < self.tokens.len and self.tokens[scan].tag == .l_bracket) {
+                        saw_bracket = true;
+                        scan += 1;
+                        while (scan < self.tokens.len and
+                            self.tokens[scan].tag != .r_bracket and
+                            self.tokens[scan].tag != .eof) scan += 1;
+                        if (scan < self.tokens.len and self.tokens[scan].tag == .r_bracket) scan += 1;
                     }
-                    if (self.current().tag == .l_paren and dim_count > 0) {
-                        // StructName[]...(args...) — struct array constructor
-                        _ = self.advance(); // (
+                    if (saw_bracket and scan < self.tokens.len and self.tokens[scan].tag == .l_paren) {
+                        // Collect the (possibly multi-dim, possibly sized) bracket run.
+                        const base_name = self.text(tok);
+                        var ctor_dims = std.ArrayListUnmanaged(u32).empty;
+                        defer ctor_dims.deinit(self.alloc);
+                        while (self.current().tag == .l_bracket) {
+                            _ = self.advance(); // [
+                            if (self.current().tag == .r_bracket) {
+                                _ = self.advance(); // ]
+                                try ctor_dims.append(self.alloc, 0); // unsized
+                            } else {
+                                const size_tok = self.current();
+                                _ = self.advance();
+                                _ = self.expect(.r_bracket) catch {};
+                                const size_val = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                                try ctor_dims.append(self.alloc, size_val);
+                            }
+                        }
+                        // Reverse-wrap innermost-first so `S[2][3]` becomes
+                        // array{size=2, base=array{size=3, base=S}} (matches the
+                        // builtin-type array-constructor path and SPIR-V layout).
+                        var ty: ast.Type = .{ .named = base_name };
+                        var di: usize = ctor_dims.items.len;
+                        while (di > 0) {
+                            di -= 1;
+                            const arr_base = try self.createType(ty);
+                            ty = .{ .array = .{ .base = arr_base, .size = ctor_dims.items[di] } };
+                        }
+                        _ = self.expect(.l_paren) catch {};
                         var args = std.ArrayListUnmanaged(ast.Node).empty;
                         defer args.deinit(self.alloc);
                         while (self.current().tag != .r_paren and self.current().tag != .eof) {
@@ -2787,9 +2818,8 @@ const Parser = struct {
                             .data = .{ .ty = ty, .children = try self.ownedChildren(&args) },
                         };
                     }
-                    // Not followed by (, backtrack not easy — but this shouldn't happen for valid GLSL
-                    // Return identifier anyway, the [] was probably array indexing but we already consumed them
-                    // This is a known limitation: arr[] is not valid GLSL anyway
+                    // Not a constructor (no trailing `(`): leave the brackets for
+                    // postfix array-indexing to consume.
                 }
                 if (self.current().tag == .l_paren) {
                     _ = self.advance();

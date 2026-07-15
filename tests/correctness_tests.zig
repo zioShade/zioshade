@@ -1394,3 +1394,63 @@ test "frontend #335: int-literal vector splat folds to a constant" {
     try std.testing.expect(spirvPrivateVarHasInitializer(spv));
     try spirvValOrSkip(spv);
 }
+
+// =============================================================================
+// const array-of-struct constructors and unsized const-array size inference
+//
+// Two frontend bugs found while investigating #335:
+//  (1) The parser only accepted the UNSIZED struct-array constructor `S[](...)`.
+//      A SIZED `S[N](...)` fell through to a bare identifier, so the initializer
+//      failed to parse and `const S arr[3] = S[3](...)` never declared its symbol
+//      (UndeclaredIdentifier at the use site). Fixed with a lookahead that treats
+//      `Identifier[dims]...(` as a constructor.
+//  (2) An unsized `const` array global (`const float LUT[] = float[](1,2,3)`)
+//      kept its size-0 declared type, lowering to an OpTypeRuntimeArray plus an
+//      initializer — invalid SPIR-V (a Private array must be sized). Fixed by
+//      inferring the outer length from the initializer, as glslang and the local
+//      var_decl path already do.
+// =============================================================================
+
+test "frontend: sized const struct-array constructor compiles to valid SPIR-V" {
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\struct S { vec3 a; float b; };
+        \\const S arr[3] = S[3](S(vec3(1),2.0), S(vec3(3),4.0), S(vec3(5),6.0));
+        \\layout(location=0) flat in int idx;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(arr[idx].a, arr[idx].b); }
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // A sized array must NOT lower to an OpTypeRuntimeArray (29).
+    try std.testing.expect(!spirvHasOpcode(spv, 29));
+    try spirvValOrSkip(spv);
+}
+
+test "frontend: unsized const array global infers its size (no runtime array)" {
+    const alloc = std.testing.allocator;
+    // Both a scalar-element and a struct-element unsized const array must adopt
+    // the initializer's length instead of emitting an invalid runtime array.
+    const cases = [_][:0]const u8{
+        \\#version 450
+        \\const float LUT[] = float[](1.0, 2.0, 3.0);
+        \\layout(location=0) flat in int idx;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(LUT[idx]); }
+        ,
+        \\#version 450
+        \\struct S { vec3 a; float b; };
+        \\const S arr[] = S[](S(vec3(1),2.0), S(vec3(3),4.0));
+        \\layout(location=0) flat in int idx;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(arr[idx].a, arr[idx].b); }
+        ,
+    };
+    for (cases) |src| {
+        const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+        defer alloc.free(spv);
+        try std.testing.expect(!spirvHasOpcode(spv, 29)); // no OpTypeRuntimeArray
+        try spirvValOrSkip(spv);
+    }
+}
