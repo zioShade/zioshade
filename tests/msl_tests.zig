@@ -776,7 +776,6 @@ test "msl: bitCount -> popcount" {
     try std.testing.expect(std.mem.indexOf(u8, msl, "popcount") != null);
 }
 
-
 test "T11.1: MSL loop reconstruction produces while loop" {
     const source =
         \\#version 430
@@ -2898,8 +2897,8 @@ test "T19.11: samplerCubeShadow -> depthcube<float> (#208)" {
     ;
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
-    try assertContains(msl, "depthcube<float>");   // cube shadow -> depth family
-    try assertContains(msl, "texturecube<float>");  // non-shadow cube unchanged
+    try assertContains(msl, "depthcube<float>"); // cube shadow -> depth family
+    try assertContains(msl, "texturecube<float>"); // non-shadow cube unchanged
     try assertNotContains(msl, "texturecube<float> cs");
 }
 
@@ -2915,7 +2914,7 @@ test "T19.10: int sampler array + depth component types (#203)" {
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
     try assertContains(msl, "texture1d_array<int>"); // int array sampler
-    try assertContains(msl, "depth2d<float>");        // depth always float
+    try assertContains(msl, "depth2d<float>"); // depth always float
     try assertNotContains(msl, "depth2d<int>");
 }
 
@@ -3298,7 +3297,7 @@ test "T-imgrw.7: MSL fragment storage image emits NO sampler (#284 follow-up)" {
     const msl = try compileToMslStage(source, .fragment);
     defer alloc.free(msl);
     try assertContains(msl, "img [[texture(0)]]"); // texture still bound
-    try assertNotContains(msl, "imgSmplr");         // but NO dead sampler anywhere
+    try assertNotContains(msl, "imgSmplr"); // but NO dead sampler anywhere
 }
 
 test "T-imgrw.8: MSL vertex storage image emits NO sampler (#284 follow-up)" {
@@ -3351,9 +3350,9 @@ test "T-imgrw.10: MSL argbuf storage image takes ONE [[id]] slot, no sampler (#2
     defer alloc.free(spirv);
     const msl = try zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true });
     defer alloc.free(msl);
-    try assertNotContains(msl, "imgSmplr");                // storage image: no sampler
-    try assertContains(msl, "img [[id(0)]]");              // texture at slot 0
-    try assertContains(msl, "tex [[id(1)]]");              // sampled texture shifted to slot 1
+    try assertNotContains(msl, "imgSmplr"); // storage image: no sampler
+    try assertContains(msl, "img [[id(0)]]"); // texture at slot 0
+    try assertContains(msl, "tex [[id(1)]]"); // sampled texture shifted to slot 1
     try assertContains(msl, "sampler texSmplr [[id(2)]]"); // its sampler at slot 2
 }
 
@@ -4026,7 +4025,6 @@ test "msl: read-only param shadowed by a mutated inner local is not promoted (#4
     try assertNotContains(msl, "thread float&");
 }
 
-
 // ---------------------------------------------------------------------------
 // #413: loop-carried phi read before declaration
 // ---------------------------------------------------------------------------
@@ -4203,4 +4201,63 @@ test "T417.SSBO: _Globals buffer slot does not collide with an SSBO" {
     try assertContains(msl, "[[buffer(0)]]");
     try assertContains(msl, "_Globals_1 [[buffer(1)]]");
     try assertNotContains(msl, "_Globals_1 [[buffer(0)]]");
+}
+
+// ---- Compute differential regressions (found by tools/compute_diff.sh) ----
+// These four SPIR-V opcodes were mistranslated by the MSL backend, each verified
+// wrong by running both toolchains' MSL on the Metal GPU and diffing the output
+// buffers. The zioshade frontend emits the same SPIR-V as glslang for all four
+// (confirmed with spirv-dis), so the defect was purely in SPIR-V -> MSL.
+
+test "OpFMod uses GLSL-mod sign semantics, not Metal fmod (silent-wrong for negatives)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float a; } u;
+        \\void main() { if (mod(u.a, 3.0) > 0.5) discard; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // GLSL mod(x,y) = x - y*floor(x/y) (sign of y). Metal fmod takes the sign of x,
+    // so an fmod lowering silently diverges for negative operands.
+    try assertContains(msl, "floor(");
+    try assertNotContains(msl, "fmod(");
+}
+
+test "OpBitcast reinterprets bits via as_type, not a numeric conversion (silent-wrong)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float a; } u;
+        \\void main() { if (uintBitsToFloat(floatBitsToUint(u.a) + 1u) > 0.0) discard; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // floatBitsToUint(x) must be as_type<uint>(x), not uint(x) which would round.
+    try assertContains(msl, "as_type<");
+}
+
+test "degrees/radians lower to a multiply, not a nonexistent Metal builtin (won't compile)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { float a; } u;
+        \\void main() { if (degrees(u.a) + radians(u.a) > 0.0) discard; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Metal has no degrees()/radians(); spirv-cross and now zioshade emit the
+    // defining multiply (180/pi, pi/180).
+    try assertNotContains(msl, "degrees(");
+    try assertNotContains(msl, "radians(");
+    try assertContains(msl, "57.29577");
+    try assertContains(msl, "0.017453");
+}
+
+test "OpVectorExtractDynamic (matrix-column dynamic index) emits vec[idx], not an unhandled stub" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { mat3 m; int i; } u;
+        \\void main() { if (u.m[1][u.i] > 0.0) discard; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertNotContains(msl, "unhandled op");
 }
