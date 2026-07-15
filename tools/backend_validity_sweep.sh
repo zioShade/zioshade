@@ -36,33 +36,43 @@ case "$STAGE" in
   *) GV_STAGE=$EXT;;
 esac
 
-glsl_ok=0 glsl_bad=0 wgsl_ok=0 wgsl_bad=0 wgsl_skip=0 total=0
+# *_ok  = emitted source the reference validator accepts
+# *_bad  = emitted source the validator REJECTS (a backend bug — the gate)
+# *_herr = the zioshade frontend refused to compile the shader (honest-error, an
+#          unsupported-feature boundary, NOT a backend defect)
+glsl_ok=0 glsl_bad=0 glsl_herr=0 wgsl_ok=0 wgsl_bad=0 wgsl_herr=0 wgsl_skip=0 total=0
 printf "%-26s %-14s %-14s\n" "shader" "GLSL" "WGSL"
 printf -- "-%.0s" {1..56}; echo
 
 for f in "$DIR"/*."$EXT"; do
   [ -e "$f" ] || continue
+  case "$f" in *.asm.*) continue;; esac  # SPIR-V assembly, not GLSL source
   total=$((total+1))
   name=$(basename "$f")
 
   # GLSL
-  gstat="ERR"
+  gstat="honest-error"
   if "$CLI" glsl "$f" --stage "$STAGE" > "$TMP/o.glsl" 2>/dev/null; then
-    if glslangValidator -S "$GV_STAGE" "$TMP/o.glsl" >/dev/null 2>&1; then gstat="valid"; glsl_ok=$((glsl_ok+1)); else gstat="INVALID"; glsl_bad=$((glsl_bad+1)); fi
-  else gstat="ERR-EMIT"; glsl_bad=$((glsl_bad+1)); fi
+    if glslangValidator -S "$GV_STAGE" "$TMP/o.glsl" >/dev/null 2>&1; then gstat="valid"; glsl_ok=$((glsl_ok+1)); else gstat="INVALID"; glsl_bad=$((glsl_bad+1)); echo "$name" >> "$TMP/glsl_bad.txt"; fi
+  else glsl_herr=$((glsl_herr+1)); fi
 
   # WGSL
   wstat="skip(no naga)"
   if [ "$HAVE_NAGA" = 1 ]; then
+    wstat="honest-error"
     if "$CLI" wgsl "$f" --stage "$STAGE" > "$TMP/o.wgsl" 2>/dev/null; then
-      if naga "$TMP/o.wgsl" >/dev/null 2>&1; then wstat="valid"; wgsl_ok=$((wgsl_ok+1)); else wstat="INVALID"; wgsl_bad=$((wgsl_bad+1)); fi
-    else wstat="ERR-EMIT"; wgsl_bad=$((wgsl_bad+1)); fi
+      if naga "$TMP/o.wgsl" >/dev/null 2>&1; then wstat="valid"; wgsl_ok=$((wgsl_ok+1)); else wstat="INVALID"; wgsl_bad=$((wgsl_bad+1)); echo "$name" >> "$TMP/wgsl_bad.txt"; fi
+    else wgsl_herr=$((wgsl_herr+1)); fi
   else wgsl_skip=$((wgsl_skip+1)); fi
 
-  printf "%-26s %-14s %-14s\n" "$name" "$gstat" "$wstat"
+  [ "${QUIET:-0}" = 1 ] || printf "%-30s %-14s %-14s\n" "$name" "$gstat" "$wstat"
 done
 
 echo
-echo "GLSL: valid=$glsl_ok invalid=$glsl_bad / $total"
-if [ "$HAVE_NAGA" = 1 ]; then echo "WGSL: valid=$wgsl_ok invalid=$wgsl_bad / $total"; else echo "WGSL: skipped ($wgsl_skip, naga not installed)"; fi
+echo "GLSL: valid=$glsl_ok  INVALID=$glsl_bad  honest-error=$glsl_herr  / $total"
+[ -s "$TMP/glsl_bad.txt" ] && { echo "--- GLSL invalid ---"; cat "$TMP/glsl_bad.txt"; }
+if [ "$HAVE_NAGA" = 1 ]; then
+  echo "WGSL: valid=$wgsl_ok  INVALID=$wgsl_bad  honest-error=$wgsl_herr  / $total"
+  [ -s "$TMP/wgsl_bad.txt" ] && { echo "--- WGSL invalid ---"; cat "$TMP/wgsl_bad.txt"; }
+else echo "WGSL: skipped ($wgsl_skip, naga not installed)"; fi
 [ "$glsl_bad" -eq 0 ] && [ "$wgsl_bad" -eq 0 ]

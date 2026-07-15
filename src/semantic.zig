@@ -2616,16 +2616,26 @@ const Analyzer = struct {
                         // can verify the argument is a compile-time constant array.
                         .is_const = node.data.qualifier != null and node.data.qualifier.?.is_const,
                     });
-                    // For global `const` array declarations with an initializer, record the
+                    // For global `const` declarations with an initializer, record the
                     // AST initializer node so constStoreSource() can evaluate it lazily
                     // (during function analysis) to obtain the constant-composite id for
-                    // textureGatherOffsets ConstOffsets validation. Scalar int/uint const
-                    // globals are recorded too so evalConstInt can fold a name used as an
-                    // array size (`const int N = 3; float a[N];`) or switch-case label. The
-                    // init pass only assigns an initializer to a matching Private global and
-                    // skips anything else, so recording extra scalars is harmless.
+                    // textureGatherOffsets ConstOffsets validation, and so the Design-A
+                    // init pass (above) materialises the initializer onto the Private
+                    // OpVariable. Scalar int/uint const globals are recorded too so
+                    // evalConstInt can fold a name used as an array size
+                    // (`const int N = 3; float a[N];`) or switch-case label.
+                    //
+                    // ALL numeric value types are recorded, not just arrays/ints: a
+                    // `const float K = 2.0;` (and vecN/matN/bool) referenced through a
+                    // function lowers to a Private global too, and without an initializer
+                    // it read uninitialised memory — silent-wrong on backends that
+                    // zero-init the variable, and an undeclared-identifier compile error
+                    // on GLSL/MSL. The init pass only assigns to a matching Private global
+                    // and rolls back non-constant initializers, so recording extra types
+                    // is harmless.
                     if (node.data.qualifier != null and node.data.qualifier.?.is_const and
-                        (ty == .array or ty == .int or ty == .uint) and node.data.children.len > 0)
+                        node.data.children.len > 0 and
+                        (ty == .array or ty == .int or ty == .uint or ty == .float or ty == .bool or ty.isVector() or ty.isMatrix()))
                     {
                         self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
                     }
