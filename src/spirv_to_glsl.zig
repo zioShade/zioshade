@@ -21,6 +21,43 @@ fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (i >= m.instructions.len) return null;
     return m.instructions[i];
 }
+
+/// Scalar base classification of a SPIR-V type id, descending through a vector to
+/// its component type. Used to pick the right GLSL bit-reinterpret builtin for
+/// OpBitcast (floatBitsToUint / uintBitsToFloat / floatBitsToInt / intBitsToFloat).
+const ScalarBase = enum { float, sint, uint, other };
+fn spvScalarBase(m: *const ParsedModule, type_id: u32) ScalarBase {
+    var d = getDef(m, type_id) orelse return .other;
+    if (d.op == .TypeVector and d.words.len > 2) d = getDef(m, d.words[2]) orelse return .other;
+    return switch (d.op) {
+        .TypeFloat => .float,
+        .TypeInt => if (d.words.len > 3 and d.words[3] != 0) .sint else .uint,
+        else => .other,
+    };
+}
+
+/// True if a SPIR-V type id is a vector. GLSL relational OPERATORS (`<`, `>`, `==`,
+/// …) are scalar-only; a vector comparison (bvecN result) must use the builtin
+/// greaterThan / lessThan / equal / notEqual family, so relationals check this.
+fn isVectorType(m: *const ParsedModule, type_id: u32) bool {
+    const d = getDef(m, type_id) orelse return false;
+    return d.op == .TypeVector;
+}
+
+/// Emit a relational op: the scalar `op` for a bool result, or the GLSL builtin
+/// `vfunc` (greaterThan/lessThan/...) for a bvecN result. Emitting `a > b` on
+/// vectors is invalid GLSL (silently produced non-compiling output before).
+fn emitRelOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, vfunc: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    const rtt = try glslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const a = names.get(inst.words[3]) orelse "a";
+    const b = names.get(inst.words[4]) orelse "b";
+    if (isVectorType(m, inst.words[1])) {
+        try w.print("    {s} {s} = {s}({s}, {s});\n", .{ rtt, rn, vfunc, a, b });
+    } else {
+        try w.print("    {s} {s} = {s} {s} {s};\n", .{ rtt, rn, a, op, b });
+    }
+}
 /// Element type reached by descending one composite level: the element type of an
 /// array (fixed or runtime), the column type of a matrix, or the component type of
 /// a vector. Used per access-chain index for the runtime-index descent (#419).
@@ -3003,12 +3040,12 @@ fn emitInstruction(
         .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitBinOp(m, names, inst, "*", w, alloc),
         .Dot => try emitCall(m, names, inst, "dot", w, alloc),
         .Transpose => try emitCall(m, names, inst, "transpose", w, alloc),
-        .FOrdEqual, .FUnordEqual, .IEqual => try emitBinOp(m, names, inst, "==", w, alloc),
-        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitBinOp(m, names, inst, "!=", w, alloc),
-        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitBinOp(m, names, inst, "<", w, alloc),
-        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(m, names, inst, ">", w, alloc),
-        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(m, names, inst, "<=", w, alloc),
-        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(m, names, inst, ">=", w, alloc),
+        .FOrdEqual, .FUnordEqual, .IEqual => try emitRelOp(m, names, inst, "==", "equal", w, alloc),
+        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitRelOp(m, names, inst, "!=", "notEqual", w, alloc),
+        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitRelOp(m, names, inst, "<", "lessThan", w, alloc),
+        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitRelOp(m, names, inst, ">", "greaterThan", w, alloc),
+        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitRelOp(m, names, inst, "<=", "lessThanEqual", w, alloc),
+        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitRelOp(m, names, inst, ">=", "greaterThanEqual", w, alloc),
         .LogicalOr => try emitBinOp(m, names, inst, "||", w, alloc),
         .LogicalAnd => try emitBinOp(m, names, inst, "&&", w, alloc),
         .IsNan => try emitCall(m, names, inst, "isnan", w, alloc),
@@ -3079,9 +3116,48 @@ fn emitInstruction(
                 names.get(inst.words[5]) orelse "0",
             });
         },
-        .ConvertSToF, .ConvertUToF, .ConvertFToS, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast => {
+        .ConvertSToF, .ConvertUToF, .ConvertFToS, .ConvertFToU, .UConvert, .SConvert, .FConvert => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = {s}({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", rtt, names.get(inst.words[3]) orelse "0" });
+        },
+        .VectorExtractDynamic => {
+            // Extract a component from a vector by a (possibly non-constant) index —
+            // e.g. matrixColumn[i]. GLSL spells this vec[idx]; without this arm it fell
+            // through to `// unhandled op 77` and emitted undeclared identifiers.
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            try w.print("    {s} {s} = {s}[{s}];\n", .{
+                rtt,                                 names.get(inst.words[2]) orelse "e",
+                names.get(inst.words[3]) orelse "v", names.get(inst.words[4]) orelse "0",
+            });
+        },
+        .Bitcast => {
+            // OpBitcast REINTERPRETS the bit pattern; it does not numerically convert.
+            // GLSL spells a float<->int/uint reinterpret with the dedicated builtins;
+            // a T(x) constructor would round/convert and silently produce the wrong
+            // value (floatBitsToUint(2.5) must be 0x40200000, not 2). An int<->uint
+            // bitcast is already bit-preserving through the constructor, so that case
+            // keeps the plain cast.
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const x = names.get(inst.words[3]) orelse "0";
+            const dst = spvScalarBase(m, inst.words[1]);
+            const src_ty = if (getDef(m, inst.words[3])) |od| (if (od.words.len > 1) od.words[1] else 0) else 0;
+            const src = spvScalarBase(m, src_ty);
+            const builtin: ?[]const u8 = switch (dst) {
+                .uint => if (src == .float) "floatBitsToUint" else null,
+                .sint => if (src == .float) "floatBitsToInt" else null,
+                .float => switch (src) {
+                    .uint => "uintBitsToFloat",
+                    .sint => "intBitsToFloat",
+                    else => null,
+                },
+                .other => null,
+            };
+            if (builtin) |f| {
+                try w.print("    {s} {s} = {s}({s});\n", .{ rtt, rn, f, x });
+            } else {
+                try w.print("    {s} {s} = {s}({s});\n", .{ rtt, rn, rtt, x });
+            }
         },
         .CompositeConstruct => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
