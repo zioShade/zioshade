@@ -3,8 +3,8 @@ const zioshade = @import("zioshade");
 
 pub fn main() !void {
     const alloc = std.heap.page_allocator; // short-lived CLI; OS reclaims on exit
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
     if (args.len < 4) {
         std.debug.print("Usage: cross_validate <input.glsl> <zioshade_output_prefix> <spirvcross_output_prefix>\n", .{});
         std.debug.print("  Compiles GLSL via both zioshade and glslangValidator+spirv-cross\n", .{});
@@ -18,7 +18,7 @@ pub fn main() !void {
     _ = spirvcross_prefix; // spirv-cross comparison pipeline not yet wired here
 
     // Read input GLSL
-    const source_raw = try std.fs.cwd().readFileAlloc(alloc, input_path, 10 * 1024 * 1024);
+    const source_raw = try zioshade.compat.readFileByPath(alloc, input_path, 10 * 1024 * 1024);
     defer alloc.free(source_raw);
 
     // Null-terminate
@@ -44,7 +44,7 @@ pub fn main() !void {
     defer alloc.free(hlsl);
     const hlsl_path = try std.fmt.allocPrint(alloc, "{s}.hlsl", .{zioshade_prefix});
     defer alloc.free(hlsl_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = hlsl_path, .data = hlsl });
+    try zioshade.compat.writeFileByPath(alloc, hlsl_path, hlsl);
 
     // zioshade → GLSL
     const glsl = zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| {
@@ -54,7 +54,7 @@ pub fn main() !void {
     defer alloc.free(glsl);
     const glsl_path = try std.fmt.allocPrint(alloc, "{s}.glsl", .{zioshade_prefix});
     defer alloc.free(glsl_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = glsl_path, .data = glsl });
+    try zioshade.compat.writeFileByPath(alloc, glsl_path, glsl);
 
     // zioshade → MSL
     const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch |err| {
@@ -64,12 +64,12 @@ pub fn main() !void {
     defer alloc.free(msl);
     const msl_path = try std.fmt.allocPrint(alloc, "{s}.msl", .{zioshade_prefix});
     defer alloc.free(msl_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = msl_path, .data = msl });
+    try zioshade.compat.writeFileByPath(alloc, msl_path, msl);
 
     // Write zioshade SPIR-V
     const spv_path = try std.fmt.allocPrint(alloc, "{s}.spv", .{zioshade_prefix});
     defer alloc.free(spv_path);
-    try std.fs.cwd().writeFile(.{ .sub_path = spv_path, .data = std.mem.sliceAsBytes(spirv) });
+    try zioshade.compat.writeFileByPath(alloc, spv_path, std.mem.sliceAsBytes(spirv));
 
     std.debug.print("zioshade outputs: {s}.*\n", .{zioshade_prefix});
 }

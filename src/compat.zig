@@ -407,6 +407,56 @@ pub fn walkerNext(io: IoType, walker: anytype) !?@TypeOf(walker.*).Entry {
     }
 }
 
+/// A directory entry surfaced by `walkDirAlloc`: the caller-owned path is
+/// relative to cwd (the walked dir joined with the walk-relative path), so it
+/// can be handed straight to `readFileByPath`.
+pub const WalkEntry = struct {
+    path: []u8,
+    is_file: bool,
+};
+
+/// Recursively list the entries under `dir_path` (relative to cwd), returning a
+/// caller-owned slice of `WalkEntry`. Hides the 0.15/0.16 Dir/Io + Walker split
+/// so dev tools that scan a fixture directory need not thread an Io context or a
+/// live Dir handle through their logic — they iterate the slice and read each
+/// file by path. Free with `freeWalkEntries`.
+pub fn walkDirAlloc(alloc: std.mem.Allocator, dir_path: []const u8) ![]WalkEntry {
+    var list: std.ArrayListUnmanaged(WalkEntry) = .empty;
+    errdefer {
+        for (list.items) |e| alloc.free(e.path);
+        list.deinit(alloc);
+    }
+    if (is_0_16) {
+        var main_io = MainIo().init(alloc);
+        defer main_io.deinit();
+        const io = main_io.io();
+        var dir = try std.Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
+        defer dir.close(io);
+        var walker = try dir.walk(alloc);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            const full = try std.fs.path.join(alloc, &.{ dir_path, entry.path });
+            try list.append(alloc, .{ .path = full, .is_file = entry.kind == .file });
+        }
+    } else {
+        var dir = try std.fs.cwd().openDir(dir_path, .{ .iterate = true });
+        defer dir.close();
+        var walker = try dir.walk(alloc);
+        defer walker.deinit();
+        while (try walker.next()) |entry| {
+            const full = try std.fs.path.join(alloc, &.{ dir_path, entry.path });
+            try list.append(alloc, .{ .path = full, .is_file = entry.kind == .file });
+        }
+    }
+    return list.toOwnedSlice(alloc);
+}
+
+/// Free the slice returned by `walkDirAlloc`, including each entry path.
+pub fn freeWalkEntries(alloc: std.mem.Allocator, entries: []WalkEntry) void {
+    for (entries) |e| alloc.free(e.path);
+    alloc.free(entries);
+}
+
 // ---- Process / Args ----
 
 threadlocal var main_init_storage: if (is_0_16) std.process.Init.Minimal else void = if (is_0_16) undefined else {};
@@ -522,6 +572,22 @@ pub fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) ?[]const u8 {
         return std.process.getEnvVarOwned(alloc, name) catch null;
     } else {
         return null;
+    }
+}
+
+/// Wall-clock time in nanoseconds, hiding the 0.15/0.16 split. Zig 0.16 removed
+/// the top-level std.time.nanoTimestamp (timing moved behind std.Io's clock
+/// vtable), so on 0.16 this constructs a minimal Io and reads the real clock.
+/// Dev bench/timing tools use this for elapsed-time diffs; it is not on a hot
+/// path in the library or CLI. COMPAT(0.15): drop the shim when the floor is 0.16.
+pub fn nanoTimestamp() i128 {
+    if (is_0_16) {
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        const ts = std.Io.Timestamp.now(threaded.io(), .real);
+        return @as(i128, ts.nanoseconds);
+    } else {
+        return std.time.nanoTimestamp();
     }
 }
 

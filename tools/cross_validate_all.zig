@@ -6,8 +6,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
 
     if (args.len < 2) {
         std.debug.print("Usage: cross_validate_all <spirv_bins_dir>\n", .{});

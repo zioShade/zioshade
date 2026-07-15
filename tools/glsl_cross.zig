@@ -8,8 +8,8 @@ pub const zioshade = @import("zioshade");
 pub fn main() !void {
     const alloc = std.heap.page_allocator;
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
 
     if (args.len < 4) {
         std.debug.print("Usage: glsl_cross <input.glsl> <output_prefix> <target:hlsl|glsl|msl>\n", .{});

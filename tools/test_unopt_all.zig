@@ -6,8 +6,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
 
     if (args.len < 3) {
         std.debug.print("Usage: test_unopt_all <dir> <backend:hlsl|glsl|msl|wgsl>\n", .{});

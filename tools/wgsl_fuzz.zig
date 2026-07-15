@@ -6,8 +6,8 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const alloc = gpa.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    const args = try zioshade.compat.argsAlloc(alloc);
+    defer zioshade.compat.argsFree(alloc, args);
 
     const iterations = if (args.len > 1) try std.fmt.parseInt(u32, args[1], 10) else 1000;
     const seed = if (args.len > 2) try std.fmt.parseInt(u64, args[2], 10) else 42;
