@@ -1561,3 +1561,35 @@ test "frontend #multiview: gl_ViewIndex emits the ViewIndex builtin (not Viewpor
     defer alloc.free(spv);
     try spirvValOrSkip(spv);
 }
+
+// A dynamic index that is itself a UBO/SSBO member (arr[u.k], m[1][u.k]) arrives as
+// a pointer; the frontend fed it straight into OpAccessChain / OpVectorExtractDynamic
+// without loading, emitting invalid SPIR-V at exit 0 ("Indexes passed to
+// OpAccessChain must be of type integer" / a pointer operand to VectorExtractDynamic).
+// The index is now loaded to a scalar-int value first. Found by the backend validity
+// sweep + compute differential.
+test "frontend: array indexed by a UBO member loads the index (valid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x=64) in;
+        \\layout(std430,binding=0) writeonly buffer O{ float o[]; };
+        \\layout(binding=1,std140) uniform U{ float tbl[8]; int k; } u;
+        \\void main(){ o[gl_GlobalInvocationID.x] = u.tbl[u.k]; }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    try spirvValOrSkip(spv);
+}
+
+test "frontend: matrix column indexed by a UBO member loads the index (valid SPIR-V)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(local_size_x=64) in;
+        \\layout(std430,binding=0) writeonly buffer O{ float o[]; };
+        \\layout(binding=1,std140) uniform U{ mat3 m; int k; } u;
+        \\void main(){ o[gl_GlobalInvocationID.x] = u.m[1][u.k]; }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    try spirvValOrSkip(spv);
+}
