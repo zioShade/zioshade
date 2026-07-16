@@ -152,6 +152,41 @@ fn structHasBufferBlock(m: *const ParsedModule, struct_id: u32) bool {
     return false;
 }
 
+/// True if a struct type carries `Block` or `BufferBlock` — a UBO/SSBO interface
+/// block, emitted by the cbuffer/SSBO path, not as a plain value struct.
+fn structIsInterfaceBlock(m: *const ParsedModule, struct_id: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 3 and inst.words[1] == struct_id) {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[2]);
+            if (dec == .block or dec == .buffer_block) return true;
+        }
+    }
+    return false;
+}
+
+/// If `inst` is a value-producing op whose result type is (or is an array of) a
+/// plain (non-interface-block) struct, return that struct type id. Used to declare
+/// struct types that appear only as SSA VALUES: when a function taking/returning a
+/// struct is inlined, its struct locals become OpCompositeConstruct/OpFunctionCall
+/// results rather than OpVariables, so the OpVariable-based local-struct scan below
+/// misses them and the type is used (`Light v = Light(...)`) but never declared.
+fn structValueTypeId(m: *const ParsedModule, inst: Instruction) ?u32 {
+    switch (inst.op) {
+        .CompositeConstruct, .CompositeExtract, .CompositeInsert, .Load, .FunctionCall, .CopyObject, .Phi, .Select, .ConstantComposite => {},
+        else => return null,
+    }
+    if (inst.words.len < 3) return null;
+    var sid = inst.words[1]; // result type id
+    var si = getDef(m, sid) orelse return null;
+    while ((si.op == .TypeArray or si.op == .TypeRuntimeArray) and si.words.len > 2) {
+        sid = si.words[2];
+        si = getDef(m, sid) orelse return null;
+    }
+    if (si.op != .TypeStruct) return null;
+    if (structIsInterfaceBlock(m, sid) or isBuiltinBlockType(m, sid)) return null;
+    return sid;
+}
+
 /// True if `id` is an old-style SSBO variable: `Uniform` storage class whose pointee struct
 /// type carries `BufferBlock` (glslangValidator's SSBO encoding). zioshade's own frontend uses
 /// the `StorageBuffer` storage class instead, so this only catches glslang-produced SPIR-V.
@@ -1124,6 +1159,14 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                     }
                 }
             }
+        }
+    }
+    // Structs that appear only as SSA VALUES (an inlined function's struct locals
+    // become OpCompositeConstruct/OpFunctionCall results, not OpVariables) are
+    // missed by the OpVariable scan above; declare them too.
+    for (module.instructions) |inst| {
+        if (structValueTypeId(&module, inst)) |sid| {
+            emitOneStructForwardDecl(&module, &names, sid, w, aa, &local_structs_glsl, &emitted_names) catch {};
         }
     }
     if (local_structs_glsl.count() > 0) try w.writeAll("\n");

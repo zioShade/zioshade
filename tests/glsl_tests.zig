@@ -2735,3 +2735,26 @@ test "vector relational uses greaterThan(), not the scalar-only `>` operator (in
     // is a GLSL type error. Scalar comparisons still use the operator.
     try assertContains(glsl, "greaterThan(");
 }
+
+// A value struct used only through a function that gets inlined becomes an
+// OpCompositeConstruct SSA value (never an OpVariable), so the OpVariable-based
+// local-struct scan missed it and the type was used (`Light l = Light(...)`) but
+// never declared — an undeclared-identifier compile error. Found by the backend
+// validity sweep over the SPIRV-Cross corpus (struct_light, two_lights, etc.).
+test "value struct used via an inlined function is declared (not undeclared)" {
+    // The struct is built from the runtime input so it survives constant folding
+    // and reaches the output as an OpCompositeConstruct value.
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec3 p;
+        \\layout(location=0) out vec4 o;
+        \\struct Light { vec3 pos; float intensity; };
+        \\vec3 shade(vec3 x, Light l){ return l.pos * (l.intensity / (length(x - l.pos) + 0.01)); }
+        \\void main(){ Light a = Light(p, p.x); Light b = Light(p.zyx, p.y); o = vec4(shade(p, a) + shade(p, b), 1.0); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // The struct type must be declared before use.
+    try assertContains(glsl, "struct Light");
+    try assertContains(glsl, "float intensity;");
+}
