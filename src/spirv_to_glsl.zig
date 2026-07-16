@@ -3048,6 +3048,10 @@ fn emitInstruction(
         .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitBinOp(m, names, inst, "*", w, alloc),
         .Dot => try emitCall(m, names, inst, "dot", w, alloc),
         .Transpose => try emitCall(m, names, inst, "transpose", w, alloc),
+        // GLSL has a native outerProduct(c, r); SPIR-V OpOuterProduct uses the same
+        // operand order. Without this arm it fell through to `// unhandled op 147`,
+        // leaving the result id undefined at its use sites.
+        .OuterProduct => try emitCall(m, names, inst, "outerProduct", w, alloc),
         .FOrdEqual, .FUnordEqual, .IEqual => try emitRelOp(m, names, inst, "==", "equal", w, alloc),
         .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitRelOp(m, names, inst, "!=", "notEqual", w, alloc),
         .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitRelOp(m, names, inst, "<", "lessThan", w, alloc),
