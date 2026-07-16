@@ -79,6 +79,25 @@ zig build cli
 tools/backend_validity_sweep.sh
 ```
 
+Run at corpus scale it is a strong backend gate. Over the full SPIRV-Cross
+**fragment** corpus (1453 non-assembly shaders) the GLSL backend started at 69
+shaders emitting glslang-rejected output at exit 0. Each is the silent-wrong class
+one layer out — plausible-looking source that does not compile — and invisible to
+spirv-val. Fixes so far (frontend SPIR-V unchanged / valid in every case):
+
+- **const scalar/vec/mat globals** dropped their initializer, producing an
+  uninitialised Private variable (silent-wrong value; undeclared identifier on
+  GLSL/MSL). Now materialised as a constant initializer.
+- **value structs** used only through an inlined function became `OpCompositeConstruct`
+  SSA values that no backend pass declared (`Light l = Light(...)` with no
+  `struct Light`). Now collected and declared.
+
+That took the fragment corpus to 1385/1453 valid. The remaining rejections are a
+mix of genuinely advanced features that should instead honest-error (barycentric,
+pixel/sample interlock, tensor, spv14 block-match, push-constant blocks, subpass
+input attachments) and a few narrower backend gaps (mutual recursion, ternary on a
+struct value) — catalogued for follow-up.
+
 ---
 
 ## 2. Execution equivalence (MSL, on-GPU)
