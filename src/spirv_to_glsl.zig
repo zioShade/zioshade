@@ -231,6 +231,52 @@ fn exprName(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id
     return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "?";
 }
 
+/// Whether block `target` is reachable from block `cur` by following terminators,
+/// WITHOUT entering `stop` (the selection merge). Used to attribute an OpPhi
+/// predecessor to the true vs false side of a selection: with NESTED control flow
+/// the phi's real predecessor is an inner merge block, not the immediate true/false
+/// label, so matching the predecessor by label equality picks the wrong incoming
+/// value (swapping the branches). Reachability from the true label — stopping at
+/// the merge so the two branch regions stay disjoint — attributes it correctly.
+fn labelReaches(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), cur: u32, target: u32, stop: u32, seen: *std.AutoHashMap(u32, void)) bool {
+    if (cur == stop) return false;
+    if (cur == target) return true;
+    if (seen.contains(cur)) return false;
+    seen.put(cur, {}) catch return false;
+    const bi = label_map.get(cur) orelse return false;
+    var j = bi + 1;
+    while (j < m.instructions.len) : (j += 1) {
+        const inst = m.instructions[j];
+        switch (inst.op) {
+            .Branch => return if (inst.words.len >= 2) labelReaches(m, label_map, inst.words[1], target, stop, seen) else false,
+            .BranchConditional => {
+                if (inst.words.len < 4) return false;
+                if (labelReaches(m, label_map, inst.words[2], target, stop, seen)) return true;
+                return labelReaches(m, label_map, inst.words[3], target, stop, seen);
+            },
+            .Switch => {
+                if (inst.words.len >= 3 and labelReaches(m, label_map, inst.words[2], target, stop, seen)) return true;
+                var k: usize = 3;
+                while (k + 1 < inst.words.len) : (k += 2) {
+                    if (labelReaches(m, label_map, inst.words[k + 1], target, stop, seen)) return true;
+                }
+                return false;
+            },
+            .Return, .ReturnValue, .Kill, .Unreachable, .Label => return false,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// True if the phi predecessor `pred1` lies in the TRUE region of a selection
+/// (reachable from the true label `tl`, stopping at the merge `mval`).
+fn phiPred1InTrueRegion(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), tl: u32, mval: u32, pred1: u32, alloc: std.mem.Allocator) bool {
+    var seen = std.AutoHashMap(u32, void).init(alloc);
+    defer seen.deinit();
+    return labelReaches(m, label_map, tl, pred1, mval, &seen);
+}
+
 /// Look up the BuiltIn decoration (if any) on member `member_idx` of struct type
 /// `struct_id`. gl_PerVertex and similar interface blocks carry BuiltIn on the
 /// *members* via `OpMemberDecorate` — which the `decs` map (OpDecorate-only) does
@@ -2162,7 +2208,7 @@ fn emitBody(
                 // After true branch: assign Phi vars
                 for (phi_decls.items) |pv| {
                     const vn = names.get(pv.result_id) orelse "pv";
-                    const true_val = if (pv.preds[1] == tl) pv.vals[1] else pv.vals[0];
+                    const true_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                     const tvn = exprName(m, names, true_val, alloc);
                     try w.print("        {s}_phi = {s};\n", .{ vn, tvn });
                 }
@@ -2172,7 +2218,7 @@ fn emitBody(
                     // After false branch: assign Phi vars
                     for (phi_decls.items) |pv| {
                         const vn = names.get(pv.result_id) orelse "pv";
-                        const false_val = if (pv.preds[1] != tl) pv.vals[1] else pv.vals[0];
+                        const false_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                         const fvn = exprName(m, names, false_val, alloc);
                         try w.print("        {s}_phi = {s};\n", .{ vn, fvn });
                     }
@@ -2795,7 +2841,7 @@ fn emitBlock(
                 i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
                 for (phi_decls2.items) |pv| {
                     const vn = names.get(pv.result_id) orelse "pv";
-                    const true_val = if (pv.preds[1] == tl) pv.vals[1] else pv.vals[0];
+                    const true_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                     const tvn = exprName(m, names, true_val, alloc);
                     try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, tvn });
                 }
@@ -2804,7 +2850,7 @@ fn emitBlock(
                     i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
                     for (phi_decls2.items) |pv| {
                         const vn = names.get(pv.result_id) orelse "pv";
-                        const false_val = if (pv.preds[1] != tl) pv.vals[1] else pv.vals[0];
+                        const false_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                         const fvn = exprName(m, names, false_val, alloc);
                         try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, fvn });
                     }
