@@ -22,6 +22,30 @@ fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     return m.instructions[i];
 }
 
+/// True if `rid` (a value's result id) is consumed as an operand by any real
+/// (non-metadata) instruction. Its own definition contributes exactly one
+/// occurrence, so >= 2 means it is referenced. Used to decide whether an UNHANDLED
+/// opcode must honest-error — its result is consumed, so emitting only a
+/// `// unhandled op` comment would leave an undeclared identifier (invalid GLSL) —
+/// or may keep the harmless comment (dead result).
+fn resultIsReferenced(m: *const ParsedModule, rid: u32) bool {
+    var count: u32 = 0;
+    for (m.instructions) |inst| {
+        switch (inst.op) {
+            .Name, .MemberName, .Decorate, .MemberDecorate => continue,
+            else => {},
+        }
+        if (inst.words.len < 2) continue;
+        for (inst.words[1..]) |wrd| {
+            if (wrd == rid) {
+                count += 1;
+                if (count >= 2) return true;
+            }
+        }
+    }
+    return false;
+}
+
 /// Scalar base classification of a SPIR-V type id, descending through a vector to
 /// its component type. Used to pick the right GLSL bit-reinterpret builtin for
 /// OpBitcast (floatBitsToUint / uintBitsToFloat / floatBitsToInt / intBitsToFloat).
@@ -4024,6 +4048,26 @@ fn emitInstruction(
                 try w.print("    {s} {s} = {s}({s}.{s}.length());\n", .{ rtt, rn, rtt, inst_name, mname });
         },
         else => {
+            // An unhandled opcode has no GLSL lowering. Emitting a `// unhandled op N`
+            // comment and continuing leaves the result undefined at every use site =
+            // invalid GLSL at exit 0 (the silent-wrong class this project exists to
+            // prevent). If the result is consumed, REFUSE loudly; only a genuinely
+            // dead result keeps the harmless comment. (Advanced image/tensor/ray-query
+            // opcodes with no GLSL equivalent; OpUndef from a lost frontend result.)
+            // An unknown opcode is NOT registered in id_defs, so getDef(result) is
+            // null — detect a value result via the TYPE operand instead (words[1]
+            // resolves to a Type* instruction for every result-producing op; for a
+            // no-result op like OpStore it resolves to a value/pointer, so this stays
+            // false and the op keeps its harmless comment).
+            const rid: u32 = if (inst.words.len >= 3) inst.words[2] else 0;
+            const produces_result = rid != 0 and blk: {
+                const td = getDef(m, inst.words[1]) orelse break :blk false;
+                break :blk switch (td.op) {
+                    .TypeBool, .TypeInt, .TypeFloat, .TypeVector, .TypeMatrix, .TypeArray, .TypeRuntimeArray, .TypeStruct, .TypePointer, .TypeImage, .TypeSampledImage, .TypeSampler => true,
+                    else => false,
+                };
+            };
+            if (produces_result and resultIsReferenced(m, rid)) return error.CrossCompileUnsupported;
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
         },
     }
