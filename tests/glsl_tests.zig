@@ -2818,3 +2818,29 @@ test "OpOuterProduct emits outerProduct(), not an unhandled stub" {
     try assertContains(glsl, "outerProduct(");
     try assertNotContains(glsl, "unhandled op");
 }
+
+// A phi at an if/else merge INSIDE a loop body used to be dropped: the loop-body
+// selection handler emitted the branches but never materialized the merge phi, so
+// the true value vanished and the result aliased to the block-scoped false value
+// (`sum += v25` where v25 is else-scoped = undeclared). Now materialized like the
+// other selection sites. Found by the backend validity sweep (phi_loop_branch).
+test "if/else phi inside a loop body is materialized (not dropped)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in float x;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  float sum = 0.0;
+        \\  for (int i = 0; i < 5; i++) {
+        \\    float val;
+        \\    if (x < float(i)) { val = 1.0; } else { val = 0.1 / (x + 0.01); }
+        \\    sum += val;
+        \\  }
+        \\  o = vec4(sum);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "_phi");
+    try glslValidateOrSkip("loop-body-phi", glsl);
+}

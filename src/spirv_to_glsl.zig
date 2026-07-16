@@ -2674,14 +2674,53 @@ fn emitWhileLoop(
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         try w.writeAll("        }\n");
                     } else {
-                        // General case
+                        // General case — materialize any phis at the merge (val = cond
+                        // ? a : b), exactly like the top-level and emitBlock selection
+                        // handlers. A loop body's if/else used to SKIP this, so a phi at
+                        // the merge was dropped: its true value vanished and its result
+                        // aliased to the block-scoped false value (undeclared at the use
+                        // site = invalid GLSL). (phi_loop_branch)
+                        var body_phis = std.ArrayList(struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 }).initCapacity(alloc, 4) catch unreachable;
+                        defer body_phis.deinit(alloc);
+                        if (label_map.get(nmv)) |midx| {
+                            var pj: usize = midx + 1;
+                            while (pj < m.instructions.len) : (pj += 1) {
+                                const minst = m.instructions[pj];
+                                if (minst.op != .Phi) break;
+                                if (minst.words.len >= 7) {
+                                    body_phis.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
+                                }
+                            }
+                        }
+                        for (body_phis.items) |pv| {
+                            const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
+                        }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
+                        for (body_phis.items) |pv| {
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            const true_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                            const tvn = exprName(m, names, true_val, alloc);
+                            try w.print("            {s}_phi = {s};\n", .{ vn, tvn });
+                        }
                         if (nhe) {
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
+                            for (body_phis.items) |pv| {
+                                const vn = names.get(pv.result_id) orelse "pv";
+                                const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                const fvn = exprName(m, names, false_val, alloc);
+                                try w.print("            {s}_phi = {s};\n", .{ vn, fvn });
+                            }
                         }
                         try w.writeAll("        }\n");
+                        for (body_phis.items) |pv| {
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                            if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
+                        }
                     }
                     if (label_map.get(nmv)) |nmi| {
                         bi = nmi;
