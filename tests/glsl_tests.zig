@@ -58,6 +58,50 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     return words;
 }
 
+/// Validate emitted GLSL by compiling it with glslangValidator; skip if the tool
+/// is unavailable (keeps `zig build test` hermetic). Fails if glslang rejects it.
+fn glslValidateOrSkip(name: []const u8, glsl_src: []const u8) !void {
+    const tmp = try zioshade.compat.tempFilePathFmt(alloc, "glsl_out_{s}.frag", .{name});
+    defer alloc.free(tmp);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp, glsl_src);
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-S", "frag", tmp }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if ((result.term.exitedCode() orelse 1) == 0) return;
+    std.debug.print("glslang REJECTED emitted GLSL [{s}]:\n{s}\n{s}\n", .{ name, result.stdout, result.stderr });
+    return error.GlslValidationFailed;
+}
+
+// A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
+// INNER merge blocks, not the immediate true/false labels. Matching predecessors by
+// label equality picked the wrong incoming value, SWAPPING the branches and emitting
+// a reference to a raw phi-result id that was never declared (`v44_phi = v43` where
+// only `v43_phi` exists) — invalid GLSL at exit 0. Now attributed by reachability
+// from the true label. Found by the backend validity sweep (struct_tern, pbr_struct).
+test "nested struct-ternary OpPhi attributes branches correctly (no swap, valid GLSL)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\struct Color { vec3 rgb; float a; };
+        \\Color mk(float r, float g, float b){ Color c; c.rgb = vec3(r,g,b); c.a = 1.0; return c; }
+        \\void main(){
+        \\  Color c = uv.x > 0.5
+        \\    ? (uv.y > 0.5 ? mk(1.0,0.0,0.0) : mk(0.0,1.0,0.0))
+        \\    : (uv.y > 0.5 ? mk(0.0,0.0,1.0) : mk(1.0,1.0,0.0));
+        \\  o = vec4(c.rgb, c.a);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "unhandled op");
+    try glslValidateOrSkip("nested-struct-ternary", glsl);
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders
 // ---------------------------------------------------------------------------
