@@ -2633,8 +2633,13 @@ const Analyzer = struct {
                     // on GLSL/MSL. The init pass only assigns to a matching Private global
                     // and rolls back non-constant initializers, so recording extra types
                     // is harmless.
-                    if (node.data.qualifier != null and node.data.qualifier.?.is_const and
-                        node.data.children.len > 0 and
+                    //
+                    // MUTABLE globals are recorded too (not just const): a written
+                    // module-scope global like `float val = 0.0;` (an accumulator poked
+                    // by a helper) otherwise dropped its initializer the same way, so it
+                    // started at garbage. evalConstInt guards on sym.is_const before
+                    // folding, so recording a mutable global cannot make it a const.
+                    if (node.data.children.len > 0 and
                         (ty == .array or ty == .int or ty == .uint or ty == .float or ty == .bool or ty.isVector() or ty.isMatrix()))
                     {
                         self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
