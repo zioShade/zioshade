@@ -2758,3 +2758,19 @@ test "value struct used via an inlined function is declared (not undeclared)" {
     try assertContains(glsl, "struct Light");
     try assertContains(glsl, "float intensity;");
 }
+
+// OpOuterProduct (opcode 147) was unhandled — `// unhandled op 147` left the
+// result id undefined at its use sites (outer_product*.frag in the corpus). GLSL
+// has a native outerProduct with the same operand order.
+test "OpOuterProduct emits outerProduct(), not an unhandled stub" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec3 p;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ mat3 m = outerProduct(p, p.zyx); o = vec4(m[0] + m[1] + m[2], 1.0); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "outerProduct(");
+    try assertNotContains(glsl, "unhandled op");
+}
