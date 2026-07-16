@@ -1906,6 +1906,45 @@ fn emitFunction(
             emitted_any_io = true;
         }
         if (emitted_any_io) try w.writeAll("\n");
+
+        // Declare mutable module-scope Private globals (e.g. `float val = 0.0;`
+        // written by a helper function). const, never-written Private vars are
+        // inlined to their literal by aliasConstInitializedPrivateVars (above) and
+        // must NOT be declared; every other Private var is a real global whose uses
+        // would otherwise be undeclared identifiers. Emit its OpVariable initializer
+        // (word 4) when present so the value is preserved, not just the name.
+        var emitted_any_priv = false;
+        for (m.instructions) |ginst| {
+            if (ginst.op != .Variable or ginst.words.len < 4) continue;
+            const gsc: spirv.StorageClass = @enumFromInt(ginst.words[3]);
+            if (gsc != .Private) continue;
+            if (common.constInitializedPrivateVar(m, ginst) != null) continue; // inlined const
+            const gvar_id = ginst.words[2];
+            const gname = names.get(gvar_id) orelse continue;
+            const gptr = getDef(m, ginst.words[1]) orelse continue;
+            if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
+            const gpointee = gptr.words[3];
+            const pointee_def = getDef(m, gpointee);
+            if (pointee_def) |pd| {
+                if (pd.op == .TypeArray and pd.words.len > 3) {
+                    const et = glslType(m, pd.words[2], names, alloc) catch continue;
+                    const li = getDef(m, pd.words[3]);
+                    const lv: u32 = if (li) |l| (if (l.words.len > 3) l.words[3] else 1) else 1;
+                    try w.print("{s} {s}[{d}];\n", .{ et, gname, lv });
+                    emitted_any_priv = true;
+                    continue;
+                }
+            }
+            const gt = glslType(m, gpointee, names, alloc) catch continue;
+            if (ginst.words.len >= 5) {
+                const init_name = exprName(m, names, ginst.words[4], alloc);
+                try w.print("{s} {s} = {s};\n", .{ gt, gname, init_name });
+            } else {
+                try w.print("{s} {s};\n", .{ gt, gname });
+            }
+            emitted_any_priv = true;
+        }
+        if (emitted_any_priv) try w.writeAll("\n");
     }
 
     try w.print("{s} {s}(", .{ rt, func_name });
