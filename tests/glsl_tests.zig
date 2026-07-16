@@ -2844,3 +2844,23 @@ test "if/else phi inside a loop body is materialized (not dropped)" {
     try assertContains(glsl, "_phi");
     try glslValidateOrSkip("loop-body-phi", glsl);
 }
+
+// A MUTABLE module-scope global written by a helper (`float val = 0.0; ... val += x`)
+// used to (1) drop its initializer in the frontend (started at garbage) and (2)
+// never get declared by the GLSL backend (its uses were undeclared identifiers).
+// Now the initializer is materialised onto the Private OpVariable and the backend
+// declares `float val = 0.0;`. Found by the backend validity sweep
+// (conditional_side_effects, func_side_effect).
+test "mutable module-scope global is declared with its initializer" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\float val = 0.0;
+        \\float bump(){ val += 0.1; return val; }
+        \\void main(){ float a = bump(); float b = bump(); o = vec4(a, b, val, 1.0); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "float val = 0.0;");
+    try glslValidateOrSkip("mutable-global", glsl);
+}
