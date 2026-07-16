@@ -4261,3 +4261,24 @@ test "OpVectorExtractDynamic (matrix-column dynamic index) emits vec[idx], not a
     defer alloc.free(msl);
     try assertNotContains(msl, "unhandled op");
 }
+
+// Mirrors the GLSL value-struct fix: a struct used via an inlined function reaches
+// the output as an OpCompositeConstruct value. It must be DECLARED, and constructed
+// with C++ aggregate brace-init `Light{ ... }` — Metal structs have no call-style
+// constructor, so `Light(a,b,c)` fails to compile. Built from runtime input so the
+// struct survives constant folding. Found by the backend validity sweep.
+test "value struct is declared and brace-initialized (Metal has no struct ctor)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec3 p;
+        \\layout(location=0) out vec4 o;
+        \\struct Light { vec3 pos; float intensity; };
+        \\vec3 shade(vec3 x, Light l){ return l.pos * (l.intensity / (length(x - l.pos) + 0.01)); }
+        \\void main(){ Light a = Light(p, p.x); Light b = Light(p.zyx, p.y); o = vec4(shade(p, a) + shade(p, b), 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "struct Light");
+    try assertContains(msl, "Light{ ");
+    try assertNotContains(msl, "= Light(");
+}
