@@ -4282,3 +4282,20 @@ test "value struct is declared and brace-initialized (Metal has no struct ctor)"
     try assertContains(msl, "Light{ ");
     try assertNotContains(msl, "= Light(");
 }
+
+// OpOuterProduct has no Metal builtin; it is built column-by-column
+// (matCxR(v1*v2[0], v1*v2[1], …), Metal being column-major like the SPIR-V
+// result). Verified bit-exact vs SPIRV-Cross MSL on the GPU by
+// tools/compute_corpus/13_outerproduct.comp. Previously `// unhandled op 147`.
+test "OpOuterProduct builds the matrix from columns, not an unhandled stub" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec3 p;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ mat3 m = outerProduct(p, p.zyx); o = vec4(m[0] + m[1] + m[2], 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertNotContains(msl, "unhandled op");
+    try assertContains(msl, "float3x3(");
+}
