@@ -1487,7 +1487,6 @@ test "T24.2: while loop" {
     try assertContains(hlsl, "discard");
 }
 
-
 test "T24.2b: HLSL loop reconstruction produces while loop" {
     const source =
         \\#version 430
@@ -2094,7 +2093,6 @@ test "T30.10: multi-return function" {
     try assertContains(hlsl, "discard");
 }
 
-
 // ---------------------------------------------------------------------------
 // Wintty integration tests — real shadertoy shaders
 // ---------------------------------------------------------------------------
@@ -2161,10 +2159,8 @@ test "WIN-DXC: dump HLSL for DXC validation" {
     const hlsl_focus = try compileShadertoy(test_focus);
     defer alloc.free(hlsl_focus);
 
-
     const hlsl_crt = try compileShadertoy(test_crt);
     defer alloc.free(hlsl_crt);
-
 
     // Basic structural checks
     try assertContains(hlsl_focus, "Texture2D");
@@ -7712,7 +7708,6 @@ test "T305.1: dual texture blend" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T306.1: for-loop accumulation into local" {
     const source =
         \\#version 450
@@ -7899,7 +7894,6 @@ test "T315.1: integer abs and sign chain" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T316.1: compute barrier and shared memory" {
     const source =
         \\#version 450
@@ -7981,7 +7975,6 @@ test "T320.1: matrixCompMult" {
     try assertContains(hlsl, " * ");
     try assertContains(hlsl, "fragColor");
 }
-
 
 test "T321.1: deep if-else chain" {
     const source =
@@ -8068,7 +8061,6 @@ test "T325.1: complex expression tree" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T326.1: #define preprocessor" {
     const source =
         \\#version 450
@@ -8148,7 +8140,6 @@ test "T330.1: global const variable" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T331.1: complex shader with branching and loops" {
     // End-to-end test exercising the full optimization pipeline:
@@ -8261,7 +8252,6 @@ test "T335.1: nested switch with returns" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T336.1: packSnorm2x16" {
     const source =
         \\#version 450
@@ -8338,7 +8328,6 @@ test "T340.1: bitfieldInsert" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T341.1: PCF shadow mapping" {
     // Common real-world pattern: percentage-closer filtering
@@ -8472,7 +8461,6 @@ test "T345.1: compute prefix sum (scan)" {
     try assertContains(hlsl, "float");
 }
 
-
 test "T346.1: bitCount on int" {
     const source =
         \\#version 450
@@ -8547,7 +8535,6 @@ test "T350.1: findMSB unsigned" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "firstbithigh");
 }
-
 
 test "T351.1: bitfieldReverse on uint" {
     const source =
@@ -8628,7 +8615,6 @@ test "T355.1: bitfieldInsert on uint" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T356.1: bitCount uint to int conversion" {
     // Verifies that bitCount(uint) returns int, not uint (GLSL spec requirement)
     const source =
@@ -8648,7 +8634,6 @@ test "T356.1: bitCount uint to int conversion" {
     try assertContains(hlsl, "firstbitlow");
     try assertContains(hlsl, "firstbithigh");
 }
-
 
 test "T357.1: multiple render targets (MRT)" {
     // Tests multiple output locations mapping to SV_Target0/1
@@ -8741,7 +8726,6 @@ test "T361.1: compute histogram" {
     try assertContains(hlsl, "uint");
 }
 
-
 test "T362.1: negate folding in expression" {
     // Exercises foldNegateIntoAddSub: a + (-b) should become a - b
     const source =
@@ -8829,7 +8813,6 @@ test "T366.1: compute matrix multiply chain" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T367.1: sampler3D volume texture" {
     const source =
@@ -8950,7 +8933,6 @@ test "T371.1: chromatic aberration post-process" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T372.1: integer negate folding" {
     // Exercises foldNegateIntoAddSub integer path: IAdd(x, SNegate(y)) -> ISub(x, y)
     const source =
@@ -9054,7 +9036,6 @@ test "T376.1: push_constant uniform block" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T377.1: sampler1D texture lookup" {
     const source =
         \\#version 450
@@ -9129,7 +9110,6 @@ test "T381.1: gl_FragCoord in fragment shader" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T382.1: image2D read and write" {
     const source =
@@ -9251,7 +9231,6 @@ test "T386.1: compute image processing (edge detect)" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T387.1: variance shadow map" {
     // Variance shadow map: Chebyshev inequality
@@ -9376,7 +9355,6 @@ test "T391.1: multi-pass blur (separable)" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T392.1: nested struct uniform access" {
     // Tests deeply nested struct member access through uniform buffer
     const source =
@@ -9471,7 +9449,6 @@ test "T396.1: complex boolean logic" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T397.1: while loop with break" {
     const source =
@@ -9613,7 +9590,6 @@ test "T401.1: multiple function calls with recursion-like pattern" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T402.1: layout row_major matrix" {
     // Tests row_major layout qualifier on uniform buffer
     const source =
@@ -9709,7 +9685,6 @@ test "T406.1: mat3 construction from vec3 columns" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T407.1: mat4x3 multiply vec4" {
     // Non-square matrix: mat4x3 * vec4 = vec3
     const source =
@@ -9795,7 +9770,6 @@ test "T411.1: texture with bias" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T412.1: mat2 operations" {
     // Tests mat2 construction, multiply, and transpose
@@ -9894,7 +9868,6 @@ test "T416.1: mixed integer and float conversions" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T417.1: sampler2DMS sample" {
     // Tests multisampled texture sampling
@@ -9996,7 +9969,6 @@ test "T421.1: conditional store to output" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T422.1: geometry shader triangle_strip" {
     // Tests geometry shader with triangle_strip output
@@ -10104,7 +10076,6 @@ test "T426.1: PBR metallic-roughness lighting" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T427.1: textureGather component selection" {
     // Tests textureGather with explicit component
     const source =
@@ -10194,7 +10165,6 @@ test "T431.1: function with array parameter" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T432.1: memory barrier buffer" {
     // Tests memoryBarrierBuffer in compute shader
@@ -10288,7 +10258,6 @@ test "T436.1: textureQueryLod" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T437.1: image load/store rgba8" {
     // Tests image2D with rgba8 format qualifier
     const source =
@@ -10378,7 +10347,6 @@ test "T441.1: struct array in uniform block" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T442.1: interpolateAtCentroid" {
     // Tests interpolation function at centroid
@@ -10490,7 +10458,6 @@ test "T446.1: uint sampler texture fetch" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T447.1: textureQueryLevels" {
     // Tests textureQueryLevels for mip level count
     const source =
@@ -10579,7 +10546,6 @@ test "T451.1: flat interpolation on struct member" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T452.1: sampler2DShadow comparison" {
     // Tests shadow sampler depth comparison
@@ -10673,7 +10639,6 @@ test "T456.1: layout std140 uniform block" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T457.1: textureOffset" {
     // Tests texture with texel offset
     const source =
@@ -10761,7 +10726,6 @@ test "T461.1: vec4 from scalar broadcast" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T462.1: textureLod with shadow sampler" {
     // Tests textureLod on sampler2DShadow
@@ -10856,7 +10820,6 @@ test "T466.1: dFdx and dFdy derivatives" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T467.1: sampler1D texture fetch" {
     // Tests sampler1D basic texture sampling
@@ -10957,7 +10920,6 @@ test "T471.1: vec3 swizzle operations" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T472.1: sampler3D volume texture" {
     // Tests sampler3D (volume texture) sampling
     const source =
@@ -11038,7 +11000,6 @@ test "T476.1: gl_Layer in fragment" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T477.1: textureGrad explicit gradients" {
     // Tests textureGrad with explicit gradients
@@ -11128,7 +11089,6 @@ test "T481.1: mix function with bool selector" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T482.1: frexp and ldexp" {
     // Tests frexp/ldexp float decomposition
     const source =
@@ -11215,7 +11175,6 @@ test "T486.1: nested ternary with functions" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T487.1: mat4 column access and assignment" {
     // Tests mat4 column access with array indexing
@@ -11308,7 +11267,6 @@ test "T491.1: uint loop counter with bitwise ops" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T492.1: textureProj with sampler2D" {
     // Tests textureProj (projected texture coordinate)
     const source =
@@ -11400,7 +11358,6 @@ test "T496.1: faceforward and normalize" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T497.1: exp2 log2 radians degrees" {
     // Tests exp2, log2, radians, degrees functions
@@ -11500,7 +11457,6 @@ test "T501.1: const array initializer" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T502.1: gl_VertexIndex and gl_InstanceIndex" {
     // Tests gl_VertexIndex and gl_InstanceIndex in vertex shader
     const source =
@@ -11588,7 +11544,6 @@ test "T506.1: imul and unsigned overflow" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T507.1: gl_PointCoord in fragment" {
     // Tests gl_PointCoord for point sprite rendering
@@ -11687,7 +11642,6 @@ test "T511.1: integer division and modulo" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T512.1: gl_CullDistance in vertex" {
     // Tests gl_CullDistance write in vertex shader
     const source =
@@ -11781,7 +11735,6 @@ test "T516.1: mat3 from 3 vec3 columns" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T517.1: gl_FragDepth write" {
     // Tests gl_FragDepth output in fragment shader
     const source =
@@ -11869,7 +11822,6 @@ test "T521.1: multiple function calls with recursion-like pattern" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T522.1: gl_NumWorkGroups query" {
     // Tests gl_NumWorkGroups read in compute shader
@@ -11967,7 +11919,6 @@ test "T526.1: clamp min max on vectors" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T527.1: gl_DrawID in vertex" {
     // Tests gl_DrawID in multi-draw vertex shader
     const source =
@@ -12054,7 +12005,6 @@ test "T531.1: inout parameter modification" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T532.1: matrix transpose on mat3" {
     // Tests transpose on mat3
@@ -12155,7 +12105,6 @@ test "T536.1: switch with multiple cases fall-through" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T537.1: outerProduct vec3xvec3" {
     // Tests outerProduct producing a mat3 from two vec3
@@ -12259,7 +12208,6 @@ test "T541.1: complex expression with many operators" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T542.1: struct with sampler member" {
     // Tests struct containing a sampler
     const source =
@@ -12357,7 +12305,6 @@ test "T546.1: struct return from function" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T547.1: textureSize query" {
     // Tests textureSize for sampler2D
@@ -12475,7 +12422,6 @@ test "T551.1: compute bitonic sort" {
     try assertContains(hlsl, "main");
 }
 
-
 test "T552.1: gl_SampleID and gl_SamplePosition" {
     // Tests gl_SampleID and gl_SamplePosition in fragment
     const source =
@@ -12574,7 +12520,6 @@ test "T556.1: compute wave simulation" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
 }
-
 
 test "T557.1: layout depth_greater" {
     // Tests layout(depth_greater) in fragment shader
@@ -12683,7 +12628,6 @@ test "T561.1: PBR lighting model" {
     try assertContains(hlsl, "float4");
 }
 
-
 test "T562.1: subgroup basic operations" {
     // Subgroup operations require SPIR-V 1.3; compiling at SPIR-V 1.0 (the
     // default for compute) causes a semantic error. The flip correctly rejects this.
@@ -12783,7 +12727,6 @@ test "T566.1: texture with bias and lod" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T567.1: subgroup ballot and shuffle" {
     // Subgroup ops require SPIR-V 1.3; rejected at default SPIR-V 1.0.
@@ -12888,7 +12831,6 @@ test "T571.1: shadow comparison PCF" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T572.1: compute bloom extraction" {
     // Tests compute bright extraction for bloom
@@ -13007,7 +12949,6 @@ test "T576.1: deferred lighting pass" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T577.1: SSAO screen-space ambient occlusion" {
     // Tests SSAO kernel sampling pattern
@@ -13128,7 +13069,6 @@ test "T581.1: compute radix sort prefix" {
     try assertContains(hlsl, "main");
 }
 
-
 test "T582.1: vertex skinning with bone weights" {
     // Tests vertex skinning with bone matrix palette
     const source =
@@ -13248,7 +13188,6 @@ test "T586.1: compute particle emission" {
     try assertContains(hlsl, "main");
 }
 
-
 test "T587.1: screen-space reflections" {
     // Tests SSR ray marching pattern
     const source =
@@ -13367,7 +13306,6 @@ test "T591.1: FXAA edge detection" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "float4");
 }
-
 
 test "T592.1: bloom composite upsampling" {
     // Tests bloom composite with upsampling blend
@@ -14020,7 +13958,6 @@ test "HLSL: sample-parameter with gl_SampleMaskIn[0]" {
     try std.testing.expect(hlsl.len > 0);
 }
 
-
 test "HLSL: barycentric-khr from SPIR-V binary" {
     const spv_data = try zioshade.compat.readFileByPath(alloc, "tests/spirv_bins/barycentric-khr.spv", 1024 * 1024);
     defer alloc.free(spv_data);
@@ -14373,7 +14310,6 @@ test "T597.10: dynamic column index into a row_major UBO matrix is transposed" {
     try assertContains(hlsl, "transpose(a_m)[");
     try assertNotContains(hlsl, "transpose(a_m)[0]");
 }
-
 
 test "compute built-ins map to HLSL SV semantics on the entry signature" {
     // gl_GlobalInvocationID / gl_LocalInvocationID / gl_WorkGroupID /
@@ -14825,7 +14761,6 @@ test "hlsl: read-only param shadowed by a mutated inner local is not promoted (#
     try assertNotContains(hlsl, "f(out ");
 }
 
-
 // ---------------------------------------------------------------------------
 // #413: loop-carried phi read before declaration
 // ---------------------------------------------------------------------------
@@ -14981,4 +14916,23 @@ test "T417.LOOSE: loose non-block uniforms are gathered into cbuffer _Globals" {
     // No stray empty per-uniform cbuffer named after the loose uniform.
     try assertNotContains(hlsl, "cbuffer iResolution");
     try assertNotContains(hlsl, "cbuffer iTime");
+}
+
+// Mirrors the GLSL/MSL value-struct fix: a struct used via an inlined function
+// must be DECLARED and constructed with an HLSL aggregate initializer
+// `Light v = { ... };` — HLSL structs have no call-style constructor. Built from
+// runtime input so the struct survives constant folding.
+test "value struct is declared and aggregate-initialized (HLSL has no struct ctor)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec3 p;
+        \\layout(location=0) out vec4 o;
+        \\struct Light { vec3 pos; float intensity; };
+        \\vec3 shade(vec3 x, Light l){ return l.pos * (l.intensity / (length(x - l.pos) + 0.01)); }
+        \\void main(){ Light a = Light(p, p.x); Light b = Light(p.zyx, p.y); o = vec4(shade(p, a) + shade(p, b), 1.0); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "struct Light");
+    try assertNotContains(hlsl, "= Light(");
 }

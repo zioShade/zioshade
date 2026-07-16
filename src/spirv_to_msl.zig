@@ -2216,6 +2216,14 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
         }
     }
+    // Structs that appear only as SSA VALUES (an inlined function's struct locals
+    // become OpCompositeConstruct/OpFunctionCall results, not OpVariables) are
+    // missed by the OpVariable scan above; declare them too.
+    for (module.instructions) |inst| {
+        if (common.structValueTypeId(&module, inst)) |sid| {
+            mslEmitOneStructForwardDecl(&module, &names, sid, w, aa, &local_structs_msl, &emitted_names_msl) catch {};
+        }
+    }
     if (local_structs_msl.count() > 0) try w.writeAll("\n");
 
     // Module-scope array constants. Each array `OpConstantComposite` referenced
@@ -4921,6 +4929,17 @@ fn emitInstruction(
                 return;
             }
             const rtt = try mslType(m, inst.words[1], names, alloc);
+            if (rt != null and rt.?.op == .TypeStruct) {
+                // Metal structs have no call-style constructor (`Light(a,b,c)` fails
+                // to compile); use C++ aggregate brace-init `Light{ a, b, c }`.
+                try w.print("    {s} {s} = {s}{{ ", .{ rtt, names.get(inst.words[2]) orelse "v", rtt });
+                for (inst.words[3..], 0..) |cid, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try w.writeAll(names.get(cid) orelse "0");
+                }
+                try w.writeAll(" };\n");
+                return;
+            }
             try w.print("    {s} {s} = {s}(", .{ rtt, names.get(inst.words[2]) orelse "v", rtt });
             for (inst.words[3..], 0..) |cid, i| {
                 if (i > 0) try w.writeAll(", ");
