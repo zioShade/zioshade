@@ -361,6 +361,46 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return module.instructions[idx];
 }
 
+/// True if a struct type carries `Block` or `BufferBlock` — a UBO/SSBO interface
+/// block (this also covers builtin blocks like gl_PerVertex, which are Block-
+/// decorated). Such structs are emitted by each backend's cbuffer/SSBO path, not
+/// as plain value structs. `module` is `anytype` because the HLSL backend uses a
+/// distinct ParsedModule struct; all three share the `.instructions` shape.
+pub fn structIsInterfaceBlock(module: anytype, struct_id: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 3 and inst.words[1] == struct_id) {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[2]);
+            if (dec == .block or dec == .buffer_block) return true;
+        }
+    }
+    return false;
+}
+
+/// If `inst` is a value-producing op whose result type is (or is an array of) a
+/// plain (non-interface-block) struct, return that struct type id; else null.
+/// Used by every text backend to declare struct types that appear ONLY as SSA
+/// values: when a function taking/returning a struct is inlined, its struct
+/// locals become OpCompositeConstruct/OpFunctionCall results rather than
+/// OpVariables, so an OpVariable-only scan misses them and the type is used
+/// (`Light l = Light(...)`) but never declared. `module`/`inst` are `anytype`
+/// (the HLSL backend has its own ParsedModule/Instruction types).
+pub fn structValueTypeId(module: anytype, inst: anytype) ?u32 {
+    switch (inst.op) {
+        .CompositeConstruct, .CompositeExtract, .CompositeInsert, .Load, .FunctionCall, .CopyObject, .Phi, .Select, .ConstantComposite => {},
+        else => return null,
+    }
+    if (inst.words.len < 3) return null;
+    var sid = inst.words[1]; // result type id
+    var si = localGetDef(module.instructions, module.id_defs, sid) orelse return null;
+    while ((si.op == .TypeArray or si.op == .TypeRuntimeArray) and si.words.len > 2) {
+        sid = si.words[2];
+        si = localGetDef(module.instructions, module.id_defs, sid) orelse return null;
+    }
+    if (si.op != .TypeStruct) return null;
+    if (structIsInterfaceBlock(module, sid)) return null;
+    return sid;
+}
+
 /// #414: whether a function parameter can carry a result back to its caller.
 /// In logical SPIR-V that is possible ONLY for a pointer parameter (the GLSL
 /// out/inout lowering, as the frontend emits it). A by-value parameter is a

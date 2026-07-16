@@ -875,6 +875,14 @@ pub fn spirvToHLSL(
             }
         }
     }
+    // Structs that appear only as SSA VALUES (an inlined function's struct locals
+    // become OpCompositeConstruct/OpFunctionCall results, not OpVariables) are
+    // missed by the OpVariable scan above; declare them too.
+    for (module.instructions) |inst| {
+        if (common.structValueTypeId(&module, inst)) |sid| {
+            hlslEmitOneStructForwardDecl(&module, &names, sid, w, aa, &local_structs, &emitted_names2) catch {};
+        }
+    }
     if (local_structs.count() > 0) try w.writeAll("\n");
 
     // Find ALL function IDs in the module
@@ -3995,6 +4003,18 @@ fn emitInstruction(
         // Composites
         .CompositeConstruct => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const rtd = getDef(module, inst.words[1]);
+            if (rtd != null and rtd.?.op == .TypeStruct) {
+                // HLSL structs have no call-style constructor (`Light(a,b,c)` is
+                // invalid); use an aggregate initializer `Light v = { a, b, c };`.
+                try w.print("    {s} {s} = {{ ", .{ rt, names.get(inst.words[2]) orelse "v" });
+                for (inst.words[3..], 0..) |cid, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try w.writeAll(names.get(cid) orelse "0");
+                }
+                try w.writeAll(" };\n");
+                return;
+            }
             try w.print("    {s} {s} = {s}(", .{ rt, names.get(inst.words[2]) orelse "v", rt });
             for (inst.words[3..], 0..) |cid, i| {
                 if (i > 0) try w.writeAll(", ");
