@@ -315,7 +315,11 @@ fn mslAtomicImageScalar(m: *const ParsedModule, image_var_id: u32) ?[]const u8 {
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
     switch (inst.op) {
-        .Variable => {
+        // OpFunctionParameter shares OpVariable's word layout (words[1] = pointer
+        // result type). A struct pointer param (`thread Particle&`) was otherwise
+        // unresolved, so its member accesses emitted a numeric index (v[1]) instead
+        // of `.member`. (Mirrors the GLSL backend fix.)
+        .Variable, .FunctionParameter => {
             const pt = getDef(m, inst.words[1]) orelse return null;
             if (pt.op == .TypePointer and pt.words.len > 3) return pt.words[3];
             return null;
@@ -3229,6 +3233,11 @@ fn emitFunction(
     atomic_images: *const std.AutoHashMap(u32, void),
     arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !void {
+    // opi (detectOutParams) is retained for API symmetry with the other backends
+    // but no longer consulted: any Function-storage pointer param is emitted as
+    // `thread T&` directly (a pointer param is always out/inout), which is
+    // call-site-independent and so covers the local-argument case opi missed.
+    _ = opi;
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
     const fti = getDef(m, fi.words[4]) orelse return;
@@ -3799,13 +3808,12 @@ fn emitFunction(
     }
 
     var first_param = true;
-    for (param_ids.items, 0..) |pid, i| {
+    for (param_ids.items) |pid| {
         if (!first_param) try w.writeAll(", ");
         first_param = false;
         const pi = getDef(m, pid).?;
         const pn = names.get(pid) orelse "p";
         const pti = getDef(m, pi.words[1]);
-        var is_out = false;
         var is_ptr = false;
         var itid = pi.words[1];
         if (pti) |pt| {
@@ -3814,20 +3822,13 @@ fn emitFunction(
                 is_ptr = true;
             }
         }
-        // #414: only a POINTER param can be an out param; a by-value param is
-        // a read-only copy and must keep its plain value signature.
-        if (is_ptr) {
-            if (opi.get(func_id)) |oindices| {
-                for (oindices.items) |oi| {
-                    if (oi == i) {
-                        is_out = true;
-                        break;
-                    }
-                }
-            }
-        }
         const pt2 = try mslType(m, itid, names, alloc);
-        if (is_out) {
+        // A Function-storage pointer param is always out/inout (the frontend emits a
+        // pointer only for those, never a by-value copy); Metal passes both as a
+        // `thread T&` reference. This used to be gated on opi (detectOutParams), which
+        // only records the shadertoy Output-arg case, so a local-argument pointer
+        // param degraded to a by-value copy and its writes were lost (silent-wrong).
+        if (is_ptr) {
             try w.print("thread {s}& {s}", .{ pt2, pn });
         } else {
             try w.print("{s} {s}", .{ pt2, pn });
