@@ -4299,3 +4299,29 @@ test "OpOuterProduct builds the matrix from columns, not an unhandled stub" {
     try assertNotContains(msl, "unhandled op");
     try assertContains(msl, "float3x3(");
 }
+
+// A struct passed by pointer param (`inout Particle p`) with a local-variable arg
+// had two bugs mirrored from GLSL: emitted by-value (writes lost) and member access
+// as `v14[1]` instead of `.vel`. Metal passes any out/inout param as `thread T&`
+// (a Function-storage pointer param is always out/inout per the frontend), and
+// resolvePointee now handles the OpFunctionParameter base. gl_FragCoord keeps the
+// function un-inlined.
+test "struct pointer param is thread T& with .member access (not by-value [idx])" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\struct Particle { vec2 pos; vec2 vel; float life; };
+        \\void updateParticle(inout Particle p, float dt){ p.pos = p.pos + p.vel * dt; p.life -= dt; if (p.life < 0.0) p.life = 0.0; }
+        \\void main(){
+        \\  vec2 uv = gl_FragCoord.xy / 300.0;
+        \\  Particle p; p.pos = uv; p.vel = vec2(0.01, -0.02); p.life = 1.0;
+        \\  for (int i = 0; i < 5; i++) { updateParticle(p, 0.1); }
+        \\  fragColor = vec4(p.pos, p.life, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "thread Particle&");
+    try assertContains(msl, ".vel");
+    try assertNotContains(msl, "v14[1]");
+}
