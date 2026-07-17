@@ -206,7 +206,11 @@ fn isAnonymousSSBOVar(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
 fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(m, id) orelse return null;
     switch (inst.op) {
-        .Variable => {
+        // OpFunctionParameter shares OpVariable's word layout (words[1] = pointer
+        // result type). A pointer param (`inout Particle p`) whose pointee is a struct
+        // was otherwise unresolved (null), so its access chains emitted a numeric index
+        // (`v[1]`) instead of the member name (`.vel`) — invalid GLSL.
+        .Variable, .FunctionParameter => {
             const pt = getDef(m, inst.words[1]) orelse return null;
             if (pt.op == .TypePointer and pt.words.len > 3) return pt.words[3];
             return null;

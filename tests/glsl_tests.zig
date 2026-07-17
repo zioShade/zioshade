@@ -2927,3 +2927,28 @@ test "helper function reading a stage input compiles (globals declared first)" {
     try std.testing.expect(in_pos < helper_pos);
     try glslValidateOrSkip("helper-reads-input", glsl);
 }
+
+// A struct passed to a function as a pointer parameter (`inout Particle p`) had its
+// member access chains emitted as numeric indices (`v13[1]`) instead of `.member`,
+// because resolvePointee didn't resolve an OpFunctionParameter base — invalid GLSL
+// ("left of '[' is not array/matrix/vector"). Found by the backend validity sweep
+// (particle_sim). gl_FragCoord keeps the function un-inlined so it survives.
+test "struct member access on a pointer function parameter uses .member (not [idx])" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\struct Particle { vec2 pos; vec2 vel; float life; };
+        \\void updateParticle(inout Particle p, float dt){ p.pos = p.pos + p.vel * dt; p.life -= dt; if (p.life < 0.0) p.life = 0.0; }
+        \\void main(){
+        \\  vec2 uv = gl_FragCoord.xy / 300.0;
+        \\  Particle p; p.pos = uv; p.vel = vec2(0.01, -0.02); p.life = 1.0;
+        \\  for (int i = 0; i < 5; i++) { updateParticle(p, 0.1); }
+        \\  fragColor = vec4(p.pos, p.life, 1.0);
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, ".vel");
+    try assertContains(glsl, ".life");
+    try glslValidateOrSkip("struct-param-access", glsl);
+}
