@@ -2864,3 +2864,24 @@ test "mutable module-scope global is declared with its initializer" {
     try assertContains(glsl, "float val = 0.0;");
     try glslValidateOrSkip("mutable-global", glsl);
 }
+
+// Mutual recursion (helperA calls helperB defined later, and vice versa): GLSL
+// requires a prototype before use, but SPIR-V does not preserve the source's
+// forward declarations. The backend now emits a prototype for every non-entry
+// function before any body. Found by the backend validity sweep (mutual_recursion).
+test "mutually recursive functions get forward-declaration prototypes (valid GLSL)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in float t;
+        \\layout(location=0) out vec4 o;
+        \\float a(float x);
+        \\float b(float x){ if (x < 0.1) return x; return a(x - 0.1); }
+        \\float a(float x){ if (x < 0.1) return x + 0.1; return b(x * 0.5); }
+        \\void main(){ o = vec4(a(t), b(t), 0.0, 1.0); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // A prototype for the forward-referenced function must precede the bodies.
+    try assertContains(glsl, "float b(float");
+    try glslValidateOrSkip("mutual-recursion", glsl);
+}
