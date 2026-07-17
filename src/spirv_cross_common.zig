@@ -432,6 +432,74 @@ pub fn functionParamIsPointer(instructions: anytype, id_defs: anytype, func_id: 
     return false;
 }
 
+pub const PtrParamDir = enum { out_only, in_out };
+
+/// Classify a POINTER function parameter (only call when the param is a pointer) as
+/// `out` (written, never read) or `inout` (read, or read+write) from the callee
+/// body. The frontend emits a Function-storage pointer param only for genuine
+/// out/inout, so a pointer param always needs one of these qualifiers; the choice
+/// affects correctness (an `out` param drops the caller's incoming value, so a
+/// param that is READ must be `inout`). Biased to `inout`: it is the safe superset,
+/// and `out` is returned only when the body provably writes without reading.
+pub fn classifyPointerParam(instructions: anytype, id_defs: anytype, alloc: std.mem.Allocator, func_id: u32, param_idx: usize) PtrParamDir {
+    const fidx = if (func_id < id_defs.len) id_defs[func_id] orelse return .in_out else return .in_out;
+    // Resolve the param id at param_idx.
+    var i: usize = fidx + 1;
+    var pi: usize = 0;
+    var param_id: u32 = 0;
+    var found = false;
+    while (i < instructions.len) : (i += 1) {
+        const inst = instructions[i];
+        if (inst.op == .FunctionParameter and inst.words.len > 2) {
+            if (pi == param_idx) {
+                param_id = inst.words[2];
+                found = true;
+                break;
+            }
+            pi += 1;
+        } else if (inst.op != .Label) break;
+    }
+    if (!found) return .in_out;
+
+    // Alias set: the param and every pointer transitively derived from it
+    // (OpAccessChain / OpCopyObject). SSA/dominance order means one forward pass
+    // over the body suffices.
+    var set = std.AutoHashMap(u32, void).init(alloc);
+    defer set.deinit();
+    set.put(param_id, {}) catch return .in_out;
+    var read = false;
+    var written = false;
+    var j = fidx + 1;
+    while (j < instructions.len) : (j += 1) {
+        const inst = instructions[j];
+        if (inst.op == .FunctionEnd) break;
+        switch (inst.op) {
+            .AccessChain, .CopyObject => {
+                if (inst.words.len > 3 and set.contains(inst.words[3])) set.put(inst.words[2], {}) catch {};
+            },
+            .Load => {
+                if (inst.words.len > 3 and set.contains(inst.words[3])) read = true;
+            },
+            .Store => {
+                if (inst.words.len > 2 and set.contains(inst.words[1])) written = true;
+            },
+            .FunctionCall => {
+                // Passing the pointer onward can read it — force inout.
+                if (inst.words.len > 4) {
+                    for (inst.words[4..]) |a| {
+                        if (set.contains(a)) {
+                            read = true;
+                            break;
+                        }
+                    }
+                }
+            },
+            else => {},
+        }
+    }
+    return if (written and !read) .out_only else .in_out;
+}
+
 /// Detect out-parameters by scanning function calls in the entry function:
 /// records (called function id -> param positions) for every call argument
 /// that is a stage Output variable, i.e. the frontend passed the out/inout
