@@ -748,6 +748,19 @@ fn tryResolveTypeName(m: *const ParsedModule, type_id: u32) []const u8 {
     };
 }
 
+/// True if `s` is a bare integer (optional leading '-', then only digits) — i.e. a
+/// GLSL *integer* literal, not a float. `inf`/`nan` and anything with `.`/`e`/`E`
+/// are not.
+fn isBareIntegerString(s: []const u8) bool {
+    if (s.len == 0) return false;
+    var i: usize = if (s[0] == '-') 1 else 0;
+    if (i >= s.len) return false;
+    while (i < s.len) : (i += 1) {
+        if (!std.ascii.isDigit(s[i])) return false;
+    }
+    return true;
+}
+
 fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
     if (type_inst.op == .TypeFloat and literal_words.len > 0) {
         const val: f32 = @bitCast(literal_words[0]);
@@ -755,7 +768,16 @@ fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_wor
             const ival: i32 = @intFromFloat(val);
             return std.fmt.allocPrint(alloc, "{d}.0", .{ival});
         }
-        return std.fmt.allocPrint(alloc, "{d}", .{val});
+        // `{d}` on a whole-valued float >= 1e6 prints bare digits (1e10 ->
+        // "10000000000") with no decimal or exponent, which glslang lexes as an int
+        // literal and rejects ("numeric literal too big"). Append ".0" when the
+        // formatted value is a bare integer so it stays a valid float literal.
+        const s = try std.fmt.allocPrint(alloc, "{d}", .{val});
+        if (isBareIntegerString(s)) {
+            defer alloc.free(s);
+            return std.fmt.allocPrint(alloc, "{s}.0", .{s});
+        }
+        return s;
     }
     if (type_inst.op == .TypeInt and literal_words.len > 0) {
         const signed = type_inst.words.len > 3 and type_inst.words[3] != 0;

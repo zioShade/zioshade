@@ -2885,3 +2885,21 @@ test "mutually recursive functions get forward-declaration prototypes (valid GLS
     try assertContains(glsl, "float b(float");
     try glslValidateOrSkip("mutual-recursion", glsl);
 }
+
+// A whole-valued float constant >= 1e6 (e.g. 1e10) was formatted with `{d}` as bare
+// digits `10000000000` (no decimal), which glslang lexes as an over-range int
+// literal ("numeric literal too big"). It must keep a `.0`. Found by the backend
+// validity sweep (ray-sphere, mandelbox).
+test "large whole-valued float constant keeps a decimal (valid float literal)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) in float t;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float big = 1e10; o = vec4(min(t, big)); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "10000000000.0");
+    try assertNotContains(glsl, " 10000000000;");
+    try glslValidateOrSkip("large-float-literal", glsl);
+}
