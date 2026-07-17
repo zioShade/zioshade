@@ -1879,6 +1879,23 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
     if (emitted_any_priv) try w.writeAll("\n");
 }
 
+/// GLSL qualifier for a function parameter: "" for a by-value param, "out " for a
+/// pointer param whose call argument is a stage Output (the shadertoy fast-path,
+/// kept byte-identical), else the body classification ("inout "/"out "). Shared by
+/// the prototype and definition emitters so their signatures always match.
+fn paramQualifier(m: *const ParsedModule, opi: *const std.AutoHashMap(u32, std.ArrayList(usize)), func_id: u32, param_idx: usize, is_ptr: bool, alloc: std.mem.Allocator) []const u8 {
+    if (!is_ptr) return "";
+    if (opi.get(func_id)) |oindices| {
+        for (oindices.items) |oi| {
+            if (oi == param_idx) return "out ";
+        }
+    }
+    return switch (common.classifyPointerParam(m.instructions, m.id_defs, alloc, func_id, param_idx)) {
+        .out_only => "out ",
+        .in_out => "inout ",
+    };
+}
+
 /// Emit a GLSL forward declaration (prototype) for a function: `rt name(params);`.
 /// Must match emitFunction's signature exactly (return type, param types, and the
 /// `out` qualifier from `opi`) or GLSL rejects the mismatched redeclaration.
@@ -1906,21 +1923,17 @@ fn emitFunctionPrototype(m: *const ParsedModule, names: *std.AutoHashMap(u32, []
                 is_ptr = true;
             }
         }
-        var is_out = false;
-        if (is_ptr) {
-            if (opi.get(func_id)) |oindices| {
-                for (oindices.items) |oi| {
-                    if (oi == pidx) {
-                        is_out = true;
-                        break;
-                    }
-                }
-            }
-        }
+        // A pointer param is a genuine out/inout param (the frontend never emits a
+        // pointer for a by-value param). The opi (detectOutParams) fast-path keeps
+        // the shadertoy `out fragColor` case byte-identical; every other pointer
+        // param is classified from the callee body as inout (read) or out
+        // (write-only). MUST match the definition site exactly or GLSL rejects the
+        // redeclaration.
+        const qual = paramQualifier(m, opi, func_id, pidx, is_ptr, alloc);
         const pt2 = try glslType(m, itid, names, alloc);
         // A prototype needs only parameter TYPES; omitting names avoids introducing
         // the body's SSA param name at file scope (and matches by type regardless).
-        if (is_out) try w.writeAll("out ");
+        try w.writeAll(qual);
         try w.writeAll(pt2);
         pidx += 1;
     }
@@ -2049,7 +2062,6 @@ fn emitFunction(
         const pi = getDef(m, pid).?;
         const pn = names.get(pid) orelse "p";
         const pti = getDef(m, pi.words[1]);
-        var is_out = false;
         var is_ptr = false;
         var itid = pi.words[1];
         if (pti) |pt| {
@@ -2058,20 +2070,12 @@ fn emitFunction(
                 is_ptr = true;
             }
         }
-        // #414: only a POINTER param can be an out param; a by-value param is
-        // a read-only copy and must keep its plain value signature.
-        if (is_ptr) {
-            if (opi.get(func_id)) |oindices| {
-                for (oindices.items) |oi| {
-                    if (oi == i) {
-                        is_out = true;
-                        break;
-                    }
-                }
-            }
-        }
+        // #414: only a POINTER param can be out/inout; a by-value param stays plain.
+        // Must match emitFunctionPrototype exactly (same paramQualifier) or GLSL
+        // rejects the redeclaration.
+        const qual = paramQualifier(m, opi, func_id, i, is_ptr, alloc);
         const pt2 = try glslType(m, itid, names, alloc);
-        if (is_out) try w.writeAll("out ");
+        try w.writeAll(qual);
         try w.print("{s} {s}", .{ pt2, pn });
     }
 
