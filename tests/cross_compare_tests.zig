@@ -856,11 +856,13 @@ test "ssbo round-trip: glslang BufferBlock imageAtomic store accepted (symptom 2
     try assertSSBODeclaredAsBuffer(alloc, ssbo_image_atomic_store);
 }
 
-// Stage-gating guard: the SSBO emission loop is compute-only, and the buffer-block exclusion
-// in isUniformBlockVar/collectResources is gated on the SAME compute condition. A non-compute
-// (fragment) glslang SSBO must therefore NOT be routed to the `buffer` path (which would
-// reference an undeclared block) — it keeps its prior uniform-block rendering. This pins
-// "zero non-compute behavior change" and catches an accidental un-gating.
+// SSBOs are legal in every stage (GLSL 4.30 / GLSL ES 3.10), not just compute, so the
+// SSBO emission loop and its lockstep exclusions (isUniformBlockVar/isAnonymousSSBOVar/
+// collectResources) run in all stages. A fragment SSBO must be DECLARED as a `buffer`
+// block that its `{instance}.{member}` uses reference; the prior compute-gating declared
+// it nowhere (StorageBuffer-class vars are not on the uniform path either), so the body
+// referenced an undeclared block and glslang rejected the output. This pins the block IS
+// emitted AND — the guard the old string-only check lacked — the whole unit validates.
 const ssbo_fragment_read: [:0]const u8 =
     \\#version 450
     \\layout(std430, binding = 0) buffer B { uint v; } b;
@@ -868,15 +870,21 @@ const ssbo_fragment_read: [:0]const u8 =
     \\void main() { o = vec4(float(b.v)); }
 ;
 
-test "ssbo gating: non-compute glslang SSBO is NOT emitted as a buffer block" {
+test "ssbo gating: non-compute glslang SSBO IS emitted as a validated buffer block" {
     const spirv = try compileToSpirvViaGlslang(alloc, ssbo_fragment_read, .fragment);
     defer alloc.free(spirv);
     const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 450 });
     defer alloc.free(glsl);
-    if (std.mem.indexOf(u8, glsl, "buffer b_block") != null) {
-        std.debug.print("\nnon-compute SSBO wrongly routed to buffer path:\n{s}\n", .{glsl});
-        return error.NonComputeSSBORoutedToBuffer;
+    // Declared as a writable std430 `buffer` block (never a read-only std140 uniform).
+    if (std.mem.indexOf(u8, glsl, "buffer b_block") == null or
+        std.mem.indexOf(u8, glsl, "std140") != null)
+    {
+        std.debug.print("\nnon-compute SSBO not declared as a buffer block:\n{s}\n", .{glsl});
+        return error.NonComputeSSBONotBuffer;
     }
+    // The full emitted unit must compile — the validation the old test omitted, which is
+    // exactly what let the undeclared-block bug hide.
+    try assertGlslangAccepts(alloc, "ssbo_fragment_read", glsl, .fragment);
 }
 
 test "glsl-version acceptance: UBO frag valid at 330/400/410/420/440/450/460" {

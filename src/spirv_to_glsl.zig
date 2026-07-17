@@ -152,12 +152,10 @@ fn isUniformBlockVar(m: *const ParsedModule, id: u32) bool {
     const ti = getDef(m, pt) orelse return false;
     if (ti.op != .TypeStruct) return false;
     // An old-style SSBO (`Uniform` storage + `BufferBlock`-decorated struct) is declared as a
-    // writable `buffer` block — but ONLY in the compute stage, where the SSBO emission loop
-    // runs (it is `is_compute`-gated, matching #296's `.length()` gate). There it keeps its
-    // original member names + `{instance}.{member}` access, so it must NOT take the cbuffer
-    // `{name}_1.{name}_m{idx}` form. Outside compute it is still emitted via the uniform-block
-    // path, so keep treating it as a UBO there to avoid referencing an undeclared block. (#296)
-    if (m.execution_model == .GLCompute and structHasBufferBlock(m, pt)) return false;
+    // writable `buffer` block (the SSBO emission loop now runs in every stage, not just
+    // compute). There it keeps its original member names + `{instance}.{member}` access, so
+    // it must NOT take the cbuffer `{name}_1.{name}_m{idx}` form. (#296)
+    if (structHasBufferBlock(m, pt)) return false;
     return true;
 }
 
@@ -190,11 +188,9 @@ fn isOldStyleSSBOVar(m: *const ParsedModule, id: u32) bool {
 /// block exposes its members directly in global scope, so member access must be BARE (`a`),
 /// never `{instance}.a` — and crucially never the leading-dot `.a` produced when the empty
 /// instance name is prefixed. glslang rejects `.a` with "unexpected DOT". Mirrors the
-/// gl_PerVertex builtin-block base suppression (isBuiltinBlockVar). Compute-gated to match
-/// the SSBO emission loop and isUniformBlockVar's BufferBlock exclusion: only there is the
-/// block actually emitted anonymously; elsewhere it routes through the named cbuffer path.
+/// gl_PerVertex builtin-block base suppression (isBuiltinBlockVar). Applies in every stage,
+/// in lockstep with the SSBO emission loop and isUniformBlockVar's BufferBlock exclusion.
 fn isAnonymousSSBOVar(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32) bool {
-    if (m.execution_model != .GLCompute) return false;
     const def = getDef(m, id) orelse return false;
     if (def.op != .Variable or def.words.len < 4) return false;
     const sc: spirv.StorageClass = @enumFromInt(def.words[3]);
@@ -991,8 +987,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         try w.print("}} {s}_1;\n\n", .{cb.name});
     }
 
-    // For compute shaders: emit SSBO (storage buffer) declarations
-    if (is_compute) {
+    // Emit SSBO (storage buffer) declarations. SSBOs are legal in every stage
+    // (GLSL 4.30 / GLSL ES 3.10 with shader_storage_buffer_object), not just
+    // compute — a StorageBuffer-class block in a fragment shader is declared
+    // here too, or its `{instance}.{member}` uses reference an undeclared block.
+    {
         for (module.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
@@ -1548,10 +1547,10 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
             // Exclude SSBOs from the cbuffer list. `BufferBlock` is decorated on the STRUCT
             // TYPE (`structHasBufferBlock(pt)`) — the variable-id check `hasDec(rid,…)` is a
             // defensive no-op for spec-conformant SPIR-V but kept for any producer that mis-
-            // decorates the variable. The struct-type exclusion is compute-gated so non-compute
-            // SSBOs (not declared by the compute-only SSBO loop) stay on the uniform path.
+            // decorates the variable. Excluded in every stage: the SSBO emission loop now runs
+            // in all stages, so an old-style SSBO is declared there, never on the uniform path.
             .Uniform => {
-                if (hasDec(decs, rid, .buffer_block) or (m.execution_model == .GLCompute and structHasBufferBlock(m, pt))) continue;
+                if (hasDec(decs, rid, .buffer_block) or structHasBufferBlock(m, pt)) continue;
                 const binding = getDecVal(decs, rid, .binding) orelse 0;
                 cb.append(alloc, .{ .name = names.get(rid) orelse "Globals", .type_id = pt, .binding = binding }) catch {};
             },
