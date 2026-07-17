@@ -1220,6 +1220,18 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     common.detectOutParams(module.instructions, module.id_defs, entry_id, &out_param_info, aa);
 
+    // Forward-declare every non-entry function before any body, so a call to a
+    // function defined LATER resolves — mutual recursion (helperA <-> helperB) and
+    // any forward reference. GLSL requires a prototype before use, and the source's
+    // prototypes are not preserved in SPIR-V. A prototype plus a matching definition
+    // is valid GLSL, so this is emitted unconditionally for all helpers.
+    var emitted_any_proto = false;
+    for (func_ids.items) |fid| {
+        if (fid == entry_id) continue;
+        try emitFunctionPrototype(&module, &names, fid, &out_param_info, w, aa);
+        emitted_any_proto = true;
+    }
+    if (emitted_any_proto) try w.writeAll("\n");
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue;
         try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, options.version);
@@ -1750,6 +1762,54 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
 // ---- Function emission (GLSL dialect) ----
 // Part 2 of spirv_to_glsl.zig — emit functions
 // This content gets appended to the main file.
+
+/// Emit a GLSL forward declaration (prototype) for a function: `rt name(params);`.
+/// Must match emitFunction's signature exactly (return type, param types, and the
+/// `out` qualifier from `opi`) or GLSL rejects the mismatched redeclaration.
+fn emitFunctionPrototype(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), func_id: u32, opi: *const std.AutoHashMap(u32, std.ArrayList(usize)), w: anytype, alloc: std.mem.Allocator) !void {
+    const fi = getDef(m, func_id) orelse return;
+    if (fi.op != .Function or fi.words.len < 5) return;
+    const fti = getDef(m, fi.words[4]) orelse return;
+    if (fti.words.len < 3) return;
+    const rt = try glslType(m, fti.words[2], names, alloc);
+    const func_name = names.get(func_id) orelse "func";
+    const func_idx = if (func_id < m.id_defs.len) m.id_defs[func_id] orelse return else return;
+    try w.print("{s} {s}(", .{ rt, func_name });
+    var pidx: usize = 0;
+    var idx = func_idx + 1;
+    while (idx < m.instructions.len) : (idx += 1) {
+        const inst = m.instructions[idx];
+        if (inst.op == .Label) break; // params precede the first block
+        if (inst.op != .FunctionParameter) continue;
+        if (pidx > 0) try w.writeAll(", ");
+        var itid = inst.words[1];
+        var is_ptr = false;
+        if (getDef(m, inst.words[1])) |pt| {
+            if (pt.op == .TypePointer and pt.words.len > 3) {
+                itid = pt.words[3];
+                is_ptr = true;
+            }
+        }
+        var is_out = false;
+        if (is_ptr) {
+            if (opi.get(func_id)) |oindices| {
+                for (oindices.items) |oi| {
+                    if (oi == pidx) {
+                        is_out = true;
+                        break;
+                    }
+                }
+            }
+        }
+        const pt2 = try glslType(m, itid, names, alloc);
+        // A prototype needs only parameter TYPES; omitting names avoids introducing
+        // the body's SSA param name at file scope (and matches by type regardless).
+        if (is_out) try w.writeAll("out ");
+        try w.writeAll(pt2);
+        pidx += 1;
+    }
+    try w.writeAll(");\n");
+}
 
 fn emitFunction(
     m: *const ParsedModule,
