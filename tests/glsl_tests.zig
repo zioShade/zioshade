@@ -2951,4 +2951,25 @@ test "struct member access on a pointer function parameter uses .member (not [id
     try assertContains(glsl, ".vel");
     try assertContains(glsl, ".life");
     try glslValidateOrSkip("struct-param-access", glsl);
+    // The struct is read AND written through the pointer param, so it must be inout
+    // (a by-value or `out` param would drop the caller's value = silent-wrong).
+    try assertContains(glsl, "inout Particle");
+}
+
+// A pointer function param that a stage Output variable is passed to (the shadertoy
+// `mainImage(out vec4 fragColor, ...)` pattern) must stay `out`, never flip to
+// `inout` — the wintty terminal depends on this. Guards the paramQualifier
+// opi fast-path.
+test "shadertoy-style out-parameter (stage Output arg) stays out, not inout" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\void mainImage(out vec4 c, in vec2 p){ float a = 0.0; for(int i=0;i<3;i++){ a += p.x; } c = vec4(a, p.y, 0.0, 1.0); }
+        \\void main(){ mainImage(fragColor, gl_FragCoord.xy); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "out vec4");
+    try assertNotContains(glsl, "inout vec4");
+    try glslValidateOrSkip("shadertoy-out-param", glsl);
 }
