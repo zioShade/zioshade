@@ -2973,3 +2973,23 @@ test "shadertoy-style out-parameter (stage Output arg) stays out, not inout" {
     try assertNotContains(glsl, "inout vec4");
     try glslValidateOrSkip("shadertoy-out-param", glsl);
 }
+
+// An SSBO (`buffer {}` block) in a FRAGMENT shader must be declared, not just referenced.
+// SSBO declaration emission was compute-gated, so a non-compute SSBO left the block
+// undeclared while the body still indexed it (`b.data[...]`) — glslang then rejected the
+// output ("undeclared identifier"). The index here is a complex expression (idx*2+1),
+// mirroring tests/spirv-cross/complex-expression-in-access-chain.frag.
+test "SSBO block in a fragment shader is declared (not compute-gated)" {
+    const source =
+        \\#version 450
+        \\layout(std430, binding = 0) buffer B { vec4 data[128]; } b;
+        \\layout(location = 0) flat in int idx;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = b.data[idx * 2 + 1]; }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "buffer b_block");
+    try assertContains(glsl, "b.data[");
+    try glslValidateOrSkip("fragment-ssbo", glsl);
+}
