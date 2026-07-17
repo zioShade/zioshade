@@ -1242,6 +1242,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
     common.detectOutParams(module.instructions, module.id_defs, entry_id, &out_param_info, aa);
 
+    // Declare stage in/out varyings and mutable Private globals at file scope BEFORE
+    // any function body — a helper may reference a stage input or a global, and the
+    // entry point (which used to emit these) is written last. (triple-nested-functions)
+    try emitModuleGlobals(&module, &decs, &names, options.version, w, aa);
+
     // Forward-declare every non-entry function before any body, so a call to a
     // function defined LATER resolves — mutual recursion (helperA <-> helperB) and
     // any forward reference. GLSL requires a prototype before use, and the source's
@@ -1256,9 +1261,9 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     if (emitted_any_proto) try w.writeAll("\n");
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue;
-        try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, options.version);
+        try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info);
     }
-    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info, options.version);
+    try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -1785,6 +1790,91 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
 // Part 2 of spirv_to_glsl.zig — emit functions
 // This content gets appended to the main file.
 
+/// Emit stage in/out varying declarations and mutable Private globals at file scope,
+/// BEFORE any function body. A helper function may reference a stage input (e.g.
+/// `uv`) or a mutable global, so these must be declared ahead of ALL functions — the
+/// entry point (main) is emitted last, so declaring them there left helpers using
+/// undeclared identifiers. Built-ins (gl_FragCoord, gl_Position, …) are predefined
+/// and never declared here.
+fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), names: *std.AutoHashMap(u32, []const u8), version: u32, w: anytype, alloc: std.mem.Allocator) !void {
+    var emitted_any_io = false;
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Input) continue;
+        const ivid = inst.words[2];
+        if (getDecVal(decs, ivid, .built_in) != null) continue;
+        if (isBuiltinBlockVar(m, ivid)) continue;
+        const it = try glslType(m, inst.words[1], names, alloc);
+        const in_name = names.get(ivid) orelse continue;
+        const flat_q: []const u8 = if (hasDec(decs, ivid, .flat)) "flat " else "";
+        const drop_loc = dropVaryingLocation(version, m.execution_model, .in);
+        if (!drop_loc) if (getDecVal(decs, ivid, .location)) |l| {
+            try w.print("layout(location = {d}) {s}in {s} {s};\n", .{ l, flat_q, it, in_name });
+            emitted_any_io = true;
+            continue;
+        };
+        try w.print("{s}in {s} {s};\n", .{ flat_q, it, in_name });
+        emitted_any_io = true;
+    }
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Output) continue;
+        const ovid = inst.words[2];
+        if (getDecVal(decs, ovid, .built_in) != null) continue;
+        if (isBuiltinBlockVar(m, ovid)) continue;
+        const ot = try glslType(m, inst.words[1], names, alloc);
+        const on = names.get(ovid) orelse "_out";
+        const flat_q: []const u8 = if (hasDec(decs, ovid, .flat)) "flat " else "";
+        const drop_loc = dropVaryingLocation(version, m.execution_model, .out);
+        if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
+            try w.print("layout(location = {d}) {s}out {s} {s};\n", .{ l, flat_q, ot, on });
+            emitted_any_io = true;
+            continue;
+        };
+        try w.print("{s}out {s} {s};\n", .{ flat_q, ot, on });
+        emitted_any_io = true;
+    }
+    if (emitted_any_io) try w.writeAll("\n");
+
+    // Mutable module-scope Private globals (e.g. `float val = 0.0;` written by a
+    // helper). const never-written Private vars are inlined to their literal by
+    // aliasConstInitializedPrivateVars and must NOT be declared; every other Private
+    // var is a real global. Emit its OpVariable initializer (word 4) when present.
+    var emitted_any_priv = false;
+    for (m.instructions) |ginst| {
+        if (ginst.op != .Variable or ginst.words.len < 4) continue;
+        const gsc: spirv.StorageClass = @enumFromInt(ginst.words[3]);
+        if (gsc != .Private) continue;
+        if (common.constInitializedPrivateVar(m, ginst) != null) continue;
+        const gvar_id = ginst.words[2];
+        const gname = names.get(gvar_id) orelse continue;
+        const gptr = getDef(m, ginst.words[1]) orelse continue;
+        if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
+        const gpointee = gptr.words[3];
+        if (getDef(m, gpointee)) |pd| {
+            if (pd.op == .TypeArray and pd.words.len > 3) {
+                const et = glslType(m, pd.words[2], names, alloc) catch continue;
+                const li = getDef(m, pd.words[3]);
+                const lv: u32 = if (li) |l| (if (l.words.len > 3) l.words[3] else 1) else 1;
+                try w.print("{s} {s}[{d}];\n", .{ et, gname, lv });
+                emitted_any_priv = true;
+                continue;
+            }
+        }
+        const gt = glslType(m, gpointee, names, alloc) catch continue;
+        if (ginst.words.len >= 5) {
+            const init_name = exprName(m, names, ginst.words[4], alloc);
+            try w.print("{s} {s} = {s};\n", .{ gt, gname, init_name });
+        } else {
+            try w.print("{s} {s};\n", .{ gt, gname });
+        }
+        emitted_any_priv = true;
+    }
+    if (emitted_any_priv) try w.writeAll("\n");
+}
+
 /// Emit a GLSL forward declaration (prototype) for a function: `rt name(params);`.
 /// Must match emitFunction's signature exactly (return type, param types, and the
 /// `out` qualifier from `opi`) or GLSL rejects the mismatched redeclaration.
@@ -1842,7 +1932,6 @@ fn emitFunction(
     alloc: std.mem.Allocator,
     is_entry: bool,
     opi: *const std.AutoHashMap(u32, std.ArrayList(usize)),
-    version: u32,
 ) !void {
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
@@ -1947,110 +2036,6 @@ fn emitFunction(
                 }
             }
         }
-    }
-
-    // Emit input/output varying declarations before the entry function, for ALL
-    // stages. Non-builtin inputs → `layout(location=N) in T name;`, non-builtin
-    // outputs → `layout(location=N) out T name;`. Built-ins (gl_Position,
-    // gl_FragCoord, gl_VertexIndex, gl_FragDepth, ...) are predefined in GLSL —
-    // never declared here; builtin INPUTS are aliased to their gl_* name below.
-    // (Previously only the single fragment color output was declared, so vertex
-    // varyings, vertex attributes, and fragment input varyings were emitted as
-    // undeclared identifiers — invalid GLSL.)
-    if (is_entry) {
-        var emitted_any_io = false;
-        for (input_var_ids.items) |ivid| {
-            if (getDecVal(decs, ivid, .built_in) != null) continue;
-            // gl_PerVertex-style built-in blocks carry BuiltIn on their members
-            // (OpMemberDecorate), not on the variable — skip them: the members are
-            // predefined in GLSL and re-declaring the block is invalid.
-            if (isBuiltinBlockVar(m, ivid)) continue;
-            const iv = getDef(m, ivid) orelse continue;
-            const it = try glslType(m, iv.words[1], names, alloc);
-            const in_name = names.get(ivid) orelse continue;
-            // GLSL requires `flat` interpolation on integer/double fragment
-            // inputs (glslang: "'int' : must be qualified as flat in"). The
-            // frontend preserves the source qualifier as an `OpDecorate … Flat`;
-            // emit it whenever present (never fabricate — only what the SPIR-V
-            // says). Applies symmetrically to flat vertex outputs below.
-            const flat_q: []const u8 = if (hasDec(decs, ivid, .flat)) "flat " else "";
-            // #169 (G4) Tier 3: below 410 glslang rejects `layout(location=)` on a
-            // fragment INPUT varying (only vertex inputs may carry it). Drop the
-            // qualifier there; keep it at >= 410 and for vertex inputs.
-            const drop_loc = dropVaryingLocation(version, m.execution_model, .in);
-            if (!drop_loc) if (getDecVal(decs, ivid, .location)) |l| {
-                try w.print("layout(location = {d}) {s}in {s} {s};\n", .{ l, flat_q, it, in_name });
-                emitted_any_io = true;
-                continue;
-            };
-            try w.print("{s}in {s} {s};\n", .{ flat_q, it, in_name });
-            emitted_any_io = true;
-        }
-        for (output_var_ids.items) |ovid| {
-            if (getDecVal(decs, ovid, .built_in) != null) continue;
-            // Skip gl_PerVertex (built-in block): glslang rejects `out gl_PerVertex;`
-            // and spirv-cross omits it — gl_Position et al. are predefined. The
-            // BuiltIn decorations live on the struct members, so the variable-level
-            // built_in check above doesn't catch it.
-            if (isBuiltinBlockVar(m, ovid)) continue;
-            const ov = getDef(m, ovid) orelse continue;
-            const ot = try glslType(m, ov.words[1], names, alloc);
-            const on = names.get(ovid) orelse "_out";
-            // Mirror the input side: a `flat out` (e.g. integer varying from a
-            // vertex stage) carries an `OpDecorate … Flat`; preserve it.
-            const flat_q: []const u8 = if (hasDec(decs, ovid, .flat)) "flat " else "";
-            // #169 (G4) Tier 3: below 410 glslang rejects `layout(location=)` on a
-            // vertex OUTPUT varying (only fragment outputs may carry it). Drop it
-            // there; keep it at >= 410 and for fragment outputs.
-            const drop_loc = dropVaryingLocation(version, m.execution_model, .out);
-            if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
-                try w.print("layout(location = {d}) {s}out {s} {s};\n", .{ l, flat_q, ot, on });
-                emitted_any_io = true;
-                continue;
-            };
-            try w.print("{s}out {s} {s};\n", .{ flat_q, ot, on });
-            emitted_any_io = true;
-        }
-        if (emitted_any_io) try w.writeAll("\n");
-
-        // Declare mutable module-scope Private globals (e.g. `float val = 0.0;`
-        // written by a helper function). const, never-written Private vars are
-        // inlined to their literal by aliasConstInitializedPrivateVars (above) and
-        // must NOT be declared; every other Private var is a real global whose uses
-        // would otherwise be undeclared identifiers. Emit its OpVariable initializer
-        // (word 4) when present so the value is preserved, not just the name.
-        var emitted_any_priv = false;
-        for (m.instructions) |ginst| {
-            if (ginst.op != .Variable or ginst.words.len < 4) continue;
-            const gsc: spirv.StorageClass = @enumFromInt(ginst.words[3]);
-            if (gsc != .Private) continue;
-            if (common.constInitializedPrivateVar(m, ginst) != null) continue; // inlined const
-            const gvar_id = ginst.words[2];
-            const gname = names.get(gvar_id) orelse continue;
-            const gptr = getDef(m, ginst.words[1]) orelse continue;
-            if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
-            const gpointee = gptr.words[3];
-            const pointee_def = getDef(m, gpointee);
-            if (pointee_def) |pd| {
-                if (pd.op == .TypeArray and pd.words.len > 3) {
-                    const et = glslType(m, pd.words[2], names, alloc) catch continue;
-                    const li = getDef(m, pd.words[3]);
-                    const lv: u32 = if (li) |l| (if (l.words.len > 3) l.words[3] else 1) else 1;
-                    try w.print("{s} {s}[{d}];\n", .{ et, gname, lv });
-                    emitted_any_priv = true;
-                    continue;
-                }
-            }
-            const gt = glslType(m, gpointee, names, alloc) catch continue;
-            if (ginst.words.len >= 5) {
-                const init_name = exprName(m, names, ginst.words[4], alloc);
-                try w.print("{s} {s} = {s};\n", .{ gt, gname, init_name });
-            } else {
-                try w.print("{s} {s};\n", .{ gt, gname });
-            }
-            emitted_any_priv = true;
-        }
-        if (emitted_any_priv) try w.writeAll("\n");
     }
 
     try w.print("{s} {s}(", .{ rt, func_name });

@@ -2903,3 +2903,27 @@ test "large whole-valued float constant keeps a decimal (valid float literal)" {
     try assertNotContains(glsl, " 10000000000;");
     try glslValidateOrSkip("large-float-literal", glsl);
 }
+
+// A helper function that reads a stage input (or a mutable global) needs that
+// declaration to precede it. The in/out varyings + Private globals used to be
+// emitted inside the entry function, which is written LAST — so a helper reading
+// `uv` saw an undeclared identifier. They are now emitted at file scope before any
+// function. Found by the backend validity sweep (triple-nested-functions).
+test "helper function reading a stage input compiles (globals declared first)" {
+    // The loop + two call sites keep `helper` a real function (not inlined) so it
+    // genuinely reads the global `uv` from within a non-entry function.
+    const source =
+        \\#version 450
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\float helper(float s){ float a = 0.0; for(int i=0;i<3;i++){ a += uv.x * s + uv.y; } return a; }
+        \\void main(){ o = vec4(helper(1.0) + helper(2.0)); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // The input declaration must appear before the helper body that reads it.
+    const in_pos = std.mem.indexOf(u8, glsl, "in vec2 uv") orelse return error.TestExpectedFind;
+    const helper_pos = std.mem.indexOf(u8, glsl, "float helper(float v") orelse return error.TestExpectedFind;
+    try std.testing.expect(in_pos < helper_pos);
+    try glslValidateOrSkip("helper-reads-input", glsl);
+}
