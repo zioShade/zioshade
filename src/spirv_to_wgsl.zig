@@ -5725,6 +5725,62 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // Refresh AccessChain names (and the loads that inline them) before building
+    // inline expressions below. The AccessChain pre-scan above ran BEFORE index
+    // loads were renamed to their source expressions, so a DYNAMIC index froze the
+    // raw temp name (`u.v4[v15]` instead of `u.v4[u.n]`): buildAccessExprPlain
+    // resolved the index via `names.get(index_id)`, and at that point the index
+    // load still carried its SSA temp name. The emission loop rebuilds AccessChain
+    // names correctly, but inline_exprs (built just below) captures `names` NOW and
+    // would otherwise freeze the stale index — which then reappears verbatim wherever
+    // that arithmetic result is re-inlined (naga-rejected undefined identifier).
+    // Rebuilding here, after all load/extract renames, is the same operation the
+    // emission loop performs; doing it early makes the two agree.
+    {
+        var aci: usize = func_idx + 1;
+        while (aci < module.instructions.len) : (aci += 1) {
+            const ac_inst = module.instructions[aci];
+            if (ac_inst.op == .FunctionEnd) break;
+            if (ac_inst.op != .AccessChain or ac_inst.words.len <= 3) continue;
+            const result_id = ac_inst.words[2];
+            var expr = buildAccessExpr(module, names, ac_inst.words[3], ac_inst.words[4..], alloc, wrapped_members) catch continue;
+            if (std.mem.indexOf(u8, expr, "._wrapped_[") != null) {
+                const with_x = std.fmt.allocPrint(alloc, "{s}.x", .{expr}) catch {
+                    alloc.free(expr);
+                    continue;
+                };
+                alloc.free(expr);
+                expr = with_x;
+            }
+            const cur = names.get(result_id);
+            if (expr.len == 0 or (cur != null and std.mem.eql(u8, cur.?, expr))) {
+                alloc.free(expr);
+                continue;
+            }
+            if (try names.fetchPut(result_id, expr)) |old| alloc.free(old.value);
+        }
+        // Re-propagate refreshed AccessChain names into the immutable loads that
+        // were inlined to them (a load of an AccessChain pointer takes the chain's
+        // name); their frozen names must follow the refresh too.
+        var it = def_op.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* != .Load and entry.value_ptr.* != .CopyObject) continue;
+            const result_id = entry.key_ptr.*;
+            if (!inline_loads.contains(result_id)) continue;
+            const load_inst = getDef(module, result_id) orelse continue;
+            if (load_inst.words.len <= 3) continue;
+            const ptr_id = load_inst.words[3];
+            if (store_targets.contains(ptr_id)) continue;
+            const ptr_inst = getDef(module, ptr_id) orelse continue;
+            if (ptr_inst.op != .AccessChain) continue;
+            const ptr_name = names.get(ptr_id) orelse continue;
+            const cur = names.get(result_id) orelse "";
+            if (std.mem.eql(u8, cur, ptr_name)) continue;
+            const copy = alloc.dupe(u8, ptr_name) catch continue;
+            if (try names.fetchPut(result_id, copy)) |old| alloc.free(old.value);
+        }
+    }
+
     // Pre-scan: build inline expressions for single-use arithmetic operations
     // This eliminates chains like: let v13 = v12 * 6.0; let v17 = v13 + v16; → inline v13 into v17
     var inline_exprs = std.AutoHashMap(u32, []const u8).init(arena);

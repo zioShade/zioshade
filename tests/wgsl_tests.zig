@@ -3369,6 +3369,11 @@ test "wgsl: A2 mixed block — scalar array wrapped, vec4 array NOT wrapped" {
     // It must NOT be re-widened, and its access must NOT carry a stray swizzle.
     try assertNotContains(wgsl, "v4: array<vec4<f32>, 2>");
     try assertNotContains(wgsl, "v4[u.n].x");
+    // The dynamic index must resolve to `u.n` everywhere, including where the
+    // access is re-inlined into a later expression. A stale `v4[v<NN>]` means the
+    // index froze its raw SSA temp before the load was renamed (naga-rejected
+    // undefined identifier); this catches that regression without needing naga.
+    try assertNotContains(wgsl, "v4[v");
     try nagaValidateOrSkip(wgsl, "A2-mixed");
 }
 
