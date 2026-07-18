@@ -3421,25 +3421,48 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
         if (!has_load) continue;
+        // A global that is WRITTEN (an OpStore to the var, or to an AccessChain
+        // rooted at it) is mutable and must be `var<private>`, never `const` —
+        // WGSL rejects assignment to a `const`. A never-written global stays a
+        // `const` so it inlines/folds like a compile-time constant.
+        var is_written = false;
+        for (module.instructions) |check| {
+            if (check.op != .Store or check.words.len < 2) continue;
+            if (check.words[1] == result_id) {
+                is_written = true;
+                break;
+            }
+            const tgt = getDef(&module, check.words[1]);
+            if (tgt != null and tgt.?.op == .AccessChain and tgt.?.words.len > 3 and tgt.?.words[3] == result_id) {
+                is_written = true;
+                break;
+            }
+        }
         // Check for initializer (optional 5th word in OpVariable)
         if (inst.words.len > 4) {
-            // Const-initialised global: emit its real values as a `const`. If we
-            // can't materialise the initializer, DON'T fall through to a
-            // zero-initialised `var<private>` (that would be the wrong values =
-            // silent-wrong) — skip the declaration so the access fails loudly
-            // (naga: undefined identifier) instead of silently reading zeros.
+            // Emit the real initial value. If we can't materialise the initializer,
+            // DON'T fall through to a zero-initialised `var<private>` (that would be
+            // the wrong values = silent-wrong) — skip the declaration so the access
+            // fails loudly (naga: undefined identifier) instead of reading zeros.
             const init_id = inst.words[4];
             if (resolveConstantExpr(&module, &names, init_id, arena)) |val| {
                 // #252: a non-finite float is spelled `bitcast<f32>(0x..u)` (valid in
                 // runtime expressions) but naga REJECTS `bitcast` in a const-expression
                 // ("Not implemented as constant expression"). WGSL has no const-expr
-                // form for inf/nan, so a module-scope `const` with a non-finite
-                // component is unrepresentable — fail loud, don't emit a non-parsing const.
+                // form for inf/nan, so a module-scope initializer with a non-finite
+                // component is unrepresentable — fail loud, don't emit non-parsing output.
                 if (std.mem.indexOf(u8, val, "bitcast<f32>(0x") != null) {
-                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot represent a non-finite float constant in a module-scope const initializer", .{}) catch null;
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL cannot represent a non-finite float constant in a module-scope initializer", .{}) catch null;
                     return error.UnsupportedOp;
                 }
-                try w.print("const {s}: {s} = {s};\n", .{ name, rt, val });
+                // A mutable global keeps its initializer on a `var<private>`
+                // (WGSL permits a const-expression initializer there); an
+                // immutable one folds as a `const`.
+                if (is_written) {
+                    try w.print("var<private> {s}: {s} = {s};\n", .{ name, rt, val });
+                } else {
+                    try w.print("const {s}: {s} = {s};\n", .{ name, rt, val });
+                }
             }
             continue;
         }

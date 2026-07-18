@@ -2782,6 +2782,33 @@ test "wgsl: module-scope const array indexed at runtime emits its values" {
     try nagaValidateOrSkip(wgsl, "const-array-global");
 }
 
+test "wgsl: a WRITTEN module-scope global is var<private>, not an assign-to-const" {
+    // A mutable global (`float val = 0.0;` poked by a helper `val += ...`) lowers
+    // to a Private OpVariable that carries an initializer AND is an OpStore target.
+    // Emitting it as `const val: f32 = 0.0;` (the initialized-global path) is
+    // silent-wrong: WGSL rejects assignment to a `const` ("cannot assign to this
+    // expression"). It must be `var<private> val: f32 = 0.0;` (WGSL permits a
+    // const-expression initializer there). Mirrors the GLSL mutable-global fix.
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision highp float;
+        \\out vec4 fragColor;
+        \\float val = 0.0;
+        \\float bump() { val += 0.1; return val; }
+        \\void main() {
+        \\  float a = gl_FragCoord.x > 100.0 ? bump() : 0.0;
+        \\  fragColor = vec4(a, bump(), val, 1.0);
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var<private> val: f32 = 0.0");
+    try assertNotContains(wgsl, "const val:"); // a written global is never a const
+    try nagaValidateOrSkip(wgsl, "written-global-private");
+}
+
 test "wgsl: a reloaded input index keeps one name across recomputed sub-expressions" {
     // Regression (spirv-cross constant-array.frag / lut-promotion.frag): the
     // single load of a `flat in int index` is rendered INCONSISTENTLY — as the
