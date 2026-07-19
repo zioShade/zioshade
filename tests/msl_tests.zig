@@ -4004,6 +4004,25 @@ test "T-tensor.msl: ARM tensor types honest-error in MSL (#474)" {
     try std.testing.expectError(error.UnsupportedTensor, compileToMsl(source));
 }
 
+// #474: reading gl_ClipDistance / gl_CullDistance in a FRAGMENT shader has no
+// Metal form (clip_distance is a vertex OUTPUT attribute only), so the emitter
+// would write undeclared gl_ClipDistance / gl_CullDistance identifiers. Honest-
+// error instead. Scoped to the fragment stage: vertex clip/cull output IS
+// expressible in MSL, so this gate must not touch it (compileToMsl compiles as
+// fragment, which is the gated case).
+test "T-clipcull.msl: fragment gl_ClipDistance/gl_CullDistance honest-errors in MSL (#474)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\in float gl_ClipDistance[4];
+        \\in float gl_CullDistance[3];
+        \\layout(location = 0) out float FragColor;
+        \\void main() {
+        \\    FragColor = gl_ClipDistance[0] + gl_CullDistance[0];
+        \\}
+    ;
+    try std.testing.expectError(error.UnsupportedFragmentClipCullDistance, compileToMsl(source));
+}
+
 // #414: an `in` parameter whose value seeds a written-then-read local (the
 // classic `float d = p; loop { d = ... }` shape) was misdetected as an out
 // param: the Variable+Store(param) prologue is just GLSL's by-value copy of

@@ -1038,7 +1038,13 @@ fn checkUnsupportedRowMajor(m: *const ParsedModule) !void {
 ///  - ARM tensor types (GL_ARM_tensors: tensorARM<>, tensorReadARM,
 ///    tensorSizeARM): Metal has no tensor type at all, so tensor operands lower to
 ///    undeclared identifiers.
+///  - gl_ClipDistance / gl_CullDistance READ IN A FRAGMENT SHADER: Metal exposes
+///    clip_distance only as a vertex OUTPUT ([[clip_distance]]); there is no
+///    fragment input for it. Scoped to the fragment stage on purpose: vertex
+///    clip/cull output IS expressible in MSL, so gating it would be a false
+///    "unsupported" (it is a codegen bug to fix, not a limit to declare).
 fn checkUnsupportedMslFeatures(m: *const ParsedModule) !void {
+    const is_fragment = m.execution_model == .Fragment;
     for (m.instructions) |inst| {
         // ARM tensor type: no Metal equivalent exists in any stage.
         if (inst.op == .TypeTensorARM) return error.UnsupportedTensor;
@@ -1050,6 +1056,12 @@ fn checkUnsupportedMslFeatures(m: *const ParsedModule) !void {
             bi == @intFromEnum(spirv.BuiltIn.bary_coord_no_persp_khr))
         {
             return error.UnsupportedBarycentric;
+        }
+        if (is_fragment and
+            (bi == @intFromEnum(spirv.BuiltIn.clip_distance) or
+                bi == @intFromEnum(spirv.BuiltIn.cull_distance)))
+        {
+            return error.UnsupportedFragmentClipCullDistance;
         }
     }
 }
