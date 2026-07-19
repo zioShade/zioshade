@@ -1031,11 +1031,18 @@ fn checkUnsupportedRowMajor(m: *const ParsedModule) !void {
 /// "unsupported" that rejects a shader we could compile is a coverage
 /// regression, so each gate keys on a precise SPIR-V signature.
 ///
-/// Currently gates: fragment barycentric coordinates (gl_BaryCoordEXT /
-/// gl_BaryCoordNV). Metal has no fragment barycentric builtin, so the emitter
-/// would otherwise write a bare `gl_BaryCoord*` identifier that does not exist.
+/// Currently gates:
+///  - Fragment barycentric coordinates (gl_BaryCoordEXT / gl_BaryCoordNV): Metal
+///    has no fragment barycentric builtin, so the emitter would otherwise write a
+///    bare `gl_BaryCoord*` identifier that does not exist.
+///  - ARM tensor types (GL_ARM_tensors: tensorARM<>, tensorReadARM,
+///    tensorSizeARM): Metal has no tensor type at all, so tensor operands lower to
+///    undeclared identifiers.
 fn checkUnsupportedMslFeatures(m: *const ParsedModule) !void {
     for (m.instructions) |inst| {
+        // ARM tensor type: no Metal equivalent exists in any stage.
+        if (inst.op == .TypeTensorARM) return error.UnsupportedTensor;
+
         if (inst.op != .Decorate or inst.words.len < 4) continue;
         if (inst.words[2] != @intFromEnum(spirv.Decoration.built_in)) continue;
         const bi = inst.words[3];

@@ -455,6 +455,7 @@ const Codegen = struct {
         self.emitted_types.deinit(self.alloc);
         self.emitted_storage_image_types.deinit(self.alloc);
         self.emitted_array_types.deinit(self.alloc);
+        self.emitted_tensor_types.deinit(self.alloc);
         self.emitted_array_stride.deinit(self.alloc);
         self.emitted_struct_layout.deinit(self.alloc);
         self.emitted_named_types.deinit(self.alloc);
