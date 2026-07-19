@@ -4375,3 +4375,28 @@ test "struct constant folds to a Metal brace initializer" {
     // not left as a bare undeclared vNN.
     try assertContains(msl, "] = Light{");
 }
+
+// A switch case that declares a variable then falls through to the next case is a
+// jump over an in-scope initialization, which Metal rejects. Each case body must be
+// braced so its temps are scoped. (Fall-through control flow is unaffected.)
+test "switch case bodies are braced so fall-through does not jump over a declaration" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) flat in int mode;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\  vec3 c = vec3(0.0);
+        \\  switch (mode) {
+        \\    case 2: c.r = 0.5; // fall through
+        \\    case 1: { vec3 t = c + vec3(0.0, 0.3, 0.0); c = t; } // fall through
+        \\    default: { vec3 u = c + vec3(0.1); c = u; }
+        \\  }
+        \\  fragColor = vec4(c, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Each emitted case body is braced.
+    try assertContains(msl, "case 2: {");
+    try assertContains(msl, "case 1: {");
+}
