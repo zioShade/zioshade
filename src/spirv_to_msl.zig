@@ -201,6 +201,29 @@ fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
     return depth == 1 and (dim == 1 or dim == 3);
 }
 
+/// True if the shader accesses gl_FragCoord component z (2) or w (3). MSL threads
+/// gl_FragCoord.xy into the impl as a `float2 _fragCoord` (the common shadertoy
+/// case); a shader that reads .z (depth) or .w needs the FULL `float4` threaded
+/// instead, or the body's `.z`/`.w` access exceeds the float2 (Metal rejects it).
+/// Detected via an OpAccessChain into the var with a constant index >= 2, or a
+/// CompositeExtract with component >= 2 from a load of the var.
+fn fragCoordNeedsFullVec(m: *const ParsedModule, fcvid: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op == .AccessChain and inst.words.len >= 5 and inst.words[3] == fcvid) {
+            const idxd = getDef(m, inst.words[4]);
+            if (idxd != null and idxd.?.op == .Constant and idxd.?.words.len > 3 and idxd.?.words[3] >= 2) return true;
+        }
+    }
+    for (m.instructions) |ld| {
+        if (ld.op != .Load or ld.words.len < 4 or ld.words[3] != fcvid) continue;
+        const loadid = ld.words[2];
+        for (m.instructions) |u| {
+            if (u.op == .CompositeExtract and u.words.len >= 5 and u.words[3] == loadid and u.words[4] >= 2) return true;
+        }
+    }
+    return false;
+}
+
 /// The Metal unsigned coordinate type matching coordinate VALUE `id`'s width.
 /// Metal's `texture.read()` takes `uint`/`uintN`, never a SIGNED coordinate — GLSL
 /// texelFetch/imageLoad hand it an `int`/`ivecN` coord, so the read must cast it or
@@ -3417,10 +3440,15 @@ fn emitFunction(
         }
 
         // Rename the FragCoord input variable so the body uses _fragCoord parameter
+        var frag_coord_full = false;
         if (frag_coord_var_id) |fcvid| {
             const pa = alloc.dupe(u8, "_fragCoord") catch unreachable;
             if (names.fetchPut(fcvid, pa) catch null) |old| alloc.free(old.value);
+            frag_coord_full = fragCoordNeedsFullVec(m, fcvid);
         }
+        // gl_FragCoord.z/.w readers get the full float4; the common .xy-only case
+        // stays float2 (keeps the shadertoy/wintty signature byte-identical).
+        const fc_ty: []const u8 = if (frag_coord_full) "float4" else "float2";
 
         // Rewrite each location stage-input variable's name to `in.<origname>`
         // BEFORE emitting the body, exactly as FragCoord is renamed above.
@@ -3464,9 +3492,9 @@ fn emitFunction(
 
         // Add frag coord param
         if (output_var_id != null) {
-            try w.writeAll(", float2 _fragCoord");
+            try w.print(", {s} _fragCoord", .{fc_ty});
         } else {
-            try w.writeAll("float2 _fragCoord");
+            try w.print("{s} _fragCoord", .{fc_ty});
             first_param = false;
         }
 
@@ -3558,7 +3586,8 @@ fn emitFunction(
         try w.writeAll("float4 gl_FragCoord [[position]])");
 
         try w.writeAll("\n{\n    main0_out out = {};\n    ");
-        try w.print("{s}_impl(out._fragColor, gl_FragCoord.xy", .{func_name});
+        // Pass the full float4 when the body reads .z/.w, else just .xy (float2).
+        try w.print("{s}_impl(out._fragColor, gl_FragCoord{s}", .{ func_name, if (frag_coord_full) "" else ".xy" });
         if (has_argbuf) {
             for (cbuffers.items) |cb| {
                 try w.print(", set{d}.{s}", .{ cb.descriptor_set, cb.name });
