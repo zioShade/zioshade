@@ -1077,6 +1077,34 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             }
         }
     }
+
+    // Emit push-constant blocks. Desktop GL has no `push_constant` qualifier, so
+    // (like SPIRV-Cross) a PushConstant-storage block lowers to a plain std140
+    // `uniform` block with its ORIGINAL member names and instance = the var name;
+    // the body already accesses `{instance}.{member}`. Push constants carry no
+    // binding/set, so no `layout(binding=)`. Without this the block is declared
+    // nowhere and its uses reference an undeclared identifier. PushConstant is not
+    // a Uniform storage class, so it is never on the cbuffer path (no double-emit).
+    {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .PushConstant) continue;
+            const rid = inst.words[2];
+            const name = names.get(rid) orelse continue;
+            const block_tag = std.fmt.allocPrint(aa, "{s}_block", .{name}) catch return error.OutOfMemory;
+            const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
+            const has_block_struct = ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4;
+            if (has_block_struct) {
+                emitStructForwardDecls(&module, &names, ptr_inst.words[3], w, aa, &emitted_structs, &emitted_names) catch {};
+            }
+            try w.print("layout(std140) uniform {s}\n{{\n", .{block_tag});
+            if (has_block_struct) {
+                try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa, true);
+            }
+            try w.print("}} {s};\n\n", .{name});
+        }
+    }
     for (textures.items) |tex| {
         const tex_shifted = common.applyBindingShift(tex.binding, options.binding_shift);
         // Descriptor-array suffix, e.g. `[4]` for `uniform sampler2D tex[4]`.
