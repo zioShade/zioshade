@@ -1064,6 +1064,32 @@ test "T15.5: int location input emits int field (matches spirv-cross, no [[flat]
     try assertContains(msl, "in.uv");
 }
 
+// #478: a location-decorated Input interface block `layout(location=L) in Block
+// { members } vin;` was skipped by collectStageInputs (struct-typed), so body
+// access `vin.member` referenced an undeclared `vin`. Flatten each member into
+// its own `T <inst>_<member> [[user(locnK)]]` stage-in field (location base+index)
+// and rewrite `vin.member` to `in.<inst>_<member>`.
+test "T15.7: interface-block input is flattened into main0_in fields (#478)" {
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\#extension GL_EXT_shader_io_blocks : require
+        \\precision mediump float;
+        \\layout(location = 1) in VertexOut { vec4 color; highp vec3 normal; } vin;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vin.color + vin.normal.xyzz; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // Members flattened to distinct stage-in fields at sequential locations.
+    try assertContains(msl, "vin_color [[user(locn1)]];");
+    try assertContains(msl, "vin_normal [[user(locn2)]];");
+    // Body resolves members through the stage-in struct, not a bare `vin`.
+    try assertContains(msl, "in.vin_color");
+    try assertContains(msl, "in.vin_normal");
+    try assertNotContains(msl, "vin.color");
+    try assertNotContains(msl, "vin.normal");
+}
+
 test "T15.6: no location inputs → no main0_in struct (no regression)" {
     const source =
         \\#version 450

@@ -474,13 +474,40 @@ fn resolvePointee(m: *const ParsedModule, id: u32) ?u32 {
 /// row_major `transpose(...)` correction — it builds a plain pointer expression.
 /// It backs pointer/store contexts; matrix READS go through `writeAccessExpr`.
 fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
-    const base_name = names.get(base_id) orelse "base";
-    if (indices.len == 0) return try alloc.dupe(u8, base_name);
+    var base_buf: [96]u8 = undefined;
+    var base_name: []const u8 = names.get(base_id) orelse "base";
+    // #478: a flattened interface-block Input member. The struct-typed block var
+    // has no MSL declaration; its first (constant) member index selects a
+    // flattened `in.<block>_<member>` stage-in field. Rewrite the base and consume
+    // that index; remaining indices (sub-vector swizzle, nested access) apply to
+    // the member type as usual.
+    var start: usize = 0;
+    var cur_type_init: ?u32 = resolvePointee(m, base_id);
+    if (g_block_flat) |bf| {
+        if (indices.len > 0) {
+            if (getDef(m, indices[0])) |idx| {
+                if (idx.op == .Constant and idx.words.len > 3) {
+                    if (bf.get(blockFlatKey(base_id, idx.words[3]))) |flat| {
+                        base_name = std.fmt.bufPrint(&base_buf, "in.{s}", .{flat}) catch base_name;
+                        start = 1;
+                        if (cur_type_init) |tid| {
+                            if (getDef(m, tid)) |ti| {
+                                if (ti.op == .TypeStruct and idx.words[3] + 2 < ti.words.len)
+                                    cur_type_init = ti.words[idx.words[3] + 2];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    const eff_indices = indices[start..];
+    if (eff_indices.len == 0) return try alloc.dupe(u8, base_name);
     // Use a stack buffer to avoid heap allocation for typical access chains
     var writer = compat.StackBufWriter(512).init();
     writer.writeAll(base_name);
-    var cur_type: ?u32 = resolvePointee(m, base_id);
-    for (indices) |index_id| {
+    var cur_type: ?u32 = cur_type_init;
+    for (eff_indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
@@ -541,8 +568,8 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     var buf = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     defer buf.deinit(alloc);
     try buf.appendSlice(alloc, base_name);
-    cur_type = resolvePointee(m, base_id);
-    for (indices) |index_id| {
+    cur_type = cur_type_init;
+    for (eff_indices) |index_id| {
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
@@ -774,13 +801,38 @@ fn writeAccessExprPlain(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         try w.writeAll(base_name);
         return;
     }
-    const base_is_cb = isUniformVar(m, base_id);
+    // #478: a flattened interface-block Input member. The struct-typed block var
+    // has no MSL declaration; its first (constant) member index selects the
+    // flattened `in.<block>_<member>` stage-in field. Emit that and consume the
+    // index; remaining indices apply to the member type.
+    var eff_indices = indices;
+    var block_handled = false;
+    var block_member_type: ?u32 = null;
+    if (g_block_flat) |bf| {
+        if (getDef(m, indices[0])) |idx0| {
+            if (idx0.op == .Constant and idx0.words.len > 3) {
+                if (bf.get(blockFlatKey(base_id, idx0.words[3]))) |flat| {
+                    try w.print("in.{s}", .{flat});
+                    block_handled = true;
+                    eff_indices = indices[1..];
+                    if (resolvePointee(m, base_id)) |tid| {
+                        if (getDef(m, tid)) |ti| {
+                            if (ti.op == .TypeStruct and idx0.words[3] + 2 < ti.words.len)
+                                block_member_type = ti.words[idx0.words[3] + 2];
+                        }
+                    }
+                    if (eff_indices.len == 0) return;
+                }
+            }
+        }
+    }
+    const base_is_cb = if (block_handled) false else isUniformVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
-    if (!base_is_cb) try w.writeAll(base_name);
-    var cur_type: ?u32 = resolvePointee(m, base_id);
+    if (!base_is_cb and !block_handled) try w.writeAll(base_name);
+    var cur_type: ?u32 = if (block_handled) block_member_type else resolvePointee(m, base_id);
     var first_member = true;
-    for (indices, 0..) |index_id, ix| {
-        const is_last = ix + 1 == indices.len;
+    for (eff_indices, 0..) |index_id, ix| {
+        const is_last = ix + 1 == eff_indices.len;
         const idx_inst = getDef(m, index_id);
         if (idx_inst) |def| {
             if (def.op == .Constant and def.words.len > 3) {
@@ -1118,6 +1170,16 @@ threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
 threadlocal var g_loop_hoists: ?*const std.AutoHashMap(usize, std.ArrayList(common.HoistedPhiSrc)) = null;
 threadlocal var g_hoisted_ids: ?*const std.AutoHashMap(u32, void) = null;
 threadlocal var g_hoist_stripping: bool = false;
+
+// Maps a flattened interface-block Input member to its main0_in field name so
+// buildAccessExpr can rewrite `vin.member` (an OpAccessChain into a struct-typed
+// Input var, which has no MSL declaration) to `in.<blockinstance>_<member>`.
+// Key packs (block_var_id, member_index); value is the flat field name (no `in.`
+// prefix). Set before function emission (#478). Fragment interface blocks only.
+threadlocal var g_block_flat: ?*const std.AutoHashMap(u64, []const u8) = null;
+fn blockFlatKey(var_id: u32, member: u32) u64 {
+    return (@as(u64, var_id) << 20) | @as(u64, member);
+}
 
 // True when the shader has location stage inputs, so the `main0_in in` struct is
 // threaded into every non-entry function's signature. Read at OpFunctionCall to
@@ -1836,6 +1898,17 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
     return false;
 }
 
+// OpMemberDecorate value reader (struct_id, member_index): an interface-block
+// member's explicit Location, when present. (#478)
+fn memberDecVal(m: *const ParsedModule, struct_id: u32, member: u32, dec: spirv.Decoration) ?u32 {
+    for (m.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 5 and
+            inst.words[1] == struct_id and inst.words[2] == member and
+            inst.words[3] == @intFromEnum(dec)) return inst.words[4];
+    }
+    return null;
+}
+
 /// Append `set` to `list` only if it's not already present. Used to gather
 /// the unique set indices in use by an argument-buffer-mode entry point.
 fn addUniqueSet(list: *std.ArrayList(u32), set: u32, alloc: std.mem.Allocator) !void {
@@ -2029,9 +2102,14 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // the attribute spelling is gated at emit time.
     var stage_inputs = std.ArrayList(StageInputDecl).initCapacity(aa, 0) catch return error.OutOfMemory;
     defer stage_inputs.deinit(aa);
+    // (block_var<<20 | member) -> flattened main0_in field name, for the
+    // buildAccessExpr interface-block rewrite (#478).
+    var block_flat = std.AutoHashMap(u64, []const u8).init(aa);
     if (module.execution_model == .Fragment or module.execution_model == .Vertex) {
-        collectStageInputs(&module, &names, &decs, &stage_inputs, aa);
+        collectStageInputs(&module, &names, &decs, &stage_inputs, &block_flat, aa);
     }
+    g_block_flat = &block_flat;
+    defer g_block_flat = null;
 
     // Pull-model interpolation: the set of Input variable ids queried by
     // interpolateAtCentroid/Sample/Offset. Those inputs are declared
@@ -2893,7 +2971,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
 ///   - Built-in inputs (gl_FragCoord etc.): `built_in` decoration present.
 ///   - Struct-typed inputs (per-vertex interface blocks): out of scope here.
 ///   - Inputs without a Location decoration (nothing to bind to `[[user(locnN)]]`).
-fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), inputs: *std.ArrayList(StageInputDecl), alloc: std.mem.Allocator) void {
+fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), inputs: *std.ArrayList(StageInputDecl), block_flat: *std.AutoHashMap(u64, []const u8), alloc: std.mem.Allocator) void {
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
@@ -2906,9 +2984,28 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
         const pi = getDef(m, inst.words[1]) orelse continue;
         if (pi.op != .TypePointer or pi.words.len < 4) continue;
         const pt = pi.words[3];
-        // Struct-typed inputs (interface blocks) are out of scope for this pass.
         const pti = getDef(m, pt) orelse continue;
-        if (pti.op == .TypeStruct) continue;
+        if (pti.op == .TypeStruct) {
+            // #478: interface block `layout(location=L) in Block { members } vin;`.
+            // Metal stage-in has no nested-struct fields, so FLATTEN each member
+            // into its own `T <inst>_<member> [[user(locnK)]]` field with per-member
+            // location (base+index, or an explicit member Location) and
+            // interpolation. buildAccessExpr rewrites `vin.member` to
+            // `in.<inst>_<member>` via block_flat.
+            const inst_name = names.get(rid) orelse "vin";
+            const nmembers: u32 = @intCast(pti.words.len - 2);
+            var mi: u32 = 0;
+            while (mi < nmembers) : (mi += 1) {
+                const mtype = pti.words[mi + 2];
+                var nbuf: [32]u8 = undefined;
+                const mname = getMemberName(m, pt, mi, &nbuf);
+                const flat = std.fmt.allocPrint(alloc, "{s}_{s}", .{ inst_name, mname }) catch continue;
+                const mloc = memberDecVal(m, pt, mi, .location) orelse (loc + mi);
+                inputs.append(alloc, .{ .var_id = rid, .name = flat, .type_id = mtype, .location = mloc }) catch {};
+                block_flat.put(blockFlatKey(rid, mi), flat) catch {};
+            }
+            continue;
+        }
         const name = names.get(rid) orelse continue;
         inputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .location = loc }) catch {};
     }
