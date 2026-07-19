@@ -3383,7 +3383,7 @@ const Codegen = struct {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.layer));
             }
             if (std.mem.eql(u8, global.name, "gl_ViewportIndex")) {
-                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.view_index));
+                try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.viewport_index));
             }
             if (std.mem.eql(u8, global.name, "gl_GlobalInvocationID")) {
                 try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.built_in), @intFromEnum(spirv.BuiltIn.global_invocation_id));
