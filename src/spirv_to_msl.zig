@@ -201,6 +201,23 @@ fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
     return depth == 1 and (dim == 1 or dim == 3);
 }
 
+/// The Metal unsigned coordinate type matching coordinate VALUE `id`'s width.
+/// Metal's `texture.read()` takes `uint`/`uintN`, never a SIGNED coordinate — GLSL
+/// texelFetch/imageLoad hand it an `int`/`ivecN` coord, so the read must cast it or
+/// Metal rejects the call ("no matching member function for call to 'read'"). The
+/// cast width MATCHES the coordinate's own component count (only the signedness
+/// changes), so a coord that is already the right width/type is never resized.
+fn mslReadCoordCast(m: *const ParsedModule, id: u32) []const u8 {
+    const def = getDef(m, id) orelse return "uint2";
+    if (def.words.len < 2) return "uint2";
+    return switch (typeRank(m, def.words[1])) {
+        1 => "uint",
+        3 => "uint3",
+        4 => "uint4",
+        else => "uint2",
+    };
+}
+
 /// Component count of a result type id: 1 for a scalar, else the OpTypeVector
 /// size. OpTypeVector layout: `[op, result_id, component_type, count]`.
 fn typeRank(m: *const ParsedModule, type_id: u32) u32 {
@@ -5618,7 +5635,8 @@ fn emitInstruction(
                     try w.print("    {s} {s} = {s}.read({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, fetch_args });
                 }
             } else {
-                try w.print("    {s} {s} = {s}.read({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord_name });
+                const ct = mslReadCoordCast(m, inst.words[4]);
+                try w.print("    {s} {s} = {s}.read({s}({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, coord_name });
             }
         },
         .ImageGather => {
@@ -5670,7 +5688,8 @@ fn emitInstruction(
         .ImageRead => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "img";
-            try w.print("    {s} {s} = {s}.read({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, names.get(inst.words[4]) orelse "0" });
+            const ct = mslReadCoordCast(m, inst.words[4]);
+            try w.print("    {s} {s} = {s}.read({s}({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, names.get(inst.words[4]) orelse "0" });
         },
         .ImageWrite => {
             const img = names.get(inst.words[1]) orelse "img";

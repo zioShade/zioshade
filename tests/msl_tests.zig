@@ -4400,3 +4400,20 @@ test "switch case bodies are braced so fall-through does not jump over a declara
     try assertContains(msl, "case 2: {");
     try assertContains(msl, "case 1: {");
 }
+
+// Metal's texture.read() takes an UNSIGNED coordinate; a texelFetch hands it a
+// signed ivec, so the read must cast (`uint2(coord)`) or Metal rejects the call.
+test "texelFetch read casts its integer coordinate to unsigned" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform highp isampler2D Buf;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\  ivec4 c = texelFetch(Buf, ivec2(gl_FragCoord.xy), 0);
+        \\  FragColor = vec4(c);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, ".read(uint2(");
+}
