@@ -477,7 +477,10 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                                 }
                             }
                         },
-                        37 => { // OpCopyMemory
+                        63 => { // OpCopyMemory: dst, src (opcode 63 — NOT 37, which is
+                            // OpTypeQueue and never appears in a function body; the old
+                            // 37 meant a var loaded only via OpCopyMemory src was never
+                            // marked live and its store could be wrongly elided).
                             if (wc >= 3) {
                                 const dst = current_words[pos + 1];
                                 const src = current_words[pos + 2];
@@ -637,8 +640,32 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                             }
                         }
                     },
+                    // OpFunctionCall: the callee may write through any pointer argument
+                    // (a GLSL `out`/`inout` param is passed as the pointer directly) or
+                    // through any module-scope global it references. A later load of ANY
+                    // tracked pointer must re-read memory, not forward a pre-call value —
+                    // so clear all forwarding state. Without this barrier the write-back
+                    // of an `inout` arg is silently dropped (the post-call load is
+                    // rewritten to the stale pre-call store). (#170 silent-wrong.)
+                    57 => { // OpFunctionCall
+                        last_store.clearRetainingCapacity();
+                    },
+                    // OpExtInst: the pointer-output builtins (`modf`/`frexp` write their
+                    // integer/exponent part through a pointer operand) mutate memory too.
+                    // An ext inst only touches its explicit operands, so invalidate
+                    // forwarding for each operand (and its AccessChain base) rather than
+                    // clearing everything — pure ext insts (sin/pow/…) pass only value
+                    // ids, which are not store keys, so this is a no-op for them. (#170)
+                    12 => { // OpExtInst: result_type result_id set instruction operands…
+                        var ei: u32 = pos + 5;
+                        while (ei < inst_end) : (ei += 1) {
+                            const operand = current_words[ei];
+                            _ = last_store.remove(operand);
+                            if (ac_to_base.get(operand)) |base_var| _ = last_store.remove(base_var);
+                        }
+                    },
                     // OpCopyMemory: clear store tracking for dst
-                    37 => { // OpCopyMemory: dst, src
+                    63 => { // OpCopyMemory: dst, src
                         if (wc >= 3) {
                             const dst = current_words[pos + 1];
                             // Don't forward from dst anymore
@@ -648,6 +675,33 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                     else => {},
                 }
                 pos = inst_end;
+            }
+
+            // Transitively flatten replacement chains. A forwarded value may itself be
+            // a forwarded (and therefore about-to-be-removed) load: e.g. an inlined
+            // `swap(inout,inout)` yields %14→%32 and %32→%10, so applying %14→%32 alone
+            // leaves the composite referencing the removed load %32 = an undefined-id
+            // (invalid SPIR-V). Resolve each key to its final non-forwarded target
+            // (%14→%10) so no reference survives to a removed load. Bounded to avoid
+            // cycling on a self-referential chain.
+            if (replacements.count() > 0) {
+                var chain_keys = std.ArrayListUnmanaged(u32).empty;
+                defer chain_keys.deinit(alloc);
+                var kit = replacements.keyIterator();
+                while (kit.next()) |k| chain_keys.append(alloc, k.*) catch {};
+                for (chain_keys.items) |k| {
+                    var target = replacements.get(k) orelse continue;
+                    var hops: u32 = 0;
+                    while (replacements.get(target)) |next_target| {
+                        if (next_target == target or hops > 64) break;
+                        target = next_target;
+                        hops += 1;
+                    }
+                    // put on an already-present key never grows the map, so this can't
+                    // actually fail; a swallowed OOM would only leave k at its 1-hop
+                    // target (the same as the un-flattened behavior).
+                    replacements.put(alloc, k, target) catch {};
+                }
             }
 
             if (replacements.count() > 0) {
