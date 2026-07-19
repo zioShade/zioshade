@@ -4023,6 +4023,23 @@ test "T-clipcull.msl: fragment gl_ClipDistance/gl_CullDistance honest-errors in 
     try std.testing.expectError(error.UnsupportedFragmentClipCullDistance, compileToMsl(source));
 }
 
+// #475: gl_HelperInvocation has no MSL input attribute; Metal spells it as the
+// simd_is_helper_thread() intrinsic. Was leaking as an undeclared gl_HelperInvocation
+// identifier (uncompilable). Mirrors the HLSL IsHelperLane() path. Aliased at the
+// load so each use reads current helper state; not gated on stage since the load
+// often lives in a non-entry helper function (fragment-only builtin regardless).
+test "T-helperinv.msl: gl_HelperInvocation lowers to simd_is_helper_thread() (#475)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = gl_HelperInvocation ? vec4(1.0) : vec4(0.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "simd_is_helper_thread()");
+    try assertNotContains(msl, "gl_HelperInvocation");
+}
+
 // #414: an `in` parameter whose value seeds a written-then-read local (the
 // classic `float d = p; loop { d = ... }` shape) was misdetected as an out
 // param: the Variable+Store(param) prologue is just GLSL's by-value copy of
