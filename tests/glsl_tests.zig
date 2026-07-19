@@ -3057,3 +3057,23 @@ test "storage image size query uses imageSize, not textureSize" {
     try assertNotContains(glsl, "textureSize(");
     try glslValidateOrSkip("image-size", glsl);
 }
+
+// A push_constant block (PushConstant storage class) has no desktop-GL qualifier,
+// so it lowers to a plain std140 uniform block with its instance = the var name.
+// Before the fix the block was declared nowhere and its `push.value0` uses
+// referenced an undeclared identifier. Mirrors the SSBO declaration fix.
+test "push-constant block is declared as a uniform block" {
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(push_constant, std430) uniform PushConstants { vec4 value0; vec4 value1; } push;
+        \\layout(location = 0) in vec4 vColor;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vColor + push.value0 + push.value1; }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "uniform push_block");
+    try assertContains(glsl, "push.value0");
+    try glslValidateOrSkip("push-constant", glsl);
+}
