@@ -446,7 +446,6 @@ pub const Decoration = enum(u32) {
     array_stride = 6,
     matrix_stride = 7,
     built_in = 11,
-    index = 12,
     no_perspective = 13,
     flat = 14,
     centroid = 16,
@@ -454,6 +453,10 @@ pub const Decoration = enum(u32) {
     non_writable = 24,
     non_readable = 25,
     location = 30,
+    // Dual-source blending second-output selector (Location=30, Component=31,
+    // Index=32, Binding=33). Value 12 is NOT Index — that misvalue emitted SPIR-V
+    // spirv-val rejects ("Invalid decoration operand: 12").
+    index = 32,
     binding = 33,
     descriptor_set = 34,
     offset = 35,
