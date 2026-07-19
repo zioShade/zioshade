@@ -480,6 +480,21 @@ fn spirvHasOpcode(spv: []const u32, opcode: u16) bool {
     return false;
 }
 
+// True iff the module contains an `OpDecorate <target> BuiltIn <value>`. Used to
+// verify a builtin lowers to the correct SPIR-V BuiltIn constant (e.g. gl_ViewportIndex
+// → ViewportIndex 10, NOT ViewIndex 4440). OpDecorate=71, Decoration BuiltIn=11.
+fn spirvHasBuiltinDecoration(spv: []const u32, builtin_value: u32) bool {
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 71 and wc >= 4 and spv[idx + 2] == 11 and spv[idx + 3] == builtin_value) return true;
+        idx += wc;
+    }
+    return false;
+}
+
 // True iff an OpFunctionCall argument (an inout/out pointer) is re-loaded by a LATER
 // OpLoad — proving the post-call read re-reads memory rather than being store-forwarded
 // to the pre-call value. Without the OpFunctionCall store-forward barrier, that post-
@@ -1702,6 +1717,26 @@ test "frontend #multiview: gl_ViewIndex emits the ViewIndex builtin (not Viewpor
     ;
     const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .vertex });
     defer alloc.free(spv);
+    try spirvValOrSkip(spv);
+}
+
+// The mirror hazard: gl_ViewportIndex must lower to BuiltIn ViewportIndex (10, needs
+// the ShaderViewportIndex capability), NOT BuiltIn ViewIndex (4440, the multiview
+// builtin that needs MultiView). #441 split gl_ViewIndex out to 4440 but left the
+// gl_ViewportIndex decoration pointing at the same view_index constant, so it emitted
+// `OpDecorate %gl_ViewportIndex BuiltIn ViewIndex` with only the ShaderViewportIndex
+// capability = invalid SPIR-V at exit 0 (spirv-val: "requires ... MultiView"). Found
+// as the last conformance FAIL (glslang-430/spv.430.frag).
+test "frontend #multiview: gl_ViewportIndex emits ViewportIndex (10), not ViewIndex (4440)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location = 0) out vec4 color;
+        \\void main(){ color = vec4(float(gl_ViewportIndex)); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasBuiltinDecoration(spv, 10)); // ViewportIndex
+    try std.testing.expect(!spirvHasBuiltinDecoration(spv, 4440)); // NOT ViewIndex
     try spirvValOrSkip(spv);
 }
 

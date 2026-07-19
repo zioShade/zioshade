@@ -336,6 +336,10 @@ pub const BuiltIn = enum(u32) {
     patch_vertices = 14,
     frag_depth = 22,
     layer = 9,
+    // gl_ViewportIndex — the viewport-array index (needs the ShaderViewportIndex /
+    // MultiViewport capability). Distinct from view_index below: conflating the two
+    // made gl_ViewportIndex emit `BuiltIn ViewIndex` = invalid SPIR-V at exit 0.
+    viewport_index = 10,
     // SPV_KHR_multiview / core since SPIR-V 1.3. Must NOT be 10, which is
     // ViewportIndex (requires the MultiViewport capability) — that mismatch made
     // gl_ViewIndex shaders emit invalid SPIR-V (spirv-val: "Operand ... requires
