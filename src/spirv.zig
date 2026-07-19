@@ -446,6 +446,7 @@ pub const Decoration = enum(u32) {
     array_stride = 6,
     matrix_stride = 7,
     built_in = 11,
+    index = 12,
     no_perspective = 13,
     flat = 14,
     centroid = 16,
