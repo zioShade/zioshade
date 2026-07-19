@@ -1906,7 +1906,14 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         const flat_q: []const u8 = if (hasDec(decs, ovid, .flat)) "flat " else "";
         const drop_loc = dropVaryingLocation(version, m.execution_model, .out);
         if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
-            try w.print("layout(location = {d}) {s}out {s} {s};\n", .{ l, flat_q, ot, on });
+            // Dual-source blending: two outputs share location 0, distinguished by
+            // the Index decoration (index 0 = src color, index 1 = src1). Dropping
+            // `index=` collides them ("overlapping use of location 0"), so emit it.
+            if (getDecVal(decs, ovid, .index)) |idx| {
+                try w.print("layout(location = {d}, index = {d}) {s}out {s} {s};\n", .{ l, idx, flat_q, ot, on });
+            } else {
+                try w.print("layout(location = {d}) {s}out {s} {s};\n", .{ l, flat_q, ot, on });
+            }
             emitted_any_io = true;
             continue;
         };

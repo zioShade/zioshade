@@ -3296,6 +3296,10 @@ const Codegen = struct {
                 if (layout.location) |loc| {
                     try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.location), loc);
                 }
+                if (layout.index) |idx| {
+                    // Dual-source blending: OpDecorate Index on the second color output.
+                    try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.index), idx);
+                }
                 if (layout.binding) |binding| {
                     try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.binding), binding);
                 }

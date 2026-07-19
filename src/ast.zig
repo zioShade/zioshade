@@ -561,6 +561,9 @@ pub const ImageFormat = enum {
 
 pub const Layout = struct {
     location: ?u32 = null,
+    // Dual-source blending output index (`layout(location=0, index=1)`): a second
+    // color output at the same location, distinguished by the Index decoration.
+    index: ?u32 = null,
     binding: ?u32 = null,
     set: ?u32 = null,
     std140: bool = false,

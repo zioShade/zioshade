@@ -3077,3 +3077,21 @@ test "push-constant block is declared as a uniform block" {
     try assertContains(glsl, "push.value0");
     try glslValidateOrSkip("push-constant", glsl);
 }
+
+// Dual-source blending puts two color outputs at the same location, distinguished
+// by `index=`. The frontend previously dropped the `index` layout qualifier (never
+// parsed it), so both outputs emitted at location 0 with no index and glslang
+// rejected them ("overlapping use of location 0"). Now parsed, decorated (Index),
+// and re-emitted.
+test "dual-source blending output keeps its index qualifier" {
+    const source =
+        \\#version 450
+        \\layout(location = 0, index = 0) out vec4 c0;
+        \\layout(location = 0, index = 1) out vec4 c1;
+        \\void main() { c0 = vec4(1.0); c1 = vec4(2.0); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "index = 1");
+    try glslValidateOrSkip("dual-source", glsl);
+}
