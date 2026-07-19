@@ -3983,6 +3983,27 @@ test "T-barycentric.msl: gl_BaryCoordEXT honest-errors in MSL (#474)" {
     try std.testing.expectError(error.UnsupportedBarycentric, compileToMsl(source));
 }
 
+// #474: ARM tensors (GL_ARM_tensors: tensorARM<>, tensorReadARM, tensorSizeARM)
+// have no Metal type at all, so tensor operands lower to undeclared identifiers.
+// Fail loud with UnsupportedTensor keyed on the TypeTensorARM opcode rather than
+// emitting MSL that Metal rejects.
+test "T-tensor.msl: ARM tensor types honest-error in MSL (#474)" {
+    const source: [:0]const u8 =
+        \\#version 460
+        \\#extension GL_ARM_tensors : require
+        \\#extension GL_EXT_shader_explicit_arithmetic_types : require
+        \\layout(location = 0) out vec4 outColor;
+        \\layout(set=0, binding=0) uniform tensorARM<uint8_t, 3> tens;
+        \\void main() {
+        \\  const uint size_d1 = tensorSizeARM(tens, 1);
+        \\  uint8_t tensorValue = uint8_t(0);
+        \\  tensorReadARM(tens, uint[](uint(0), uint(0), 1), tensorValue);
+        \\  outColor = vec4(0.0, tensorValue, 0.0, 255.0);
+        \\}
+    ;
+    try std.testing.expectError(error.UnsupportedTensor, compileToMsl(source));
+}
+
 // #414: an `in` parameter whose value seeds a written-then-read local (the
 // classic `float d = p; loop { d = ... }` shape) was misdetected as an out
 // param: the Variable+Store(param) prologue is just GLSL's by-value copy of
