@@ -1119,6 +1119,13 @@ threadlocal var g_loop_hoists: ?*const std.AutoHashMap(usize, std.ArrayList(comm
 threadlocal var g_hoisted_ids: ?*const std.AutoHashMap(u32, void) = null;
 threadlocal var g_hoist_stripping: bool = false;
 
+// True when the shader has location stage inputs, so the `main0_in in` struct is
+// threaded into every non-entry function's signature. Read at OpFunctionCall to
+// append `in` to the call args (mirrors how cbuffers/textures are threaded). Set
+// once before function emission; a threadlocal avoids plumbing the flag through
+// the whole emitBody/emitBlock/emitInstruction call chain (#476).
+threadlocal var g_has_stage_in: bool = false;
+
 fn phiTypeNameMSL(m: *const ParsedModule, type_id: u32) []const u8 {
     const tinst = getDef(m, type_id) orelse return "int";
     switch (tinst.op) {
@@ -2497,6 +2504,33 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // fails loud rather than emitting silent-wrong MSL.
     var arraylen_empty = std.AutoHashMap(u32, u32).init(aa);
 
+    // #476: thread location stage inputs into non-entry functions. A varying used
+    // inside a helper function (e.g. gl_HelperInvocation's foo(), or a Vulkan
+    // combined-sampler's texcoord) would otherwise reference a bare `vTex` that is
+    // only in scope in the entry, where inputs are aliased to `in.<name>`. Rename
+    // the inputs to `in.<name>` BEFORE emitting non-entry functions (they are
+    // emitted before the entry, which does its own rename), give every non-entry
+    // function a `main0_in in` parameter, and pass `in` at each call site. Gated on
+    // is_frag + non-empty stage inputs, so wintty (no varyings) is byte-identical.
+    // The stage-in struct was already emitted above from the captured decl names,
+    // so this body-only rename does not affect field spellings.
+    g_has_stage_in = is_frag and stage_inputs.items.len > 0;
+    defer g_has_stage_in = false;
+    if (g_has_stage_in) {
+        // This is now the SOLE stage-input rename (the entry function's own copy is
+        // removed): doing it here, before non-entry functions are emitted, lets a
+        // varying used inside a helper resolve to `in.<name>` too. Arena-allocated
+        // (all names come from collectNames on the arena); the prior arena name is
+        // reclaimed at arena.deinit, so it is overwritten without an explicit free.
+        for (stage_inputs.items) |si| {
+            const aliased = if (pull_model.contains(si.var_id))
+                std.fmt.allocPrint(aa, "in.{s}{s}", .{ si.name, pull_model_center_suffix }) catch continue
+            else
+                std.fmt.allocPrint(aa, "in.{s}", .{si.name}) catch continue;
+            _ = names.fetchPut(si.var_id, aliased) catch {};
+        }
+    }
+
     // Emit non-entry functions first
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue;
@@ -3427,6 +3461,10 @@ fn emitFunction(
     // `thread T&` directly (a pointer param is always out/inout), which is
     // call-site-independent and so covers the local-argument case opi missed.
     _ = opi;
+    // pull_model is retained for call-site symmetry but no longer consulted here:
+    // the stage-input rename (its only former use) moved to the caller before any
+    // function is emitted, so helper functions share it too (#476).
+    _ = pull_model;
     const fi = getDef(m, func_id) orelse return;
     if (fi.op != .Function or fi.words.len < 5) return;
     const fti = getDef(m, fi.words[4]) orelse return;
@@ -3500,24 +3538,14 @@ fn emitFunction(
         // stays float2 (keeps the shadertoy/wintty signature byte-identical).
         const fc_ty: []const u8 = if (frag_coord_full) "float4" else "float2";
 
-        // Rewrite each location stage-input variable's name to `in.<origname>`
-        // BEFORE emitting the body, exactly as FragCoord is renamed above.
-        // The Load handler copies the pointer's name to the load result and
-        // buildAccessExpr resolves access-chains/swizzles via names.get(base),
-        // so every downstream use inherits `in.<name>` (e.g. in.uv, in.color.x)
-        // with no per-instruction rewrite. The struct fields above already
-        // captured the ORIGINAL source names, so the rename is body-only.
-        for (stage_inputs.items) |si| {
-            // A pull-model interpolated input is an `interpolant<>` field, so a PLAIN
-            // read must go through .interpolate_at_center() (the default-interpolation
-            // accessor). The InterpolateAt* ExtInst arms strip this known suffix to
-            // recover the `in.<name>` base for their own method calls.
-            const aliased = if (pull_model.contains(si.var_id))
-                std.fmt.allocPrint(alloc, "in.{s}{s}", .{ si.name, pull_model_center_suffix }) catch continue
-            else
-                std.fmt.allocPrint(alloc, "in.{s}", .{si.name}) catch continue;
-            if (names.fetchPut(si.var_id, aliased) catch null) |old| alloc.free(old.value);
-        }
+        // Location stage inputs are renamed to `in.<origname>` in the caller
+        // (crossCompileToMsl) BEFORE any function is emitted, so both this entry
+        // body AND non-entry helper functions resolve varyings through the stage-in
+        // struct (#476). The Load handler copies the pointer's name to the load
+        // result and buildAccessExpr resolves access-chains/swizzles via
+        // names.get(base), so every downstream use inherits `in.<name>` (e.g.
+        // in.uv, in.color.x). The struct fields captured the ORIGINAL source names,
+        // so the rename is body-only. FragCoord is still renamed above.
 
         // Fragment input built-ins (gl_FrontFacing → bool [[front_facing]]). Like
         // the vertex case, these carry no Location and would otherwise leak as
@@ -4043,6 +4071,14 @@ fn emitFunction(
         first_param = false;
         try w.print("{s} {s}", .{ tex.msl_type, tex.name });
         if (!tex.is_storage) try w.print(", sampler {s}Smplr", .{tex.name});
+    }
+    // #476: a fragment helper that reads a location varying (aliased to `in.<name>`)
+    // needs the stage-in struct in scope. Thread `main0_in in` uniformly, matching
+    // the call-site append gated on g_has_stage_in (is_frag + non-empty inputs).
+    if (m.execution_model == .Fragment and stage_inputs.items.len > 0) {
+        if (!first_param) try w.writeAll(", ");
+        first_param = false;
+        try w.writeAll("main0_in in");
     }
 
     try w.writeAll(")\n{\n");
@@ -6133,6 +6169,15 @@ fn emitInstruction(
                 first_arg = false;
                 try w.print("{s}", .{tex.name});
                 if (!tex.is_storage) try w.print(", {s}Smplr", .{tex.name});
+            }
+            // #476: pass the stage-in struct through to the callee (every non-entry
+            // fragment function receives `main0_in in` when there are varyings).
+            // `in` is always in scope here: the entry impl takes it as a param and
+            // each non-entry function re-threads it, so nested calls stay valid.
+            if (g_has_stage_in) {
+                if (!first_arg) try w.writeAll(", ");
+                first_arg = false;
+                try w.writeAll("in");
             }
             try w.writeAll(");\n");
         },

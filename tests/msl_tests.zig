@@ -4040,6 +4040,38 @@ test "T-helperinv.msl: gl_HelperInvocation lowers to simd_is_helper_thread() (#4
     try assertNotContains(msl, "gl_HelperInvocation");
 }
 
+// #476: a location varying (vUV) read inside a NON-entry function (foo) was
+// emitted as a bare `vUV` there, undeclared, because inputs are aliased to
+// `in.<name>` only in scope in the entry. Thread `main0_in in` into non-entry
+// fragment functions and pass `in` at the call site so the varying resolves.
+// (This is the corpus helper-invocation.frag, which the frontend keeps as a real
+// foo() rather than inlining.) Also exercises the #475 helper-invocation lowering.
+test "T-staturein-helper.msl: varying used in a non-entry function is threaded (#476)" {
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) in vec2 vUV;
+        \\layout(binding = 0) uniform sampler2D uSampler;
+        \\vec4 foo() {
+        \\    vec4 color;
+        \\    if (!gl_HelperInvocation)
+        \\        color = textureLod(uSampler, vUV, 0.0);
+        \\    else
+        \\        color = vec4(1.0);
+        \\    return color;
+        \\}
+        \\void main() { FragColor = foo(); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // foo() receives the stage-in struct and reads the varying through it.
+    try assertContains(msl, "main0_in in");
+    try assertContains(msl, "in.vUV");
+    // No bare varying reference leaks into the helper.
+    try assertNotContains(msl, ", vUV,");
+}
+
 // #414: an `in` parameter whose value seeds a written-then-read local (the
 // classic `float d = p; loop { d = ... }` shape) was misdetected as an out
 // param: the Variable+Store(param) prologue is just GLSL's by-value copy of
