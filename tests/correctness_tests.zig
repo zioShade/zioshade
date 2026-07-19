@@ -480,6 +480,62 @@ fn spirvHasOpcode(spv: []const u32, opcode: u16) bool {
     return false;
 }
 
+// True iff an OpFunctionCall argument (an inout/out pointer) is re-loaded by a LATER
+// OpLoad — proving the post-call read re-reads memory rather than being store-forwarded
+// to the pre-call value. Without the OpFunctionCall store-forward barrier, that post-
+// call OpLoad is rewritten to the pre-call stored id and disappears, so this is false.
+// Scope: checks against the MOST RECENT call's args (fine for single-call test shaders).
+fn funcCallArgReloaded(spv: []const u32) bool {
+    var idx: usize = 5;
+    var args: [16]u32 = undefined;
+    var nargs: usize = 0;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 57 and wc >= 4) { // OpFunctionCall result_type result_id fn args…
+            nargs = 0;
+            var a: usize = idx + 4;
+            while (a < idx + wc and nargs < args.len) : (a += 1) {
+                args[nargs] = spv[a];
+                nargs += 1;
+            }
+        } else if (op == 61 and wc >= 4) { // OpLoad result_type result_id ptr
+            const ptr = spv[idx + 3];
+            for (args[0..nargs]) |ar| if (ar == ptr) return true;
+        }
+        idx += wc;
+    }
+    return false;
+}
+
+// True iff some OpExtInst's output pointer (its last operand — the `modf`/`frexp`
+// integer/exponent slot) is re-loaded by a LATER OpLoad. When the OpExtInst store-
+// forward barrier is missing, the post-modf read of that pointer is rewritten to the
+// pre-modf stored value and the re-read OpLoad disappears; its survival proves the
+// barrier works. Pure ext insts (sin/pow/…) pass a value as their last operand, which
+// is never loaded-as-pointer, so this never false-positives on them.
+// Scope: tracks the MOST RECENT OpExtInst's output pointer (fine when no intervening
+// ext inst sits between the modf/frexp and the read-back, as in the test shaders).
+fn extInstOutputReloaded(spv: []const u32) bool {
+    var idx: usize = 5;
+    var target_ptr: ?u32 = null;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 12 and wc >= 6) { // OpExtInst with at least one operand
+            target_ptr = spv[idx + wc - 1]; // last operand = the modf/frexp output pointer
+        } else if (op == 61 and wc >= 4) { // OpLoad result_type result_id ptr
+            if (target_ptr) |p| {
+                if (spv[idx + 3] == p) return true;
+            }
+        }
+        idx += wc;
+    }
+    return false;
+}
+
 // Scan the SPIR-V module for an OpTypeImage (opcode 25) with Dim==Buffer (5)
 // whose sampled-type id resolves to a scalar of the requested kind:
 //   .float → OpTypeFloat, .int → signed OpTypeInt, .uint → unsigned OpTypeInt.
@@ -920,6 +976,93 @@ test "frontend: side-effecting ternary with a lossy type mismatch honest-errors"
     defer alloc.free(ok);
     try std.testing.expect(spirvHasOpcode(ok, 250)); // short-circuited (OpBranchConditional)
     try spirvValOrSkip(ok);
+}
+
+// #170: an `out`/`inout` parameter mutated by a callee must be observable AFTER the
+// call. The store-to-load forwarding inside deadCodeElim tracked `last_store[ptr]=val`
+// but had NO barrier for OpFunctionCall — so `OpStore %param v0; OpFunctionCall se
+// %param; OpLoad %param` rewrote the post-call load to the STALE v0, silently dropping
+// the write-back. Guard against const-folding masking the drop: a runtime input feeds
+// the mutated value, so the `+7` cannot fold. If the write-back is forwarded-over, the
+// OpIAdd goes dead and DCE removes it — its presence in the OPTIMIZED module proves the
+// mutation survives. (Repro: `float(c)` collapsed to `float(int(iv.x))`, dropping +7.)
+test "frontend: inlined inout write-back survives optimization (no store-forward across a call)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\void se(inout int c){ c += 7; }
+        \\void main(){ int c = int(iv.x); se(c); o = vec4(float(c), 0.0, 0.0, 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 128)); // OpIAdd — the +7 write-back survives
+    try spirvValOrSkip(spv);
+}
+
+// The same hazard for a NON-inlined callee (a loop keeps se() out-of-line, so the real
+// OpFunctionCall survives to the final module). Without the OpFunctionCall barrier, the
+// post-call load of the inout arg forwards to the pre-call store = the loop's writes are
+// silently dropped. The callee's per-iteration `c += 7` must survive.
+test "frontend: non-inlined inout write-back survives (OpFunctionCall barrier)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) flat in int niter;
+        \\layout(location=1) out vec4 o;
+        \\void se(inout int c){ for(int i=0;i<niter;i++){ c += 7; } }
+        \\void main(){ int c = int(iv.x); se(c); o = vec4(float(c), 0.0, 0.0, 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 57)); // OpFunctionCall survives (non-inlined)
+    try std.testing.expect(funcCallArgReloaded(spv)); // the inout arg is re-read after the call
+    try spirvValOrSkip(spv);
+}
+
+// #170: a callee with MULTIPLE aliased inout params (the classic swap) exercises both
+// the OpFunctionCall barrier AND transitive replacement-chain resolution. The inlined
+// body is `%31=load x; %32=load y; store x,%32; store y,%31; %14=load x; %15=load y`.
+// The store-forward maps %14→%32→(store y's) and %15→%31→(store x's); applying that
+// chain non-transitively left the composite referencing removed loads = undefined-id
+// (invalid SPIR-V). Flattened, main becomes `vec4(in.y, in.x)` — the correct swap.
+test "frontend: swap(inout,inout) inlines to a valid, correctly-swapped module" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec2 u_input;
+        \\layout(location=0) out vec4 fragColor;
+        \\void swap(inout float a, inout float b){ float t = a; a = b; b = t; }
+        \\void main(){ float x = u_input.x; float y = u_input.y; swap(x, y); fragColor = vec4(x, y, 0.0, 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // Structural guard that holds even when spirv-val is unavailable: the pre-fix bug
+    // GUTTED main to just the dangling composite + store (no loads survived). The
+    // u_input read must survive, so an OpLoad must be present.
+    try std.testing.expect(spirvHasOpcode(spv, 61)); // OpLoad of u_input survives (body not gutted)
+    try spirvValOrSkip(spv); // was invalid SPIR-V (undefined-id) before the transitive-resolution fix
+}
+
+// #170: the OpExtInst pointer-output builtins (`modf`/`frexp` write their integer/
+// exponent part through a pointer operand) are the same defect class. With `ip` first
+// stored, then written by modf, then read back in the same block, the store-forward
+// rewrote the read-back to the STALE stored value (`o.y` came out as the initial value,
+// not modf's integer part). The OpExtInst barrier invalidates forwarding for the
+// pointer operand so the post-modf load re-reads memory. `ip` is seeded from a runtime
+// input so the correct value is a live OpLoad, not a foldable constant.
+test "frontend: modf out-param survives store-forward (OpExtInst barrier)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float ip = iv.y; float fr = modf(iv.x, ip); o = vec4(fr, ip, 0.0, 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The integer part written by modf must be re-read (a live OpLoad of the ip pointer
+    // after the OpExtInst), not forwarded to the pre-modf stored value.
+    try std.testing.expect(extInstOutputReloaded(spv));
+    try spirvValOrSkip(spv);
 }
 
 // #170: textureProjOffset (projective sample + const offset, no lod/grad) was wrongly
