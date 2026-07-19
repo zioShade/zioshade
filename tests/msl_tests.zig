@@ -4325,3 +4325,29 @@ test "struct pointer param is thread T& with .member access (not by-value [idx])
     try assertContains(msl, ".vel");
     try assertNotContains(msl, "v14[1]");
 }
+
+// A value that differs by branch (`x = cond ? a : b`, or a conditional mutation) is
+// a selection-merge OpPhi. MSL has block scope, so the branch-local temp is out of
+// scope after the `if`; the phi must be materialized as a persistent `_phi` var and
+// the post-merge use must read it. Before the fix the merge value was aliased to the
+// branch-local temp (undeclared identifier after the block = Metal rejects it).
+test "selection-merge phi is materialized as a persistent _phi variable" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\  float x = uv.x;
+        \\  float row = floor(uv.y * 5.0);
+        \\  if (mod(row, 2.0) > 0.5) { x += 0.5; }
+        \\  float result = fract(x * 4.0);
+        \\  fragColor = vec4(result, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The phi is a `_phi` var, initialized to the fall-through value and assigned in
+    // the branch; the post-merge multiply reads it.
+    try assertContains(msl, "_phi = ");
+    try assertContains(msl, "_phi * 4.0");
+}

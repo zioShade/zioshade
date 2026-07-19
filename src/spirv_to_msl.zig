@@ -61,6 +61,76 @@ fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (i >= m.instructions.len) return null;
     return m.instructions[i];
 }
+
+/// The value string for an operand id: its name, a bool literal, or the SSA
+/// fallback `v{id}`. Mirrors the GLSL exprName; used to spell OpPhi incoming
+/// values when materializing a selection-merge phi.
+fn mslExprName(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, alloc: std.mem.Allocator) []const u8 {
+    if (names.get(id)) |n| return n;
+    const def = getDef(m, id) orelse return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "0";
+    if (def.op == .ConstantTrue) return "true";
+    if (def.op == .ConstantFalse) return "false";
+    return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "0";
+}
+
+/// Whether block `target` is reachable from `cur` by following terminators without
+/// entering `stop` (the selection merge). Used to attribute an OpPhi predecessor to
+/// the true vs false side of a selection — a copy of the GLSL backend's helper, so
+/// nested selections attribute correctly. See spirv_to_glsl.labelReaches.
+fn mslLabelReaches(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), cur: u32, target: u32, stop: u32, seen: *std.AutoHashMap(u32, void)) bool {
+    if (cur == stop) return false;
+    if (cur == target) return true;
+    if (seen.contains(cur)) return false;
+    seen.put(cur, {}) catch return false;
+    const bi = label_map.get(cur) orelse return false;
+    var j = bi + 1;
+    while (j < m.instructions.len) : (j += 1) {
+        const inst = m.instructions[j];
+        switch (inst.op) {
+            .Branch => return if (inst.words.len >= 2) mslLabelReaches(m, label_map, inst.words[1], target, stop, seen) else false,
+            .BranchConditional => {
+                if (inst.words.len < 4) return false;
+                if (mslLabelReaches(m, label_map, inst.words[2], target, stop, seen)) return true;
+                return mslLabelReaches(m, label_map, inst.words[3], target, stop, seen);
+            },
+            .Switch => {
+                if (inst.words.len >= 3 and mslLabelReaches(m, label_map, inst.words[2], target, stop, seen)) return true;
+                var k: usize = 3;
+                while (k + 1 < inst.words.len) : (k += 2) {
+                    if (mslLabelReaches(m, label_map, inst.words[k + 1], target, stop, seen)) return true;
+                }
+                return false;
+            },
+            .Return, .ReturnValue, .Kill, .Unreachable, .Label => return false,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// True if phi predecessor `pred1` lies in the TRUE region of a selection.
+fn mslPhiPred1InTrueRegion(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), tl: u32, mval: u32, pred1: u32, alloc: std.mem.Allocator) bool {
+    var seen = std.AutoHashMap(u32, void).init(alloc);
+    defer seen.deinit();
+    return mslLabelReaches(m, label_map, tl, pred1, mval, &seen);
+}
+
+const MslMergePhi = struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 };
+
+/// Collect the OpPhi instructions at selection-merge block `mval` (a selection
+/// merge's phis appear at the top of the merge block). Two-incoming phis only
+/// (the if/else shape); more-incoming phis are left to other handling.
+fn collectMergePhis(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), mval: u32, list: *std.ArrayList(MslMergePhi), alloc: std.mem.Allocator) void {
+    const midx = label_map.get(mval) orelse return;
+    var pj: usize = midx + 1;
+    while (pj < m.instructions.len) : (pj += 1) {
+        const minst = m.instructions[pj];
+        if (minst.op != .Phi) break;
+        if (minst.words.len >= 7) {
+            list.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
+        }
+    }
+}
 fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
     return common.commonGetMemberName(m.instructions, struct_id, member_idx, buf, "_m");
 }
@@ -949,6 +1019,11 @@ const PhiInfo = struct { result_id: u32, type_id: u32, init_id: u32, update_id: 
 threadlocal var g_loop_phis: ?*const std.AutoHashMap(usize, std.ArrayList(PhiInfo)) = null;
 threadlocal var g_phi_hdr: ?*const std.AutoHashMap(u32, usize) = null;
 threadlocal var g_deferred_hdr: ?*const std.AutoHashMap(usize, void) = null;
+// Selection-merge phis the BranchConditional handler already materialized as a
+// `_phi` var. The generic OpPhi handler must NOT re-alias these to a branch-local
+// incoming value (which is out of scope after the merge) — it would undo the
+// materialization and reintroduce the undeclared-identifier bug.
+threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
 
 // #413: loop-phi update temps defined INSIDE the loop have their declaration
 // hoisted above the loop header (declare-then-assign split) — the top-of-loop
@@ -3939,7 +4014,11 @@ fn emitBody(
         g_deferred_hdr = null;
         g_loop_hoists = null;
         g_hoisted_ids = null;
+        g_materialized_phis = null;
     }
+    var materialized_phis = std.AutoHashMap(u32, void).init(alloc);
+    defer materialized_phis.deinit();
+    g_materialized_phis = &materialized_phis;
     {
         var li = func_idx + 1;
         while (li < m.instructions.len) : (li += 1) {
@@ -4033,13 +4112,53 @@ fn emitBody(
             const ml = bc_merge.get(idx);
             if (ml) |mval| {
                 const he = fl != null and fl.? != mval;
+                // Materialize selection-merge phis: a value that differs by branch
+                // (`x = cond ? a : b`) lowers to an OpPhi at the merge. MSL has block
+                // scope, so the branch-local temp is out of scope after the `if`;
+                // declare a persistent `_phi` var, assign the branch value in each
+                // arm, and rename the phi id to it. Without this the post-merge use
+                // references an undeclared identifier (Metal rejects it).
+                var mphis: std.ArrayList(MslMergePhi) = .empty;
+                defer mphis.deinit(alloc);
+                collectMergePhis(m, &label_map, mval, &mphis, alloc);
+                for (mphis.items) |pv| {
+                    const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    if (he) {
+                        // Both arms assign it; declare uninitialized.
+                        try w.print("    {s} {s}_phi;\n", .{ t, vn });
+                    } else {
+                        // No else arm: the fall-through value is the incoming from the
+                        // header block (in scope before the `if`); initialize to it so
+                        // the phi is defined when the condition is false.
+                        const false_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        const fvn = mslExprName(m, names, false_val, alloc);
+                        try w.print("    {s} {s}_phi = {s};\n", .{ t, vn, fvn });
+                    }
+                }
                 try w.print("    if ({s})\n    {{\n", .{cn});
                 idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                for (mphis.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const true_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                    try w.print("        {s}_phi = {s};\n", .{ vn, mslExprName(m, names, true_val, alloc) });
+                }
                 if (he) {
                     try w.writeAll("    } else {\n");
                     idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                    for (mphis.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const false_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        try w.print("        {s}_phi = {s};\n", .{ vn, mslExprName(m, names, false_val, alloc) });
+                    }
                 }
                 try w.writeAll("    }\n");
+                for (mphis.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                    if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
+                    if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
+                }
                 if (label_map.get(mval)) |mi| {
                     idx = mi;
                 }
@@ -4556,13 +4675,45 @@ fn emitBlock(
             const nm = bm.get(i);
             if (nm) |nmv| {
                 const he = fl != null and fl.? != nmv;
+                // Materialize selection-merge phis (see the top-level handler in
+                // emitBody). Nested selections need the same treatment or a
+                // branch-local value is referenced out of scope after the merge.
+                var mphis: std.ArrayList(MslMergePhi) = .empty;
+                defer mphis.deinit(alloc);
+                collectMergePhis(m, lm, nmv, &mphis, alloc);
+                for (mphis.items) |pv| {
+                    const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    if (he) {
+                        try w.print("{s}    {s} {s}_phi;\n", .{ indent, t, vn });
+                    } else {
+                        const false_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, t, vn, mslExprName(m, names, false_val, alloc) });
+                    }
+                }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
                 i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                for (mphis.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const true_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                    try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, mslExprName(m, names, true_val, alloc) });
+                }
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
                     i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                    for (mphis.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const false_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, mslExprName(m, names, false_val, alloc) });
+                    }
                 }
                 try w.print("{s}    }}\n", .{indent});
+                for (mphis.items) |pv| {
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                    if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
+                    if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
+                }
                 if (lm.get(nmv)) |nmi| {
                     i = nmi;
                 }
@@ -4761,6 +4912,9 @@ fn emitInstruction(
         },
         .Phi => {
             if (inst.words.len < 4) return;
+            // Already materialized as a `_phi` var by the selection handler — keep
+            // that name; aliasing to a branch-local incoming value would be wrong.
+            if (g_materialized_phis) |mp| if (mp.contains(inst.words[2])) return;
             const fv = inst.words[3];
             if (names.get(fv)) |sn| {
                 const a = try alloc.dupe(u8, sn);
