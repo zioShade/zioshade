@@ -4417,3 +4417,25 @@ test "texelFetch read casts its integer coordinate to unsigned" {
     defer alloc.free(msl);
     try assertContains(msl, ".read(uint2(");
 }
+
+// A shader that reads gl_FragCoord.z (depth) or .w needs the FULL float4 threaded
+// into the impl; the .xy-only case stays float2. Threading only .xy made `.z`
+// exceed the float2 and Metal rejected it.
+test "gl_FragCoord.z reader threads the full float4 fragcoord" {
+    const zw =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(gl_FragCoord.xy / 128.0, gl_FragCoord.z, 1.0); }
+    ;
+    const xy =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(gl_FragCoord.xy / 128.0, 0.0, 1.0); }
+    ;
+    const msl_zw = try compileToMsl(zw);
+    defer alloc.free(msl_zw);
+    const msl_xy = try compileToMsl(xy);
+    defer alloc.free(msl_xy);
+    try assertContains(msl_zw, "float4 _fragCoord");
+    try assertContains(msl_xy, "float2 _fragCoord"); // xy-only stays float2
+}
