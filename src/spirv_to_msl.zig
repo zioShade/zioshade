@@ -2555,6 +2555,30 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
                     }
                     continue;
                 }
+                // A STRUCT constant folds to a Metal brace initializer
+                // `TypeName{c0, c1, …}` (Metal has no struct call-constructor); a
+                // MATRIX constant folds to `floatCxR(col0, col1, …)`. Without this
+                // the constant got a bare `vNN` name and was never declared, so its
+                // use (`arr[0] = vNN;`, `m * vNN`) referenced an undeclared identifier.
+                // Constituents are processed earlier in this in-order pass, so their
+                // names (`float3(…)`, scalars) are already resolved.
+                if (t.op == .TypeStruct or t.op == .TypeMatrix) {
+                    const constituents = inst.words[3..];
+                    const tn = mslType(m, inst.words[1], names, alloc) catch continue;
+                    const open: []const u8 = if (t.op == .TypeStruct) "{" else "(";
+                    const close: []const u8 = if (t.op == .TypeStruct) "}" else ")";
+                    var buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
+                    defer buf.deinit(alloc);
+                    buf.print(alloc, "{s}{s}", .{ tn, open }) catch continue;
+                    for (constituents, 0..) |cid, i| {
+                        if (i > 0) buf.appendSlice(alloc, ", ") catch continue;
+                        buf.appendSlice(alloc, names.get(cid) orelse "0.0") catch continue;
+                    }
+                    buf.appendSlice(alloc, close) catch continue;
+                    const lit = buf.toOwnedSlice(alloc) catch continue;
+                    if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
+                    continue;
+                }
             }
         }
         if (resultIdFromOp(inst.op, inst.words)) |rid| {
