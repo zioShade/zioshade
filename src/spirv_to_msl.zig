@@ -4204,17 +4204,24 @@ fn emitBody(
             const ml = bc_merge.get(idx);
             if (ml) |mval| {
                 try w.print("    switch ({s}) {{\n", .{sn});
+                // Each case body is braced: a case that declares a variable and then
+                // falls through to the next case is a jump OVER an in-scope
+                // initialization, which C++/Metal rejects ("cannot jump from switch
+                // statement to this case label"). Scoping each case's temps in a block
+                // fixes that; fall-through control flow is unaffected by the braces.
                 if (dl != mval) {
-                    try w.writeAll("    default:\n");
+                    try w.writeAll("    default: {\n");
                     _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                    try w.writeAll("    }\n");
                 }
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
                     const cv = inst.words[wi];
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
-                    try w.print("    case {d}:\n", .{cv});
+                    try w.print("    case {d}: {{\n", .{cv});
                     _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                    try w.writeAll("    }\n");
                 }
                 try w.writeAll("    }\n");
                 if (label_map.get(mval)) |mi| {
