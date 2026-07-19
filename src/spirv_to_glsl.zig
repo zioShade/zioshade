@@ -2662,6 +2662,49 @@ fn emitWhileLoop(
     const has_phis = !is_do_while and (if (g_loop_phis) |lp| (if (lp.get(loop_idx)) |pl| pl.items.len > 0 else false) else false);
     if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
 
+    // Loop-carried body phis: an OpPhi materialized inside the loop body (a
+    // selection merge, e.g. `j = cond ? 40u : 30u`) whose result the CONTINUE
+    // block reads (`i += int(j)`) runs a full iteration behind — the #237 hoist
+    // emits the continue at the TOP, reading the PREVIOUS iteration's value. Such
+    // a phi must persist ACROSS iterations, so declare it BEFORE the loop (not
+    // body-local, which resets it each turn = the hoisted read gets garbage =
+    // silent-wrong) and rename its result id to the `_phi` var NOW, so both the
+    // hoisted read and the body's merge assignment reference the same persistent
+    // variable. The common non-carried case leaves this set empty.
+    var carried_phis = std.AutoHashMap(u32, void).init(alloc);
+    defer carried_phis.deinit();
+    if (has_phis and !dw_native) {
+        var cont_refs = std.AutoHashMap(u32, void).init(alloc);
+        defer cont_refs.deinit();
+        if (label_map.get(cont_lbl)) |cidx| {
+            var k: usize = cidx + 1;
+            while (k < m.instructions.len) : (k += 1) {
+                const cinst = m.instructions[k];
+                if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .BranchConditional or cinst.op == .FunctionEnd) break;
+                if (cinst.words.len < 2) continue;
+                for (cinst.words[1..]) |wrd| cont_refs.put(wrd, {}) catch {};
+            }
+        }
+        if (cont_refs.count() > 0) {
+            const body_start = label_map.get(body_lbl) orelse m.instructions.len;
+            const body_end = label_map.get(merge_lbl) orelse m.instructions.len;
+            var k: usize = if (body_start < m.instructions.len) body_start + 1 else m.instructions.len;
+            while (k < body_end and k < m.instructions.len) : (k += 1) {
+                const pinst = m.instructions[k];
+                if (pinst.op == .FunctionEnd) break;
+                if (pinst.op != .Phi or pinst.words.len < 3) continue;
+                const rid = pinst.words[2];
+                if (!cont_refs.contains(rid) or carried_phis.contains(rid)) continue;
+                const rtt = glslType(m, pinst.words[1], names, alloc) catch "float";
+                const vn = names.get(rid) orelse continue;
+                const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                try w.print("    {s} {s};\n", .{ rtt, phi_name });
+                if (names.fetchPut(rid, phi_name) catch null) |old| alloc.free(old.value);
+                carried_phis.put(rid, {}) catch {};
+            }
+        }
+    }
+
     if (dw_native) {
         try w.writeAll("    do\n    {\n");
     } else {
@@ -2830,6 +2873,9 @@ fn emitWhileLoop(
                             }
                         }
                         for (body_phis.items) |pv| {
+                            // A loop-carried phi was already declared at loop top and
+                            // renamed to its `_phi` var; don't re-declare it body-local.
+                            if (carried_phis.contains(pv.result_id)) continue;
                             const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
                             const vn = names.get(pv.result_id) orelse "pv";
                             try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
@@ -2837,23 +2883,37 @@ fn emitWhileLoop(
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         for (body_phis.items) |pv| {
+                            // Carried phis are already renamed (name == `<vn>_phi`), so
+                            // assign the bare name; others get the `_phi` suffix here.
+                            const carried = carried_phis.contains(pv.result_id);
                             const vn = names.get(pv.result_id) orelse "pv";
                             const true_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                             const tvn = exprName(m, names, true_val, alloc);
-                            try w.print("            {s}_phi = {s};\n", .{ vn, tvn });
+                            if (carried) {
+                                try w.print("            {s} = {s};\n", .{ vn, tvn });
+                            } else {
+                                try w.print("            {s}_phi = {s};\n", .{ vn, tvn });
+                            }
                         }
                         if (nhe) {
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                             for (body_phis.items) |pv| {
+                                const carried = carried_phis.contains(pv.result_id);
                                 const vn = names.get(pv.result_id) orelse "pv";
                                 const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                                 const fvn = exprName(m, names, false_val, alloc);
-                                try w.print("            {s}_phi = {s};\n", .{ vn, fvn });
+                                if (carried) {
+                                    try w.print("            {s} = {s};\n", .{ vn, fvn });
+                                } else {
+                                    try w.print("            {s}_phi = {s};\n", .{ vn, fvn });
+                                }
                             }
                         }
                         try w.writeAll("        }\n");
                         for (body_phis.items) |pv| {
+                            // Carried phis were renamed at the top; don't rename again.
+                            if (carried_phis.contains(pv.result_id)) continue;
                             const vn = names.get(pv.result_id) orelse "pv";
                             const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                             if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);

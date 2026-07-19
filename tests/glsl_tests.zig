@@ -2993,3 +2993,34 @@ test "SSBO block in a fragment shader is declared (not compute-gated)" {
     try assertContains(glsl, "b.data[");
     try glslValidateOrSkip("fragment-ssbo", glsl);
 }
+
+// A loop where a body if/else sets a value used in the loop INCREMENT (`i += int(j)`)
+// creates a loop-carried selection phi. The #237 hoist emits the increment at the top
+// of the loop, reading the previous iteration's value, so that phi must persist ACROSS
+// iterations — declared before the loop, not body-local. Before the fix it was declared
+// inside the if/else and the hoisted increment referenced an undeclared raw SSA name
+// (`int(v14)`), which glslang rejects. Mirrors tests/spirv-cross/false-loop-init.frag.
+test "loop-carried selection phi used in the increment persists across iterations" {
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) in vec4 accum;
+        \\layout(location = 0) out vec4 result;
+        \\void main() {
+        \\  result = vec4(0.0);
+        \\  uint j;
+        \\  for (int i = 0; i < 4; i += int(j)) {
+        \\    if (accum.y > 10.0) j = 40u; else j = 30u;
+        \\    result += accum;
+        \\  }
+        \\}
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    // glslang catches the undeclared-identifier regression directly.
+    try glslValidateOrSkip("loop-carried-phi", glsl);
+    // The carried phi is declared before `while (true)`, not inside the body.
+    const decl = std.mem.indexOf(u8, glsl, "_phi;") orelse return error.TestUnexpectedResult;
+    const loop = std.mem.indexOf(u8, glsl, "while (true)") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(decl < loop);
+}
