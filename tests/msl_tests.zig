@@ -4351,3 +4351,27 @@ test "selection-merge phi is materialized as a persistent _phi variable" {
     try assertContains(msl, "_phi = ");
     try assertContains(msl, "_phi * 4.0");
 }
+
+// A struct OpConstantComposite must fold to a Metal brace initializer
+// `Type{...}` (Metal has no struct call-constructor); before the fix it got a bare
+// vNN name and was never declared, so its use referenced an undeclared identifier.
+test "struct constant folds to a Metal brace initializer" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct Light { vec3 color; float intensity; };
+        \\void main() {
+        \\  Light lights[2];
+        \\  lights[0] = Light(vec3(1.0, 0.0, 0.0), 0.5);
+        \\  lights[1] = Light(vec3(0.0, 1.0, 0.0), 0.8);
+        \\  int i = clamp(int(uv.x * 2.0), 0, 1);
+        \\  fragColor = vec4(lights[i].color * lights[i].intensity, 1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The struct constant is inlined as `Light{...}` at the array-element assignment,
+    // not left as a bare undeclared vNN.
+    try assertContains(msl, "] = Light{");
+}
