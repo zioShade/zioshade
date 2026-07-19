@@ -60,6 +60,19 @@ fn spvScalarBase(m: *const ParsedModule, type_id: u32) ScalarBase {
     };
 }
 
+/// True if `id` resolves to a STORAGE image (OpTypeImage with Sampled==2, e.g.
+/// `image2D`), as opposed to a sampled texture. Used to pick imageSize vs
+/// textureSize for OpImageQuerySize. Resolves the value's type and unwraps a
+/// pointer (an unloaded image variable operand).
+fn imageOperandIsStorage(m: *const ParsedModule, id: u32) bool {
+    const def = getDef(m, id) orelse return false;
+    if (def.words.len < 2) return false;
+    var ti = getDef(m, def.words[1]) orelse return false;
+    if (ti.op == .TypePointer and ti.words.len > 3) ti = getDef(m, ti.words[3]) orelse return false;
+    if (ti.op != .TypeImage) return false;
+    return ti.words.len > 7 and ti.words[7] == 2;
+}
+
 /// True if a SPIR-V type id is a vector. GLSL relational OPERATORS (`<`, `>`, `==`,
 /// …) are scalar-only; a vector comparison (bvecN result) must use the builtin
 /// greaterThan / lessThan / equal / notEqual family, so relationals check this.
@@ -119,6 +132,38 @@ fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 {
     }
     return buf.toOwnedSlice(alloc);
 }
+/// Splice `#extension <name> : require` directives for the extension-gated gl_*
+/// builtins the emitted GLSL actually references. A builtin such as
+/// gl_FragStencilRefARB or gl_DrawID is only in scope once its extension is
+/// requested, so without this glslang rejects the (otherwise correct) output with
+/// "undeclared identifier" / "required extension not requested". Keyed on the
+/// emitted gl_* token — the ground truth, and the EXT/NV suffix cleanly separates
+/// the KHR and NV barycentric variants (whose SPIR-V capability/BuiltIn coincide).
+/// The directives must precede the first use, so they are inserted right after the
+/// `#version` line once the body is known.
+fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
+    // Only builtins whose extension request ALONE makes the output valid are
+    // listed. gl_DrawID (a vertex-only builtin misused in fragment) and the
+    // barycentric inputs (which also need per-vertex `pervertexEXT` arrays) need
+    // more than a pragma, so they are left to refuse/deeper work, not half-fixed.
+    const map = [_]struct { token: []const u8, ext: []const u8 }{
+        .{ .token = "gl_FragStencilRefARB", .ext = "GL_ARB_shader_stencil_export" },
+    };
+    var block = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
+    defer block.deinit(alloc);
+    var seen = std.StringHashMap(void).init(alloc);
+    defer seen.deinit();
+    for (map) |m| {
+        if (std.mem.indexOf(u8, output.items, m.token) == null) continue;
+        if (seen.contains(m.ext)) continue;
+        seen.put(m.ext, {}) catch {};
+        block.print(alloc, "#extension {s} : require\n", .{m.ext}) catch {};
+    }
+    if (block.items.len == 0) return;
+    const nl = std.mem.indexOfScalar(u8, output.items, '\n') orelse return;
+    try output.insertSlice(alloc, nl + 1, block.items);
+}
+
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
     var buf = try std.ArrayList(u8).initCapacity(alloc, name.len);
     for (name) |c| {
@@ -1267,6 +1312,7 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info);
     }
     try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info);
+    try spliceRequiredExtensions(&output, alloc);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -3826,11 +3872,20 @@ fn emitInstruction(
             try w.print("    {s} {s} = textureSize({s}, {s});\n", .{ rtt, rn, img, lod });
         },
         .ImageQuerySize => {
-            // OpImageQuerySize: result_type, result, image (no lod)
+            // OpImageQuerySize: result_type, result, image (no lod). A STORAGE image
+            // (`image2D`, Sampled==2) has no LOD chain, so its size is queried with
+            // `imageSize(img)` — `textureSize` is sampled-texture-only and glslang
+            // rejects it on an image2D ("no matching overloaded function"). A sampled
+            // texture that legitimately reaches OpImageQuerySize (multisample/buffer/
+            // rect, also LOD-less) keeps the `textureSize(img, 0)` form.
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const img = names.get(inst.words[3]) orelse "tex";
-            try w.print("    {s} {s} = textureSize({s}, 0);\n", .{ rtt, rn, img });
+            if (imageOperandIsStorage(m, inst.words[3])) {
+                try w.print("    {s} {s} = imageSize({s});\n", .{ rtt, rn, img });
+            } else {
+                try w.print("    {s} {s} = textureSize({s}, 0);\n", .{ rtt, rn, img });
+            }
         },
         .ImageQueryLod => {
             // OpImageQueryLod: result_type, result, SampledImage, coord

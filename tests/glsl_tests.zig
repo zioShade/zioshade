@@ -3024,3 +3024,36 @@ test "loop-carried selection phi used in the increment persists across iteration
     const loop = std.mem.indexOf(u8, glsl, "while (true)") orelse return error.TestUnexpectedResult;
     try std.testing.expect(decl < loop);
 }
+
+// An extension-gated gl_* builtin (here gl_FragStencilRefARB) is only in scope once
+// its `#extension ... : require` is emitted; without it glslang rejects the output.
+// The pragma is spliced right after `#version` from the emitted builtin token.
+test "extension-gated builtin emits its required #extension pragma" {
+    const source =
+        \\#version 450
+        \\#extension GL_ARB_shader_stencil_export : require
+        \\layout(location = 0) out vec4 c;
+        \\void main() { gl_FragStencilRefARB = 100; c = vec4(1.0); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "#extension GL_ARB_shader_stencil_export : require");
+    try glslValidateOrSkip("stencil-export", glsl);
+}
+
+// A size query on a STORAGE image (image2D) must use imageSize(); textureSize() is
+// sampled-texture-only and glslang rejects it on an image2D. A sampled-texture query
+// still uses textureSize.
+test "storage image size query uses imageSize, not textureSize" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 c;
+        \\layout(r32f, binding = 0) uniform image2D img;
+        \\void main() { c = vec4(vec2(imageSize(img)), 0.0, 1.0); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "imageSize(");
+    try assertNotContains(glsl, "textureSize(");
+    try glslValidateOrSkip("image-size", glsl);
+}
