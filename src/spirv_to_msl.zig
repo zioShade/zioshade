@@ -1020,6 +1020,33 @@ fn checkUnsupportedRowMajor(m: *const ParsedModule) !void {
     }
 }
 
+/// Reject GLSL features that have NO valid Metal Shading Language form, so the
+/// cross-compiler fails loud with a precise "unsupported feature" error instead
+/// of emitting MSL that references an identifier Metal has never heard of (the
+/// silent-wrong class: exit 0, then makeLibrary rejects it deep in the Metal
+/// compiler with an opaque diagnostic the user cannot map back to their GLSL).
+///
+/// Scoped narrowly to constructs that are genuinely unrepresentable in MSL for
+/// THIS stage, never to ones we simply have not implemented yet: a false
+/// "unsupported" that rejects a shader we could compile is a coverage
+/// regression, so each gate keys on a precise SPIR-V signature.
+///
+/// Currently gates: fragment barycentric coordinates (gl_BaryCoordEXT /
+/// gl_BaryCoordNV). Metal has no fragment barycentric builtin, so the emitter
+/// would otherwise write a bare `gl_BaryCoord*` identifier that does not exist.
+fn checkUnsupportedMslFeatures(m: *const ParsedModule) !void {
+    for (m.instructions) |inst| {
+        if (inst.op != .Decorate or inst.words.len < 4) continue;
+        if (inst.words[2] != @intFromEnum(spirv.Decoration.built_in)) continue;
+        const bi = inst.words[3];
+        if (bi == @intFromEnum(spirv.BuiltIn.bary_coord_khr) or
+            bi == @intFromEnum(spirv.BuiltIn.bary_coord_no_persp_khr))
+        {
+            return error.UnsupportedBarycentric;
+        }
+    }
+}
+
 /// MSL type for uniform buffer struct members.
 /// Uses packed_float3 instead of float3 to match SPIR-V offset layout.
 fn mslPackedType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
@@ -1875,6 +1902,10 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // Reject row_major matrix layouts we cannot emit correctly (non-square, any
     // struct depth) before emitting anything — honest error over silent-wrong.
     try checkUnsupportedRowMajor(&module);
+
+    // Reject GLSL features with no valid MSL form (e.g. fragment barycentrics)
+    // before emitting anything: honest "unsupported" error over silent-wrong MSL.
+    try checkUnsupportedMslFeatures(&module);
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();

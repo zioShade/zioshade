@@ -3964,6 +3964,25 @@ test "T-proj.msl3d: textureProj(sampler3D) honest-errors in MSL (#170)" {
     try std.testing.expectError(error.CrossCompileUnsupported, compileToMsl(source));
 }
 
+// #474: fragment barycentric coordinates (gl_BaryCoordEXT / gl_BaryCoordNV) have
+// NO Metal builtin — the emitter would otherwise write a bare `gl_BaryCoordEXT`
+// identifier that Metal rejects deep in makeLibrary. Fail loud with a precise
+// UnsupportedBarycentric error at the cross-compile layer instead. Keyed on the
+// BaryCoord* BuiltIn decoration, so shaders that merely compute barycentrics by
+// hand (no builtin) are untouched and still compile.
+test "T-barycentric.msl: gl_BaryCoordEXT honest-errors in MSL (#474)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_EXT_fragment_shader_barycentric : require
+        \\layout(location = 0) out vec2 value;
+        \\layout(location = 0) pervertexEXT in vec2 vUV[3];
+        \\void main () {
+        \\    value = gl_BaryCoordEXT.x * vUV[0] + gl_BaryCoordEXT.y * vUV[1] + gl_BaryCoordEXT.z * vUV[2];
+        \\}
+    ;
+    try std.testing.expectError(error.UnsupportedBarycentric, compileToMsl(source));
+}
+
 // #414: an `in` parameter whose value seeds a written-then-read local (the
 // classic `float d = p; loop { d = ... }` shape) was misdetected as an out
 // param: the Variable+Store(param) prologue is just GLSL's by-value copy of
