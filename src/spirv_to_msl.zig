@@ -4966,7 +4966,20 @@ fn emitInstruction(
                 }
             }
             if (is_special) {
-                const a = try alloc.dupe(u8, pn);
+                // gl_HelperInvocation has no MSL input attribute; Metal spells it
+                // as the simd_is_helper_thread() intrinsic. Alias the load result
+                // to an inline call so every use reads the current helper state,
+                // mirroring the HLSL IsHelperLane() path (spirv_to_hlsl.zig). The
+                // builtin Input variable is never declared or threaded, so aliasing
+                // the load is the whole fix. Not gated on is_frag: HelperInvocation
+                // is a fragment-only builtin (spirv-val enforces it) but its load
+                // often lives in a NON-entry helper function, which emits with
+                // is_frag=false; the intrinsic is valid in any fragment-pipeline fn.
+                const is_helper = if (builtinOf(decs, pid)) |bi|
+                    bi == @intFromEnum(spirv.BuiltIn.helper_invocation)
+                else
+                    false;
+                const a = try alloc.dupe(u8, if (is_helper) "simd_is_helper_thread()" else pn);
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
             } else {
                 // B4: a whole-array load is a VALUE copy. Spell it
