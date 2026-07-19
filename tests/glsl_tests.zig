@@ -3095,3 +3095,21 @@ test "dual-source blending output keeps its index qualifier" {
     try assertContains(glsl, "index = 1");
     try glslValidateOrSkip("dual-source", glsl);
 }
+
+// A depth/shadow sampler (OpTypeImage Depth==1) must keep its `Shadow` suffix in
+// the declaration; dropping it degrades to a plain sampler2D that glslang rejects
+// against the Dref sample/gather calls the body emits.
+test "shadow sampler keeps its Shadow suffix in the declaration" {
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(binding = 0) uniform mediump sampler2DShadow uT;
+        \\layout(location = 0) in vec3 vUV;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = textureGather(uT, vUV.xy, vUV.z); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "sampler2DShadow");
+    try glslValidateOrSkip("shadow-sampler", glsl);
+}
