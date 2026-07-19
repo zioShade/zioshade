@@ -12,7 +12,7 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
-const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false };
+const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false, shadow: bool = false };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
@@ -1118,7 +1118,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             const itype = if (std.mem.eql(u8, dim_str, "Buffer")) (if (tex.is_uint) "uimageBuffer" else if (tex.is_int) "iimageBuffer" else "imageBuffer") else std.fmt.allocPrint(aa, "{s}image{s}", .{ if (tex.is_uint) "u" else if (tex.is_int) "i" else "", dim_str }) catch "image2D";
             try w.print("layout(binding = {d}, {s}) uniform {s} {s}{s};\n", .{ tex_shifted, tex.format_str, itype, tex.name, arr });
         } else {
-            const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{dim_str}) catch "isampler2D" else if (std.mem.eql(u8, dim_str, "2D")) "sampler2D" else std.fmt.allocPrint(aa, "sampler{s}", .{dim_str}) catch "sampler2D";
+            // A shadow/depth sampler carries the `Shadow` suffix (sampler2DShadow,
+            // sampler2DArrayShadow, samplerCubeShadow); it is always float, so the
+            // u/i-sampler prefixes never combine with it.
+            const shadow_suffix: []const u8 = if (tex.shadow) "Shadow" else "";
+            const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{dim_str}) catch "isampler2D" else std.fmt.allocPrint(aa, "sampler{s}{s}", .{ dim_str, shadow_suffix }) catch "sampler2D";
             try w.print("layout(binding = {d}) uniform {s} {s}{s};\n", .{ tex_shifted, stype, tex.name, arr });
         }
     }
@@ -1660,7 +1664,12 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                             break :blk "2D";
                         };
                         const si_arrayed = si_img != null and si_img.?.words.len > 5 and si_img.?.words[5] == 1;
-                        tex.append(alloc, .{ .name = name, .binding = binding, .is_uint = si_uint, .is_int = si_int, .dim_str = si_dim, .array_size = arr_sz, .arrayed = si_arrayed }) catch {};
+                        // OpTypeImage Depth operand (words[4]) == 1 marks a shadow/depth
+                        // sampler (sampler2DShadow etc.). Dropping it degraded the
+                        // declaration to a plain sampler2D, which glslang rejects against
+                        // the Dref sample/gather calls the body emits.
+                        const si_shadow = si_img != null and si_img.?.words.len > 4 and si_img.?.words[4] == 1;
+                        tex.append(alloc, .{ .name = name, .binding = binding, .is_uint = si_uint, .is_int = si_int, .dim_str = si_dim, .array_size = arr_sz, .arrayed = si_arrayed, .shadow = si_shadow }) catch {};
                     },
                     .TypeImage => {
                         const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0;
