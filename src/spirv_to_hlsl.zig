@@ -35,6 +35,13 @@ threadlocal var g_loop_hoists: ?*const std.AutoHashMap(usize, std.ArrayList(comm
 threadlocal var g_hoisted_ids: ?*const std.AutoHashMap(u32, void) = null;
 threadlocal var g_hoist_stripping: bool = false;
 
+// Selection-merge phis the BranchConditional handler already materialized as a
+// `_phi` var (declared before the `if`, assigned in each arm). The generic OpPhi
+// handler must NOT then re-alias these to a branch-local incoming value (that
+// temp is out of scope at the merge — DXC rejects it). Mirrors the MSL backend's
+// g_materialized_phis. See collectMergePhisHLSL. (#491)
+threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
+
 /// HLSL type name for a loop-phi variable declaration. Returns STATIC strings
 /// only (no allocation, so no free management) for the scalar/vector types loop
 /// phis realistically carry. Falls back to "int" for exotic (matrix/struct) phis.
@@ -57,6 +64,125 @@ fn phiTypeNameHLSL(module: *const ParsedModule, type_id: u32) []const u8 {
             return "int";
         },
         else => return "int",
+    }
+}
+
+// --- Selection-merge OpPhi materialization (#491) -----------------------------
+// A value that differs by branch (`x = cond ? a : b`) lowers to an OpPhi at the
+// selection merge. HLSL has block scope, so a branch-local temp is out of scope
+// after the `if`; declare a persistent `_phi` var, assign the branch value in
+// each arm, and rename the phi id to it. Ported from the render-verified MSL
+// backend (mslExprName / mslLabelReaches / mslPhiPred1InTrueRegion /
+// collectMergePhis), which handles the same corpus shaders correctly.
+
+/// The value string for an operand id: its name, a bool literal, or the SSA
+/// fallback `v{id}`. Used to spell OpPhi incoming values.
+fn hlslExprName(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, alloc: std.mem.Allocator) []const u8 {
+    if (names.get(id)) |n| return n;
+    const def = getDef(module, id) orelse return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "0";
+    if (def.op == .ConstantTrue) return "true";
+    if (def.op == .ConstantFalse) return "false";
+    return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "0";
+}
+
+/// Whether block `target` is reachable from `cur` by following terminators without
+/// entering `stop` (the selection merge). Attributes an OpPhi predecessor to the
+/// true vs false side of a selection so nested selections attribute correctly.
+fn hlslLabelReaches(module: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), cur: u32, target: u32, stop: u32, seen: *std.AutoHashMap(u32, void)) bool {
+    if (cur == stop) return false;
+    if (cur == target) return true;
+    if (seen.contains(cur)) return false;
+    seen.put(cur, {}) catch return false;
+    const bi = label_map.get(cur) orelse return false;
+    var j = bi + 1;
+    while (j < module.instructions.len) : (j += 1) {
+        const inst = module.instructions[j];
+        switch (inst.op) {
+            .Branch => return if (inst.words.len >= 2) hlslLabelReaches(module, label_map, inst.words[1], target, stop, seen) else false,
+            .BranchConditional => {
+                if (inst.words.len < 4) return false;
+                if (hlslLabelReaches(module, label_map, inst.words[2], target, stop, seen)) return true;
+                return hlslLabelReaches(module, label_map, inst.words[3], target, stop, seen);
+            },
+            .Switch => {
+                if (inst.words.len >= 3 and hlslLabelReaches(module, label_map, inst.words[2], target, stop, seen)) return true;
+                var k: usize = 3;
+                while (k + 1 < inst.words.len) : (k += 2) {
+                    if (hlslLabelReaches(module, label_map, inst.words[k + 1], target, stop, seen)) return true;
+                }
+                return false;
+            },
+            .Return, .ReturnValue, .Kill, .Unreachable, .Label => return false,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// True if phi predecessor `pred1` lies in the TRUE region of a selection.
+fn hlslPhiPred1InTrueRegion(module: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), tl: u32, mval: u32, pred1: u32, alloc: std.mem.Allocator) bool {
+    var seen = std.AutoHashMap(u32, void).init(alloc);
+    defer seen.deinit();
+    return hlslLabelReaches(module, label_map, tl, pred1, mval, &seen);
+}
+
+const HlslMergePhi = struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 };
+
+/// Collect the two-incoming OpPhi instructions at selection-merge block `mval`
+/// (they appear at the top of the merge block). More-incoming phis are left to
+/// other handling.
+fn collectMergePhisHLSL(module: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), mval: u32, list: *std.ArrayList(HlslMergePhi), alloc: std.mem.Allocator) void {
+    const midx = label_map.get(mval) orelse return;
+    var pj: usize = midx + 1;
+    while (pj < module.instructions.len) : (pj += 1) {
+        const minst = module.instructions[pj];
+        if (minst.op != .Phi) break;
+        if (minst.words.len >= 7) {
+            list.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
+        }
+    }
+}
+
+/// Declare each merge phi as a persistent `_phi` var BEFORE the `if`. With an else
+/// arm both sides assign it, so declare it uninitialized; without an else arm the
+/// fall-through value is the incoming from the header block (in scope before the
+/// `if`), so initialize to it. (#491)
+fn emitMergePhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), label_map: *const std.AutoHashMap(u32, usize), mphis: []const HlslMergePhi, has_else: bool, tl: u32, mval: u32, w: anytype, alloc: std.mem.Allocator, indent: []const u8) !void {
+    for (mphis) |pv| {
+        const t = hlslType(module, pv.type_id, names, alloc) catch "float";
+        const vn = names.get(pv.result_id) orelse "pv";
+        if (has_else) {
+            try w.print("{s}    {s} {s}_phi;\n", .{ indent, t, vn });
+        } else {
+            const false_val = if (hlslPhiPred1InTrueRegion(module, label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+            try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, t, vn, hlslExprName(module, names, false_val, alloc) });
+        }
+    }
+}
+
+/// Copy the incoming value for one arm into each merge phi's `_phi` var, at the end
+/// of that arm's block (where the value is in scope). (#491)
+fn emitMergePhiArmCopiesHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), label_map: *const std.AutoHashMap(u32, usize), mphis: []const HlslMergePhi, tl: u32, mval: u32, true_arm: bool, w: anytype, alloc: std.mem.Allocator, indent: []const u8) !void {
+    for (mphis) |pv| {
+        const vn = names.get(pv.result_id) orelse "pv";
+        const pred1_true = hlslPhiPred1InTrueRegion(module, label_map, tl, mval, pv.preds[1], alloc);
+        // vals[1] pairs with preds[1]; pick the value whose predecessor is on this arm.
+        const val = if (true_arm)
+            (if (pred1_true) pv.vals[1] else pv.vals[0])
+        else
+            (if (pred1_true) pv.vals[0] else pv.vals[1]);
+        try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, hlslExprName(module, names, val, alloc) });
+    }
+}
+
+/// After both arms are emitted, rename each phi id to its `_phi` var and mark it
+/// materialized so the generic OpPhi handler leaves it alone. (#491)
+fn finalizeMergePhisHLSL(names: *std.AutoHashMap(u32, []const u8), mphis: []const HlslMergePhi, alloc: std.mem.Allocator) void {
+    for (mphis) |pv| {
+        const vn = names.get(pv.result_id) orelse "pv";
+        const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+        if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
+        if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
     }
 }
 
@@ -2953,13 +3079,17 @@ fn emitBody(
     defer deferred_hdr.deinit();
     var loop_hoists = std.AutoHashMap(usize, std.ArrayList(common.HoistedPhiSrc)).init(alloc);
     var hoisted_ids = std.AutoHashMap(u32, void).init(alloc);
+    var materialized_phis = std.AutoHashMap(u32, void).init(alloc);
+    g_materialized_phis = &materialized_phis;
     defer {
         var lhit = loop_hoists.valueIterator();
         while (lhit.next()) |list| list.deinit(alloc);
         loop_hoists.deinit();
         hoisted_ids.deinit();
+        materialized_phis.deinit();
         g_loop_hoists = null;
         g_hoisted_ids = null;
+        g_materialized_phis = null;
     }
     {
         var li = func_idx + 1;
@@ -3095,14 +3225,23 @@ fn emitBody(
 
             if (merge_label) |ml| {
                 const has_else = false_label != null and false_label.? != ml;
+                // #491: materialize selection-merge phis as `_phi` vars so a value
+                // that differs by branch is in scope after the `if`.
+                var mphis: std.ArrayList(HlslMergePhi) = .empty;
+                defer mphis.deinit(alloc);
+                collectMergePhisHLSL(module, &label_map, ml, &mphis, alloc);
+                try emitMergePhiDeclsHLSL(module, names, &label_map, mphis.items, has_else, true_label, ml, w, alloc, "");
                 try w.print("    if ({s}) {{\n", .{cond_name});
                 // Emit true branch
                 idx = try emitBlock(module, names, decorations, true_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                try emitMergePhiArmCopiesHLSL(module, names, &label_map, mphis.items, true_label, ml, true, w, alloc, "");
                 if (has_else) {
                     try w.writeAll("    } else {\n");
                     idx = try emitBlock(module, names, decorations, false_label.?, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                    try emitMergePhiArmCopiesHLSL(module, names, &label_map, mphis.items, true_label, ml, false, w, alloc, "");
                 }
                 try w.writeAll("    }\n");
+                finalizeMergePhisHLSL(names, mphis.items, alloc);
                 // Advance to merge label
                 if (label_map.get(ml)) |merge_idx| {
                     idx = merge_idx; // loop will increment
@@ -3768,13 +3907,21 @@ fn emitBlock(
 
             if (nested_merge) |nm| {
                 const has_else = false_lbl != null and false_lbl.? != nm;
+                // #491: materialize this nested selection's merge phis too.
+                var mphis: std.ArrayList(HlslMergePhi) = .empty;
+                defer mphis.deinit(alloc);
+                collectMergePhisHLSL(module, label_map, nm, &mphis, alloc);
+                try emitMergePhiDeclsHLSL(module, names, label_map, mphis.items, has_else, true_lbl, nm, w, alloc, indent);
                 try w.print("{s}    if ({s}) {{\n", .{ indent, cond_name });
                 i = try emitBlock(module, names, decorations, true_lbl, nm, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, indent);
+                try emitMergePhiArmCopiesHLSL(module, names, label_map, mphis.items, true_lbl, nm, true, w, alloc, indent);
                 if (has_else) {
                     try w.print("{s}    }} else {{\n", .{indent});
                     i = try emitBlock(module, names, decorations, false_lbl.?, nm, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, indent);
+                    try emitMergePhiArmCopiesHLSL(module, names, label_map, mphis.items, true_lbl, nm, false, w, alloc, indent);
                 }
                 try w.print("{s}    }}\n", .{indent});
+                finalizeMergePhisHLSL(names, mphis.items, alloc);
                 // Skip to nested merge label
                 if (label_map.get(nm)) |nm_idx| {
                     i = nm_idx; // loop will increment
@@ -4014,6 +4161,10 @@ fn emitInstruction(
         .Phi => {
             // OpPhi: SSA phi node - just use the first available predecessor value
             if (inst.words.len < 4) return;
+            // #491: a selection-merge phi already materialized as a `_phi` var by
+            // the BranchConditional handler keeps that name; re-aliasing it to a
+            // branch-local incoming value would reference an out-of-scope temp.
+            if (g_materialized_phis) |mp| if (mp.contains(inst.words[2])) return;
             const result_id = inst.words[2];
             // words[3..] are pairs of (value_id, label_id)
             // Take the first value as the phi result
