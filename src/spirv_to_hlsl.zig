@@ -2931,10 +2931,16 @@ fn emitBody(
 
             if (merge_label) |ml| {
                 try w.print("    switch ({s}) {{\n", .{selector_name});
-                // Emit default case first if it's not the merge label
+                // Brace each case body: a case that declares a variable makes the
+                // NEXT label's jump cross that declaration, which HLSL/DXC rejects
+                // ("cannot jump from switch statement to this case label"). The
+                // block scopes the declaration without affecting fall-through
+                // (execution still flows past the `}` into the next case). Mirrors
+                // the MSL backend (#471); #485.
                 if (default_label != ml) {
-                    try w.writeAll("    default:\n");
+                    try w.writeAll("    default: {\n");
                     _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                    try w.writeAll("    }\n");
                 }
                 // Emit case labels (word 3+: pairs of literal, target)
                 var wi: usize = 3;
@@ -2942,8 +2948,9 @@ fn emitBody(
                     const case_val = inst.words[wi];
                     const target_label = inst.words[wi + 1];
                     if (target_label == ml) continue; // skip branches to merge
-                    try w.print("    case {d}:\n", .{case_val});
+                    try w.print("    case {d}: {{\n", .{case_val});
                     _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                    try w.writeAll("    }\n");
                 }
                 try w.writeAll("    }\n");
                 // Advance to merge label
