@@ -1577,6 +1577,66 @@ fn spirvValOrSkip(spv: []const u32) !void {
     }
 }
 
+// Like spirvValOrSkip but validates against the Vulkan 1.3 environment, which
+// enforces the StandaloneSpirv memory-semantics rules (VUID-…-10871: a storage-
+// class semantics bit without an ordering bit is illegal). The default spirv-val
+// env does NOT enforce this, so a bug can pass spirvValOrSkip yet be invalid on a
+// modern driver. Used by the #170 atomic-semantics regression test.
+fn spirvValVulkan13OrSkip(spv: []const u32) !void {
+    const alloc = std.testing.allocator;
+    const tool = zioshade.compat.resolveVulkanTool(alloc, "spirv-val") catch return error.SkipZigTest;
+    defer alloc.free(tool);
+
+    const spv_path = try zioshade.compat.tempFilePathFmt(alloc, "zs_cor_vk_{x}.spv", .{zioshade.compat.randomInt(u64)});
+    defer alloc.free(spv_path);
+    defer zioshade.compat.deleteFileAbsolute(alloc, spv_path) catch {};
+    try zioshade.compat.writeFileAbsolute(alloc, spv_path, std.mem.sliceAsBytes(spv));
+
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const r = zioshade.compat.processRun(main_io.io(), alloc, &.{ tool, "--target-env", "vulkan1.3", spv_path }) catch return error.SkipZigTest;
+    defer alloc.free(r.stdout);
+    defer alloc.free(r.stderr);
+    if (!((r.term.exitedCode() orelse 1) == 0)) {
+        std.debug.print("spirv-val (vulkan1.3) rejected the module:\n{s}\n{s}\n", .{ r.stdout, r.stderr });
+        return error.TestSpirvValFailed;
+    }
+}
+
+// #170: GLSL atomics were emitted with UniformMemory (0x40) memory semantics but NO
+// ordering bit. Under Vulkan 1.2+ a storage-class semantics bit without an ordering
+// bit (Acquire/Release/AcquireRelease) is illegal (VUID-StandaloneSpirv-Memory
+// Semantics-10871) = INVALID SPIR-V on modern drivers. The older default spirv-val
+// env accepted it, so conformance missed it. GLSL atomics are relaxed → emit None
+// (0x0), matching glslang. Covers the 6-word ops (AtomicIAdd via atomicAdd) and the
+// 9-word OpAtomicCompareExchange (two semantics operands). Validates under vulkan1.3,
+// which enforces the rule (a genuine RED/GREEN discriminator vs the default env).
+test "frontend: relaxed atomics use None semantics — valid under Vulkan 1.3" {
+    const alloc = std.testing.allocator;
+    {
+        const spv = try zioshade.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(local_size_x=64) in;
+            \\shared int counter;
+            \\layout(std430,binding=0) buffer B { int outv[]; };
+            \\void main(){ if(gl_LocalInvocationID.x==0u) counter=0; barrier();
+            \\  outv[gl_GlobalInvocationID.x] = atomicAdd(counter, 1); }
+        , .{ .stage = .compute });
+        defer alloc.free(spv);
+        try spirvValVulkan13OrSkip(spv);
+    }
+    {
+        const spv = try zioshade.compileToSPIRV(alloc,
+            \\#version 450
+            \\layout(local_size_x=64) in;
+            \\layout(std430,binding=0) buffer B { uint v; uint o[]; };
+            \\void main(){ o[gl_GlobalInvocationID.x] = atomicCompSwap(v, 0u, 7u); }
+        , .{ .stage = .compute });
+        defer alloc.free(spv);
+        try spirvValVulkan13OrSkip(spv);
+    }
+}
+
 const dyn_double_index_src =
     \\#version 450
     \\layout(location=0) in vec3 a; layout(location=1) in vec3 b; layout(location=2) in vec3 c;
