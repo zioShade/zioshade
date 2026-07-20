@@ -15090,3 +15090,38 @@ test "hlsl: selection-merge phi is materialized as a persistent _phi var (#491)"
     try assertContains(hlsl, "_phi;");
     try assertContains(hlsl, "_phi = ");
 }
+
+// #492: a struct used only as an array-element type (`Hit hits[3];`) inside
+// another struct was never declared — the forward-decl recursion stopped at the
+// TypeArray wrapper and never unwrapped it to the element struct, so HLSL saw an
+// undeclared type name and DXC rejected the shader. Unwrap array/pointer wrappers
+// when recursing so the dependency struct is declared first. Fixes struct-array,
+// bullseye_struct, nested_struct_arr in the corpus.
+test "hlsl: a struct used only as an array-element type is declared first (#492)" {
+    // Seed the struct from an input and add data-dependent control flow so
+    // glslang cannot constant-fold the struct away (which would erase the bug).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct Hit { float t; int id; };
+        \\struct Scene { Hit hits[3]; float ambient; };
+        \\void main() {
+        \\    Scene s;
+        \\    s.hits[0].t = uv.x; s.hits[0].id = int(uv.y);
+        \\    s.hits[1].t = uv.y; s.hits[1].id = 1;
+        \\    s.ambient = uv.x * uv.y;
+        \\    float m = s.hits[0].t;
+        \\    if (s.hits[1].t < m) { m = s.hits[1].t; }
+        \\    fragColor = vec4(m, float(s.hits[0].id), s.ambient, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Both structs are declared, and Hit comes before Scene (which references it).
+    try assertContains(hlsl, "struct Hit");
+    try assertContains(hlsl, "struct Scene");
+    const hit_pos = std.mem.indexOf(u8, hlsl, "struct Hit").?;
+    const scene_pos = std.mem.indexOf(u8, hlsl, "struct Scene").?;
+    try std.testing.expect(hit_pos < scene_pos);
+}
