@@ -1653,6 +1653,32 @@ test "frontend: relaxed atomics use None semantics — valid under Vulkan 1.3" {
     }
 }
 
+// #170: an integer fragment INPUT — including implicitly-flat integer builtins that
+// carry no `flat` qualifier (gl_SampleID here) — was emitted WITHOUT a Flat
+// decoration. Vulkan forbids interpolating integers, so a fragment integer/double
+// Input MUST be Flat (VUID-StandaloneSpirv-Flat-04744) = invalid SPIR-V without it;
+// the lenient default spirv-val env missed it. Validated under vulkan1.3.
+test "frontend: integer fragment input (gl_SampleID) is Flat — valid under Vulkan 1.3" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(gl_SampleID), 0.0, 0.0, 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try spirvValVulkan13OrSkip(spv);
+    // A user `flat in int` must still work (and float inputs must NOT get Flat).
+    const spv2 = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) flat in int idx;
+        \\layout(location=1) in float w;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(idx) + w); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv2);
+    try spirvValVulkan13OrSkip(spv2);
+}
+
 // #170: a compute (GLCompute) entry point with NO `layout(local_size_*)` was
 // emitted WITHOUT a LocalSize execution mode. Vulkan requires one (VUID-Standalone
 // Spirv-None-10685) → invalid SPIR-V on modern drivers; the lenient default spirv-

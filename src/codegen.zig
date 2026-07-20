@@ -3491,8 +3491,16 @@ const Codegen = struct {
             // gl_VertexIndex → already covered by gl_VertexID
             // Decorate uniform/storage buffer struct types with Block/BufferBlock + Offset
             // (emitted inline in ensureType for named structs)
-            // Emit Flat decoration for flat-qualified IO variables
-            if (global.qualifier.is_flat and (global.storage_class == .input or global.storage_class == .output)) {
+            // Flat interpolation: an explicit `flat` qualifier (input OR output), OR
+            // any fragment INPUT whose type is integer/double — Vulkan forbids
+            // interpolating those, so they MUST be Flat (VUID-StandaloneSpirv-Flat-
+            // 04744). Integer builtins (gl_SampleID, gl_PrimitiveID, gl_SampleMaskIn,
+            // gl_Layer, …) are implicitly flat but carry no `flat` qualifier; without
+            // the type check they were emitted un-decorated = invalid SPIR-V (the
+            // lenient default spirv-val env missed it). (#170)
+            const flat_by_qual = global.qualifier.is_flat and (global.storage_class == .input or global.storage_class == .output);
+            const flat_by_type = self.stage == .fragment and global.storage_class == .input and global.ty.requiresFlatFragInput();
+            if (flat_by_qual or flat_by_type) {
                 try self.emitDecorateNoExtra(global.result_id, @intFromEnum(spirv.Decoration.flat));
             }
             // Emit Invariant decoration for invariant-qualified output variables
