@@ -644,17 +644,32 @@ pub const Timer = struct {
 /// portable across machines / CI / non-Windows. Callers that spawn the result
 /// should degrade a spawn failure to a skip rather than a hard failure.
 pub fn resolveVulkanTool(allocator: std.mem.Allocator, tool: []const u8) ![]const u8 {
+    // Read the ambient VULKAN_SDK and delegate to the pure resolver. Splitting the
+    // env read from the path logic keeps the latter hermetically testable — a test
+    // that exercised this function directly would depend on whether the HOST has the
+    // SDK installed (VULKAN_SDK set), so it failed on dev machines / CI with the SDK
+    // present while passing on bare runners. (#170: keep `zig build test` green
+    // regardless of host env.)
+    const sdk = getEnvVarOwned(allocator, "VULKAN_SDK");
+    defer if (sdk) |s| allocator.free(s);
+    return resolveVulkanToolWith(allocator, tool, sdk);
+}
+
+/// Pure core of `resolveVulkanTool`: given the VULKAN_SDK value (`null` = unset),
+/// return `<sdk>/Bin/<tool>[.exe]` when it points somewhere, else the bare
+/// `<tool>[.exe]` for a PATH lookup. No environment access — fully testable.
+/// Caller owns the returned slice.
+fn resolveVulkanToolWith(allocator: std.mem.Allocator, tool: []const u8, sdk: ?[]const u8) ![]const u8 {
     const exe = if (builtin.os.tag == .windows)
         try std.fmt.allocPrint(allocator, "{s}.exe", .{tool})
     else
         try allocator.dupe(u8, tool);
-    if (getEnvVarOwned(allocator, "VULKAN_SDK")) |sdk| {
-        defer allocator.free(sdk);
+    if (sdk) |s| {
         // Treat a set-but-empty value as unset so we fall back to PATH rather
         // than building a bogus relative "Bin/<tool>" path.
-        if (sdk.len == 0) return exe;
+        if (s.len == 0) return exe;
         defer allocator.free(exe);
-        return try std.fs.path.join(allocator, &.{ sdk, "Bin", exe });
+        return try std.fs.path.join(allocator, &.{ s, "Bin", exe });
     }
     // Unset or unreadable: fall back to PATH lookup by bare name.
     return exe;
@@ -730,13 +745,37 @@ pub fn StackBufWriter(comptime size: usize) type {
 // ---- Tests ----
 
 test "resolveVulkanTool falls back to bare tool name without VULKAN_SDK" {
-    // With VULKAN_SDK unset (or set-but-empty), and on 0.16 where env access is
-    // unavailable without an Io context, resolution degrades to the bare name.
+    // Exercise the PURE resolver with an explicit SDK value so the assertion does
+    // not depend on the host's ambient VULKAN_SDK (previously this called the env-
+    // reading wrapper and failed on any machine WITH the SDK installed — the full
+    // "<sdk>/Bin/spirv-val.exe" path came back, not the bare name).
     const alloc = std.testing.allocator;
-    const got = try resolveVulkanTool(alloc, "spirv-val");
-    defer alloc.free(got);
     const expected = if (builtin.os.tag == .windows) "spirv-val.exe" else "spirv-val";
-    try std.testing.expectEqualStrings(expected, got);
+    // Unset -> bare name.
+    {
+        const got = try resolveVulkanToolWith(alloc, "spirv-val", null);
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(expected, got);
+    }
+    // Set-but-empty is treated as unset -> bare name.
+    {
+        const got = try resolveVulkanToolWith(alloc, "spirv-val", "");
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings(expected, got);
+    }
+}
+
+test "resolveVulkanTool joins Bin/<tool> when VULKAN_SDK points somewhere" {
+    const alloc = std.testing.allocator;
+    const got = try resolveVulkanToolWith(alloc, "spirv-val", "/opt/vk");
+    defer alloc.free(got);
+    // Path join is platform-specific ('/' vs '\'); assert the pieces are present
+    // and the bare-name fallback did NOT fire.
+    try std.testing.expect(std.mem.indexOf(u8, got, "/opt/vk") != null);
+    try std.testing.expect(std.mem.indexOf(u8, got, "Bin") != null);
+    const leaf = if (builtin.os.tag == .windows) "spirv-val.exe" else "spirv-val";
+    try std.testing.expect(std.mem.endsWith(u8, got, leaf));
+    try std.testing.expect(!std.mem.eql(u8, got, leaf)); // not the bare-name fallback
 }
 
 test "absolute file helpers round-trip bytes under the temp dir" {
