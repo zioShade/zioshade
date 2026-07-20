@@ -1080,6 +1080,31 @@ test "frontend: modf out-param survives store-forward (OpExtInst barrier)" {
     try spirvValOrSkip(spv);
 }
 
+// #170: the UNINITIALIZED out-param variant of the modf/frexp defect. When the pointer
+// argument is a variable declared WITHOUT an initializer (`float ip; modf(x, ip);`), the
+// builtin's arg pre-analysis analyzes `ip` as an rvalue and emits (and CACHES) a load of
+// the variable BEFORE the OpExtInst runs. A later read of the out-param (`o.y = ip`)
+// reused that cached PRE-modf load = silent-wrong: `o.y` came out as the uninitialized
+// value, not modf's integer part (the read-back OpLoad was hoisted above the OpExtInst).
+// This is a DISTINCT path from the initialized case above (no store → no store-forward
+// barrier fires); the fix invalidates the pointer's load cache after the OpExtInst so the
+// post-modf read re-loads memory. Discriminator: pre-fix there is NO OpLoad of the ip
+// pointer after the OpExtInst (the composite uses the hoisted pre-modf load).
+test "frontend: uninitialized modf out-param re-loads after OpExtInst (no stale hoist)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float ip; float fr = modf(iv.x, ip); o = vec4(fr, ip, 0.0, 1.0); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // modf's integer part must be a live OpLoad of the ip pointer AFTER the OpExtInst,
+    // not the pre-modf (uninitialized) load hoisted above it.
+    try std.testing.expect(extInstOutputReloaded(spv));
+    try spirvValOrSkip(spv);
+}
+
 // #170: textureProjOffset (projective sample + const offset, no lod/grad) was wrongly
 // rejected (UndeclaredIdentifier). It IS representable: OpImageSampleProjImplicitLod
 // with a ConstOffset operand (its own IR tag — image_sample_proj has no operands).

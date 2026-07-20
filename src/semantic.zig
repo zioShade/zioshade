@@ -8241,6 +8241,14 @@ const Analyzer = struct {
                                 .operands = operands,
                                 .ty = arg_tids.items[0].ty,
                             });
+                            // modf/frexp WRITE their out-param through ptr_id. The arg
+                            // pre-analysis already emitted (and cached) an rvalue load of
+                            // that same variable; a later read of the out-param would reuse
+                            // that STALE pre-write load = silent-wrong (the value from before
+                            // modf ran — uninitialized when the var was declared without an
+                            // initializer). Invalidate the cache so subsequent reads re-load
+                            // the written integer part / exponent. (#170)
+                            self.invalidatePtrLoadCache(ptr_id);
                         } else {
                             // Fallback: use Struct version with 1 arg (no output param)
                             const struct_glsl_id: u32 = if (std.mem.eql(u8, node.data.name, "modf")) 36 else 52;
