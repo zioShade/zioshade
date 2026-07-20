@@ -1146,6 +1146,22 @@ test "T-mutualrec.msl: mutual recursion gets forward prototypes (#480)" {
     try assertContains(msl, ");\nfloat "); // a `);` prototype line precedes a definition
 }
 
+// #481: gl_SampleMaskIn is an int[] in GLSL but Metal's [[sample_mask]] is a
+// scalar uint. Thread it as a fragment entry param and drop the `[0]` array
+// index so the body reads the scalar (was an undeclared identifier before).
+test "T-samplemask.msl: gl_SampleMaskIn maps to scalar [[sample_mask]] (#481)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vec4(gl_SampleMaskIn[0]); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "uint gl_SampleMaskIn [[sample_mask]]");
+    // The GLSL array index is dropped: no `gl_SampleMaskIn[0]` survives.
+    try assertNotContains(msl, "gl_SampleMaskIn[0]");
+}
+
 // ---------------------------------------------------------------------------
 // T16: VERTEX stage I/O (mirrors T15 fragment, structurally matched to
 // spirv-cross --msl). Vertex inputs use `[[attribute(N)]]` (NOT
