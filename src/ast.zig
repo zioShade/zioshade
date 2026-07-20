@@ -326,6 +326,23 @@ pub const Type = union(enum) {
         };
     }
 
+    /// True for types that cannot be interpolated across a fragment and therefore
+    /// must carry a Flat decoration on a fragment Input under Vulkan (VUID-Standalone
+    /// Spirv-Flat-04744): any integer type (scalar or vector) and double. Covers the
+    /// implicitly-flat integer builtins (gl_SampleID, gl_PrimitiveID, gl_Layer,
+    /// gl_SampleMaskIn, …) that carry no explicit `flat` qualifier, as well as user
+    /// integer inputs.
+    pub fn requiresFlatFragInput(self: Type) bool {
+        return switch (self) {
+            .int, .uint, .int8, .uint8, .int16, .uint16, .ivec2, .ivec3, .ivec4, .uvec2, .uvec3, .uvec4, .double => true,
+            // An array of an integer/double type is equally non-interpolatable — this
+            // covers the integer-array builtins that carry no `flat` qualifier, e.g.
+            // gl_SampleMaskIn (`int[]`). glslang decorates those Flat too.
+            .array => |arr| arr.base.*.requiresFlatFragInput(),
+            else => false,
+        };
+    }
+
     pub fn isMatrix(self: Type) bool {
         return switch (self) {
             .mat2, .mat3, .mat4, .mat2x2, .mat2x3, .mat2x4, .mat3x2, .mat3x3, .mat3x4, .mat4x2, .mat4x3, .mat4x4 => true,
