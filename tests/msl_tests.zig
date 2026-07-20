@@ -1162,6 +1162,21 @@ test "T-samplemask.msl: gl_SampleMaskIn maps to scalar [[sample_mask]] (#481)" {
     try assertNotContains(msl, "gl_SampleMaskIn[0]");
 }
 
+// #482: OpImageQueryLevels (textureQueryLevels) had no MSL emit arm, so its
+// result id was undefined ("unhandled op 106"). Map it to get_num_mip_levels().
+test "T-querylevels.msl: textureQueryLevels maps to get_num_mip_levels() (#482)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = vec4(float(textureQueryLevels(tex))); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "get_num_mip_levels()");
+    try assertNotContains(msl, "unhandled op");
+}
+
 // ---------------------------------------------------------------------------
 // T16: VERTEX stage I/O (mirrors T15 fragment, structurally matched to
 // spirv-cross --msl). Vertex inputs use `[[attribute(N)]]` (NOT
