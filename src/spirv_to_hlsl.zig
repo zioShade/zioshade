@@ -1996,10 +1996,23 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
     const inst = common.localGetDef(instructions, id_defs, type_id) orelse return;
     if (inst.op != .TypeStruct) return;
 
-    // Recurse into member types first
+    // Recurse into member types first, so a dependency struct is declared before
+    // the struct that uses it. Unwrap array/pointer wrappers: a struct used only
+    // as an array element (`Hit hits[3];`) or through a pointer is otherwise
+    // never declared, and HLSL rejects the undeclared type name. (#492)
     if (inst.words.len > 2) {
         for (inst.words[2..]) |mt_id| {
-            try hlslEmitOneStructForwardDecl(module, names, mt_id, w, alloc, emitted, emitted_names);
+            var underlying = mt_id;
+            var u_inst = common.localGetDef(instructions, id_defs, underlying);
+            while (u_inst) |ui| {
+                if ((ui.op == .TypeArray or ui.op == .TypeRuntimeArray) and ui.words.len > 2) {
+                    underlying = ui.words[2];
+                } else if (ui.op == .TypePointer and ui.words.len > 3) {
+                    underlying = ui.words[3];
+                } else break;
+                u_inst = common.localGetDef(instructions, id_defs, underlying);
+            }
+            try hlslEmitOneStructForwardDecl(module, names, underlying, w, alloc, emitted, emitted_names);
         }
     }
 
