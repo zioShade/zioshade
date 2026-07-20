@@ -195,3 +195,34 @@ zioshade is a focused replacement for the shader-compilation surface wintty need
 boundary made explicit and measurable. The guarantee is not "compiles every
 Khronos shader" but "for every shader, either matches the reference or refuses —
 never silently diverges." The tables above are the evidence for that guarantee.
+
+---
+
+## Per-backend verification confidence (be honest about what is proven)
+
+Not every backend is verified to the same depth. The distinction that matters is
+**compile-validity** (a real target compiler accepts the output) vs
+**render-correctness** (the output produces the right pixels).
+
+| Backend | Compile oracle | Render-verified? |
+| --- | --- | --- |
+| GLSL | glslangValidator | GLSL rendered on Windows OpenGL (RENDERING_RESULTS.md) |
+| WGSL | naga | not rendered (naga validates semantics) |
+| MSL  | Metal `makeLibrary` | **yes** — `ShaderCompare.swift` renders on-GPU, 0-pixel diff vs spirv-cross |
+| HLSL | DXC (`ps_6_0`, in a docker container) | **NO — compile-verified only** |
+
+HLSL render-verification is not currently possible in this dev environment (no
+DirectX/GPU on macOS), so the HLSL sweep (`tools/hlsl_validity_sweep.sh`) proves
+the output **compiles** under DXC, not that it **renders** correctly. Matrix
+operations (the largest HLSL cluster) are argued correct by
+**codegen-equivalence with the render-verified MSL backend** — zioshade emits
+byte-identical matrix construction, the same `mul(M,v)` order, and the same
+`spvInverseNxN` helper as MSL, whose rendering is proven above. That is a strong
+inference, not a measurement.
+
+**Recommended pre-launch gate:** stand up a headless HLSL render check on a
+Windows runner (D3D WARP software rasterizer, in the Windows SDK) — one
+round-trip golden test (identity, a known rotation, and `M · inverse(M) == I` read
+back from a render target) retroactively validates the whole HLSL matrix surface
+and makes every future matrix fix render-verifiable. Until then, HLSL matrix
+correctness is stated as *compile-verified, render-inferred*.

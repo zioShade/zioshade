@@ -675,6 +675,125 @@ fn hlslHasRecursion(m: *const ParsedModule, alloc: std.mem.Allocator) bool {
     return false;
 }
 
+// HLSL has no matrix inverse() builtin, so GLSL inverse(matN) (GLSL.std.450
+// MatrixInverse=34) lowers to a generated closed-form cofactor/adjugate helper.
+// These are byte-identical to the MSL backend's spvInverseNxN (verified valid
+// HLSL); zioshade's HLSL matrix convention (column-major, float2x2(col0,col1) +
+// mul(M,v)) matches the MSL backend's exactly (confirmed by codegen diff), so the
+// same column-major helper is correct here. Emitted at most once per dimension.
+// (#488)
+const spv_inverse2_hlsl =
+    \\float2x2 spvInverse2x2(float2x2 m)
+    \\{
+    \\    float det = m[0][0] * m[1][1] - m[0][1] * m[1][0];
+    \\    return float2x2(m[1][1], -m[0][1], -m[1][0], m[0][0]) * (1.0 / det);
+    \\}
+    \\
+    \\
+;
+const spv_inverse3_hlsl =
+    \\float3x3 spvInverse3x3(float3x3 m)
+    \\{
+    \\    float a = m[0][0]; float b = m[1][0]; float c = m[2][0];
+    \\    float d = m[0][1]; float e = m[1][1]; float f = m[2][1];
+    \\    float g = m[0][2]; float h = m[1][2]; float i = m[2][2];
+    \\    float A = (e * i - f * h);
+    \\    float B = (f * g - d * i);
+    \\    float C = (d * h - e * g);
+    \\    float det = a * A + b * B + c * C;
+    \\    float inv_det = 1.0 / det;
+    \\    return float3x3(
+    \\        A * inv_det,
+    \\        B * inv_det,
+    \\        C * inv_det,
+    \\        (c * h - b * i) * inv_det,
+    \\        (a * i - c * g) * inv_det,
+    \\        (b * g - a * h) * inv_det,
+    \\        (b * f - c * e) * inv_det,
+    \\        (c * d - a * f) * inv_det,
+    \\        (a * e - b * d) * inv_det);
+    \\}
+    \\
+    \\
+;
+const spv_inverse4_hlsl =
+    \\float4x4 spvInverse4x4(float4x4 m)
+    \\{
+    \\    float a00 = m[0][0]; float a01 = m[0][1]; float a02 = m[0][2]; float a03 = m[0][3];
+    \\    float a10 = m[1][0]; float a11 = m[1][1]; float a12 = m[1][2]; float a13 = m[1][3];
+    \\    float a20 = m[2][0]; float a21 = m[2][1]; float a22 = m[2][2]; float a23 = m[2][3];
+    \\    float a30 = m[3][0]; float a31 = m[3][1]; float a32 = m[3][2]; float a33 = m[3][3];
+    \\    float b00 = a00 * a11 - a01 * a10;
+    \\    float b01 = a00 * a12 - a02 * a10;
+    \\    float b02 = a00 * a13 - a03 * a10;
+    \\    float b03 = a01 * a12 - a02 * a11;
+    \\    float b04 = a01 * a13 - a03 * a11;
+    \\    float b05 = a02 * a13 - a03 * a12;
+    \\    float b06 = a20 * a31 - a21 * a30;
+    \\    float b07 = a20 * a32 - a22 * a30;
+    \\    float b08 = a20 * a33 - a23 * a30;
+    \\    float b09 = a21 * a32 - a22 * a31;
+    \\    float b10 = a21 * a33 - a23 * a31;
+    \\    float b11 = a22 * a33 - a23 * a32;
+    \\    float det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    \\    float inv_det = 1.0 / det;
+    \\    return float4x4(
+    \\        ( a11 * b11 - a12 * b10 + a13 * b09) * inv_det,
+    \\        (-a01 * b11 + a02 * b10 - a03 * b09) * inv_det,
+    \\        ( a31 * b05 - a32 * b04 + a33 * b03) * inv_det,
+    \\        (-a21 * b05 + a22 * b04 - a23 * b03) * inv_det,
+    \\        (-a10 * b11 + a12 * b08 - a13 * b07) * inv_det,
+    \\        ( a00 * b11 - a02 * b08 + a03 * b07) * inv_det,
+    \\        (-a30 * b05 + a32 * b02 - a33 * b01) * inv_det,
+    \\        ( a20 * b05 - a22 * b02 + a23 * b01) * inv_det,
+    \\        ( a10 * b10 - a11 * b08 + a13 * b06) * inv_det,
+    \\        (-a00 * b10 + a01 * b08 - a03 * b06) * inv_det,
+    \\        ( a30 * b04 - a31 * b02 + a33 * b00) * inv_det,
+    \\        (-a20 * b04 + a21 * b02 - a23 * b00) * inv_det,
+    \\        (-a10 * b09 + a11 * b07 - a12 * b06) * inv_det,
+    \\        ( a00 * b09 - a01 * b07 + a02 * b06) * inv_det,
+    \\        (-a30 * b03 + a31 * b01 - a32 * b00) * inv_det,
+    \\        ( a20 * b03 - a21 * b01 + a22 * b00) * inv_det);
+    \\}
+    \\
+    \\
+;
+
+/// Square dimension (2/3/4) of a MatrixInverse result matrix type, or null if not
+/// a supported square float matrix. (#488)
+fn matrixInverseDim(m: *const ParsedModule, result_type_id: u32) ?u8 {
+    const ti = getDef(m, result_type_id) orelse return null;
+    if (ti.op != .TypeMatrix or ti.words.len < 4) return null;
+    const cols = ti.words[3];
+    const col_inst = getDef(m, ti.words[2]) orelse return null;
+    if (col_inst.op != .TypeVector or col_inst.words.len < 4) return null;
+    const rows = col_inst.words[3];
+    if (cols != rows) return null;
+    return switch (cols) {
+        2, 3, 4 => @intCast(cols),
+        else => null,
+    };
+}
+
+const InverseDims = struct { n2: bool = false, n3: bool = false, n4: bool = false };
+
+/// Scan for GLSL.std.450 MatrixInverse(34) ExtInsts and record which helper
+/// dimensions are needed, so each is emitted at most once. (#488)
+fn moduleInverseDims(m: *const ParsedModule) InverseDims {
+    var r = InverseDims{};
+    for (m.instructions) |inst| {
+        if (inst.op == .ExtInst and inst.words.len >= 6 and inst.words[4] == 34) {
+            if (matrixInverseDim(m, inst.words[1])) |d| switch (d) {
+                2 => r.n2 = true,
+                3 => r.n3 = true,
+                4 => r.n4 = true,
+                else => {},
+            };
+        }
+    }
+    return r;
+}
+
 pub fn spirvToHLSL(
     alloc: std.mem.Allocator,
     spirv_words: []const u32,
@@ -779,6 +898,13 @@ pub fn spirvToHLSL(
     if (bf_needs.insert) try w.writeAll(spv_bitfield_insert_hlsl);
     if (bf_needs.uextract) try w.writeAll(spv_bitfield_uextract_hlsl);
     if (bf_needs.sextract) try w.writeAll(spv_bitfield_sextract_hlsl);
+
+    // HLSL has no matrix inverse() — emit the closed-form spvInverseNxN helper(s)
+    // once for each dimension actually used (#488).
+    const inv_dims = moduleInverseDims(&module);
+    if (inv_dims.n2) try w.writeAll(spv_inverse2_hlsl);
+    if (inv_dims.n3) try w.writeAll(spv_inverse3_hlsl);
+    if (inv_dims.n4) try w.writeAll(spv_inverse4_hlsl);
 
     // Emit struct forward declarations for types used in cbuffers
     var emitted_structs = std.AutoHashMap(u32, void).init(aa);
@@ -4282,6 +4408,17 @@ fn emitInstruction(
         .ExtInst => {
             if (inst.words.len < 5) return;
             const instruction = inst.words[4];
+            // MatrixInverse (34): HLSL has no inverse() builtin — call the generated
+            // spvInverseNxN helper (emitted once in the preamble). Non-square/
+            // unsupported matrices honest-error. (#488)
+            if (instruction == 34) {
+                if (inst.words.len < 6) return;
+                const d = matrixInverseDim(module, inst.words[1]) orelse return error.UnsupportedOp;
+                const rt = try hlslType(module, inst.words[1], names, alloc);
+                const arg = names.get(inst.words[5]) orelse "m";
+                try w.print("    {s} {s} = spvInverse{d}x{d}({s});\n", .{ rt, names.get(inst.words[2]) orelse "v", d, d, arg });
+                return;
+            }
             // FrexpStruct (52) and ModfStruct (36) return structs — decompose to two-arg form
             if (instruction == 52 or instruction == 36) {
                 const result_id = inst.words[2];

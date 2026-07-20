@@ -15012,3 +15012,24 @@ test "hlsl: constant matrix folds to a matrix constructor (#487)" {
     // No undeclared matrix temp survives into a mul().
     try assertNotContains(hlsl, "mul(v8,");
 }
+
+// #488: HLSL has no matrix inverse() builtin. GLSL inverse(matN) lowers to a
+// generated spvInverseNxN helper (byte-identical to the render-verified MSL
+// backend's; zioshade's HLSL matrix convention matches MSL's column-major).
+test "hlsl: inverse(mat2) lowers to the spvInverse2x2 helper (#488)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = mat2(1.0, 2.0, 3.0, 4.0);
+        \\    fragColor = vec4(inverse(m) * uv, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // The helper is defined and called; the non-existent HLSL inverse() is gone.
+    try assertContains(hlsl, "float2x2 spvInverse2x2(float2x2 m)");
+    try assertContains(hlsl, "spvInverse2x2(");
+    try assertNotContains(hlsl, " = inverse(");
+}
