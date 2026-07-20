@@ -241,10 +241,19 @@ MSL for `mat_branch` (mat2) but diverges for mat3-class shaders. So HLSL matrix
 correctness is now a **measured open question, not a safe inference** — the DXC
 compile sweep passes these shaders (they are valid HLSL) but they render wrong.
 
-**Pre-launch gate — WARP (`tools/warp/`):** a D3D12 WARP render harness (the real
-`DXC → DXIL → D3D12` path) is built and ready to run on Windows. It renders
-zioshade's HLSL against SPIRV-Cross's HLSL directly on the shipping runtime, with
-no SPIRV-Cross→MSL proxy, and will (a) confirm the matrix divergence on the real
-path and pin down which side is wrong, and (b) render-verify the whole HLSL surface
-there. Run `mat3_branch`, `mat_cond_swizzle`, `outer_product_test` first. See
-`tools/warp/README.md`.
+**Confirmed on WARP (real D3D12).** The `tools/warp/` harness (`DXC → DXIL → D3D12
+WARP`, no MSL proxy) was run on a Windows box: `RENDER-MATCH = 5` (controls incl.
+mat_branch/mat2), `RENDER-DIFFER = 3` — the same `mat3_branch`, `mat_cond_swizzle`,
+`outer_product_test`. So the divergence is real on the shipping runtime, not a proxy
+artifact, and zioshade's HLSL (not SPIRV-Cross's) is the one that renders wrong.
+
+**Root cause.** HLSL's `floatCxR(a, b, c)` constructor fills the matrix by ROWS,
+whereas MSL's `matCxR(a, b, c)` fills by COLUMNS. zioshade emits the same
+column-by-column construction for both backends, so in HLSL it stores the transpose;
+`mul(M, v)` then computes Mᵀ·v. SPIRV-Cross stores the same transpose but compensates
+with `mul(v, M)` (= M·v). The earlier "codegen-equivalence with the render-verified
+MSL backend" argument was therefore a false analogy — MSL and HLSL matrix
+constructors have opposite row/column semantics. mat2 shaders happened to match; mat3
+exposes it. Fix is a matrix-convention correction in `spirv_to_hlsl.zig` (mul operand
+order plus construction / indexing / inverse consistency), verifiable via
+`tools/hlsl_render_check.sh` on macOS and re-confirmable on WARP.

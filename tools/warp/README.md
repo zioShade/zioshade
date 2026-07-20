@@ -27,10 +27,27 @@ self-contained procedural shader class the Metal harness also covers).
    `dxgi.lib`, and `d3d10warp.dll` come with them / with Windows.
 2. `dxc.exe` on `PATH` (Windows SDK `bin\x64`, or the standalone DXC release —
    the same one used by the macOS docker oracle).
-3. Build the renderer once, in an **x64 Native Tools Command Prompt**:
+3. Build the renderer once. With a full "Desktop C++" MSVC install, from an **x64
+   Native Tools Command Prompt**:
    ```
    cl /std:c++17 /EHsc /O2 warp_render.cpp /link d3d12.lib dxgi.lib
    ```
+   If `cl`/`vcvars64` are unavailable (VS installed without the C++ workload) but
+   LLVM + the MSVC toolset headers + the Windows SDK are present — as on the
+   `ryzen7pro` box — build with clang-cl + lld and explicit toolset/SDK paths
+   (this is the recipe that actually built it there):
+   ```bat
+   set "PATH=C:\Program Files\LLVM\bin;%PATH%"
+   set "MSVC=C:\Program Files\Microsoft Visual Studio\18\Community\VC\Tools\MSVC\14.51.36231"
+   set "SDK=C:\Program Files (x86)\Windows Kits\10"
+   set "SDKVER=10.0.26100.0"
+   set "INCLUDE=%MSVC%\include;%SDK%\Include\%SDKVER%\ucrt;%SDK%\Include\%SDKVER%\um;%SDK%\Include\%SDKVER%\shared;%SDK%\Include\%SDKVER%\winrt"
+   set "LIB=%MSVC%\lib\x64;%SDK%\Lib\%SDKVER%\ucrt\x64;%SDK%\Lib\%SDKVER%\um\x64"
+   clang-cl /std:c++17 /EHsc /O2 /D_CRT_SECURE_NO_WARNINGS warp_render.cpp /Fe:warp_render.exe -fuse-ld=lld /link d3d12.lib dxgi.lib
+   ```
+   The pixel-shader DXIL must be compiled by a **DXIL-capable** dxc (has `dxil.dll`
+   next to it) — the Windows SDK dxc, NOT the Vulkan SDK dxc (SPIR-V only). On
+   ryzen7pro that is `C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\dxc.exe`.
 
 ## Run
 
@@ -63,7 +80,15 @@ named. Exit code 1 if any shader diverged, so it doubles as a gate.
 
 ## Status
 
-Authored on macOS and **not yet run** (no Windows in the authoring session). First
-run on the `ryzen7pro` box is pending SSH access (enable OpenSSH Server on Windows).
-Expect to iterate on the first compile. The macOS Metal check (`hlsl_render_check.sh`)
-is the already-proven, runs-anywhere complement.
+**Run and green on `ryzen7pro` (Windows 11, D3D12 WARP).** Over an 8-shader set:
+`RENDER-MATCH = 5` (controls: mat_branch/mat2, outer_product, mandelbrot_smooth,
+swizzle_access, struct_tern), `RENDER-DIFFER = 3` — `mat3_branch`,
+`mat_cond_swizzle`, `outer_product_test` — the exact three the macOS Metal proxy
+predicted. So the harness works end-to-end and **confirms a real zioshade HLSL
+matrix bug on the shipping DXC->DXIL->D3D12 runtime**: HLSL's `floatCxR(a,b,c)`
+constructor fills ROWS (MSL's `matCxR` fills columns), so zioshade building a matrix
+from GLSL columns stores the transpose, and `mul(M, v)` then computes M^T*v. SPIRV-
+Cross stores the same transpose but compensates with `mul(v, M)`. Fix is a matrix-
+convention correction in `spirv_to_hlsl.zig` (mul operand order + construction/
+indexing/inverse consistency), verifiable via `tools/hlsl_render_check.sh` (fast,
+macOS) and re-confirmable here.
