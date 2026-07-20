@@ -6062,6 +6062,23 @@ fn emitInstruction(
                 try w.print("    {s} {s} = {s}.get_width();\n", .{ rtt, rn, img });
             }
         },
+        // #482: OpImageQueryLevels / OpImageQuerySamples had no emit arm (fell to
+        // "unhandled op" so the result id was never defined). Metal: mip-level
+        // count is texture.get_num_mip_levels(), sample count is
+        // texture.get_num_samples() (the latter needs a multisampled texture type).
+        // Both return uint; cast to the (int) result type.
+        .ImageQueryLevels => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            try w.print("    {s} {s} = {s}({s}.get_num_mip_levels());\n", .{ rtt, rn, rtt, img });
+        },
+        .ImageQuerySamples => {
+            const rtt = try mslType(m, inst.words[1], names, alloc);
+            const rn = names.get(inst.words[2]) orelse "v";
+            const img = names.get(inst.words[3]) orelse "tex";
+            try w.print("    {s} {s} = {s}({s}.get_num_samples());\n", .{ rtt, rn, rtt, img });
+        },
         .Kill => try w.writeAll("    discard_fragment();\n"),
         .Unreachable => {}, // no-op
         .BeginInvocationInterlockEXT => try w.writeAll("    simd_barrier();\n"),
