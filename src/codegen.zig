@@ -1339,36 +1339,40 @@ const Codegen = struct {
             }
         }
         if (stage == .compute) {
-            if (self.module.local_size) |ls| {
-                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
-                try self.emitWord(entry_id);
-                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
-                try self.emitWord(ls.x);
-                try self.emitWord(ls.y);
-                try self.emitWord(ls.z);
-            }
+            // A GLCompute entry point MUST carry a LocalSize execution mode under
+            // Vulkan (VUID-StandaloneSpirv-None-10685) — omitting it is invalid SPIR-V
+            // on modern drivers (the older default spirv-val env misses it). GLSL
+            // defaults each unspecified work-group dimension to 1, so a shader with no
+            // `layout(local_size_*)` at all is (1,1,1) — matching glslang, which always
+            // emits `LocalSize 1 1 1` in that case. (#170)
+            const ls = self.module.local_size orelse ir.LocalSize{ .x = 1, .y = 1, .z = 1 };
+            try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
+            try self.emitWord(entry_id);
+            try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
+            try self.emitWord(ls.x);
+            try self.emitWord(ls.y);
+            try self.emitWord(ls.z);
         }
-        // Task shaders use LocalSize same as compute
+        // Task shaders use LocalSize same as compute — VUID-StandaloneSpirv-None-10685
+        // applies to the TaskEXT model too, so default a missing size to (1,1,1). (#170)
         if (stage == .task) {
-            if (self.module.local_size) |ls| {
-                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
-                try self.emitWord(entry_id);
-                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
-                try self.emitWord(ls.x);
-                try self.emitWord(ls.y);
-                try self.emitWord(ls.z);
-            }
+            const ls = self.module.local_size orelse ir.LocalSize{ .x = 1, .y = 1, .z = 1 };
+            try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
+            try self.emitWord(entry_id);
+            try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
+            try self.emitWord(ls.x);
+            try self.emitWord(ls.y);
+            try self.emitWord(ls.z);
         }
-        // Mesh shader execution modes
+        // Mesh shader execution modes — VUID-…-10685 applies to MeshEXT too. (#170)
         if (stage == .mesh) {
-            if (self.module.local_size) |ls| {
-                try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
-                try self.emitWord(entry_id);
-                try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
-                try self.emitWord(ls.x);
-                try self.emitWord(ls.y);
-                try self.emitWord(ls.z);
-            }
+            const ls = self.module.local_size orelse ir.LocalSize{ .x = 1, .y = 1, .z = 1 };
+            try self.emitWord(spirv.encodeInstructionHeader(6, @intFromEnum(spirv.Op.ExecutionMode)));
+            try self.emitWord(entry_id);
+            try self.emitWord(@intFromEnum(spirv.ExecutionMode.LocalSize));
+            try self.emitWord(ls.x);
+            try self.emitWord(ls.y);
+            try self.emitWord(ls.z);
             if (self.module.mesh_output_topology) |topo| {
                 const topo_mode: spirv.ExecutionMode = switch (topo) {
                     .triangles => .OutputTrianglesEXT,
