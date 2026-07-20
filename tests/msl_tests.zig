@@ -1104,6 +1104,24 @@ test "T15.6: no location inputs → no main0_in struct (no regression)" {
     try assertNotContains(msl, "[[stage_in]]");
 }
 
+// #479: a fragment with NO Output variable (only side effects / discard). The
+// impl signature already omits the `thread float4& _fragColor` output param, but
+// the entry wrapper still passed `out._fragColor` -> arg-count mismatch ("no
+// matching function for call to main0_impl"). Gate the output argument on the
+// output var, matching the signature.
+test "T-zerooutput.msl: fragment with no output emits a matching impl call (#479)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\void main() { if (uv.x > 0.5) discard; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The call must not pass the color output the impl no longer accepts.
+    try assertContains(msl, "main0_impl(gl_FragCoord");
+    try assertNotContains(msl, "main0_impl(out._fragColor");
+}
+
 // ---------------------------------------------------------------------------
 // T16: VERTEX stage I/O (mirrors T15 fragment, structurally matched to
 // spirv-cross --msl). Vertex inputs use `[[attribute(N)]]` (NOT

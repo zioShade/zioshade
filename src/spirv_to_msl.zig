@@ -3762,7 +3762,15 @@ fn emitFunction(
 
         try w.writeAll("\n{\n    main0_out out = {};\n    ");
         // Pass the full float4 when the body reads .z/.w, else just .xy (float2).
-        try w.print("{s}_impl(out._fragColor, gl_FragCoord{s}", .{ func_name, if (frag_coord_full) "" else ".xy" });
+        // The `out._fragColor` output argument is gated on output_var_id exactly
+        // like the impl signature's output param: a fragment with NO Output var
+        // (e.g. it only reads inputs / has side effects) omits both, so caller and
+        // callee agree on arity (#479).
+        if (output_var_id != null) {
+            try w.print("{s}_impl(out._fragColor, gl_FragCoord{s}", .{ func_name, if (frag_coord_full) "" else ".xy" });
+        } else {
+            try w.print("{s}_impl(gl_FragCoord{s}", .{ func_name, if (frag_coord_full) "" else ".xy" });
+        }
         if (has_argbuf) {
             for (cbuffers.items) |cb| {
                 try w.print(", set{d}.{s}", .{ cb.descriptor_set, cb.name });
