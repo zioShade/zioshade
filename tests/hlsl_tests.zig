@@ -15033,3 +15033,28 @@ test "hlsl: inverse(mat2) lowers to the spvInverse2x2 helper (#488)" {
     try assertContains(hlsl, "spvInverse2x2(");
     try assertNotContains(hlsl, " = inverse(");
 }
+
+// #490: HLSL has no outerProduct builtin. OpOuterProduct lowers to a
+// column-by-column matrix constructor (float{C}x{R}(c*r[0], c*r[1], …)), the same
+// convention CompositeConstruct uses; the emission is byte-identical to what
+// spirv-cross produces (verified via tools/hlsl_differential.sh). Without an emit
+// arm the op fell through to `// unhandled op 147`, leaving the result id
+// undefined and the whole shader DXC-rejected (silent-wrong).
+test "hlsl: outerProduct lowers to a column-by-column matrix constructor (#490)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = outerProduct(uv, vec2(0.5, 0.3));
+        \\    fragColor = vec4(m[0], m[1]);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Built as a matrix constructor with each column scaled by a component of the
+    // right operand; no non-existent HLSL outerProduct and no unhandled-op stub.
+    try assertContains(hlsl, "float2x2(");
+    try assertNotContains(hlsl, "outerProduct");
+    try assertNotContains(hlsl, "unhandled");
+}

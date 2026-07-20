@@ -4091,6 +4091,28 @@ fn emitInstruction(
         .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitCall(module, names, inst, "mul", w, alloc),
         .Dot => try emitCall(module, names, inst, "dot", w, alloc),
         .Transpose => try emitCall(module, names, inst, "transpose", w, alloc),
+        .OuterProduct => {
+            // HLSL has no outerProduct builtin. Build the matrix column by column:
+            // SPIR-V OpOuterProduct's result column j is v1 * v2[j]. zioshade
+            // constructs HLSL matrices column-by-column (floatRxC(col0, col1, …),
+            // the same convention CompositeConstruct uses above), so passing each
+            // v1 * v2[j] as constructor arg j is exact. Column count = v2's
+            // component count. Without this arm it fell through to `// unhandled op
+            // 147`, leaving the result id undefined (DXC-rejected, silent-wrong).
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const v1 = names.get(inst.words[3]) orelse "a";
+            const v2 = names.get(inst.words[4]) orelse "b";
+            const v2_def = getDef(module, inst.words[4]);
+            const v2_ty = if (v2_def) |d| (if (d.words.len > 1) getDef(module, d.words[1]) else null) else null;
+            const cols: u32 = if (v2_ty) |t| (if (t.op == .TypeVector and t.words.len > 3) t.words[3] else 2) else 2;
+            try w.print("    {s} {s} = {s}(", .{ rt, names.get(inst.words[2]) orelse "v", rt });
+            var j: u32 = 0;
+            while (j < cols) : (j += 1) {
+                if (j > 0) try w.writeAll(", ");
+                try w.print("{s} * {s}[{d}]", .{ v1, v2, j });
+            }
+            try w.writeAll(");\n");
+        },
 
         // Comparisons
         .FOrdEqual, .FUnordEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, alloc),
