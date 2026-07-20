@@ -15154,3 +15154,38 @@ test "hlsl: a selection-merge phi inside a loop body is materialized (#493)" {
     try assertContains(hlsl, "_phi;");
     try assertContains(hlsl, "_phi = ");
 }
+
+// #497: HLSL's floatCxR(a,b,c) constructor fills ROWS (MSL's matCxR fills COLUMNS),
+// so a LOCAL matrix built column-by-column is stored TRANSPOSED and mul(M,v) would
+// compute M^T*v. It must swap the operands (vector first) to compute M*v, matching
+// SPIRV-Cross - confirmed correct by rendering on D3D12 WARP + Metal. A UNIFORM /
+// cbuffer matrix is instead stored as the logical M (bare column_major), where
+// mul(M,v) is already correct, so it must NOT be swapped. Verify both directions.
+test "hlsl: local matrix multiply swaps operands; uniform matrix does not (#497)" {
+    const local: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec3 v;
+        \\layout(location=1) in vec3 c0;
+        \\layout(location=2) in vec3 c1;
+        \\layout(location=3) in vec3 c2;
+        \\layout(location=0) out vec4 o;
+        \\void main() { mat3 m = mat3(c0, c1, c2); o = vec4(m * v, 1.0); }
+    ;
+    const lh = try compileToHlsl(local);
+    defer alloc.free(lh);
+    // Local matrix: vector first (swapped) -> mul(v, <matrix>).
+    try assertContains(lh, "mul(v, ");
+
+    const uni: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140) uniform A { mat4 m; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.m * v; }
+    ;
+    const uh = try compileToHlsl(uni);
+    defer alloc.free(uh);
+    // Uniform matrix: matrix first (NOT swapped) -> mul(<matrix>, v); vector is not first.
+    try assertNotContains(uh, "mul(v, ");
+    try assertContains(uh, ", v)");
+}

@@ -4263,7 +4263,7 @@ fn emitInstruction(
         },
 
         .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, inst, "*", w, alloc),
-        .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitCall(module, names, inst, "mul", w, alloc),
+        .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitMatrixMulSwapped(module, names, inst, w, alloc),
         .Dot => try emitCall(module, names, inst, "dot", w, alloc),
         .Transpose => try emitCall(module, names, inst, "transpose", w, alloc),
         .OuterProduct => {
@@ -6387,6 +6387,82 @@ fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         try w.writeAll(names.get(arg) orelse "x");
     }
     try w.writeAll(");\n");
+}
+
+/// True if the matrix VALUE `id` is loaded from a buffer-backed variable
+/// (Uniform / PushConstant / StorageBuffer). Such a matrix is declared bare
+/// (HLSL default column_major) and holds the LOGICAL matrix M, so `mul(M, v)` is
+/// already correct and must NOT be swapped. A constructed/local matrix
+/// (OpCompositeConstruct, a constant, or a Function-storage local) is built by
+/// HLSL's row-filling `floatCxR` constructor and therefore stored TRANSPOSED, so
+/// it DOES need the swap. Traces through Load / CopyObject / AccessChain to the
+/// root variable's storage class. (#497)
+///
+/// Known limitation: a uniform matrix first COPIED into a Function-storage local
+/// and then multiplied traces to the Function var and is treated as local (swap).
+/// That case is rare (matrices are normally multiplied straight from the uniform);
+/// the common shapes — construct→multiply and uniform-load→multiply — are exact.
+fn matrixIsBufferSourced(module: *const ParsedModule, id: u32) bool {
+    var cur = id;
+    var guard: u32 = 0;
+    while (guard < 64) : (guard += 1) {
+        const def = getDef(module, cur) orelse return false;
+        switch (def.op) {
+            .Load, .CopyObject => cur = if (def.words.len > 3) def.words[3] else return false,
+            .AccessChain => cur = if (def.words.len > 3) def.words[3] else return false,
+            .Variable => {
+                if (def.words.len > 3) {
+                    const sc: spirv.StorageClass = @enumFromInt(def.words[3]);
+                    return sc == .Uniform or sc == .PushConstant or sc == .StorageBuffer;
+                }
+                return false;
+            },
+            else => return false, // OpCompositeConstruct / ConstantComposite / … = local
+        }
+    }
+    return false;
+}
+
+/// True if the SSA value `id`'s result type is a matrix.
+fn valueTypeIsMatrix(module: *const ParsedModule, id: u32) bool {
+    const def = getDef(module, id) orelse return false;
+    if (def.words.len < 2) return false;
+    const t = getDef(module, def.words[1]) orelse return false;
+    return t.op == .TypeMatrix;
+}
+
+/// Emit a matrix multiply, swapping the operands relative to the SPIR-V op WHEN the
+/// matrix operand is a local/constructed matrix. zioshade builds local matrices
+/// column-by-column as `floatCxR(col0, col1, …)`, but HLSL's `floatCxR(a, b, c)`
+/// constructor fills ROWS (unlike MSL's `matCxR`, which fills columns), so a local
+/// matrix is stored TRANSPOSED; `mul(M, v)` would then compute Mᵀ·v. SPIRV-Cross
+/// stores the same transpose and compensates by reversing the operands, so for
+/// local matrices we do too:
+///   OpMatrixTimesVector(M, v) -> mul(v, M)
+///   OpVectorTimesMatrix(v, M) -> mul(M, v)
+///   OpMatrixTimesMatrix(A, B) -> mul(B, A)
+/// A UNIFORM/cbuffer matrix is stored as the logical M (bare column_major), where
+/// `mul(M, v)` is already correct — that path is left byte-unchanged. Construction,
+/// indexing (`m[i]`), transpose() and the spvInverseNxN helper operate on the
+/// stored representation and stay consistent; only the local multiply order
+/// compensates. The local case is confirmed on D3D12 WARP + Metal
+/// (docs/DIFFERENTIAL_PROOF.md, tools/warp). (#497)
+fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    if (inst.words.len < 5) return emitCall(module, names, inst, "mul", w, alloc);
+    const rt = try hlslType(module, inst.words[1], names, alloc);
+    const a = names.get(inst.words[3]) orelse "x";
+    const b = names.get(inst.words[4]) orelse "x";
+    // The matrix operand: MatrixTimesVector -> words[3]; VectorTimesMatrix ->
+    // words[4]; MatrixTimesMatrix -> words[3] (use the left matrix's storage).
+    const mat_op: u32 = if (valueTypeIsMatrix(module, inst.words[3])) inst.words[3] else inst.words[4];
+    const name = names.get(inst.words[2]) orelse "v";
+    if (matrixIsBufferSourced(module, mat_op)) {
+        // Logical-M storage: keep the SPIR-V operand order.
+        try w.print("    {s} {s} = mul({s}, {s});\n", .{ rt, name, a, b });
+    } else {
+        // Transposed local storage: swap to compensate (matches SPIRV-Cross).
+        try w.print("    {s} {s} = mul({s}, {s});\n", .{ rt, name, b, a });
+    }
 }
 
 fn emitStd450(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {
