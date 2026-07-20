@@ -209,20 +209,42 @@ Not every backend is verified to the same depth. The distinction that matters is
 | GLSL | glslangValidator | GLSL rendered on Windows OpenGL (RENDERING_RESULTS.md) |
 | WGSL | naga | not rendered (naga validates semantics) |
 | MSL  | Metal `makeLibrary` | **yes** — `ShaderCompare.swift` renders on-GPU, 0-pixel diff vs spirv-cross |
-| HLSL | DXC (`ps_6_0`, in a docker container) | **NO — compile-verified only** |
+| HLSL | DXC (`ps_6_0`, in a docker container) | **partial** — non-matrix render-verified on Metal via DXC (see below); matrix path has a render divergence under investigation |
 
-HLSL render-verification is not currently possible in this dev environment (no
-DirectX/GPU on macOS), so the HLSL sweep (`tools/hlsl_validity_sweep.sh`) proves
-the output **compiles** under DXC, not that it **renders** correctly. Matrix
-operations (the largest HLSL cluster) are argued correct by
-**codegen-equivalence with the render-verified MSL backend** — zioshade emits
-byte-identical matrix construction, the same `mul(M,v)` order, and the same
-`spvInverseNxN` helper as MSL, whose rendering is proven above. That is a strong
-inference, not a measurement.
+### HLSL render-verification (macOS, via DXC → Metal)
 
-**Recommended pre-launch gate:** stand up a headless HLSL render check on a
-Windows runner (D3D WARP software rasterizer, in the Windows SDK) — one
-round-trip golden test (identity, a known rotation, and `M · inverse(M) == I` read
-back from a render target) retroactively validates the whole HLSL matrix surface
-and makes every future matrix fix render-verifiable. Until then, HLSL matrix
-correctness is stated as *compile-verified, render-inferred*.
+macOS has no Direct3D, but HLSL can still be render-verified without Windows:
+`tools/hlsl_render_check.sh` compiles zioshade's HLSL with the **real DXC** oracle
+to SPIR-V, converts that to MSL with SPIRV-Cross, and renders it on the Metal GPU
+(reusing `ShaderCompare.swift`), diffing pixels against zioshade's own MSL backend
+(itself 0-pixel render-proven vs SPIRV-Cross, section 2). DXC is the true HLSL
+frontend, so a wrong HLSL emission compiles to different SPIR-V and renders
+different pixels. Verdicts: **RENDER-MATCH** (≤1/channel), **RENDER-EDGE** (a
+handful of boundary pixels differ with ~0 average — benign floating-point at a
+`step()`/discontinuity, e.g. `art_deco` = 5 px), **RENDER-DIFFER** (large-area
+divergence = a real miscompile).
+
+Result: a broad set of non-matrix shaders **RENDER-MATCH**, which upgrades them
+from compile-verified to render-verified and **resolves the SPIR-V differential's
+DIVERGE over-reporting** — e.g. `swizzle_access` and `mandelbrot_smooth` (both
+flagged DIVERGE by the program-identity diff) render pixel-identical.
+
+**Matrix finding (open):** the matrix cluster does NOT cleanly render-verify. Three
+matrix shaders — `mat3_branch` (64480/65536 px), `mat_cond_swizzle` (49192),
+`outer_product_test` (50721) — render **differently from SPIRV-Cross's HLSL**
+through the identical DXC→SPIR-V→SPIRV-Cross→MSL pipeline (so a round-trip artifact
+cancels), while the reference path (zioshade SPIR-V → SPIRV-Cross → MSL) is a
+0-pixel match with zioshade's direct MSL. This contradicts the earlier
+*codegen-equivalence inference* that zioshade's HLSL matrix convention (the
+transpose of SPIRV-Cross's) is mathematically equivalent: it renders the same as
+MSL for `mat_branch` (mat2) but diverges for mat3-class shaders. So HLSL matrix
+correctness is now a **measured open question, not a safe inference** — the DXC
+compile sweep passes these shaders (they are valid HLSL) but they render wrong.
+
+**Pre-launch gate — WARP (`tools/warp/`):** a D3D12 WARP render harness (the real
+`DXC → DXIL → D3D12` path) is built and ready to run on Windows. It renders
+zioshade's HLSL against SPIRV-Cross's HLSL directly on the shipping runtime, with
+no SPIRV-Cross→MSL proxy, and will (a) confirm the matrix divergence on the real
+path and pin down which side is wrong, and (b) render-verify the whole HLSL surface
+there. Run `mat3_branch`, `mat_cond_swizzle`, `outer_product_test` first. See
+`tools/warp/README.md`.
