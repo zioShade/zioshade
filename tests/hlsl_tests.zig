@@ -15125,3 +15125,32 @@ test "hlsl: a struct used only as an array-element type is declared first (#492)
     const scene_pos = std.mem.indexOf(u8, hlsl, "struct Scene").?;
     try std.testing.expect(hit_pos < scene_pos);
 }
+
+// #493: a selection INSIDE a loop body (`if (d<x) v=a; else v=b;`) also produces
+// a merge OpPhi, but the loop-body branch emitter in emitWhileLoopHLSL did not
+// materialize it — only the top-level and emitBlock emitters did (#491). The
+// branch-local temp was out of scope at the post-merge use, so DXC rejected the
+// shader. Materialize it there too. Fixes phi_loop_branch in the corpus.
+test "hlsl: a selection-merge phi inside a loop body is materialized (#493)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 5; i++) {
+        \\        float d = abs(uv.x - float(i) * 0.15);
+        \\        float val;
+        \\        if (d < 0.05) { val = 1.0; } else { val = 0.1 / (d + 0.01); }
+        \\        sum += val;
+        \\    }
+        \\    fragColor = vec4(sum, sum, sum, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // The in-loop selection's phi is a persistent var, and the loop is present.
+    try assertContains(hlsl, "while (true)");
+    try assertContains(hlsl, "_phi;");
+    try assertContains(hlsl, "_phi = ");
+}

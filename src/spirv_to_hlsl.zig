@@ -3818,13 +3818,24 @@ fn emitWhileLoopHLSL(
                         bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                         try w.writeAll("        }\n");
                     } else {
+                        // #491/#493: a selection INSIDE a loop body also produces
+                        // merge phis (`if (d<x) v=a; else v=b;`); materialize them so
+                        // the post-merge use is in scope, exactly as the top-level and
+                        // emitBlock branch emitters do.
+                        var mphis: std.ArrayList(HlslMergePhi) = .empty;
+                        defer mphis.deinit(alloc);
+                        collectMergePhisHLSL(module, label_map, nmv, &mphis, alloc);
+                        try emitMergePhiDeclsHLSL(module, names, label_map, mphis.items, nhe, ntl, nmv, w, alloc, "    ");
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
+                        try emitMergePhiArmCopiesHLSL(module, names, label_map, mphis.items, ntl, nmv, true, w, alloc, "    ");
                         if (nhe) {
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
+                            try emitMergePhiArmCopiesHLSL(module, names, label_map, mphis.items, ntl, nmv, false, w, alloc, "    ");
                         }
                         try w.writeAll("        }\n");
+                        finalizeMergePhisHLSL(names, mphis.items, alloc);
                     }
                     if (label_map.get(nmv)) |nmi| {
                         bi = nmi;
