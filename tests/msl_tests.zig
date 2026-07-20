@@ -1122,6 +1122,30 @@ test "T-zerooutput.msl: fragment with no output emits a matching impl call (#479
     try assertNotContains(msl, "main0_impl(out._fragColor");
 }
 
+// #480: mutually-recursive functions (funcA calls funcB defined later, and vice
+// versa) referenced an undeclared callee because non-entry functions are emitted
+// in definition order with no forward prototypes. Emit C prototypes for all
+// non-entry functions first when a forward call exists.
+test "T-mutualrec.msl: mutual recursion gets forward prototypes (#480)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float funcA(int n);
+        \\float funcB(int n);
+        \\float funcA(int n) { if (n <= 0) return 1.0; return float(n) * funcB(n - 1); }
+        \\float funcB(int n) { if (n <= 0) return 1.0; return float(n) * funcA(n - 1); }
+        \\void main() { fragColor = vec4(funcA(int(uv.x * 4.0) + 1), 0.0, 0.0, 1.0); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // A forward prototype precedes the funcB body so funcA's call resolves.
+    const proto = std.mem.indexOf(u8, msl, "funcB(") orelse return error.TestExpectedFind;
+    const body = std.mem.lastIndexOf(u8, msl, "funcB(") orelse return error.TestExpectedFind;
+    try std.testing.expect(proto < body); // at least two occurrences (proto + def)
+    try assertContains(msl, ");\nfloat "); // a `);` prototype line precedes a definition
+}
+
 // ---------------------------------------------------------------------------
 // T16: VERTEX stage I/O (mirrors T15 fragment, structurally matched to
 // spirv-cross --msl). Vertex inputs use `[[attribute(N)]]` (NOT

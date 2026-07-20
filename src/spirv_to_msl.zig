@@ -1181,6 +1181,12 @@ fn blockFlatKey(var_id: u32, member: u32) u64 {
     return (@as(u64, var_id) << 20) | @as(u64, member);
 }
 
+// When true, emitFunction emits a non-entry function's SIGNATURE followed by `;`
+// (a C forward prototype) and returns before the body, so mutually-recursive /
+// forward-referencing functions resolve. Set only during the prototype pass and
+// only when a forward call actually exists (#480).
+threadlocal var g_proto_only: bool = false;
+
 // True when the shader has location stage inputs, so the `main0_in in` struct is
 // threaded into every non-entry function's signature. Read at OpFunctionCall to
 // append `in` to the call args (mirrors how cbuffers/textures are threaded). Set
@@ -2609,6 +2615,21 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
     }
 
+    // #480: when a non-entry function forward-calls a callee defined later
+    // (mutual recursion), emit C prototypes for all non-entry functions first,
+    // reusing the exact signature emitter so definitions match. Gated on an actual
+    // forward call, so shaders with none (e.g. wintty's single mainImage) stay
+    // byte-identical.
+    if (needsForwardDecls(&module, func_ids.items, entry_id)) {
+        g_proto_only = true;
+        for (func_ids.items) |fid| {
+            if (fid == entry_id) continue;
+            try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info, &cbuffers, &textures, &storage_buffers, &stage_inputs, &stage_outputs, is_compute_like, options.binding_shift, options.argument_buffers, options.resource_bindings, &pull_model, &atomic_images, &arraylen_empty);
+        }
+        g_proto_only = false;
+        try w.writeAll("\n");
+    }
+
     // Emit non-entry functions first
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue;
@@ -2971,6 +2992,35 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
 ///   - Built-in inputs (gl_FragCoord etc.): `built_in` decoration present.
 ///   - Struct-typed inputs (per-vertex interface blocks): out of scope here.
 ///   - Inputs without a Location decoration (nothing to bind to `[[user(locnN)]]`).
+/// True when some non-entry function calls a callee that is emitted LATER in
+/// `func_ids` order (a forward reference / mutual recursion), so C prototypes are
+/// needed before the bodies. Scans each non-entry function's instruction range
+/// for OpFunctionCall and compares emission order. (#480)
+fn needsForwardDecls(m: *const ParsedModule, func_ids: []const u32, entry_id: u32) bool {
+    for (func_ids, 0..) |fid, order| {
+        if (fid == entry_id) continue;
+        var in_fn = false;
+        for (m.instructions) |inst| {
+            if (inst.op == .Function and inst.words.len > 2) {
+                in_fn = inst.words[2] == fid;
+                continue;
+            }
+            if (!in_fn) continue;
+            if (inst.op == .FunctionEnd) {
+                in_fn = false;
+                continue;
+            }
+            if (inst.op == .FunctionCall and inst.words.len > 3) {
+                const callee = inst.words[3];
+                for (func_ids, 0..) |cid, corder| {
+                    if (cid == callee and corder > order) return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), inputs: *std.ArrayList(StageInputDecl), block_flat: *std.AutoHashMap(u64, []const u8), alloc: std.mem.Allocator) void {
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
@@ -4186,6 +4236,11 @@ fn emitFunction(
         try w.writeAll("main0_in in");
     }
 
+    // #480: forward-prototype pass emits `<signature>;` and stops before the body.
+    if (g_proto_only) {
+        try w.writeAll(");\n");
+        return;
+    }
     try w.writeAll(")\n{\n");
     try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
     try w.writeAll("}\n");
