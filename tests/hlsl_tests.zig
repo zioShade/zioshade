@@ -14961,3 +14961,32 @@ test "hlsl: switch case bodies are braced so declarations don't block case jumps
     try assertContains(hlsl, "case 0: {");
     try assertContains(hlsl, "case 1: {");
 }
+
+// #486: HLSL/DXC forbids recursion ("recursive functions are not allowed").
+// A recursive call graph must honest-error rather than emit HLSL DXC rejects.
+test "hlsl: recursive function honest-errors (DXC forbids recursion) (#486)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float factorial(int n) { if (n <= 1) return 1.0; return float(n) * factorial(n - 1); }
+        \\void main() { fragColor = vec4(factorial(int(uv.x * 5.0) + 1), 0.0, 0.0, 1.0); }
+    ;
+    try std.testing.expectError(error.UnsupportedRecursion, compileToHlsl(source));
+}
+
+// #486: a NON-recursive multi-function call chain must NOT be misflagged.
+test "hlsl: non-recursive function chain compiles (no false recursion) (#486)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float c(float x) { return x * 2.0; }
+        \\float b(float x) { return c(x) + 1.0; }
+        \\float a(float x) { return b(x) * 0.5; }
+        \\void main() { fragColor = vec4(a(uv.x), 0.0, 0.0, 1.0); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+}
