@@ -10636,6 +10636,18 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         block_map.deinit(alloc);
     }
 
+    // Loop-header labels (blocks that contain an OpLoopMerge). Their merge into a
+    // phi is NOT a simple diamond: one predecessor is the loop back-edge whose
+    // stored value can TRANSITIVELY DEPEND on the phi itself (e.g. a do-while whose
+    // condition mutates the counter: the continue-block store is `phi + 1`). The
+    // diamond-merge model below forwards each predecessor's raw store value into the
+    // phi, so it wires the back-edge operand to the PRE-LOOP value instead of the
+    // phi — making the loop condition loop-invariant (infinite loop) and dropping
+    // the accumulation. Loop-carried phis are handled by loopCounterToPhi (simple
+    // counters) or left as memory vars; branchMergePhi must skip loop headers. (#170)
+    var loop_headers = std.AutoHashMapUnmanaged(u32, void).empty;
+    defer loop_headers.deinit(alloc);
+
     var cur_block: u32 = 0;
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -10650,6 +10662,7 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             const gop = try block_map.getOrPut(alloc, cur_block);
             if (!gop.found_existing) gop.value_ptr.* = .{ .preds = .empty, .succs = .empty, .stores = .empty, .loads = .empty };
         }
+        if (op == 246) try loop_headers.put(alloc, cur_block, {}); // OpLoopMerge → cur_block is a loop header
         if (block_map.getPtr(cur_block)) |b| {
             if (op == 62 and wc >= 3) try b.stores.put(alloc, words[pos + 1], words[pos + 2]);
             if (op == 61 and wc >= 4) try b.loads.put(alloc, words[pos + 3], words[pos + 2]);
@@ -10708,6 +10721,8 @@ pub fn branchMergePhi(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             const bid = entry.key_ptr.*;
             const block = entry.value_ptr.*;
             if (block.preds.items.len < 2) continue;
+            // A loop header is NOT a diamond merge — skip it (see loop_headers note). (#170)
+            if (loop_headers.contains(bid)) continue;
 
             // For each predecessor, get the set of stored variables
             var pred_stored = std.AutoHashMapUnmanaged(u32, void).empty;
