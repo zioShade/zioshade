@@ -3175,7 +3175,13 @@ const Codegen = struct {
         const ptr_id = self.operandId(inst, 0);
         const value_id = self.operandId(inst, 1);
         const scope_id = try self.emitIntConstant(1); // Device scope
-        const semantics_id = try self.emitIntConstant(64); // Uniform semantics
+        // Relaxed (None) memory semantics. GLSL atomics carry no ordering; matches
+        // glslang. A storage-class semantics bit (e.g. UniformMemory 0x40) WITHOUT an
+        // ordering bit (Acquire/Release/AcquireRelease) is INVALID under Vulkan 1.2+
+        // (VUID-StandaloneSpirv-MemorySemantics-10871) — the older default spirv-val
+        // env accepts it, so it slipped past conformance, but it is invalid SPIR-V on
+        // modern drivers. (#170)
+        const semantics_id = try self.emitIntConstant(0); // None (relaxed)
         try self.emitWord(spirv.encodeInstructionHeader(7, @intFromEnum(op)));
         try self.emitWord(result_type_id);
         try self.emitWord(result_id);
@@ -6189,16 +6195,18 @@ const Codegen = struct {
                 // OpAtomicCompareExchange: 9 words. Per the SPIR-V spec the operands
                 // after the pointer are: Scope, Equal-semantics, Unequal-semantics,
                 // Value(new/data), Comparator(compare) — i.e. data at words[7], compare
-                // at words[8]. Both memory-semantics ids are the same constant (64) here,
-                // so the order in which they are emitted below is immaterial.
+                // at words[8]. Both memory-semantics ids are the same constant (0/None)
+                // here, so the order in which they are emitted below is immaterial.
+                // None (relaxed): a storage-class bit without an ordering bit is invalid
+                // under Vulkan 1.2+ (VUID-StandaloneSpirv-MemorySemantics-10871). (#170)
                 const result_type_id = resolved.result_type orelse return;
                 const result_id = resolved.result_id orelse return;
                 const ptr_id = self.operandId(resolved, 0);
                 const comparator_id = self.operandId(resolved, 1);
                 const value_id = self.operandId(resolved, 2);
                 const scope_id = try self.emitIntConstant(1); // Device
-                const sem_ne_id = try self.emitIntConstant(64); // Uniform
-                const sem_eq_id = try self.emitIntConstant(64); // Uniform
+                const sem_ne_id = try self.emitIntConstant(0); // None (relaxed)
+                const sem_eq_id = try self.emitIntConstant(0); // None (relaxed)
                 try self.emitWord(spirv.encodeInstructionHeader(9, @intFromEnum(spirv.Op.AtomicCompareExchange)));
                 try self.emitWord(result_type_id);
                 try self.emitWord(result_id);
