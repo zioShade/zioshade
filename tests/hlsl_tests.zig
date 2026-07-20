@@ -14990,3 +14990,25 @@ test "hlsl: non-recursive function chain compiles (no false recursion) (#486)" {
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
 }
+
+// #487: a constant matrix (mat2(...)) was never declared — it fell to an
+// auto-named temp, so `mul(v8, uv)` referenced an undeclared v8. Fold the matrix
+// constant to floatRxC(col0, col1, ...) like a runtime OpCompositeConstruct.
+test "hlsl: constant matrix folds to a matrix constructor (#487)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    mat2 m = mat2(1.0, 2.0, 3.0, 4.0);
+        \\    vec2 v = m * uv;
+        \\    fragColor = vec4(v, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // The constant matrix is inlined as a float2x2(...) constructor.
+    try assertContains(hlsl, "float2x2(");
+    // No undeclared matrix temp survives into a mul().
+    try assertNotContains(hlsl, "mul(v8,");
+}
