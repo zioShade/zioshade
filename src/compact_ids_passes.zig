@@ -4806,9 +4806,17 @@ pub fn elimUnreachableCalls(alloc: std.mem.Allocator, words: []const u32) error{
             in_body = false;
             body_after_label.clearRetainingCapacity();
         }
-        if (opcode == 248 and cur_func > 0) { // OpLabel — body starts
+        if (opcode == 248 and cur_func > 0) { // OpLabel — first block starts the body
+            // Do NOT clear per-label. A function is "unreachable-only" only when
+            // its ENTIRE body is OpUnreachable. Clearing here made the classifier
+            // judge only the LAST block, so any multi-block function whose tail
+            // block is a synthesized OpUnreachable — exactly the shape of a
+            // function where every path returns early via OpReturnValue (e.g. a
+            // multi-return `palette()`), was wrongly deemed unreachable-only and
+            // had its call replaced by OpUndef (silently losing the return value:
+            // DXC-rejected in HLSL, silently zero in MSL). Per-function reset is
+            // done at OpFunction above; accumulate across all blocks here. (#494)
             in_body = true;
-            body_after_label.clearRetainingCapacity();
         }
         if (opcode == 56) { // OpFunctionEnd
             if (cur_func > 0 and in_body) {

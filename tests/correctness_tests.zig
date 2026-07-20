@@ -329,6 +329,36 @@ test "G4: cross-compile preserves shader semantics across versions" {
     }
 }
 
+// #494: a function where every path returns a value (a multi-return function, e.g.
+// a palette() with if/else-if/else returns) must NOT be miscompiled to OpUndef.
+// The elimUnreachableCalls pass judged only a function's LAST block, so any
+// multi-block function whose tail block is a synthesized OpUnreachable — the exact
+// shape of an all-paths-return function — was classified "unreachable-only" and had
+// its call replaced by OpUndef. That silently dropped the return value: DXC-rejected
+// in HLSL, and SILENTLY ZERO in the render-verified MSL backend (uncaught by a
+// compile-only check). glslang keeps such a function as a real OpFunctionCall; so
+// do we now.
+test "multi-return function keeps its return value, not OpUndef (#494)" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 fragColor;
+        \\vec3 palette(float x) {
+        \\    if (x < 0.25) return vec3(1.0, x * 4.0, 0.0);
+        \\    else if (x < 0.5) return vec3(1.0 - (x - 0.25) * 4.0, 1.0, 0.0);
+        \\    else return vec3(0.0, 1.0, (x - 0.5) * 4.0);
+        \\}
+        \\void main() { fragColor = vec4(palette(t), 1.0); }
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // OpUndef (opcode 1) must NOT appear — the return value must be preserved.
+    try std.testing.expect(!spirvHasOpcode(spv, 1));
+    // The multi-return function survives as a real call (OpFunctionCall, opcode 57).
+    try std.testing.expect(spirvHasOpcode(spv, 57));
+}
+
 // =============================================================================
 // G10: HLSL SM 5.0 compatibility — correctness tests
 // =============================================================================
