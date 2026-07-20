@@ -590,6 +590,22 @@ fn loopLatchHasStore(spv: []const u32) bool {
     return false;
 }
 
+// True iff the module has an OpExecutionMode (opcode 16) LocalSize (mode 17) with
+// literal dims 1,1,1. Layout: [op|wc=6] entry LocalSize x y z.
+fn spirvHasComputeLocalSize111(spv: []const u32) bool {
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 16 and wc == 6 and spv[idx + 2] == 17) { // OpExecutionMode … LocalSize
+            if (spv[idx + 3] == 1 and spv[idx + 4] == 1 and spv[idx + 5] == 1) return true;
+        }
+        idx += wc;
+    }
+    return false;
+}
+
 // Scan the SPIR-V module for an OpTypeImage (opcode 25) with Dim==Buffer (5)
 // whose sampled-type id resolves to a scalar of the requested kind:
 //   .float → OpTypeFloat, .int → signed OpTypeInt, .uint → unsigned OpTypeInt.
@@ -1635,6 +1651,41 @@ test "frontend: relaxed atomics use None semantics — valid under Vulkan 1.3" {
         defer alloc.free(spv);
         try spirvValVulkan13OrSkip(spv);
     }
+}
+
+// #170: a compute (GLCompute) entry point with NO `layout(local_size_*)` was
+// emitted WITHOUT a LocalSize execution mode. Vulkan requires one (VUID-Standalone
+// Spirv-None-10685) → invalid SPIR-V on modern drivers; the lenient default spirv-
+// val env missed it (so conformance passed). GLSL defaults each unspecified work-
+// group dimension to 1, so the correct output is `LocalSize 1 1 1` — matching
+// glslang. Validated under vulkan1.3, which enforces the rule.
+test "frontend: compute without local_size emits LocalSize 1 1 1 — valid under Vulkan 1.3" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(std430, binding=0) buffer B { int data[]; };
+        \\void main(){ data[0] = data[0] + 1; }
+    , .{ .stage = .compute });
+    defer alloc.free(spv);
+    try spirvValVulkan13OrSkip(spv);
+    // The LocalSize execution mode (opcode 16) must be present with dims 1,1,1.
+    try std.testing.expect(spirvHasComputeLocalSize111(spv));
+}
+
+// #170: VUID-None-10685 applies to MeshEXT (and TaskEXT) execution models too — a
+// mesh shader with no local_size was likewise emitted without a LocalSize execution
+// mode = invalid under Vulkan 1.3. Same default-to-(1,1,1) fix as compute.
+test "frontend: mesh shader without local_size emits LocalSize 1 1 1 — valid under Vulkan 1.3" {
+    const alloc = std.testing.allocator;
+    const spv = zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\#extension GL_EXT_mesh_shader : require
+        \\layout(triangles, max_vertices=3, max_primitives=1) out;
+        \\void main(){ SetMeshOutputsEXT(3u, 1u); gl_MeshVerticesEXT[0].gl_Position = vec4(0.0); }
+    , .{ .stage = .mesh }) catch return error.SkipZigTest; // skip if mesh unsupported in this build
+    defer alloc.free(spv);
+    try spirvValVulkan13OrSkip(spv);
+    try std.testing.expect(spirvHasComputeLocalSize111(spv));
 }
 
 const dyn_double_index_src =
