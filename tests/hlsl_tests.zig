@@ -14936,3 +14936,28 @@ test "value struct is declared and aggregate-initialized (HLSL has no struct cto
     try assertContains(hlsl, "struct Light");
     try assertNotContains(hlsl, "= Light(");
 }
+
+// #485: a switch case that declares a variable made the next label's jump cross
+// that declaration, which DXC rejects ("cannot jump from switch statement to this
+// case label"). Brace each case body so the declaration is scoped. Mirrors MSL #471.
+test "hlsl: switch case bodies are braced so declarations don't block case jumps (#485)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float r = 0.0;
+        \\    switch (int(uv.x * 4.0)) {
+        \\        case 0: { float a = uv.y; r = a; break; }
+        \\        case 1: { float b = uv.y * 2.0; r = b; break; }
+        \\        default: { float c = uv.y * 3.0; r = c; break; }
+        \\    }
+        \\    fragColor = vec4(r, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Each case label is followed by an opening brace scoping its declaration.
+    try assertContains(hlsl, "case 0: {");
+    try assertContains(hlsl, "case 1: {");
+}
