@@ -15058,3 +15058,35 @@ test "hlsl: outerProduct lowers to a column-by-column matrix constructor (#490)"
     try assertNotContains(hlsl, "outerProduct");
     try assertNotContains(hlsl, "unhandled");
 }
+
+// #491: a value that differs by branch (a GLSL ternary, or a var assigned in both
+// arms of an if) lowers to an OpPhi at the selection merge. HLSL is block-scoped,
+// so the branch-local temp holding each arm's value is out of scope after the
+// `if`; the phi must be materialized as a persistent `_phi` var declared before
+// the `if` and assigned at the end of each arm. Previously the generic OpPhi
+// handler aliased the phi to the FIRST predecessor's name, an identifier only in
+// scope inside that arm, so the post-merge use was undeclared and DXC rejected the
+// whole shader. Ported from the render-verified MSL backend; the corpus shaders
+// (ternary-func, tern_func, struct_tern, nested_struct4, conditional_side_effects,
+// mat_cond_swizzle) now all compile under DXC.
+test "hlsl: selection-merge phi is materialized as a persistent _phi var (#491)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float add(float a, float b) { return a + b; }
+        \\float mul(float a, float b) { return a * b; }
+        \\void main() {
+        \\    float x = uv.x;
+        \\    float y = uv.y;
+        \\    float r = x > 0.5 ? add(x, y) : mul(x, y);
+        \\    fragColor = vec4(r, r, r, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // The phi becomes a persistent variable, declared once and assigned in each
+    // arm — not aliased to a branch-local temp.
+    try assertContains(hlsl, "_phi;");
+    try assertContains(hlsl, "_phi = ");
+}
