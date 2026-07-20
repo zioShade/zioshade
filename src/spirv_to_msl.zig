@@ -801,6 +801,14 @@ fn writeAccessExprPlain(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         try w.writeAll(base_name);
         return;
     }
+    // #481: a scalar-ized Input builtin (gl_SampleMaskIn) — Metal's [[sample_mask]]
+    // is a scalar, so drop the GLSL `[0]` array index and emit the bare name.
+    if (g_scalar_builtin_vars) |sb| {
+        if (sb.contains(base_id)) {
+            try w.writeAll(base_name);
+            return;
+        }
+    }
     // #478: a flattened interface-block Input member. The struct-typed block var
     // has no MSL declaration; its first (constant) member index selects the
     // flattened `in.<block>_<member>` stage-in field. Emit that and consume the
@@ -1180,6 +1188,11 @@ threadlocal var g_block_flat: ?*const std.AutoHashMap(u64, []const u8) = null;
 fn blockFlatKey(var_id: u32, member: u32) u64 {
     return (@as(u64, var_id) << 20) | @as(u64, member);
 }
+
+// Input builtin variables whose GLSL array indexing must be dropped because the
+// Metal builtin is a SCALAR: gl_SampleMaskIn[0] -> gl_SampleMaskIn, since
+// [[sample_mask]] is a uint, not an array. (#481)
+threadlocal var g_scalar_builtin_vars: ?*const std.AutoHashMap(u32, void) = null;
 
 // When true, emitFunction emits a non-entry function's SIGNATURE followed by `;`
 // (a C forward prototype) and returns before the body, so mutually-recursive /
@@ -2116,6 +2129,19 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     }
     g_block_flat = &block_flat;
     defer g_block_flat = null;
+
+    // #481: gl_SampleMaskIn is an int[] in GLSL but [[sample_mask]] is a scalar
+    // uint in Metal; record its var so writeAccessExprPlain drops the `[0]` index.
+    var scalar_builtins = std.AutoHashMap(u32, void).init(aa);
+    for (module.instructions) |sbi| {
+        if (sbi.op != .Variable or sbi.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(sbi.words[3])) != .Input) continue;
+        if (builtinOf(&decs, sbi.words[2])) |bi| {
+            if (bi == @intFromEnum(spirv.BuiltIn.sample_mask)) scalar_builtins.put(sbi.words[2], {}) catch {};
+        }
+    }
+    g_scalar_builtin_vars = &scalar_builtins;
+    defer g_scalar_builtin_vars = null;
 
     // Pull-model interpolation: the set of Input variable ids queried by
     // interpolateAtCentroid/Sample/Offset. Those inputs are declared
@@ -3176,6 +3202,10 @@ fn collectInputBuiltins(
             else => null,
         } else switch (bi) {
             @intFromEnum(spirv.BuiltIn.front_facing) => .{ .var_id = vid, .name = "", .attr = "front_facing", .entry_ty = "bool", .impl_ty = "bool", .cast_to_int = false },
+            // gl_SampleMaskIn: Metal [[sample_mask]] is a scalar uint. The body's
+            // `[0]` index is dropped in writeAccessExprPlain (#481); the value is
+            // forwarded as int to match the GLSL int[] element type.
+            @intFromEnum(spirv.BuiltIn.sample_mask) => .{ .var_id = vid, .name = "", .attr = "sample_mask", .entry_ty = "uint", .impl_ty = "int", .cast_to_int = true },
             else => null,
         };
         if (ib) |entry| {
