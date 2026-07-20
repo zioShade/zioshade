@@ -629,6 +629,52 @@ fn moduleBitfieldNeeds(m: *const ParsedModule) HlslBitfieldNeeds {
     return r;
 }
 
+/// DFS back-edge check over the call graph (edges packed as caller<<32|callee).
+/// color: 0=unvisited, 1=on-stack (gray), 2=done (black). (#486)
+fn hlslCallGraphHasCycle(edges: []const u64, node: u32, color: *std.AutoHashMap(u32, u8)) bool {
+    color.put(node, 1) catch return false;
+    for (edges) |e| {
+        if (@as(u32, @intCast(e >> 32)) != node) continue;
+        const to: u32 = @truncate(e);
+        const cc = color.get(to) orelse 0;
+        if (cc == 1) return true; // back-edge into a node still on the stack
+        if (cc == 0 and hlslCallGraphHasCycle(edges, to, color)) return true;
+    }
+    color.put(node, 2) catch {};
+    return false;
+}
+
+/// True when the module's call graph has a cycle (direct or mutual recursion).
+/// HLSL/DXC forbids recursion entirely ("recursive functions are not allowed"),
+/// so a recursive shader must honest-error rather than emit HLSL DXC rejects
+/// (fail-loud over silent-wrong). (#486)
+fn hlslHasRecursion(m: *const ParsedModule, alloc: std.mem.Allocator) bool {
+    var edges: std.ArrayList(u64) = .empty;
+    defer edges.deinit(alloc);
+    var cur: u32 = 0;
+    var in_fn = false;
+    for (m.instructions) |inst| {
+        if (inst.op == .Function and inst.words.len > 2) {
+            cur = inst.words[2];
+            in_fn = true;
+        } else if (inst.op == .FunctionEnd) {
+            in_fn = false;
+        } else if (in_fn and inst.op == .FunctionCall and inst.words.len > 3) {
+            edges.append(alloc, (@as(u64, cur) << 32) | @as(u64, inst.words[3])) catch {};
+        }
+    }
+    if (edges.items.len == 0) return false;
+    var color = std.AutoHashMap(u32, u8).init(alloc);
+    defer color.deinit();
+    for (edges.items) |e| {
+        const from: u32 = @intCast(e >> 32);
+        if ((color.get(from) orelse 0) == 0) {
+            if (hlslCallGraphHasCycle(edges.items, from, &color)) return true;
+        }
+    }
+    return false;
+}
+
 pub fn spirvToHLSL(
     alloc: std.mem.Allocator,
     spirv_words: []const u32,
@@ -662,6 +708,10 @@ pub fn spirvToHLSL(
     }
 
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
+
+    // HLSL/DXC forbids recursion; a recursive call graph would emit HLSL DXC
+    // rejects, so fail loud instead (#486).
+    if (hlslHasRecursion(&module, alloc)) return error.UnsupportedRecursion;
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
