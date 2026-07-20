@@ -168,7 +168,9 @@ fn isUniformVar(m: *const ParsedModule, id: u32) bool {
     const inst = getDef(m, id) orelse return false;
     if (inst.op == .Variable and inst.words.len >= 4) {
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-        return sc == .Uniform;
+        // PushConstant blocks are emitted as UBO-style `constant T& name_1`
+        // buffers (#483), so member access qualifies through the same `_1` path.
+        return sc == .Uniform or sc == .PushConstant;
     }
     return false;
 }
@@ -2990,6 +2992,23 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                         tex.append(alloc, .{ .name = name, .binding = binding, .descriptor_set = set, .is_depth = is_depth, .dim = dim, .arrayed = arrayed, .msl_type = msl_type, .var_id = rid, .is_storage = is_storage }) catch {};
                     },
                     else => {},
+                }
+            },
+            .PushConstant => {
+                // #483: a push_constant block is a plain uniform buffer in MSL —
+                // `constant T& name [[buffer(N)]]`, threaded exactly like a UBO.
+                // Push constants carry no Binding decoration, so give it a buffer
+                // slot (0 by default; the loose/_Globals slot picker below tracks
+                // it). Named struct blocks only: an anonymous push block would need
+                // _Globals-style bare-member qualification (left as a follow-up).
+                const pti = getDef(m, pt);
+                if (pti != null and pti.?.op == .TypeStruct) {
+                    if (names.get(rid)) |nm| {
+                        const binding = getDecVal(decs, rid, .binding) orelse 0;
+                        const set = getDecVal(decs, rid, .descriptor_set) orelse 0;
+                        trackBinding(&max_buf_binding, binding);
+                        cb.append(alloc, .{ .name = nm, .type_id = pt, .binding = binding, .descriptor_set = set }) catch {};
+                    }
                 }
             },
             else => {},

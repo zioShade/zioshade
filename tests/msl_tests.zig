@@ -1177,6 +1177,25 @@ test "T-querylevels.msl: textureQueryLevels maps to get_num_mip_levels() (#482)"
     try assertNotContains(msl, "unhandled op");
 }
 
+// #483: a push_constant block was never gathered by collectResources (no
+// .PushConstant case), so body references (push.value0) were undeclared. Emit it
+// as a UBO-style `constant T& name_1 [[buffer(N)]]` buffer and qualify member
+// access through the same `_1` path (isUniformVar now recognizes PushConstant).
+test "T-pushconstant.msl: push_constant block emits a constant buffer (#483)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(push_constant, std430) uniform PushConstants { vec4 v0; vec4 v1; } push;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = push.v0 + push.v1; }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "constant push& push_1");
+    // Member access goes through the buffer instance, not the bare struct type.
+    try assertContains(msl, "push_1.v0");
+    try assertNotContains(msl, " = push.v0");
+}
+
 // ---------------------------------------------------------------------------
 // T16: VERTEX stage I/O (mirrors T15 fragment, structurally matched to
 // spirv-cross --msl). Vertex inputs use `[[attribute(N)]]` (NOT
