@@ -209,7 +209,7 @@ Not every backend is verified to the same depth. The distinction that matters is
 | GLSL | glslangValidator | GLSL rendered on Windows OpenGL (RENDERING_RESULTS.md) |
 | WGSL | naga | not rendered (naga validates semantics) |
 | MSL  | Metal `makeLibrary` | **yes** — `ShaderCompare.swift` renders on-GPU, 0-pixel diff vs spirv-cross |
-| HLSL | DXC (`ps_6_0`, in a docker container) | **partial** — non-matrix render-verified on Metal via DXC (see below); matrix path has a render divergence under investigation |
+| HLSL | DXC (`ps_6_0`, in a docker container) | **yes for self-contained shaders** — render-verified on Metal (via DXC) and on real D3D12 WARP; the matrix transpose bug this surfaced is fixed (#497). Uniform-input shaders remain compile/round-trip verified (see below) |
 
 ### HLSL render-verification (macOS, via DXC → Metal)
 
@@ -241,19 +241,30 @@ MSL for `mat_branch` (mat2) but diverges for mat3-class shaders. So HLSL matrix
 correctness is now a **measured open question, not a safe inference** — the DXC
 compile sweep passes these shaders (they are valid HLSL) but they render wrong.
 
-**Confirmed on WARP (real D3D12).** The `tools/warp/` harness (`DXC → DXIL → D3D12
-WARP`, no MSL proxy) was run on a Windows box: `RENDER-MATCH = 5` (controls incl.
-mat_branch/mat2), `RENDER-DIFFER = 3` — the same `mat3_branch`, `mat_cond_swizzle`,
-`outer_product_test`. So the divergence is real on the shipping runtime, not a proxy
-artifact, and zioshade's HLSL (not SPIRV-Cross's) is the one that renders wrong.
+**Found, root-caused, and FIXED — confirmed on WARP (real D3D12).** The `tools/warp/`
+harness (`DXC → DXIL → D3D12 WARP`, no MSL proxy) was run on a Windows box. Before the
+fix: `RENDER-MATCH = 5`, `RENDER-DIFFER = 3` (`mat3_branch`, `mat_cond_swizzle`,
+`outer_product_test`). After the fix (#497): `RENDER-MATCH = 8, RENDER-DIFFER = 0` on
+the same real runtime.
 
 **Root cause.** HLSL's `floatCxR(a, b, c)` constructor fills the matrix by ROWS,
-whereas MSL's `matCxR(a, b, c)` fills by COLUMNS. zioshade emits the same
-column-by-column construction for both backends, so in HLSL it stores the transpose;
-`mul(M, v)` then computes Mᵀ·v. SPIRV-Cross stores the same transpose but compensates
-with `mul(v, M)` (= M·v). The earlier "codegen-equivalence with the render-verified
-MSL backend" argument was therefore a false analogy — MSL and HLSL matrix
-constructors have opposite row/column semantics. mat2 shaders happened to match; mat3
-exposes it. Fix is a matrix-convention correction in `spirv_to_hlsl.zig` (mul operand
-order plus construction / indexing / inverse consistency), verifiable via
-`tools/hlsl_render_check.sh` on macOS and re-confirmable on WARP.
+whereas MSL's `matCxR(a, b, c)` fills by COLUMNS. zioshade emitted the same
+column-by-column construction for both backends, so in HLSL a LOCAL matrix is stored
+transposed and `mul(M, v)` computed Mᵀ·v. SPIRV-Cross stores the same transpose but
+compensates with `mul(v, M)` (= M·v). The earlier "codegen-equivalence with the
+render-verified MSL backend" argument was a false analogy — MSL and HLSL matrix
+constructors have opposite row/column semantics. The DXC compile sweep and spirv-val
+passed these shaders for multiple sessions while they rendered wrong; only a render
+oracle caught it.
+
+**Fix (#497).** Swap the matrix-multiply operands to match SPIRV-Cross, but only for
+LOCAL / constructed matrices. zioshade has two matrix storage conventions: local
+(row-filling constructor → transposed storage → needs the swap) and UNIFORM/cbuffer
+(bare column_major → logical M → `mul(M, v)` already correct). `emitMatrixMulSwapped`
+traces the matrix operand to its source and leaves the uniform path byte-unchanged.
+Verified: `tools/hlsl_render_check.sh` (Metal) RENDER-MATCHes the local/inverse/chain/
+transpose matrix shaders, WARP goes 5/8 → 8/8, DXC validity is unchanged, and the
+T597 uniform tests still pass. Uniform-matrix multiplies cannot be render-verified in
+this environment (they need buffer inputs the fullscreen-triangle harness can't feed),
+so they remain compile/round-trip verified; extending the harness to bind a cbuffer is
+the way to close that last gap.
