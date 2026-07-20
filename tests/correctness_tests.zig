@@ -551,6 +551,45 @@ fn extInstOutputReloaded(spv: []const u32) bool {
     return false;
 }
 
+// True iff the continue block (latch) of some loop contains an OpStore. Finds an
+// OpLoopMerge (opcode 246), reads its continue-target label (word[2]), then scans
+// that block for an OpStore (opcode 62). Used by the #170 do-while regression test:
+// when a variable is mutated in a do-while CONDITION, the latch must re-read and
+// STORE it (memory-SSA form). The pre-fix bug (branchMergePhi treating the loop
+// header as a diamond merge) promoted the counter to a MIS-WIRED OpPhi — its
+// loop-back operand resolved to the pre-loop value, making the condition loop-
+// invariant (infinite loop) — and left NO OpStore in the latch. Store present =
+// the counter is a live loop-carried memory var, not the broken phi.
+fn loopLatchHasStore(spv: []const u32) bool {
+    var idx: usize = 5;
+    var continue_label: ?u32 = null;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 246 and wc >= 4) continue_label = spv[idx + 2]; // OpLoopMerge merge continue …
+        idx += wc;
+    }
+    const target = continue_label orelse return false;
+    // Second pass: walk to the continue block's OpLabel, then scan until the next
+    // OpLabel for an OpStore.
+    idx = 5;
+    var in_block = false;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 248 and wc >= 2) { // OpLabel
+            if (in_block) return false; // reached next block without a store
+            in_block = (spv[idx + 1] == target);
+        } else if (in_block and op == 62) { // OpStore inside the latch
+            return true;
+        }
+        idx += wc;
+    }
+    return false;
+}
+
 // Scan the SPIR-V module for an OpTypeImage (opcode 25) with Dim==Buffer (5)
 // whose sampled-type id resolves to a scalar of the requested kind:
 //   .float → OpTypeFloat, .int → signed OpTypeInt, .uint → unsigned OpTypeInt.
@@ -1077,6 +1116,60 @@ test "frontend: modf out-param survives store-forward (OpExtInst barrier)" {
     // The integer part written by modf must be re-read (a live OpLoad of the ip pointer
     // after the OpExtInst), not forwarded to the pre-modf stored value.
     try std.testing.expect(extInstOutputReloaded(spv));
+    try spirvValOrSkip(spv);
+}
+
+// #170: a `do { … } while(cond)` loop whose CONDITION mutates a loop-carried
+// variable (via an inout call or `++`) was miscompiled to a NON-TERMINATING loop
+// with dropped accumulation. branchMergePhi treated the loop HEADER (2 preds:
+// pre-header + back-edge) as a diamond merge and forwarded each predecessor's raw
+// store value into an OpPhi — but the back-edge value (`c + 1`) transitively
+// depends on the phi, so the loopback operand was wired to the PRE-LOOP value,
+// making the condition loop-invariant. Fix: branchMergePhi skips loop headers
+// (blocks with OpLoopMerge); the counter stays a memory var and the latch re-reads
+// + stores it. Discriminator: pre-fix the latch had NO OpStore (mis-wired phi);
+// post-fix it stores the loop-carried counter. `c` seeded from a runtime input so
+// the value can't const-fold away.
+test "frontend: do-while whose condition mutates a var stays loop-carried (no mis-wired phi)" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\int chk(inout int k){ k += 1; return k; }
+        \\void main(){
+        \\  int c = int(iv.x);
+        \\  int sum = 0;
+        \\  do { sum += 1; } while(chk(c) < int(iv.x) + 3);
+        \\  o = vec4(float(sum), float(c), 0.0, 1.0);
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The condition's counter must be a live loop-carried memory var: the latch
+    // re-reads and STORES it. Pre-fix (mis-wired phi) the latch had no store.
+    try std.testing.expect(loopLatchHasStore(spv));
+    try spirvValOrSkip(spv);
+}
+
+// #170: the same defect with plain `++c` in the condition (no function call) — the
+// counter's store IS the conditional latch block. Same branchMergePhi loop-header
+// miscompile; same fix. Guards against a narrower fix that only handled inlined
+// inout calls.
+test "frontend: do-while with ++ in condition stays loop-carried" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\layout(location=0) in vec4 iv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){
+        \\  int c = int(iv.x);
+        \\  int sum = 0;
+        \\  do { sum += 1; } while(++c < int(iv.x) + 3);
+        \\  o = vec4(float(sum), float(c), 0.0, 1.0);
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(loopLatchHasStore(spv));
     try spirvValOrSkip(spv);
 }
 
