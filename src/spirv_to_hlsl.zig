@@ -1263,6 +1263,26 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
                     if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
                     continue;
                 }
+                if (ti.op == .TypeMatrix) {
+                    // #487: fold a constant matrix the SAME way OpCompositeConstruct
+                    // builds a runtime matrix — floatRxC(col0, col1, ...) over the
+                    // already-folded column-vector constants — so it matches the
+                    // backend's established (DXC-valid) matrix convention. Without
+                    // this the matrix constant fell to an auto-named temp that was
+                    // never declared, so `mul(v8, uv)` referenced an undeclared v8.
+                    const tn = hlslType(module, type_id, names, alloc) catch continue;
+                    var buf = std.ArrayList(u8).initCapacity(alloc, 96) catch continue;
+                    defer buf.deinit(alloc);
+                    buf.print(alloc, "{s}(", .{tn}) catch continue;
+                    for (inst.words[3..], 0..) |col_id, i| {
+                        if (i > 0) buf.appendSlice(alloc, ", ") catch continue;
+                        buf.appendSlice(alloc, names.get(col_id) orelse "0.0") catch continue;
+                    }
+                    buf.appendSlice(alloc, ")") catch continue;
+                    const lit = buf.toOwnedSlice(alloc) catch continue;
+                    if (names.fetchPut(rid, lit) catch null) |old| alloc.free(old.value);
+                    continue;
+                }
                 // Note: array and struct ConstantComposites get their names from
                 // the static const emitter, not here. Their initializer is handled
                 // in the Variable handler via resolveInitializer().
