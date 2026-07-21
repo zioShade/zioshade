@@ -5045,26 +5045,38 @@ fn emitBlock(
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
     arraylen_buf_index: *const std.AutoHashMap(u32, u32),
-) !usize {
+) anyerror!usize { // explicit set breaks the emitBlock<->emitWhileLoopMSL inferred-error cycle
     const si = lm.get(label) orelse return error.InvalidSpirv;
     var i: usize = si + 1;
     while (i < m.instructions.len) : (i += 1) {
         const inst = m.instructions[i];
         if (inst.op == .FunctionEnd) break;
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
-        // A loop nested inside a branch arm (`if (c) { for (...) {...} }`) is entered by an
-        // OpBranch to the loop header, and its OpLoopMerge lives in that header block --
-        // which emitBlock (the branch-arm emitter) never reaches, because it breaks at the
-        // branch below. emitBlock carries no loop context, so it silently dropped the whole
-        // loop and everything after it in the arm (render-verified: maxd ~250 over most of
-        // the frame, uninitialized reads, though the frontend SPIR-V is correct). Per the
-        // cardinal rule, fail loud until the real fix (thread loop context into emitBlock and
-        // recurse the nested loop the way emitBody does) lands. Back-edge / continue / break
-        // targets are not loop headers, so they keep the normal block-ending behavior.
-        if (inst.op == .LoopMerge) return error.UnsupportedNestedLoopInBranch;
         if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        // A loop nested in this branch arm: delegate to emitWhileLoopMSL (the emitter
+        // emitBody uses; it recurses through nested loops/branches). Reached bare (arm IS
+        // the header) or via an OpBranch into a separate loop-header block. The header's
+        // phi-counter decls must be replayed first (emitBody/loop-scan do it inline; we
+        // jump over the header). emitWhileLoopMSL returns the merge-label index.
+        if (inst.op == .LoopMerge) {
+            if (inst.words.len >= 3) {
+                i = try emitWhileLoopMSL(m, names, decs, i, inst.words[1], inst.words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                i -= 1;
+            }
+            continue;
+        }
         if (inst.op == .Branch) {
-            if (inst.words.len > 1 and blockIsLoopHeader(m, inst.words[1], lm)) return error.UnsupportedNestedLoopInBranch;
+            if (inst.words.len > 1 and blockIsLoopHeader(m, inst.words[1], lm)) {
+                const hdr_idx = lm.get(inst.words[1]) orelse return error.InvalidSpirv;
+                var li: usize = hdr_idx + 1;
+                while (li < m.instructions.len and m.instructions[li].op != .LoopMerge) : (li += 1) {
+                    _ = tryEmitLoopPhiDeclMSL(m, names, m.instructions[li], w, alloc, indent) catch {};
+                }
+                if (li >= m.instructions.len or m.instructions[li].words.len < 3) return error.InvalidSpirv;
+                i = try emitWhileLoopMSL(m, names, decs, li, m.instructions[li].words[1], m.instructions[li].words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                i -= 1;
+                continue;
+            }
             break;
         }
         if (inst.op == .BranchConditional) {
