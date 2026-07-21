@@ -3892,6 +3892,21 @@ fn emitWhileLoopHLSL(
     return loop_idx + 1;
 }
 
+// True iff block `label` is a loop header: it carries an OpLoopMerge before its terminator.
+// (A loop header may compute its exit condition between the OpPhi and the OpLoopMerge, so
+// scan the whole block, not just the first instruction.) Used by emitBlock to honest-error
+// when a branch arm tries to enter a nested loop it cannot emit.
+fn blockIsLoopHeader(module: *const ParsedModule, label: u32, label_map: *const std.AutoHashMap(u32, usize)) bool {
+    const si = label_map.get(label) orelse return false;
+    var i: usize = si + 1;
+    while (i < module.instructions.len) : (i += 1) {
+        const op = module.instructions[i].op;
+        if (op == .LoopMerge) return true;
+        if (op == .Label or op == .Branch or op == .BranchConditional or op == .FunctionEnd) return false;
+    }
+    return false;
+}
+
 fn emitBlock(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3916,9 +3931,23 @@ fn emitBlock(
         // Branch to merge = end of this block
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
 
+        // A loop nested inside a branch arm (`if (c) { for (...) {...} }`) is entered by an
+        // OpBranch to the loop header, whose OpLoopMerge lives in that header block --
+        // which emitBlock (the branch-arm emitter) never reaches, because it breaks at the
+        // branch below. emitBlock carries no loop context, so it silently dropped the whole
+        // loop and everything after it in the arm (render-verified: maxd ~250 over most of
+        // the frame, uninitialized reads, though the frontend SPIR-V is correct). Per the
+        // cardinal rule, fail loud until the real fix (thread loop context into emitBlock and
+        // recurse the nested loop the way emitBody does) lands.
+        if (inst.op == .LoopMerge) return error.UnsupportedNestedLoopInBranch;
         // Skip structural instructions
-        if (inst.op == .Label or inst.op == .SelectionMerge or inst.op == .LoopMerge) continue;
-        if (inst.op == .Branch) break; // branch to somewhere else (e.g., loop back-edge)
+        if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        if (inst.op == .Branch) {
+            // Entering a nested loop (target is a loop header)? Honest-error rather than
+            // drop it. Back-edge / continue / break targets are not loop headers.
+            if (inst.words.len > 1 and blockIsLoopHeader(module, inst.words[1], label_map)) return error.UnsupportedNestedLoopInBranch;
+            break; // branch to somewhere else (e.g., loop back-edge)
+        }
 
         // Handle nested BranchConditional
         if (inst.op == .BranchConditional) {
