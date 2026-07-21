@@ -81,6 +81,18 @@ oracle-diff: test-conformance test-cross-compare test-realworld
     @echo ""
     @echo "Backend oracle differentials: ALL PASSED (spirv-val + SPIRV-Cross + naga)"
 
+# ── render/execution differential proof (macOS + Metal, no Docker) ────
+# One command reproduces the differential correctness proof across ALL THREE shader
+# stages: zioshade's output is rendered/executed on the real Metal GPU alongside an
+# independent glslang -> SPIRV-Cross reference and diffed (fragment = pixels, vertex =
+# captured gl_Position, compute = output buffers). This catches the silent-wrong class
+# that compile-only checks (spirv-val/dxc) cannot. Prints one honest report (verified /
+# benign / divergences / skipped-with-reason) and exits nonzero on any real divergence,
+# so it doubles as a regression gate. Fragment is sampled for speed; PROVE_FULL=1 runs
+# the whole fragment corpus. See docs/DIFFERENTIAL_PROOF.md for scope and caveats.
+prove:
+    @bash tools/prove.sh
+
 # large-corpus WGSL<->naga differential: every conformance fixture -> WGSL -> naga.
 # Reports naga PASS / REJECT (divergences to fix) / honest-unsupported. Slow
 # (naga subprocess per fixture); run on demand, not in `ci`.

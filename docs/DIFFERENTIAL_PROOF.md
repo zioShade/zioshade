@@ -5,6 +5,19 @@ zioshade replaces two C++ tools: **glslang** (GLSL → SPIR-V) and **SPIRV-Cross
 does so faithfully, and how to reproduce each measurement. All numbers below are
 from the checked-in shader corpora and are regenerable locally.
 
+**Reproduce the execution-equivalence proof in one command:** `just prove` (or
+`bash tools/prove.sh`) renders/executes zioshade's output alongside an independent
+glslang → SPIRV-Cross reference on the real Metal GPU across **all three shader stages**
+(fragment = pixels, vertex = captured `gl_Position`, compute = output buffers), prints one
+honest report — `verified / benign / divergences / skipped-with-reason` — and exits nonzero
+on any real divergence (so it is also a regression gate). Fragment is sampled for speed
+plus a fixed regression set; `PROVE_FULL=1` runs the whole fragment corpus. Requires only
+glslang, spirv-cross, and swiftc/Metal (no Docker; the DXC → D3D12 HLSL path lives in
+`tools/hlsl_render_check.sh` + `tools/warp/`). A representative run: **81 shaders verified,
+0 divergences.** Honest scope: the corpus is SPIRV-Cross's own test suite — a strong
+differential oracle, not a guarantee about arbitrary real-world shaders — and every
+uncovered shader is reported as an explicit skip, never counted as a pass.
+
 Three independent kinds of evidence, weakest to strongest:
 
 1. **Validity + robustness at scale** — every shader either produces SPIR-V the
