@@ -462,6 +462,39 @@ test "switch default case with a body is not dropped" {
     try std.testing.expect(!spirvSwitchDefaultTargetsMerge(spv));
 }
 
+// A switch whose cases fall through and accumulate into a variable initialized before the
+// switch must materialize that initialization ahead of the OpSwitch. The frontend kept the
+// accumulator as a deferred SSA value and never spilled pending vars before the switch (it
+// does before a loop header), so the init store landed lazily inside the FIRST case block;
+// a selector jumping straight to a later case then read an uninitialized variable. Rendered
+// ~94% of pixels wrong (frontend=MISCOMPILE vs the glslang oracle). Fixed by un-SSA-ing all
+// scopes before the OpSwitch.
+test "switch fallthrough accumulator is initialized before the switch, not inside the first case" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec3 col = vec3(0.0);
+        \\    int mode = clamp(int(gl_FragCoord.y / 60.0), 0, 4);
+        \\    switch (mode) {
+        \\        case 4: col += vec3(0.2, 0.0, 0.0);
+        \\        case 3: col += vec3(0.0, 0.2, 0.0);
+        \\        case 2: col += vec3(0.0, 0.0, 0.2);
+        \\        case 1: col += vec3(0.1);
+        \\        case 0: col += vec3(0.05);
+        \\    }
+        \\    fragColor = vec4(clamp(col, 0.0, 1.0), 1.0);
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expect(spirvHasOpcode(spv, 251)); // OpSwitch present
+    // No case block reads the accumulator before it was initialized ahead of the switch.
+    try std.testing.expect(!spirvSwitchCaseLoadsUninitVar(spv));
+}
+
 // A loop nested inside a branch arm (`if (c) {...} else { for (...) {...} }`) is now
 // emitted correctly by both backends: emitBlock (the branch-arm emitter) delegates to the
 // loop emitter (emitWhileLoop{MSL,HLSL}) the way emitBody does, replaying the loop's phi
@@ -686,6 +719,65 @@ fn spirvConditionalTargetsLoopContinue(spv: []const u32) bool {
         const op: u16 = @truncate(spv[idx] & 0xFFFF);
         if (op == 250 and wc >= 4) {
             if (continues.contains(spv[idx + 2]) or continues.contains(spv[idx + 3])) return true;
+        }
+        idx += wc;
+    }
+    return false;
+}
+
+// True iff some switch case block does an OpLoad of a function variable that was never
+// stored before the OpSwitch and is not stored earlier in that same block. Each case
+// label is a DIRECT branch target of the OpSwitch, so a fallthrough accumulator that is
+// initialized before the switch (`col = vec3(0); switch(m){ case 4: col += ...; case 3:
+// col += ...; }`) must have its init store materialized ahead of the OpSwitch. The bug:
+// the frontend kept the accumulator as a deferred SSA value and spilled its init store
+// lazily inside the FIRST case block, so a selector jumping straight to a later case read
+// an uninitialized variable. This walks for that read-before-init.
+fn spirvSwitchCaseLoadsUninitVar(spv: []const u32) bool {
+    var func_vars = std.AutoHashMap(u32, void).init(std.testing.allocator);
+    defer func_vars.deinit();
+    var pre_switch_stored = std.AutoHashMap(u32, void).init(std.testing.allocator);
+    defer pre_switch_stored.deinit();
+    // Pass 1: collect Function OpVariables and find the first OpSwitch position.
+    var sw_pos: ?usize = null;
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 59 and wc >= 4 and spv[idx + 3] == 7) func_vars.put(spv[idx + 2], {}) catch {};
+        if (op == 251) {
+            sw_pos = idx;
+            break;
+        }
+        idx += wc;
+    }
+    const swp = sw_pos orelse return false;
+    // Pass 2: every OpStore target before the OpSwitch is "pre-initialized".
+    idx = 5;
+    while (idx < swp) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 62 and wc >= 3) pre_switch_stored.put(spv[idx + 1], {}) catch {};
+        idx += wc;
+    }
+    // Pass 3: after the OpSwitch, per case block, flag an OpLoad of a Function var that is
+    // neither pre-initialized nor stored earlier in the same block.
+    var local_stored = std.AutoHashMap(u32, void).init(std.testing.allocator);
+    defer local_stored.deinit();
+    idx = swp;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 248) local_stored.clearRetainingCapacity(); // OpLabel: new block
+        if (op == 62 and wc >= 3) local_stored.put(spv[idx + 1], {}) catch {};
+        if (op == 61 and wc >= 4) { // OpLoad result_type result_id ptr
+            const ptr = spv[idx + 3];
+            if (func_vars.contains(ptr) and !pre_switch_stored.contains(ptr) and !local_stored.contains(ptr)) {
+                return true;
+            }
         }
         idx += wc;
     }

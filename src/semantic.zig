@@ -3512,6 +3512,17 @@ const Analyzer = struct {
                     .continue_label = 0, // unused for switch
                 });
 
+                // Spill any still-SSA variables to memory BEFORE the OpSwitch, in the
+                // switch's (dominating) predecessor block. Each case label is a direct
+                // branch target of the OpSwitch, so a variable that is initialized before
+                // the switch and read/modified inside a case (classic fallthrough
+                // accumulator: `col = vec3(0); switch(m){ case 4: col += ...; case 3: ... }`)
+                // must have its init store materialized ahead of the switch. Without this,
+                // the deferred SSA store lands lazily inside the FIRST case block, so a
+                // selector that jumps straight to a later case reads an uninitialized var.
+                // for_stmt does the same before its loop header.
+                try self.unssaAllScopes();
+
                 // Emit SelectionMerge + OpSwitch
                 try self.emitSelectionMerge(merge_label);
 
