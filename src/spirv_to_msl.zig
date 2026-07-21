@@ -5014,6 +5014,21 @@ fn emitWhileLoopMSL(
     return loop_idx + 1;
 }
 
+// True iff block `label` is a loop header: it carries an OpLoopMerge before its terminator.
+// (A loop header may compute its exit condition between the OpPhi and the OpLoopMerge, so
+// scan the whole block, not just the first instruction.) Used by emitBlock to honest-error
+// when a branch arm tries to enter a nested loop it cannot emit.
+fn blockIsLoopHeader(m: *const ParsedModule, label: u32, lm: *const std.AutoHashMap(u32, usize)) bool {
+    const si = lm.get(label) orelse return false;
+    var i: usize = si + 1;
+    while (i < m.instructions.len) : (i += 1) {
+        const op = m.instructions[i].op;
+        if (op == .LoopMerge) return true;
+        if (op == .Label or op == .Branch or op == .BranchConditional or op == .FunctionEnd) return false;
+    }
+    return false;
+}
+
 fn emitBlock(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5037,8 +5052,21 @@ fn emitBlock(
         const inst = m.instructions[i];
         if (inst.op == .FunctionEnd) break;
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
-        if (inst.op == .Label or inst.op == .SelectionMerge or inst.op == .LoopMerge) continue;
-        if (inst.op == .Branch) break;
+        // A loop nested inside a branch arm (`if (c) { for (...) {...} }`) is entered by an
+        // OpBranch to the loop header, and its OpLoopMerge lives in that header block --
+        // which emitBlock (the branch-arm emitter) never reaches, because it breaks at the
+        // branch below. emitBlock carries no loop context, so it silently dropped the whole
+        // loop and everything after it in the arm (render-verified: maxd ~250 over most of
+        // the frame, uninitialized reads, though the frontend SPIR-V is correct). Per the
+        // cardinal rule, fail loud until the real fix (thread loop context into emitBlock and
+        // recurse the nested loop the way emitBody does) lands. Back-edge / continue / break
+        // targets are not loop headers, so they keep the normal block-ending behavior.
+        if (inst.op == .LoopMerge) return error.UnsupportedNestedLoopInBranch;
+        if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        if (inst.op == .Branch) {
+            if (inst.words.len > 1 and blockIsLoopHeader(m, inst.words[1], lm)) return error.UnsupportedNestedLoopInBranch;
+            break;
+        }
         if (inst.op == .BranchConditional) {
             if (inst.words.len < 4) continue;
             const cn = names.get(inst.words[1]) orelse "c";

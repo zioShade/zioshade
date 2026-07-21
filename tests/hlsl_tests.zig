@@ -8144,7 +8144,11 @@ test "T330.1: global const variable" {
 test "T331.1: complex shader with branching and loops" {
     // End-to-end test exercising the full optimization pipeline:
     // constFold, foldSelect, foldConstBranches, elimUnreachableBlocks,
-    // simplifyTrivialPhi, DCE, mergeBlocks, deadLoopElim Phase 2.5
+    // simplifyTrivialPhi, DCE, mergeBlocks, deadLoopElim Phase 2.5.
+    // The loop is at the top level and its result feeds the branches: a loop nested
+    // *inside* a branch arm is a distinct, not-yet-emittable shape that now honest-errors
+    // (it used to silently drop the loop; see correctness_tests.zig). This keeps the
+    // "branching and loops" pipeline coverage on a supported shape.
     const source =
         \\#version 450
         \\layout(location = 0) in vec2 uv;
@@ -8152,13 +8156,13 @@ test "T331.1: complex shader with branching and loops" {
         \\layout(binding = 0) uniform U { int mode; float scale; vec4 tint; };
         \\void main() {
         \\    vec4 c = vec4(uv, 0.0, 1.0);
+        \\    float s = 0.0;
+        \\    for (int i = 0; i < 3; i++) {
+        \\        s += float(i) * scale;
+        \\    }
         \\    if (mode == 0) {
         \\        c = c * scale;
         \\    } else if (mode == 1) {
-        \\        float s = 0.0;
-        \\        for (int i = 0; i < 3; i++) {
-        \\            s += float(i) * scale;
-        \\        }
         \\        c = c + vec4(s);
         \\    } else {
         \\        c = tint;
