@@ -70,7 +70,20 @@ frontend_oracle() {  # $1=frag $2=stage_short $3=name
   spirv-cross --msl "$gs" > "$gm" 2>/dev/null || { echo unknown; return; }
   local o; o=$("$SC_BIN" "$zm" "$gm" "$SHARE_HOST/${name}_feiso" 2>&1)
   if printf '%s\n' "$o" | grep -q '^MATCH'; then echo fe-clean; return; fi
-  if printf '%s\n' "$o" | grep -qE '^DIFFER'; then echo fe-bug; return; fi
+  if printf '%s\n' "$o" | grep -qE '^DIFFER'; then
+    # A render divergence under Metal's default fast-math is NOT proof of a frontend
+    # miscompile on its own: Metal's fp contraction/reassociation is context-sensitive to
+    # the full MSL text, so two SEMANTICALLY-EQUIVALENT frontend SPIR-Vs can round
+    # differently at an fp discontinuity (a step()/floor() edge landing exactly on a pixel
+    # center). Re-render both with fast-math DISABLED (precise fp). If they now match, the
+    # frontend ARITHMETIC is provably identical and the divergence was benign backend
+    # fast-math, NOT a structural miscompile -- report it as a distinct, characterized
+    # status, never a silent "clean": a genuine structural bug (e.g. a switch case reading
+    # uninitialized memory) still diverges under precise fp and stays fe-bug.
+    local os; os=$(SHADERCOMPARE_SAFE_MATH=1 "$SC_BIN" "$zm" "$gm" "$SHARE_HOST/${name}_feiso_safe" 2>&1)
+    if printf '%s\n' "$os" | grep -q '^MATCH'; then echo fe-fastmath-fp; return; fi
+    echo fe-bug; return
+  fi
   echo unknown
 }
 
@@ -113,8 +126,14 @@ check_one() {
     local fe; fe=$(frontend_oracle "$frag" "$ss" "$name")
     if [ "$fe" = fe-bug ]; then
       # zioshade's frontend SPIR-V structurally differs from the independent glslang oracle
-      # under an identical backend: a genuine frontend miscompile, not fp. Definitely real.
+      # under an identical backend AND still diverges under precise fp: a genuine frontend
+      # miscompile, not fp. Definitely real.
       echo "RENDER-DIFFER(px=${diff:-?},maxdiff=${md:-?},frontend=MISCOMPILE)"
+    elif [ "$fe" = fe-fastmath-fp ]; then
+      # The two frontends diverge only under Metal fast-math; with precise fp they render
+      # identically, so the frontend arithmetic is provably equivalent. This is benign
+      # backend/driver fast-math at an fp discontinuity, not a frontend miscompile.
+      echo "RENDER-EDGE(px=${diff:-?},maxdiff=${md:-?},frontend-precise-clean,fast-math-fp)"
     elif [ "$fe" = fe-clean ]; then
       # Frontend is provably correct vs the independent oracle. The residual is benign
       # backend fast-math fp UNLESS the magnitude is extreme -- a transposed-matrix-class

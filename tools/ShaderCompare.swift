@@ -164,14 +164,29 @@ print("Metal: \(device.name)")
 let msl1 = try readMSL(zioshadePath)
 let msl2 = try readMSL(spirvcrossPath)
 
+// Opt-in precise-fp mode (default off, so the shipping-path render check is unchanged).
+// When SHADERCOMPARE_SAFE_MATH=1, compile both shaders with Metal fast-math disabled
+// (mathMode = .safe). The frontend oracle uses this to re-check a suspected miscompile:
+// with fast-math on, two semantically-equivalent SPIR-Vs can round differently at an fp
+// discontinuity (e.g. a step() edge on a pixel center) because Metal's contraction is
+// context-sensitive to the full MSL text; disabling it cancels that so only a genuine
+// structural frontend difference (e.g. reading uninitialized memory) can still diverge.
+let compileOpts: MTLCompileOptions? = {
+    guard ProcessInfo.processInfo.environment["SHADERCOMPARE_SAFE_MATH"] == "1" else { return nil }
+    let o = MTLCompileOptions()
+    o.mathMode = .safe
+    return o
+}()
+if compileOpts != nil { print("Precise-fp mode: Metal fast-math disabled (mathMode=.safe)") }
+
 let vertLib = makeVertexLibrary(device: device)
 
 print("Compiling zioshade MSL (\(msl1.count) bytes)...")
-let lib1 = try device.makeLibrary(source: msl1, options: nil)
+let lib1 = try device.makeLibrary(source: msl1, options: compileOpts)
 print("  Functions: \(lib1.functionNames)")
 
 print("Compiling spirv-cross MSL (\(msl2.count) bytes)...")
-let lib2 = try device.makeLibrary(source: msl2, options: nil)
+let lib2 = try device.makeLibrary(source: msl2, options: compileOpts)
 print("  Functions: \(lib2.functionNames)")
 
 let texture = createTestTexture(device: device, w: W, h: H)
