@@ -426,14 +426,14 @@ test "conditional continue in a loop keeps an explicit then-block, not collapsed
     try std.testing.expect(!spirvConditionalTargetsLoopContinue(spv));
 }
 
-// A loop nested inside a branch arm (`if (c) {...} else { for (...) {...} }`) is not yet
-// emittable by the backends: emitBlock (the branch-arm emitter) carries no loop context and
-// used to silently drop the loop and everything after it in the arm (render-verified: maxd
-// ~250 over most of the frame, with uninitialized reads). The frontend SPIR-V is correct.
-// Until emitBlock threads loop context and recurses the nested loop the way emitBody does,
-// both backends must FAIL LOUD (error.UnsupportedNestedLoopInBranch) rather than ship wrong
-// pixels. This test guards that honest-error so the silent miscompile can never regress in.
-test "loop nested in a branch arm honest-errors, never silently miscompiles (HLSL + MSL)" {
+// A loop nested inside a branch arm (`if (c) {...} else { for (...) {...} }`) is now
+// emitted correctly by both backends: emitBlock (the branch-arm emitter) delegates to the
+// loop emitter (emitWhileLoop{MSL,HLSL}) the way emitBody does, replaying the loop's phi
+// decls first. It used to silently drop the loop (then honest-error #501); now it compiles
+// and RENDER-MATCHes an independent glslang oracle on Metal AND the shipping HLSL->DXC path
+// (early_return2, recursive_fib, a multi-var-init analog). Genuinely-unsupported loop
+// sub-shapes still fail loud via emitWhileLoop's own honest-errors (the floor holds).
+test "loop nested in a branch arm compiles and emits the loop (HLSL + MSL)" {
     const alloc = std.testing.allocator;
     const source: [:0]const u8 =
         \\#version 310 es
@@ -452,8 +452,13 @@ test "loop nested in a branch arm honest-errors, never silently miscompiles (HLS
         \\    fragColor = vec4(col, 1.0);
         \\}
     ;
-    try std.testing.expectError(error.UnsupportedNestedLoopInBranch, zioshade.compileGlslToHlsl(alloc, source, .fragment));
-    try std.testing.expectError(error.UnsupportedNestedLoopInBranch, zioshade.compileGlslToMsl(alloc, source, .fragment));
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, source, .fragment);
+    defer alloc.free(hlsl);
+    // The nested loop is emitted (as a while(true) in the else arm), not dropped.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "while") != null);
+    const msl = try zioshade.compileGlslToMsl(alloc, source, .fragment);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while") != null);
 }
 
 // =============================================================================

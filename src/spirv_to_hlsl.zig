@@ -41,6 +41,13 @@ threadlocal var g_hoist_stripping: bool = false;
 // temp is out of scope at the merge — DXC rejects it). Mirrors the MSL backend's
 // g_materialized_phis. See collectMergePhisHLSL. (#491)
 threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
+// Loop-context maps threaded to emitWhileLoopHLSL. emitBlock (the branch-arm emitter)
+// reads these to delegate a loop nested in a branch arm to emitWhileLoopHLSL; set once in
+// emitBody (they are emitBody-local vars everywhere else), reset in its defer.
+threadlocal var g_loop_merge_map_h: ?*const std.AutoHashMap(usize, LoopInfo) = null;
+threadlocal var g_loop_phis_h: ?*const std.AutoHashMap(usize, std.ArrayList(PhiInfo)) = null;
+threadlocal var g_phi_hdr_h: ?*const std.AutoHashMap(u32, usize) = null;
+threadlocal var g_deferred_hdr_h: ?*const std.AutoHashMap(usize, void) = null;
 // The expression an EARLY OpReturn in an entry point must return (the fragment output
 // var, or `output` for a vertex). The HLSL entry returns its output value at function
 // end, so an early return (`if (hit) { fragColor = c; return; }`) must return that same
@@ -3122,6 +3129,10 @@ fn emitBody(
         g_loop_hoists = null;
         g_hoisted_ids = null;
         g_materialized_phis = null;
+        g_loop_merge_map_h = null;
+        g_loop_phis_h = null;
+        g_phi_hdr_h = null;
+        g_deferred_hdr_h = null;
     }
     {
         var li = func_idx + 1;
@@ -3196,6 +3207,12 @@ fn emitBody(
     }
     g_loop_hoists = &loop_hoists;
     g_hoisted_ids = &hoisted_ids;
+    // Expose the loop-context maps so emitBlock can delegate a loop-in-branch to
+    // emitWhileLoopHLSL (it only receives label_map + bc_merge_map as params).
+    g_loop_merge_map_h = &loop_merge_map;
+    g_loop_phis_h = &loop_phis;
+    g_phi_hdr_h = &phi_hdr;
+    g_deferred_hdr_h = &deferred_hdr;
 
     // Structured emission
     idx = func_idx + 1;
@@ -3926,6 +3943,30 @@ fn blockIsLoopHeader(module: *const ParsedModule, label: u32, label_map: *const 
     return false;
 }
 
+// Emit the loop-carried phi variable declarations (e.g. the counter `int v20 = 0;`) for
+// the loop whose OpLoopMerge is at `loop_idx`, mirroring emitBody's inline OpPhi handling.
+// emitBody / emitWhileLoopHLSL declare these as they scan the header; emitBlock jumps
+// straight to the loop so it must replay them, or the counter is used undeclared.
+fn emitLoopHeaderPhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), loop_idx: usize, w: anytype, alloc: std.mem.Allocator, indent: []const u8) !void {
+    const lp = g_loop_phis_h orelse return;
+    const plist = lp.get(loop_idx) orelse return;
+    for (plist.items) |pi| {
+        const tyname = phiTypeNameHLSL(module, pi.type_id);
+        if (names.get(pi.result_id) == null) {
+            const nm = std.fmt.allocPrint(alloc, "v{d}", .{pi.result_id}) catch "vphi";
+            if (names.fetchPut(pi.result_id, nm) catch null) |old| alloc.free(old.value);
+        }
+        const vname = names.get(pi.result_id) orelse "vphi";
+        const init_name = names.get(pi.init_id) orelse "0";
+        const hoisted = if (g_hoisted_ids) |h| h.contains(pi.result_id) else false;
+        if (hoisted) {
+            try w.print("{s}{s} = {s};\n", .{ indent, vname, init_name });
+        } else {
+            try w.print("{s}{s} {s} = {s};\n", .{ indent, tyname, vname, init_name });
+        }
+    }
+}
+
 fn emitBlock(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3940,7 +3981,7 @@ fn emitBlock(
     is_vertex: bool,
     output_var_id: ?u32,
     indent: []const u8,
-) !usize {
+) anyerror!usize { // explicit set breaks the emitBlock<->emitWhileLoopHLSL inferred-error cycle
     const start_idx = label_map.get(label) orelse return error.InvalidSpirv;
     var i: usize = start_idx + 1; // skip the Label
     while (i < module.instructions.len) : (i += 1) {
@@ -3950,20 +3991,36 @@ fn emitBlock(
         // Branch to merge = end of this block
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
 
-        // A loop nested inside a branch arm (`if (c) { for (...) {...} }`) is entered by an
-        // OpBranch to the loop header, whose OpLoopMerge lives in that header block --
-        // which emitBlock (the branch-arm emitter) never reaches, because it breaks at the
-        // branch below. emitBlock carries no loop context, so it silently dropped the whole
-        // loop and everything after it in the arm (render-verified: maxd ~250 over most of
-        // the frame, uninitialized reads, though the frontend SPIR-V is correct). Per the
-        // cardinal rule, fail loud until the real fix (thread loop context into emitBlock and
-        // recurse the nested loop the way emitBody does) lands.
-        if (inst.op == .LoopMerge) return error.UnsupportedNestedLoopInBranch;
         // Skip structural instructions
         if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        // A loop nested in this branch arm: delegate to emitWhileLoopHLSL (the emitter
+        // emitBody uses; it recurses through nested loops/branches). Reached bare (arm IS
+        // the header) or via an OpBranch into a separate loop-header block. Replay the
+        // header's phi-counter decls first (emitBody does it inline as it scans; we jump
+        // over the header). Requires the loop-context maps, exposed as threadlocals since
+        // emitBlock only receives label_map + bc_merge_map.
+        if (inst.op == .LoopMerge) {
+            if (inst.words.len >= 3 and g_loop_merge_map_h != null) {
+                try emitLoopHeaderPhiDeclsHLSL(module, names, i, w, alloc, indent);
+                i = try emitWhileLoopHLSL(module, names, decorations, i, inst.words[1], inst.words[2], label_map, bc_merge_map, g_loop_merge_map_h.?, g_loop_phis_h.?, g_phi_hdr_h.?, g_deferred_hdr_h.?, w, alloc, is_fragment, is_vertex, output_var_id);
+                i -= 1;
+                continue;
+            }
+            return error.UnsupportedNestedLoopInBranch;
+        }
         if (inst.op == .Branch) {
-            // Entering a nested loop (target is a loop header)? Honest-error rather than
-            // drop it. Back-edge / continue / break targets are not loop headers.
+            // Entering a nested loop (target is a loop header)? Emit it, then continue the
+            // arm's post-loop code from the loop's merge block.
+            if (inst.words.len > 1 and blockIsLoopHeader(module, inst.words[1], label_map) and g_loop_merge_map_h != null) {
+                const hdr_idx = label_map.get(inst.words[1]) orelse return error.InvalidSpirv;
+                var li: usize = hdr_idx + 1;
+                while (li < module.instructions.len and module.instructions[li].op != .LoopMerge) : (li += 1) {}
+                if (li >= module.instructions.len or module.instructions[li].words.len < 3) return error.InvalidSpirv;
+                try emitLoopHeaderPhiDeclsHLSL(module, names, li, w, alloc, indent);
+                i = try emitWhileLoopHLSL(module, names, decorations, li, module.instructions[li].words[1], module.instructions[li].words[2], label_map, bc_merge_map, g_loop_merge_map_h.?, g_loop_phis_h.?, g_phi_hdr_h.?, g_deferred_hdr_h.?, w, alloc, is_fragment, is_vertex, output_var_id);
+                i -= 1;
+                continue;
+            }
             if (inst.words.len > 1 and blockIsLoopHeader(module, inst.words[1], label_map)) return error.UnsupportedNestedLoopInBranch;
             break; // branch to somewhere else (e.g., loop back-edge)
         }
