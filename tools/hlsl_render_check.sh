@@ -47,9 +47,38 @@ mkdir -p "$SHARE_HOST"
 # Build the Metal render+diff harness once (reused, unmodified, from the MSL proof).
 [ -x "$SC_BIN" ] || swiftc tools/ShaderCompare.swift -o "$SC_BIN" 2>/dev/null || { echo "error: swiftc failed"; exit 2; }
 
+# Independent-oracle check via FRONTEND isolation. Compile the same GLSL with an
+# INDEPENDENT frontend (glslang) and render BOTH zioshade's and glslang's frontend SPIR-V
+# through the SAME spirv-cross -> MSL backend (NO DXC). Because the backend is identical,
+# every fast-math / transcendental fp choice cancels EXACTLY, so the only surviving
+# difference is zioshade's frontend STRUCTURE. On a hash/fbm shader -- where the shipping
+# HLSL-vs-direct-MSL render is swamped by benign fast-math fp (spirv-cross fast:: vs
+# zioshade precise) that no whole-pipeline comparison can cancel -- this is the one clean
+# signal. It decides FRONTEND correctness definitively (the continue-drop bug scored 83
+# here; correct shaders score <=1). It cannot see an HLSL-BACKEND-only miscompile, which
+# leaves the frontend clean; the magnitude backstop below flags those for WARP (real D3D).
+# Echoes: fe-clean | fe-bug | unknown. glslang (Vulkan) needs explicit in/out locations.
+frontend_oracle() {  # $1=frag $2=stage_short $3=name
+  local frag="$1" ss="$2" name="$3"
+  command -v glslangValidator >/dev/null || { echo unknown; return; }
+  local gf="$SHARE_HOST/$name.gl.frag" gs="$SHARE_HOST/$name.gl.spv" gm="$SHARE_HOST/$name.gl.msl"
+  local zs="$SHARE_HOST/$name.zfe.spv" zm="$SHARE_HOST/$name.zfe.msl"
+  "$CLI" compile "$frag" --stage "$STAGE_FULL" -o "$zs" 2>/dev/null || { echo unknown; return; }
+  spirv-cross --msl "$zs" > "$zm" 2>/dev/null || { echo unknown; return; }
+  sed 's/^\(out [a-z0-9]*vec4 [A-Za-z_][A-Za-z0-9_]*;\)/layout(location=0) \1/' "$frag" > "$gf"
+  glslangValidator -V -S "$ss" "$gf" -o "$gs" >/dev/null 2>&1 || { echo unknown; return; }
+  spirv-cross --msl "$gs" > "$gm" 2>/dev/null || { echo unknown; return; }
+  local o; o=$("$SC_BIN" "$zm" "$gm" "$SHARE_HOST/${name}_feiso" 2>&1)
+  if printf '%s\n' "$o" | grep -q '^MATCH'; then echo fe-clean; return; fi
+  if printf '%s\n' "$o" | grep -qE '^DIFFER'; then echo fe-bug; return; fi
+  echo unknown
+}
+
 # Render-check one shader. Echoes: RENDER-MATCH | RENDER-DIFFER | skip-<stage>
 check_one() {
   local frag="$1" stage="$2" name; name=$(basename "$frag" .frag)
+  local ss=frag; case "$stage" in vertex) ss=vert;; compute) ss=comp;; esac
+  STAGE_FULL="$stage"  # full stage name for the frontend oracle's `zioshade compile`
   "$CLI" msl  "$frag" --stage "$stage" > "$SHARE_HOST/$name.ref.msl" 2>/dev/null || { echo "skip-msl"; return; }
   "$CLI" hlsl "$frag" --stage "$stage" > "$SHARE_HOST/$name.hlsl"    2>/dev/null || { echo "skip-hlsl"; return; }
   # The fullscreen-triangle harness feeds only gl_FragCoord, one shadertoy-layout
@@ -73,24 +102,44 @@ check_one() {
   if printf '%s\n' "$out" | grep -q '^MATCH'; then
     echo "RENDER-MATCH"
   elif printf '%s\n' "$out" | grep -qE '^DIFFER \(max diff'; then
-    # Triage a non-exact render. Benign floating-point differences come in two
-    # shapes, neither a miscompile: (a) tiny-MAGNITUDE drift across many pixels —
-    # transcendental precision (sin/cos/atan) or a fract/mod boundary, where the two
-    # compile paths pick slightly different instructions; (b) small-AREA sharp flips
-    # — step()/floor()/discontinuity edges where a 1-ULP difference flips which side
-    # a boundary pixel lands on. A real miscompile (e.g. a transposed matrix)
-    # diverges over a LARGE area AND at LARGE magnitude (the matrix bug was ~50-64k
-    # px at maxdiff ~200+). So: maxdiff <= 8 (precision drift) OR <= 256 differing
-    # pixels (~0.4% of 65536, localized boundaries) = RENDER-EDGE (benign); anything
-    # both large-area and large-magnitude = RENDER-DIFFER (a real bug to triage).
+    # A non-exact render between the shipping HLSL path and zioshade's own MSL is NOT a
+    # reliable bug signal on its own: the two backends make different fast-math choices
+    # (spirv-cross fast:: vs zioshade precise), which a hash/fbm shader amplifies into a
+    # large maxdiff that is nonetheless benign (verified: nested_func_expr, loop_trackers).
+    # So consult the INDEPENDENT frontend oracle, the one comparison that cleanly cancels
+    # that fp (identical backend, no DXC).
     local diff md; diff=$(printf '%s\n' "$out" | grep -oE 'Different: [0-9]+' | grep -oE '[0-9]+$')
     md=$(printf '%s\n' "$out" | grep -oE 'Max channel diff: [0-9]+' | grep -oE '[0-9]+$')
-    if [ -n "$md" ] && [ "$md" -le 8 ]; then
-      echo "RENDER-EDGE(px=${diff:-?},maxdiff=${md})"
-    elif [ -n "$diff" ] && [ "$diff" -le 256 ]; then
-      echo "RENDER-EDGE(px=${diff},maxdiff=${md:-?})"
+    local fe; fe=$(frontend_oracle "$frag" "$ss" "$name")
+    if [ "$fe" = fe-bug ]; then
+      # zioshade's frontend SPIR-V structurally differs from the independent glslang oracle
+      # under an identical backend: a genuine frontend miscompile, not fp. Definitely real.
+      echo "RENDER-DIFFER(px=${diff:-?},maxdiff=${md:-?},frontend=MISCOMPILE)"
+    elif [ "$fe" = fe-clean ]; then
+      # Frontend is provably correct vs the independent oracle. The residual is benign
+      # backend fast-math fp UNLESS the magnitude is extreme -- a transposed-matrix-class
+      # HLSL-backend miscompile rendered ~200+ (the #497 bug), well above the hash-fp floor
+      # (<=~100). So >=128 stays a suspect flagged for WARP (real D3D) adjudication, since
+      # Metal cannot separate a backend miscompile from backend fp on a hash shader; below
+      # that is a benign edge.
+      if [ -n "$md" ] && [ "$md" -ge 128 ]; then
+        echo "RENDER-DIFFER(px=${diff:-?},maxdiff=${md},frontend-clean,WARP-adjudicate-backend)"
+      else
+        echo "RENDER-EDGE(px=${diff:-?},maxdiff=${md:-?},frontend-clean-backend-fp)"
+      fi
     else
-      echo "RENDER-DIFFER(px=${diff:-?},maxdiff=${md:-?})"
+      # No independent oracle (glslang missing or rejected the shader). Fall back to the
+      # magnitude heuristic: benign fp is either tiny-MAGNITUDE drift across many pixels
+      # (transcendental / fract-mod precision) or a small-AREA discontinuity flip
+      # (step/floor edges); a real miscompile is LARGE-area AND LARGE-magnitude. So
+      # maxdiff <= 8 OR <= 256 differing pixels = RENDER-EDGE (benign); else RENDER-DIFFER.
+      if [ -n "$md" ] && [ "$md" -le 8 ]; then
+        echo "RENDER-EDGE(px=${diff:-?},maxdiff=${md})"
+      elif [ -n "$diff" ] && [ "$diff" -le 256 ]; then
+        echo "RENDER-EDGE(px=${diff},maxdiff=${md:-?})"
+      else
+        echo "RENDER-DIFFER(px=${diff:-?},maxdiff=${md:-?})"
+      fi
     fi
   else
     echo "skip-inputs"   # needs vertex attrs / incompatible uniforms — not renderable here
