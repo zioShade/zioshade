@@ -3487,7 +3487,7 @@ const Analyzer = struct {
 
                 // Build OpSwitch: allocate a label per case + default
                 // First, collect case values by evaluating case expressions
-                const CaseInfo = struct { value: ?i64, label: u32, body_idx: usize };
+                const CaseInfo = struct { value: ?i64, label: u32, body_idx: usize, is_default: bool };
                 var case_infos = std.ArrayListUnmanaged(CaseInfo).empty;
                 defer case_infos.deinit(self.alloc);
 
@@ -3501,7 +3501,7 @@ const Analyzer = struct {
                             value = self.evalConstInt(case_node.data.children[0]) catch null;
                         }
                     }
-                    try case_infos.append(self.alloc, .{ .value = value, .label = label, .body_idx = ci });
+                    try case_infos.append(self.alloc, .{ .value = value, .label = label, .body_idx = ci, .is_default = is_default });
                 }
 
                 const default_label = self.allocId();
@@ -3522,7 +3522,7 @@ const Analyzer = struct {
                 // Default target
                 const default_target = blk: {
                     for (case_infos.items) |ci| {
-                        if (ci.value == null) break :blk ci.label;
+                        if (ci.is_default) break :blk ci.label;
                     }
                     break :blk default_label;
                 };
@@ -3564,8 +3564,17 @@ const Analyzer = struct {
                 for (case_infos.items, 0..) |ci, idx| {
                     try self.emitLabel(ci.label);
                     const case_node = cases[ci.body_idx];
-                    // Skip first child (case value expression), emit body statements
-                    const body_stmts = if (case_node.data.children.len > 0) case_node.data.children[1..] else case_node.data.children[0..0];
+                    // A `case N:` node stores its value expression as the first child, so its
+                    // body begins at index 1; a `default:` node has no value child, so its body
+                    // begins at index 0. Slicing `[1..]` unconditionally used to drop the
+                    // default's first statement (#500 empty-block pass then discarded the whole
+                    // default arm when that was its only real statement).
+                    const body_stmts = if (ci.is_default)
+                        case_node.data.children[0..]
+                    else if (case_node.data.children.len > 0)
+                        case_node.data.children[1..]
+                    else
+                        case_node.data.children[0..0];
                     for (body_stmts) |stmt| {
                         self.analyzeStatement(stmt) catch {};
                         // Stop emitting after a terminator (break, continue, return, discard)
@@ -3586,7 +3595,7 @@ const Analyzer = struct {
                 // Default label if no default case was found
                 var has_default = false;
                 for (case_infos.items) |ci| {
-                    if (ci.value == null) {
+                    if (ci.is_default) {
                         has_default = true;
                         break;
                     }
