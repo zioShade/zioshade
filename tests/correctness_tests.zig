@@ -359,6 +359,39 @@ test "multi-return function keeps its return value, not OpUndef (#494)" {
     try std.testing.expect(spirvHasOpcode(spv, 57));
 }
 
+// A conditional `continue` inside a loop (`if (cond) continue;`) must keep its
+// intermediate then-block so downstream structured consumers (spirv-cross, DXC) see an
+// explicit continue. The empty-passthrough-block pass used to collapse that block,
+// retargeting the OpBranchConditional straight onto the loop's continue-target — a form
+// spirv-val accepts but spirv-cross and DXC miscompile by dropping the continue as
+// redundant (the selection's fall-through path also reaches the continue at the loop
+// tail). Verified end-to-end: the collapsed form rendered wrong (a skipped iteration got
+// accumulated) through the shipping HLSL->DXC->DXIL path, while zioshade's own tolerant
+// backend masked it. Proven correct now: zioshade's SPIR-V, cross-compiled by an
+// independent spirv-cross, renders identically to glslang's.
+test "conditional continue in a loop keeps an explicit then-block, not collapsed onto the continue edge" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < 10; i++) {
+        \\        if (i == 3) continue;
+        \\        sum += 1.0;
+        \\    }
+        \\    fragColor = vec4(sum / 10.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The loop is present (OpLoopMerge = 246)...
+    try std.testing.expect(spirvHasOpcode(spv, 246));
+    // ...and no conditional branch targets the loop continue directly (the collapsed form).
+    try std.testing.expect(!spirvConditionalTargetsLoopContinue(spv));
+}
+
 // =============================================================================
 // G10: HLSL SM 5.0 compatibility — correctness tests
 // =============================================================================
@@ -520,6 +553,35 @@ fn spirvHasBuiltinDecoration(spv: []const u32, builtin_value: u32) bool {
         if (wc == 0) break;
         const op: u16 = @truncate(spv[idx] & 0xFFFF);
         if (op == 71 and wc >= 4 and spv[idx + 2] == 11 and spv[idx + 3] == builtin_value) return true;
+        idx += wc;
+    }
+    return false;
+}
+
+// True iff any OpBranchConditional (250) directly targets a loop's continue-target (the
+// collapsed-`continue` shape). A well-formed `if(cond) continue;` routes through an
+// intermediate then-block that unconditionally branches to the continue target; a bare
+// conditional edge onto the continue label is the miscompiling form spirv-cross/DXC drop.
+// OpLoopMerge=246 (continue = word[2]); OpBranchConditional=250 (true=word[2], false=word[3]).
+fn spirvConditionalTargetsLoopContinue(spv: []const u32) bool {
+    var continues = std.AutoHashMap(u32, void).init(std.testing.allocator);
+    defer continues.deinit();
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 246 and wc >= 3) continues.put(spv[idx + 2], {}) catch {};
+        idx += wc;
+    }
+    idx = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 250 and wc >= 4) {
+            if (continues.contains(spv[idx + 2]) or continues.contains(spv[idx + 3])) return true;
+        }
         idx += wc;
     }
     return false;
