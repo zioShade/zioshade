@@ -3361,13 +3361,33 @@ fn emitBody(
 /// `OpLoad ptr` resolves to the loaded variable's name (a fresh read at the bottom test),
 /// a constant to its literal. Returns null for anything else (e.g. an arithmetic
 /// intermediate — a body-local temp that would be out of scope) so the caller honest-errors.
-fn inlineDoWhileOperand(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32) ?[]const u8 {
+fn inlineDoWhileOperand(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const def = getDef(module, id) orelse return null;
     switch (def.op) {
         .Load => return if (def.words.len > 3) names.get(def.words[3]) else null,
         .Constant => return if (def.words.len > 3) names.get(def.words[2]) else null,
         .ConstantTrue => return "true",
         .ConstantFalse => return "false",
+        // Arithmetic inside the condition (`zx*zx + zy*zy < 4.0`, a magnitude/distance
+        // test ubiquitous in iteration loops) is rebuilt recursively over the persistent
+        // vars, fully parenthesised so precedence matches the source. Arena-owned.
+        .FAdd, .IAdd, .FSub, .ISub, .FMul, .IMul, .FDiv, .SDiv, .UDiv => {
+            if (def.words.len < 5) return null;
+            const l = inlineDoWhileOperand(module, names, def.words[3], alloc) orelse return null;
+            const r = inlineDoWhileOperand(module, names, def.words[4], alloc) orelse return null;
+            const bop: []const u8 = switch (def.op) {
+                .FAdd, .IAdd => "+",
+                .FSub, .ISub => "-",
+                .FMul, .IMul => "*",
+                else => "/",
+            };
+            return std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ l, bop, r }) catch null;
+        },
+        .FNegate, .SNegate => {
+            if (def.words.len < 4) return null;
+            const x = inlineDoWhileOperand(module, names, def.words[3], alloc) orelse return null;
+            return std.fmt.allocPrint(alloc, "(-{s})", .{x}) catch null;
+        },
         else => return null,
     }
 }
@@ -3395,9 +3415,24 @@ fn tryInlineDoWhileCond(module: *const ParsedModule, names: *std.AutoHashMap(u32
     };
     if (op_str) |ops| {
         if (def.words.len < 5) return null;
-        const lhs = inlineDoWhileOperand(module, names, def.words[3]) orelse return null;
-        const rhs = inlineDoWhileOperand(module, names, def.words[4]) orelse return null;
+        const lhs = inlineDoWhileOperand(module, names, def.words[3], alloc) orelse return null;
+        const rhs = inlineDoWhileOperand(module, names, def.words[4], alloc) orelse return null;
         return std.fmt.allocPrint(alloc, "{s} {s} {s}", .{ lhs, ops, rhs }) catch null;
+    }
+    // Compound conditions (`n < 20 && x < 4.0`) lower to OpLogicalAnd/Or over two
+    // comparison results; a do-while whose back-edge test is compound is common in
+    // iteration loops. Rebuild each side recursively and join. The SPIR-V is eager
+    // (side-effect-free comparisons), so `&&`/`||` over them is equivalent.
+    if (def.op == .LogicalAnd or def.op == .LogicalOr) {
+        if (def.words.len < 5) return null;
+        const lhs = tryInlineDoWhileCond(module, names, def.words[3], alloc) orelse return null;
+        const rhs = tryInlineDoWhileCond(module, names, def.words[4], alloc) orelse return null;
+        const jop: []const u8 = if (def.op == .LogicalAnd) "&&" else "||";
+        return std.fmt.allocPrint(alloc, "({s}) {s} ({s})", .{ lhs, jop, rhs }) catch null;
+    }
+    if (def.op == .LogicalNot and def.words.len >= 4) {
+        const inner = tryInlineDoWhileCond(module, names, def.words[3], alloc) orelse return null;
+        return std.fmt.allocPrint(alloc, "!({s})", .{inner}) catch null;
     }
     if (def.op == .Load and def.words.len > 3) return names.get(def.words[3]);
     return null;

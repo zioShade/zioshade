@@ -547,6 +547,42 @@ test "conditional loop increment honest-errors instead of dropping the increment
     try std.testing.expectError(error.UnstructuredControlFlow, zioshade.compileGlslToHlsl(alloc, source, .fragment));
 }
 
+// A do-while whose back-edge test is a COMPOUND condition with ARITHMETIC
+// (`while (iter < 30 && zx*zx + zy*zy < 4.0)`) is emitted natively. The do-while emitter
+// rebuilds the back-edge condition inline over the persistent loop vars so a body
+// `continue`/`break` re-evaluates it at the bottom test; that rebuilder handled only a
+// single comparison of loads/constants and honest-errored on OpLogicalAnd/Or or an
+// arithmetic operand -- the common iteration-loop shape (fractal/raymarch magnitude test).
+// Now compiles for both backends. Both patterns render-verify against the glslang oracle.
+test "do-while with a compound arithmetic back-edge condition compiles (HLSL + MSL)" {
+    const alloc = std.testing.allocator;
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = gl_FragCoord.xy / 300.0;
+        \\    float zx = uv.x * 2.0 - 1.0;
+        \\    float zy = uv.y * 2.0 - 1.0;
+        \\    int iter = 0;
+        \\    do {
+        \\        float xn = zx * zx - zy * zy + uv.x;
+        \\        float yn = 2.0 * zx * zy + uv.y;
+        \\        zx = xn; zy = yn; iter++;
+        \\        if (zx * zx + zy * zy > 4.0) break;
+        \\    } while (iter < 30 && zx * zx + zy * zy < 4.0);
+        \\    fragColor = vec4(float(iter) / 30.0, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const msl = try zioshade.compileGlslToMsl(alloc, source, .fragment);
+    defer alloc.free(msl);
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, source, .fragment);
+    defer alloc.free(hlsl);
+    // Both emit a native do-while whose bottom test re-joins the two clauses with &&.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while") != null and std.mem.indexOf(u8, msl, "&&") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "while") != null and std.mem.indexOf(u8, hlsl, "&&") != null);
+}
+
 // A loop nested inside a branch arm (`if (c) {...} else { for (...) {...} }`) is now
 // emitted correctly by both backends: emitBlock (the branch-arm emitter) delegates to the
 // loop emitter (emitWhileLoop{MSL,HLSL}) the way emitBody does, replaying the loop's phi
