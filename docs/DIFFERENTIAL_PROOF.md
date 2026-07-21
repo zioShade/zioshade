@@ -224,6 +224,26 @@ handful of boundary pixels differ with ~0 average — benign floating-point at a
 `step()`/discontinuity, e.g. `art_deco` = 5 px), **RENDER-DIFFER** (large-area
 divergence = a real miscompile).
 
+**Independent frontend oracle.** When the HLSL-vs-MSL render diverges, the script
+consults a second, backend-independent oracle: it compiles the same GLSL with both
+zioshade and **glslang**, runs both SPIR-Vs through the *same* SPIRV-Cross → MSL
+backend, and renders both. Using one backend cancels backend floating-point, so a
+residual divergence isolates a **frontend** structural difference
+(`frontend=MISCOMPILE`) from benign backend fast-math (`frontend-clean`). One caveat:
+Metal's driver-level fast-math (fp contraction/reassociation) is context-sensitive to
+the full MSL text, so two *semantically-equivalent* frontend SPIR-Vs can still round
+differently at an fp discontinuity (a `step()` edge on a pixel center). The oracle
+therefore re-renders any suspected frontend miscompile with **fast-math disabled**
+(`SHADERCOMPARE_SAFE_MATH=1`, `MTLCompileOptions.mathMode = .safe`): if the two then
+match exactly, the frontend arithmetic is provably identical and the divergence is
+benign backend fast-math (`frontend-precise-clean,fast-math-fp`), not a miscompile.
+This is a strict de-escalation — precise fp still honors evaluation *order*, so a real
+frontend reassociation or a structural bug (e.g. a switch case reading uninitialized
+memory) still diverges under precise fp and stays `frontend=MISCOMPILE`. Example:
+`origami` flags under fast-math (105 px on the `uv.x+uv.y==0` fold, which lands exactly
+on pixel centers) but is precise-clean — zioshade computes the boundary sum as exactly
+`0` (`step(0,0)==1`), which is in fact more accurate than glslang there.
+
 Result: a broad set of non-matrix shaders **RENDER-MATCH**, which upgrades them
 from compile-verified to render-verified and **resolves the SPIR-V differential's
 DIVERGE over-reporting** — e.g. `swizzle_access` and `mandelbrot_smooth` (both
