@@ -44,6 +44,12 @@ FRAG_EVERY=25
 [ "${PROVE_FULL:-0}" = 1 ] && FRAG_EVERY=1
 echo "[1/3] FRAGMENT (rendered pixel diff; $([ $FRAG_EVERY = 1 ] && echo 'FULL corpus' || echo "1/$FRAG_EVERY sample + regression set")) ..." >&2
 FRAG_EVERY=$FRAG_EVERY bash tools/frag_oracle_check.sh --sweep > "$TMP/frag" 2>/dev/null || true
+# Real-world-style fragment corpus (hand-written for zioshade, NOT from SPIRV-Cross's own
+# test suite) -- the strongest evidence, run in full since it is small. Answers the "is the
+# proof only over a synthetic self-selected corpus?" objection.
+echo "[1b] FRAGMENT real-world (render_compare + shadertoy_style, full) ..." >&2
+{ bash tools/frag_oracle_check.sh --dir tests/render_compare 2>/dev/null
+  bash tools/frag_oracle_check.sh --dir tests/shadertoy_style 2>/dev/null; } > "$TMP/fragrw" || true
 echo "[2/3] VERTEX (numeric gl_Position diff) ..." >&2
 bash tools/vert_numeric_check.sh --sweep > "$TMP/vert" 2>/dev/null || true
 echo "[3/3] COMPUTE (numeric buffer diff) ..." >&2
@@ -55,6 +61,11 @@ f_match=$(grep -c ': MATCH$' "$TMP/frag" || true)
 f_edge=$(grep -c 'EDGE(fast-math-fp' "$TMP/frag" || true)
 f_bug=$(grep -c 'frontend=MISCOMPILE' "$TMP/frag" || true)
 f_skip=$(grep -c ': skip-' "$TMP/frag" || true)
+# FRAGMENT real-world corpus (hand-written, not SPIRV-Cross's test suite)
+rw_match=$(grep -c ': MATCH$' "$TMP/fragrw" || true)
+rw_edge=$(grep -c 'EDGE(fast-math-fp' "$TMP/fragrw" || true)
+rw_bug=$(grep -c 'frontend=MISCOMPILE' "$TMP/fragrw" || true)
+rw_skip=$(grep -c ': skip-' "$TMP/fragrw" || true)
 # VERTEX: MATCH(covered) | MATCH(trivial-zero) | DIFFER(...) | skip-*
 v_match=$(grep -c 'MATCH(covered)' "$TMP/vert" || true)
 v_triv=$(grep -c 'MATCH(trivial-zero)' "$TMP/vert" || true)
@@ -66,22 +77,24 @@ c_bug=$(grep -cE '[[:space:]]DIFFER[[:space:]]' "$TMP/comp" || true)
 c_err=$(grep -cE 'ERR-' "$TMP/comp" || true)
 
 [ "${PROVE_FULL:-0}" = 1 ] && fragnote="full corpus" || fragnote="1/25 sample + regression set"
-printf "%-10s %8s %8s %10s %8s\n" "stage" "verified" "benign" "diverge" "skipped"
+printf "%-14s %8s %8s %10s %8s\n" "stage" "verified" "benign" "diverge" "skipped"
 hr
-printf "%-10s %8s %8s %10s %8s   (%s)\n" "fragment" "$f_match" "$f_edge" "$f_bug" "$f_skip" "$fragnote"
-printf "%-10s %8s %8s %10s %8s\n" "vertex" "$v_match" "$v_triv" "$v_bug" "$v_skip"
-printf "%-10s %8s %8s %10s %8s\n" "compute" "$c_match" "-" "$c_bug" "$c_err"
+printf "%-14s %8s %8s %10s %8s   (%s)\n" "fragment" "$f_match" "$f_edge" "$f_bug" "$f_skip" "$fragnote"
+printf "%-14s %8s %8s %10s %8s   (%s)\n" "frag/realworld" "$rw_match" "$rw_edge" "$rw_bug" "$rw_skip" "hand-written, full"
+printf "%-14s %8s %8s %10s %8s\n" "vertex" "$v_match" "$v_triv" "$v_bug" "$v_skip"
+printf "%-14s %8s %8s %10s %8s\n" "compute" "$c_match" "-" "$c_bug" "$c_err"
 hr
-bugs=$(( f_bug + v_bug + c_bug ))
-verified=$(( f_match + v_match + c_match ))
+bugs=$(( f_bug + rw_bug + v_bug + c_bug ))
+verified=$(( f_match + rw_match + v_match + c_match ))
 echo "verified (rendered/executed identical to reference): $verified"
 echo "divergences (real miscompiles):                       $bugs"
-echo "benign (precise-fp-clean / trivial-zero):             $(( f_edge + v_triv ))"
+echo "benign (precise-fp-clean / trivial-zero):             $(( f_edge + rw_edge + v_triv ))"
 echo
 
 if [ "$bugs" -ne 0 ]; then
   echo "RESULT: FAIL -- $bugs divergence(s) found:"
   grep -H 'frontend=MISCOMPILE' "$TMP/frag" 2>/dev/null | sed 's/^/  frag: /'
+  grep -H 'frontend=MISCOMPILE' "$TMP/fragrw" 2>/dev/null | sed 's/^/  frag-rw: /'
   grep -H ': DIFFER(' "$TMP/vert" 2>/dev/null | sed 's/^/  vert: /'
   grep -HE '[[:space:]]DIFFER[[:space:]]' "$TMP/comp" 2>/dev/null | sed 's/^/  comp: /'
   echo
@@ -94,6 +107,9 @@ fi
 echo "RESULT: PASS -- zioshade renders/executes IDENTICALLY to the independent"
 echo "glslang -> SPIRV-Cross reference on every covered shader, all three stages, 0 divergence."
 echo
-echo "Honest limits: corpus = SPIRV-Cross's own test suite (a differential oracle, not a"
-echo "real-world-shader guarantee); skipped shaders are reference-unbuildable or need inputs"
-echo "the generic harness cannot supply -- each is listed above, none is counted as a pass."
+echo "Coverage spans SPIRV-Cross's own test suite AND a hand-written real-world corpus"
+echo "(frag/realworld: mandelbrot, julia, plasma, phong, hash-noise, terrain, ... written"
+echo "for zioshade, not derived from the reference's tests). Honest limits: the fragment"
+echo "SPIRV-Cross sweep is a 1/25 sample by default (PROVE_FULL=1 for the whole corpus);"
+echo "skipped shaders are reference-unbuildable or need inputs the generic harness cannot"
+echo "supply -- each is listed above, none is ever counted as a pass."

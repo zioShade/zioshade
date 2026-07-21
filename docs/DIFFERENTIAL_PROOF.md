@@ -13,10 +13,14 @@ honest report — `verified / benign / divergences / skipped-with-reason` — an
 on any real divergence (so it is also a regression gate). Fragment is sampled for speed
 plus a fixed regression set; `PROVE_FULL=1` runs the whole fragment corpus. Requires only
 glslang, spirv-cross, and swiftc/Metal (no Docker; the DXC → D3D12 HLSL path lives in
-`tools/hlsl_render_check.sh` + `tools/warp/`). A representative run: **81 shaders verified,
-0 divergences.** Honest scope: the corpus is SPIRV-Cross's own test suite — a strong
-differential oracle, not a guarantee about arbitrary real-world shaders — and every
-uncovered shader is reported as an explicit skip, never counted as a pass.
+`tools/hlsl_render_check.sh` + `tools/warp/`). A representative run: **164 shaders verified,
+0 divergences** — spanning both SPIRV-Cross's own test suite AND a **hand-written real-world
+corpus** (`tests/render_compare/` + `tests/shadertoy_style/`: mandelbrot, julia, plasma,
+phong, hash-noise, terrain, etc., written for zioshade and NOT derived from the reference's
+tests, so they answer the "is this only a synthetic self-selected corpus?" objection).
+Honest scope: the SPIRV-Cross fragment sweep is a 1/25 sample by default (`PROVE_FULL=1`
+runs the whole corpus), and every uncovered shader is reported as an explicit skip, never
+counted as a pass.
 
 Three independent kinds of evidence, weakest to strongest:
 
