@@ -426,6 +426,42 @@ test "conditional continue in a loop keeps an explicit then-block, not collapsed
     try std.testing.expect(!spirvConditionalTargetsLoopContinue(spv));
 }
 
+// A `switch` whose `default:` case carries a real body must emit that body. The parser
+// gives a `case N:` node a leading value-expr child but a `default:` node none, so its
+// children are body statements from index 0. The switch lowering used to slice every
+// case body as `children[1..]` unconditionally, which for the default dropped its FIRST
+// statement. When that statement was the only meaningful one (`default: x = v; break;`),
+// the default block collapsed to `label; branch merge` -- empty -- and the empty-block
+// pass then retargeted the OpSwitch default straight onto the selection merge, silently
+// discarding the default arm. Signature: OpSwitch's default target equals the enclosing
+// OpSelectionMerge label even though the default has a body. Fixed by slicing the default
+// body from index 0.
+test "switch default case with a body is not dropped" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int mode = int(gl_FragCoord.x) % 3;
+        \\    float result = 0.0;
+        \\    switch (mode) {
+        \\        case 0: result = 1.0; break;
+        \\        case 1: result = 2.0; break;
+        \\        default: result = 9.0; break;
+        \\    }
+        \\    fragColor = vec4(result, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // A switch is present (OpSwitch = 251)...
+    try std.testing.expect(spirvHasOpcode(spv, 251));
+    // ...and its default target is a real block, not the selection merge (which would
+    // mean the bodied default was discarded).
+    try std.testing.expect(!spirvSwitchDefaultTargetsMerge(spv));
+}
+
 // A loop nested inside a branch arm (`if (c) {...} else { for (...) {...} }`) is now
 // emitted correctly by both backends: emitBlock (the branch-arm emitter) delegates to the
 // loop emitter (emitWhileLoop{MSL,HLSL}) the way emitBody does, replaying the loop's phi
@@ -650,6 +686,32 @@ fn spirvConditionalTargetsLoopContinue(spv: []const u32) bool {
         const op: u16 = @truncate(spv[idx] & 0xFFFF);
         if (op == 250 and wc >= 4) {
             if (continues.contains(spv[idx + 2]) or continues.contains(spv[idx + 3])) return true;
+        }
+        idx += wc;
+    }
+    return false;
+}
+
+// True iff some OpSwitch's default target equals its enclosing OpSelectionMerge label.
+// A switch always precedes its OpSwitch with `OpSelectionMerge <merge>` (opcode 247,
+// word[1] = merge label); the OpSwitch (opcode 251) has word[2] = default target. When a
+// bodied default arm is dropped, its block collapses to empty and the empty-block pass
+// retargets the default onto the merge, so default == merge. A switch with a genuinely
+// empty (or absent) default legitimately hits this too, so only assert it false for a
+// shader whose default carries real statements.
+fn spirvSwitchDefaultTargetsMerge(spv: []const u32) bool {
+    var last_merge: ?u32 = null;
+    var idx: usize = 5;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[idx] & 0xFFFF);
+        if (op == 247 and wc >= 2) {
+            last_merge = spv[idx + 1]; // OpSelectionMerge <merge> <selection control>
+        } else if (op == 251 and wc >= 3) { // OpSwitch <selector> <default> …
+            if (last_merge) |m| {
+                if (spv[idx + 2] == m) return true;
+            }
         }
         idx += wc;
     }
