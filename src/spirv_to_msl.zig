@@ -6382,7 +6382,13 @@ fn emitInstruction(
             try w.print("    bool {s} = simd_any({s});\n", .{ rn, val });
         },
         .Return => {
-            if (!(is_frag and ovid != null)) try w.writeAll("    return;\n");
+            // The impl function is always `void` (fragment/vertex/compute all use the
+            // void `_impl` helper + a wrapper that does `return out;`), so a bare
+            // `return;` is always type-correct. It MUST be emitted for an EARLY return
+            // (`if (hit) { fragColor = c; return; }`) or the early-out is lost and later
+            // writes clobber it -- a silent miscompile. Previously suppressed for
+            // fragments, which was only harmless for the redundant final return.
+            try w.writeAll("    return;\n");
         },
         .ReturnValue => {
             const vid = inst.words[1];

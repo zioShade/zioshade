@@ -359,6 +359,40 @@ test "multi-return function keeps its return value, not OpUndef (#494)" {
     try std.testing.expect(spirvHasOpcode(spv, 57));
 }
 
+// An EARLY return in a fragment (`if (hit) { fragColor = c; return; }`) must be emitted,
+// not dropped. Both backends used to suppress ALL fragment returns (they return the
+// output value at function end), so the early-out was lost and the later write clobbered
+// it -- a silent miscompile of a very common pattern (Shadertoy/raymarcher early-outs).
+// Render-verified: the fixed output RENDER-MATCHes an independent glslang reference on
+// Metal AND through the shipping HLSL->DXC path (a plain loopless early return, no loop
+// involved). These structural checks guard against regressing back to the drop.
+test "early return in a fragment is emitted, not dropped (HLSL + MSL)" {
+    const alloc = std.testing.allocator;
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = gl_FragCoord.xy / 300.0;
+        \\    if (uv.x < 0.5) {
+        \\        fragColor = vec4(1.0, 0.0, 0.0, 1.0);
+        \\        return;
+        \\    }
+        \\    fragColor = vec4(0.0, 0.0, 1.0, 1.0);
+        \\}
+    ;
+    const msl = try zioshade.compileGlslToMsl(alloc, source, .fragment);
+    defer alloc.free(msl);
+    // The void impl must contain a `return;` -- fragments used to emit none.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "return;") != null);
+
+    const hlsl = try zioshade.compileGlslToHlsl(alloc, source, .fragment);
+    defer alloc.free(hlsl);
+    // HLSL returns the output by value; the early return returns it too, so an emitted
+    // early return means >= 2 `return ` statements (the other is the function-end one).
+    try std.testing.expect(std.mem.count(u8, hlsl, "return ") >= 2);
+}
+
 // A conditional `continue` inside a loop (`if (cond) continue;`) must keep its
 // intermediate then-block so downstream structured consumers (spirv-cross, DXC) see an
 // explicit continue. The empty-passthrough-block pass used to collapse that block,
