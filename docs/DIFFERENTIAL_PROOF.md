@@ -264,7 +264,17 @@ LOCAL / constructed matrices. zioshade has two matrix storage conventions: local
 traces the matrix operand to its source and leaves the uniform path byte-unchanged.
 Verified: `tools/hlsl_render_check.sh` (Metal) RENDER-MATCHes the local/inverse/chain/
 transpose matrix shaders, WARP goes 5/8 → 8/8, DXC validity is unchanged, and the
-T597 uniform tests still pass. Uniform-matrix multiplies cannot be render-verified in
-this environment (they need buffer inputs the fullscreen-triangle harness can't feed),
-so they remain compile/round-trip verified; extending the harness to bind a cbuffer is
-the way to close that last gap.
+T597 uniform tests still pass.
+
+**Uniform matrices are now render-verified too (#498).** A `gl_FragCoord` +
+uniform-`mat4` shader renders through the existing Metal harness (both MSL emissions
+read a `float4x4` at buffer(0)); it RENDER-MATCHes zioshade's own MSL AND an
+*independent* glslang → SPIRV-Cross → MSL reference (0-pixel), and the uniform-copied-
+to-local edge case of the #497 fix renders correct (the copy is traced/propagated to
+the uniform load). On real D3D12, `tools/warp/` now binds a root CBV at `b0` with a
+known asymmetric mat4, so uniform-matrix shaders render there too: they RENDER-MATCH
+SPIRV-Cross's HLSL, and the self-contained set stays 8/8. So the matrix surface —
+local and uniform — is render-verified against independent references on both Metal
+and the real DXC→DXIL→D3D12 path. What still skips: shaders needing a texture or
+custom vertex attributes (the fullscreen-triangle harness feeds only gl_FragCoord +
+one cbuffer).
