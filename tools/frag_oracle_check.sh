@@ -41,7 +41,15 @@ check_one() {
 REGRESSION="switch_fallthrough switch_in_loop origami swizzle_lvalue art_deco ceramic \
 nested_func_expr loop_trackers recursive_fib mat_branch mandelbrot_smooth"
 
-if [ "${1:-}" = "--sweep" ]; then
+if [ "${1:-}" = "--dir" ]; then
+  # Sweep every .frag in a directory (used for the real-world corpora, which are small
+  # enough to run in full). No sampling, no regression-set injection.
+  for f in "${2:?usage: --dir <path>}"/*.frag; do
+    [ -e "$f" ] || continue
+    case "$f" in *.asm.*) continue;; esac
+    echo "$(basename "$f" .frag).frag: $(check_one "$f")"
+  done
+elif [ "${1:-}" = "--sweep" ]; then
   # FRAG_EVERY=N processes every Nth shader (default 1 = the full corpus). Sampling is
   # deterministic (sorted order), and the REGRESSION set above is always included.
   every=${FRAG_EVERY:-1}
