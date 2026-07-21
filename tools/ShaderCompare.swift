@@ -122,11 +122,24 @@ func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, te
 
 func comparePixels(_ a: [UInt8], _ b: [UInt8], count: Int) -> (maxDiff: Int, avgDiff: Float, diffPixels: Int) {
     var maxD = 0, totalD = 0, diffPx = 0
-    for i in 0..<count {
-        let d = abs(Int(a[i]) - Int(b[i]))
-        maxD = max(maxD, d)
-        totalD += d
-        if d > 0 && i % 4 == 0 { diffPx += 1 }
+    var i = 0
+    while i < count {
+        // A pixel counts as different if ANY of its RGBA channels differ -- the old
+        // `i % 4 == 0` test only looked at the red channel, so a shader wrong only in
+        // green/blue/alpha reported 0 differing pixels while maxDiff was 255 (it masked
+        // the severity of a real miscompile, e.g. for-loop-continue rendering all-black).
+        var pixelDiff = false
+        let end = min(i + 4, count)
+        var j = i
+        while j < end {
+            let d = abs(Int(a[j]) - Int(b[j]))
+            maxD = max(maxD, d)
+            totalD += d
+            if d > 0 { pixelDiff = true }
+            j += 1
+        }
+        if pixelDiff { diffPx += 1 }
+        i += 4
     }
     return (maxD, Float(totalD) / Float(count), diffPx)
 }
