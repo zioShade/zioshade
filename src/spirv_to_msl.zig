@@ -5632,14 +5632,28 @@ fn emitInstruction(
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const v1 = names.get(inst.words[3]) orelse "v1";
             const v2 = names.get(inst.words[4]) orelse "v2";
+            // OpVectorShuffle selects components from the concatenation [v1, v2]: a
+            // selector 0..N1-1 indexes v1, N1..N1+N2-1 indexes v2, where N1 is the
+            // COMPONENT COUNT OF v1 (not a fixed 4). Reading v1's actual width matters
+            // whenever v1 is a vec2/vec3 (e.g. a `v.xy = expr` swizzle-store lowers to a
+            // shuffle of the vec3 lvalue with a vec2): a hardcoded split of 4 emitted an
+            // out-of-bounds `v1[3]` and shifted every later selector, silently miscompiling
+            // the write.
+            const n1: u32 = blk: {
+                const d = getDef(m, inst.words[3]) orelse break :blk 4;
+                if (d.words.len < 2) break :blk 4;
+                break :blk typeRank(m, d.words[1]);
+            };
             try w.print("    {s} {s} = {s}(", .{ rtt, names.get(inst.words[2]) orelse "v", rtt });
             for (inst.words[5..], 0..) |sel, i| {
                 if (i > 0) try w.writeAll(", ");
-                // In MSL, use component access
-                if (sel < 4) {
+                // A 0xFFFFFFFF selector is "undefined"; spirv-cross reads v1[0]. Keep in bounds.
+                if (sel == 0xFFFFFFFF) {
+                    try w.print("{s}[0]", .{v1});
+                } else if (sel < n1) {
                     try w.print("{s}[{d}]", .{ v1, sel });
                 } else {
-                    try w.print("{s}[{d}]", .{ v2, sel - 4 });
+                    try w.print("{s}[{d}]", .{ v2, sel - n1 });
                 }
             }
             try w.writeAll(");\n");

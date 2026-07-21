@@ -495,6 +495,31 @@ test "switch fallthrough accumulator is initialized before the switch, not insid
     try std.testing.expect(!spirvSwitchCaseLoadsUninitVar(spv));
 }
 
+// A swizzle-target write (`v.xy = expr`) lowers to an OpVectorShuffle of the vec3 lvalue
+// with the vec2 rhs (selectors `3 4 2`). The MSL backend split the selector space at a
+// HARDCODED 4 (assuming v1 is always vec4), so for a vec3 v1 it emitted `<v1>[3]` -- an
+// out-of-bounds index -- and shifted every later selector, making v.x read garbage and
+// miscompiling ~62% of pixels. Fixed by splitting at v1's actual component count. The GLSL
+// and HLSL backends already used v1's real width; only MSL was wrong.
+test "swizzle-target write does not emit an out-of-bounds MSL shuffle index" {
+    const alloc = std.testing.allocator;
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    vec2 uv = gl_FragCoord.xy / vec2(128.0);
+        \\    vec3 v = vec3(0.0);
+        \\    v.xy = uv * 2.0;
+        \\    fragColor = vec4(v, 1.0);
+        \\}
+    ;
+    const msl = try zioshade.compileGlslToMsl(alloc, source, .fragment);
+    defer alloc.free(msl);
+    // No 3-or-4-wide value in this shader is legitimately indexed at [3], so an emitted
+    // "[3]" is the out-of-bounds shuffle bug.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "[3]") == null);
+}
+
 // A loop nested inside a branch arm (`if (c) {...} else { for (...) {...} }`) is now
 // emitted correctly by both backends: emitBlock (the branch-arm emitter) delegates to the
 // loop emitter (emitWhileLoop{MSL,HLSL}) the way emitBody does, replaying the loop's phi
