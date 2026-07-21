@@ -2221,6 +2221,20 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     return dce;
 }
 
+/// A passthrough block (`OpLabel` + `OpBranch %X` only) that is the arm of a selection
+/// (a target of some `OpBranchConditional`) AND whose branch target `%X` is a loop's
+/// continue- or merge-target encodes an explicit `continue`/`break` written inside an
+/// `if`. Collapsing it retargets the conditional's edge straight onto the loop
+/// continue/merge, producing structured SPIR-V that spirv-val accepts but that
+/// spirv-cross and DXC miscompile: they drop the `continue` as redundant because the
+/// selection's fall-through path also reaches the continue block at the loop tail.
+/// glslang keeps this intermediate block; so must we, or the shipping HLSL->DXC->DXIL
+/// path silently miscompiles any `if(cond) continue;` (or `break;`) in a loop.
+fn isConditionalLoopArm(label: u32, branch_target: u32, bound: u32, loop_edges: *const std.DynamicBitSet, cond_targets: *const std.DynamicBitSet) bool {
+    if (label == 0 or label >= bound or branch_target == 0 or branch_target >= bound) return false;
+    return cond_targets.isSet(label) and loop_edges.isSet(branch_target);
+}
+
 /// Block merging: when block A ends with OpBranch %B and B has exactly one predecessor (A),
 /// merge B into A by appending B's instructions (minus the label) to A.
 pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory}![]const u32 {
@@ -2230,6 +2244,14 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
     // Phase 1: Build set of protected labels (referenced by OpPhi, LoopMerge, SelectionMerge, OpName)
     var protected = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer protected.deinit();
+    // Loop continue/merge targets and the arms (targets) of conditional branches. A
+    // passthrough block that is a conditional arm AND branches to a loop continue/merge
+    // is an explicit `continue`/`break` inside an `if`; it must NOT be collapsed (see
+    // isConditionalLoopArm).
+    var loop_edges = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer loop_edges.deinit();
+    var cond_targets = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer cond_targets.deinit();
     var pos: u32 = 5;
     while (pos < words.len) {
         const hdr = words[pos];
@@ -2247,11 +2269,23 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
                 }
             },
             246 => { // OpLoopMerge: merge, continue, control
-                if (words[pos + 1] >= 1 and words[pos + 1] < bound) protected.set(words[pos + 1]);
-                if (wc >= 4 and words[pos + 2] >= 1 and words[pos + 2] < bound) protected.set(words[pos + 2]);
+                if (words[pos + 1] >= 1 and words[pos + 1] < bound) {
+                    protected.set(words[pos + 1]);
+                    loop_edges.set(words[pos + 1]);
+                }
+                if (wc >= 4 and words[pos + 2] >= 1 and words[pos + 2] < bound) {
+                    protected.set(words[pos + 2]);
+                    loop_edges.set(words[pos + 2]);
+                }
             },
             247 => { // OpSelectionMerge: merge, control
                 if (words[pos + 1] >= 1 and words[pos + 1] < bound) protected.set(words[pos + 1]);
+            },
+            250 => { // OpBranchConditional: condition, true, false
+                if (wc >= 4) {
+                    if (words[pos + 2] >= 1 and words[pos + 2] < bound) cond_targets.set(words[pos + 2]);
+                    if (words[pos + 3] >= 1 and words[pos + 3] < bound) cond_targets.set(words[pos + 3]);
+                }
             },
             5 => { // OpName: target may be a label
                 if (words[pos + 1] >= 1 and words[pos + 1] < bound) protected.set(words[pos + 1]);
@@ -2281,7 +2315,7 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
 
         if (opcode == 248 and wc >= 2) { // OpLabel
             if (cur_label != 0 and inst_count == 2 and has_branch) {
-                if (!protected.isSet(cur_label)) {
+                if (!protected.isSet(cur_label) and !isConditionalLoopArm(cur_label, branch_target, bound, &loop_edges, &cond_targets)) {
                     empty_targets.put(alloc, cur_label, branch_target) catch {};
                 }
             }
@@ -2291,7 +2325,7 @@ pub fn retargetEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
             branch_target = 0;
         } else if (opcode == 56) { // OpFunctionEnd
             if (cur_label != 0 and inst_count == 2 and has_branch) {
-                if (!protected.isSet(cur_label)) {
+                if (!protected.isSet(cur_label) and !isConditionalLoopArm(cur_label, branch_target, bound, &loop_edges, &cond_targets)) {
                     empty_targets.put(alloc, cur_label, branch_target) catch {};
                 }
             }
