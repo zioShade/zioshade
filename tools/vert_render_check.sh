@@ -25,7 +25,7 @@ check_one() {
   local gspv="$SHARE/$name.g.spv" gm="$SHARE/$name.g.msl" zb="$SHARE/$name.zb.msl"
   "$CLI" compile "$vert" --stage vertex -o "$zspv" 2>/dev/null || { echo "skip-zioshade-compile"; return; }
   spirv-cross --msl $SCFLAGS "$zspv" > "$zfe" 2>/dev/null || { echo "skip-crossmsl-zio"; return; }
-  glslangValidator -V -S vert "$vert" -o "$gspv" >/dev/null 2>&1 || { echo "skip-glslang"; return; }
+  glslangValidator -V --amb --aml -S vert "$vert" -o "$gspv" >/dev/null 2>&1 || { echo "skip-glslang"; return; }
   spirv-cross --msl $SCFLAGS "$gspv" > "$gm" 2>/dev/null || { echo "skip-crossmsl-ref"; return; }
   "$CLI" msl "$vert" --stage vertex > "$zb" 2>/dev/null || zb=""
 
