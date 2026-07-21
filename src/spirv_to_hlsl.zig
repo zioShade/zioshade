@@ -3896,7 +3896,18 @@ fn emitWhileLoopHLSL(
                 if (cinst.op == .Label) break;
                 if (cinst.op == .Branch) break;
                 if (cinst.op == .BranchConditional) break; // do-while back-edge — handled below
-                if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+                if (cinst.op == .LoopMerge) continue;
+                // A SelectionMerge in a NON-do-while continue/latch block is a CONDITIONAL
+                // increment (`for (...; cond ? a : b++)`): this straight-line walker would
+                // skip the SelectionMerge and break at the BranchConditional, silently
+                // dropping the guarded store so the counter never advances (infinite loop).
+                // Honest-error. A do-while's latch also carries a SelectionMerge before its
+                // back-edge conditional, but there it is the loop test (handled below) with
+                // no dropped block, so exclude it.
+                if (cinst.op == .SelectionMerge) {
+                    if (!is_do_while) return error.UnstructuredControlFlow;
+                    continue;
+                }
                 try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
             }
         }
