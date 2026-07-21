@@ -315,15 +315,29 @@ one. The harness is self-validated: an equivalent pair renders 0-pixel, and a de
 offset `gl_Position` (`+0.3` in x) renders 8374 differing pixels — it detects real vertex
 miscompiles.
 
-Result over the `.vert` corpus: **0 frontend miscompiles, 0 backend divergences.** The
-conclusively-covered shaders (real `gl_Position` arithmetic, a `mat4 mvp * aVertex` UBO
-transform, a row-major-array read, an I/O block, `no-contraction`) all RENDER-MATCH the
-independent glslang → SPIRV-Cross reference. Coverage caveat (honest): the harness feeds
-generic canned inputs, so shaders whose `gl_Position` depends on specific uniforms/camera
-projection land off-screen and are reported `no-coverage (inconclusive)` rather than
-mis-verified (an off-screen result is a trivial match, never a false positive) — the same
-"can't feed it correctly → skip, don't fake it" stance as the fragment harness's
-`skip-inputs`. Broadening coverage via numeric `gl_Position` capture (a buffer diff, like
-the compute differential) instead of rasterisation is a tracked follow-up. Compute already
-has a numeric differential (`tools/compute_diff.sh`, 12 kernels); so the differential proof
-now spans all three stages, with fragment the most exhaustively covered.
+The rasterising harness only has test power when the triangle lands on-screen, so a
+NUMERIC variant (`tools/VertexNumeric.swift` + `tools/vert_numeric_check.sh`) gives
+coverage for EVERY vertex regardless of where `gl_Position` lands: it injects a
+`device float4*` output into the (very regular) spirv-cross-emitted vertex entry, writes
+`out.gl_Position` to it, runs the vertex stage over N varied vertices, and diffs the
+captured clip-space positions numerically. Same self-validation (equal pair `maxAbs=0`; a
+`+0.3` offset flags `maxAbs=0.3`). glslang's reference SPIR-V is auto-map-bindings'd
+(`--amb --aml`) so the SPIRV-Cross test shaders (which omit explicit `layout(binding=)`)
+still produce a reference — the differential compares captured positions, not binding
+numbers.
+
+Result over the `.vert` corpus (numeric): **33 of 45 shaders covered, 0 frontend
+miscompiles, 0 backend divergences.** The covered set exercises real `gl_Position`
+computation — UBO `mat4 * aVertex` transforms, texture-sampled terrain (`ground`,
+`ocean`), row-major-array reads, push constants, clip-distance, I/O blocks,
+`no-contraction`, nested switches — all matching the independent glslang → SPIRV-Cross
+reference to `maxAbs=0`. The remaining 12 are honest skips (glslang or SPIRV-Cross rejects
+the reference, or the capture injection doesn't fit an edge shape: `invariant gl_Position`,
+clip/cull-distance extra outputs, integer/16-bit attributes, transform-feedback, multiview)
+— never mis-verified. The earlier rasterising harness (`VertexCompare.swift`) remains as a
+visual/coverage cross-check.
+
+So the differential proof now spans all three stages: **fragment** (most exhaustively —
+render-verified vs an independent glslang reference on Metal and, for HLSL, real D3D12
+WARP), **vertex** (33 shaders numerically render-verified, 0 divergence), and **compute**
+(numeric buffer differential, `tools/compute_diff.sh`, 12 kernels).
