@@ -60,10 +60,23 @@ static bool readFile(const char* path, std::vector<char>& out) {
 static int renderOne(ID3D12Device* dev, ID3D12CommandQueue* queue,
                      const std::vector<char>& vs, const std::vector<char>& ps,
                      std::vector<unsigned char>& pixels) {
-    // Empty root signature (self-contained shaders bind no resources).
+    // Root signature with one root CBV at b0. Self-contained shaders don't
+    // reference it (a root signature may be a superset of what a shader uses);
+    // uniform-matrix shaders (`cbuffer A : register(b0)`) read the known matrix we
+    // bind below, so their multiply gets render-verified too. A single mat4 at b0
+    // has an unambiguous layout, so this does not risk manufacturing a layout-
+    // mismatch false positive (both zioshade's and SPIRV-Cross's HLSL read the same
+    // CBV; any packing artifact is identical on both sides and cancels). (#498)
     CP<ID3D12RootSignature> rootSig;
     {
+        D3D12_ROOT_PARAMETER rp = {};
+        rp.ParameterType = D3D12_ROOT_PARAMETER_TYPE_CBV;
+        rp.Descriptor.ShaderRegister = 0; // b0
+        rp.Descriptor.RegisterSpace = 0;
+        rp.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
         D3D12_ROOT_SIGNATURE_DESC rsd = {};
+        rsd.NumParameters = 1;
+        rsd.pParameters = &rp;
         rsd.Flags = D3D12_ROOT_SIGNATURE_FLAG_ALLOW_INPUT_ASSEMBLER_INPUT_LAYOUT;
         CP<ID3DBlob> sig, err;
         HRESULT hr = D3D12SerializeRootSignature(&rsd, D3D_ROOT_SIGNATURE_VERSION_1, &sig, &err);
@@ -140,12 +153,36 @@ static int renderOne(ID3D12Device* dev, ID3D12CommandQueue* queue,
 
     CP<ID3D12CommandAllocator> alloc;
     HRCHECK(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)), "CreateCommandAllocator");
+
+    // Constant buffer bound at b0: a KNOWN, clearly asymmetric mat4 in std140
+    // column-major layout (columns 0..3 = {1..4},{5..8},{9..12},{13..16}), padded
+    // to the 256-byte CBV alignment. A uniform-matrix shader reads M from offset 0;
+    // its transpose is distinct, so a wrong-major multiply would render differently.
+    CP<ID3D12Resource> cbuf;
+    {
+        D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        rd.Width = 256; rd.Height = 1; rd.DepthOrArraySize = 1; rd.MipLevels = 1;
+        rd.Format = DXGI_FORMAT_UNKNOWN; rd.SampleDesc.Count = 1;
+        rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        HRCHECK(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&cbuf)), "CreateCommittedResource(cbuf)");
+        float m[64] = {0};
+        for (int i = 0; i < 16; i++) m[i] = (float)(i + 1); // 1..16, column-major
+        void* p = nullptr; D3D12_RANGE nr = {0, 0};
+        HRCHECK(cbuf->Map(0, &nr, &p), "Map cbuf");
+        memcpy(p, m, sizeof(float) * 16);
+        cbuf->Unmap(0, nullptr);
+    }
+
     CP<ID3D12GraphicsCommandList> cl;
     HRCHECK(dev->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc.get(), pso.get(), IID_PPV_ARGS(&cl)), "CreateCommandList");
 
     D3D12_VIEWPORT vp = { 0, 0, (float)W, (float)H, 0, 1 };
     D3D12_RECT sc = { 0, 0, (LONG)W, (LONG)H };
     cl->SetGraphicsRootSignature(rootSig.get());
+    cl->SetGraphicsRootConstantBufferView(0, cbuf->GetGPUVirtualAddress());
     cl->RSSetViewports(1, &vp);
     cl->RSSetScissorRects(1, &sc);
     cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);

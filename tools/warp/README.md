@@ -17,9 +17,13 @@ so **no GPU is needed** — but it runs the true DXIL/D3D12 runtime, which is th
 DXIL and renders both on WARP. A **RENDER-MATCH** means zioshade's HLSL produces the
 same image as the reference cross-compiler on the real D3D path — the strongest HLSL
 correctness signal there is short of a hardware GPU. A **RENDER-DIFFER** is a real
-miscompile to fix. A shader that needs a cbuffer/texture/vertex-attributes is
-**skipped** (this harness feeds only `SV_Position`/`gl_FragCoord`, matching the
-self-contained procedural shader class the Metal harness also covers).
+miscompile to fix. The harness also binds one root CBV at `b0` holding a known
+asymmetric mat4, so a `cbuffer A : register(b0) { float4x4 m; }` shader that
+multiplies a uniform matrix is render-verified too (#498) — its transpose is
+distinct, so a wrong-major multiply renders differently. Self-contained shaders
+don't reference `b0` and are unaffected. A shader that needs a texture or vertex
+attributes still **skips** (the harness feeds only `SV_Position`/`gl_FragCoord`
+plus that one cbuffer).
 
 ## One-time setup on the Windows box
 
