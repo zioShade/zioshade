@@ -4983,7 +4983,20 @@ fn emitWhileLoopMSL(
                 if (cinst.op == .Label) break;
                 if (cinst.op == .Branch) break;
                 if (cinst.op == .BranchConditional) break; // do-while back-edge — handled below
-                if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+                if (cinst.op == .LoopMerge) continue;
+                // A SelectionMerge in a NON-do-while continue/latch block is a CONDITIONAL
+                // increment (`for (...; cond ? a : b++)`): the SelectionMerge guards a
+                // side-effecting store in an intermediate block. This straight-line walker
+                // skips the SelectionMerge and then breaks at the BranchConditional, silently
+                // DROPPING the guarded store, so the loop counter never advances (an infinite
+                // loop that renders all-black). Honest-error instead of miscompiling. A
+                // do-while's latch also carries a SelectionMerge before its back-edge
+                // conditional, but there the condition is the loop test (handled by the
+                // is_do_while path below) with no dropped intermediate block, so exclude it.
+                if (cinst.op == .SelectionMerge) {
+                    if (!is_do_while) return error.UnstructuredControlFlow;
+                    continue;
+                }
                 try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
             }
         }

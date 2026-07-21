@@ -520,6 +520,33 @@ test "swizzle-target write does not emit an out-of-bounds MSL shuffle index" {
     try std.testing.expect(std.mem.indexOf(u8, msl, "[3]") == null);
 }
 
+// A conditional loop-increment (`for (...; cond ? a : b++)`) lowers to a SelectionMerge
+// guarding the `b++` store inside the loop's continue/latch block. The MSL and HLSL loop
+// emitters walk the latch straight-line and cannot yet emit a selection there; silently
+// skipping it would DROP the increment, freezing the counter into an infinite loop that
+// renders all-black. They must fail loud instead of silently miscompiling. A do-while's
+// latch also carries a SelectionMerge (its back-edge test) but compiles fine -- only a
+// non-do-while conditional increment errors. (Full latch-selection emit is a tracked
+// follow-up; when it lands, replace this with a render-verified correctness assertion.)
+test "conditional loop increment honest-errors instead of dropping the increment" {
+    const alloc = std.testing.allocator;
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    FragColor = vec4(0.0);
+        \\    for (int i = 0; i < 3; (0 > 1) ? 1 : i++) {
+        \\        FragColor[i] += float(i);
+        \\    }
+        \\}
+    ;
+    // The frontend accepts it (valid SPIR-V); the backends honest-error.
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    alloc.free(spv);
+    try std.testing.expectError(error.UnstructuredControlFlow, zioshade.compileGlslToMsl(alloc, source, .fragment));
+    try std.testing.expectError(error.UnstructuredControlFlow, zioshade.compileGlslToHlsl(alloc, source, .fragment));
+}
+
 // A loop nested inside a branch arm (`if (c) {...} else { for (...) {...} }`) is now
 // emitted correctly by both backends: emitBlock (the branch-arm emitter) delegates to the
 // loop emitter (emitWhileLoop{MSL,HLSL}) the way emitBody does, replaying the loop's phi
