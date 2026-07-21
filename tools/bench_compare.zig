@@ -123,7 +123,7 @@ fn benchZioshade(alloc: std.mem.Allocator, shader: Shader) !Stats {
         const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .binding_shift = -1, .shader_model = 60 });
         defer alloc.free(hlsl);
         const end = zioshade.compat.nanoTimestamp();
-        const dur_ns: u64 = (end - start);
+        const dur_ns: u64 = @intCast(end - start); // nanoTimestamp is i128 on 0.16
         total_ns += dur_ns;
         const dur_us = dur_ns / 1000;
         stats.min_us = @min(stats.min_us, dur_us);
@@ -185,7 +185,7 @@ fn benchReference(
         if ((r2.term.exitedCode() orelse 1) != 0) return null;
 
         const end = zioshade.compat.nanoTimestamp();
-        const dur_ns: u64 = (end - start);
+        const dur_ns: u64 = @intCast(end - start); // nanoTimestamp is i128 on 0.16
         total_ns += dur_ns;
         const dur_us = dur_ns / 1000;
         stats.min_us = @min(stats.min_us, dur_us);
@@ -210,10 +210,10 @@ pub fn main() !void {
     var tmp_arena = std.heap.ArenaAllocator.init(alloc);
     defer tmp_arena.deinit();
     const tmp_alloc = tmp_arena.allocator();
-    const sysroot_tmp = zioshade.compat.getEnvVarOwned(tmp_alloc, "TEMP") orelse
-        zioshade.compat.getEnvVarOwned(tmp_alloc, "TMPDIR") orelse
-        try tmp_alloc.dupe(u8, "/tmp");
-    const tmpdir = try std.fmt.allocPrint(tmp_alloc, "{s}{s}zioshade-bench-{d}", .{ sysroot_tmp, std.fs.path.sep_str, @as(i64, @intCast(@divTrunc(zioshade.compat.nanoTimestamp(), std.time.ns_per_s))) });
+    // Converged onto the shared compat helper: it picks the correct temp dir per
+    // OS (TMPDIR/TMP on POSIX, TEMP/TMP on Windows), strips trailing separators,
+    // skips empty values, and falls back to a valid absolute path on each host.
+    const tmpdir = try zioshade.compat.tempFilePathFmt(tmp_alloc, "zioshade-bench-{d}", .{@as(i64, @intCast(@divTrunc(zioshade.compat.nanoTimestamp(), std.time.ns_per_s)))});
     zioshade.compat.makeDirAbsolute(tmp_alloc, tmpdir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
         else => return err,
