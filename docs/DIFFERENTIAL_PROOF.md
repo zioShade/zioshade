@@ -298,3 +298,32 @@ local and uniform — is render-verified against independent references on both 
 and the real DXC→DXIL→D3D12 path. What still skips: shaders needing a texture or
 custom vertex attributes (the fullscreen-triangle harness feeds only gl_FragCoord +
 one cbuffer).
+
+### Vertex render-verification (macOS, via Metal)
+
+Fragment shaders were render-verified for many sessions while VERTEX shaders were only
+COMPILE-verified — a hole in the "provably equivalent across the pipeline" claim: a
+vertex shader that compiles cleanly but computes the wrong `gl_Position` would pass every
+check. `tools/VertexCompare.swift` + `tools/vert_render_check.sh` close it. A vertex
+shader's observable output is where it places its vertices, so the harness renders the
+TRIANGLE the shader's `gl_Position`s define (fixed known input attributes + an
+identity-filled uniform buffer, solid-white fragment); the rasterised coverage is a pure
+function of the computed clip-space positions. Rendering zioshade's frontend SPIR-V and
+glslang's SPIR-V through the SAME SPIRV-Cross → MSL backend isolates a FRONTEND
+divergence; rendering zioshade's own MSL backend against the reference catches a backend
+one. The harness is self-validated: an equivalent pair renders 0-pixel, and a deliberately
+offset `gl_Position` (`+0.3` in x) renders 8374 differing pixels — it detects real vertex
+miscompiles.
+
+Result over the `.vert` corpus: **0 frontend miscompiles, 0 backend divergences.** The
+conclusively-covered shaders (real `gl_Position` arithmetic, a `mat4 mvp * aVertex` UBO
+transform, a row-major-array read, an I/O block, `no-contraction`) all RENDER-MATCH the
+independent glslang → SPIRV-Cross reference. Coverage caveat (honest): the harness feeds
+generic canned inputs, so shaders whose `gl_Position` depends on specific uniforms/camera
+projection land off-screen and are reported `no-coverage (inconclusive)` rather than
+mis-verified (an off-screen result is a trivial match, never a false positive) — the same
+"can't feed it correctly → skip, don't fake it" stance as the fragment harness's
+`skip-inputs`. Broadening coverage via numeric `gl_Position` capture (a buffer diff, like
+the compute differential) instead of rasterisation is a tracked follow-up. Compute already
+has a numeric differential (`tools/compute_diff.sh`, 12 kernels); so the differential proof
+now spans all three stages, with fragment the most exhaustively covered.
