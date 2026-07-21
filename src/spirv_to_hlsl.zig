@@ -41,6 +41,13 @@ threadlocal var g_hoist_stripping: bool = false;
 // temp is out of scope at the merge — DXC rejects it). Mirrors the MSL backend's
 // g_materialized_phis. See collectMergePhisHLSL. (#491)
 threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
+// The expression an EARLY OpReturn in an entry point must return (the fragment output
+// var, or `output` for a vertex). The HLSL entry returns its output value at function
+// end, so an early return (`if (hit) { fragColor = c; return; }`) must return that same
+// value or the early-out is lost and later writes clobber it -- a silent miscompile. Set
+// per-entry before the body; null for MRT (would need the struct built) and compute
+// (void), where the existing skip / `return;` behavior is kept.
+threadlocal var g_early_return_expr: ?[]const u8 = null;
 
 /// HLSL type name for a loop-phi variable declaration. Returns STATIC strings
 /// only (no allocation, so no free management) for the scalar/vector types loop
@@ -2946,6 +2953,18 @@ fn emitFunction(
         try w.writeAll("    VS_OUTPUT output;\n");
     }
 
+    // Tell early OpReturns what to return (see g_early_return_expr). Single-output
+    // fragment returns the output var; vertex returns the VS_OUTPUT local. MRT and
+    // compute are left null (keep the existing behavior).
+    if (is_fragment and output_var_id != null and !has_mrt) {
+        g_early_return_expr = names.get(output_var_id.?) orelse "_out";
+    } else if (is_vertex) {
+        g_early_return_expr = "output";
+    } else {
+        g_early_return_expr = null;
+    }
+    defer g_early_return_expr = null;
+
     // Emit body
     try emitBody(module, names, decorations, func_idx, w, alloc, is_fragment, is_vertex, output_var_id);
 
@@ -5216,8 +5235,14 @@ fn emitInstruction(
             }
         },
         .Return => {
-            // Skip bare return in fragment/vertex entry — we emit the output return at function end
-            if (is_fragment or is_vertex) {} else {
+            // An early return in an entry point must return the output value (the entry
+            // returns SV_Target / VS_OUTPUT by value); otherwise the early-out is lost and
+            // later writes clobber it. The redundant final return duplicates the
+            // function-end one (DXC tolerates the unreachable copy). MRT/compute (null
+            // expr) keep the old skip / `return;`.
+            if (g_early_return_expr) |e| {
+                try w.print("    return {s};\n", .{e});
+            } else if (!(is_fragment or is_vertex)) {
                 try w.writeAll("    return;\n");
             }
         },
