@@ -52,6 +52,14 @@ check_one() {
   local frag="$1" stage="$2" name; name=$(basename "$frag" .frag)
   "$CLI" msl  "$frag" --stage "$stage" > "$SHARE_HOST/$name.ref.msl" 2>/dev/null || { echo "skip-msl"; return; }
   "$CLI" hlsl "$frag" --stage "$stage" > "$SHARE_HOST/$name.hlsl"    2>/dev/null || { echo "skip-hlsl"; return; }
+  # The fullscreen-triangle harness feeds only gl_FragCoord, one shadertoy-layout
+  # globals buffer, a test texture, and (on WARP) one b0 mat4 cbuffer. A shader
+  # with LOOSE uniforms (gathered into a synthesized `_Globals` cbuffer with an
+  # arbitrary member layout the harness can't match) or a MULTISAMPLE texture reads
+  # inputs the harness cannot supply correctly, so its "divergence" is a harness
+  # artifact, not a real miscompile (e.g. multi_uniforms, sampler-ms). Skip them so
+  # RENDER-DIFFER stays a reliable real-bug signal.
+  if grep -qE '_Globals|Texture2DMS|Texture2DMSArray' "$SHARE_HOST/$name.hlsl"; then echo "skip-inputs"; return; fi
   docker exec "$CONTAINER" bash -c "export LD_LIBRARY_PATH=/opt/dxc/lib
     /opt/dxc/bin/dxc -T $PROFILE -E main -spirv -Fo $SHARE_CONT/$name.spv $SHARE_CONT/$name.hlsl >/dev/null 2>&1" || { echo "skip-dxc"; return; }
   spirv-cross --msl "$SHARE_HOST/$name.spv" > "$SHARE_HOST/$name.hlsl.msl" 2>/dev/null || { echo "skip-crossmsl"; return; }
@@ -65,15 +73,22 @@ check_one() {
   if printf '%s\n' "$out" | grep -q '^MATCH'; then
     echo "RENDER-MATCH"
   elif printf '%s\n' "$out" | grep -qE '^DIFFER \(max diff'; then
-    # Triage a non-exact render: a handful of boundary pixels differing (with a
-    # near-zero average) is benign floating-point at a discontinuity — step()/
-    # sign()/edge flips where a 1-ULP difference in atan/sin between the two
-    # compile paths flips the pixel. A real miscompile diverges over a large
-    # region. Threshold: <=64 differing pixels (0.1% of 65536) = RENDER-EDGE.
+    # Triage a non-exact render. Benign floating-point differences come in two
+    # shapes, neither a miscompile: (a) tiny-MAGNITUDE drift across many pixels —
+    # transcendental precision (sin/cos/atan) or a fract/mod boundary, where the two
+    # compile paths pick slightly different instructions; (b) small-AREA sharp flips
+    # — step()/floor()/discontinuity edges where a 1-ULP difference flips which side
+    # a boundary pixel lands on. A real miscompile (e.g. a transposed matrix)
+    # diverges over a LARGE area AND at LARGE magnitude (the matrix bug was ~50-64k
+    # px at maxdiff ~200+). So: maxdiff <= 8 (precision drift) OR <= 256 differing
+    # pixels (~0.4% of 65536, localized boundaries) = RENDER-EDGE (benign); anything
+    # both large-area and large-magnitude = RENDER-DIFFER (a real bug to triage).
     local diff md; diff=$(printf '%s\n' "$out" | grep -oE 'Different: [0-9]+' | grep -oE '[0-9]+$')
     md=$(printf '%s\n' "$out" | grep -oE 'Max channel diff: [0-9]+' | grep -oE '[0-9]+$')
-    if [ -n "$diff" ] && [ "$diff" -le 64 ]; then
-      echo "RENDER-EDGE(px=${diff})"
+    if [ -n "$md" ] && [ "$md" -le 8 ]; then
+      echo "RENDER-EDGE(px=${diff:-?},maxdiff=${md})"
+    elif [ -n "$diff" ] && [ "$diff" -le 256 ]; then
+      echo "RENDER-EDGE(px=${diff},maxdiff=${md:-?})"
     else
       echo "RENDER-DIFFER(px=${diff:-?},maxdiff=${md:-?})"
     fi
