@@ -2808,14 +2808,26 @@ fn emitFunction(
                             try w.print("nointerpolation {s} {s}", .{ iv_type, iv_name });
                         }
                     }
-                } else if (loc) |l| {
-                    if (!first_input) try w.writeAll(", ");
-                    first_input = false;
-                    try w.print("{s} {s} : TEXCOORD{d}", .{ iv_type, iv_name, l });
                 } else {
-                    if (!first_input) try w.writeAll(", ");
-                    first_input = false;
-                    try w.print("{s} {s}", .{ iv_type, iv_name });
+                    // General fragment-input varying. An INTEGER varying (dxc REQUIRES it) or
+                    // one carrying the SPIR-V Flat decoration must be `nointerpolation`; otherwise
+                    // dxc errors on the integer case and silently PERSPECTIVE-interpolates a flat
+                    // float (wrong values). The qualifier was previously dropped here -- a
+                    // plausible-but-wrong / compile-error miscompile. (#170, #470)
+                    const flat_pfx: []const u8 = if (hasDecoration(decorations, ivid, .flat) or
+                        std.mem.startsWith(u8, iv_type, "int") or std.mem.startsWith(u8, iv_type, "uint"))
+                        "nointerpolation "
+                    else
+                        "";
+                    if (loc) |l| {
+                        if (!first_input) try w.writeAll(", ");
+                        first_input = false;
+                        try w.print("{s}{s} {s} : TEXCOORD{d}", .{ flat_pfx, iv_type, iv_name, l });
+                    } else {
+                        if (!first_input) try w.writeAll(", ");
+                        first_input = false;
+                        try w.print("{s}{s} {s}", .{ flat_pfx, iv_type, iv_name });
+                    }
                 }
             }
         }

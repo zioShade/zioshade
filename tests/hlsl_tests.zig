@@ -15193,3 +15193,19 @@ test "hlsl: local matrix multiply swaps operands; uniform matrix does not (#497)
     try assertNotContains(uh, "mul(v, ");
     try assertContains(uh, ", v)");
 }
+
+// A fragment-input INTEGER varying (or one carrying the SPIR-V Flat decoration) must be
+// `nointerpolation`: dxc rejects an interpolated integer, and a flat float silently gets
+// perspective interpolation. The qualifier was previously dropped on general varyings. (#170, #470)
+test "hlsl: integer/flat fragment varyings get nointerpolation, plain floats do not" {
+    const hlsl = try compileToHlsl(
+        \\#version 450
+        \\layout(location = 0) flat in int vId;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(vId), uv, 1.0); }
+    );
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "nointerpolation int vId");
+    try assertNotContains(hlsl, "nointerpolation float2 uv"); // a plain float varying must NOT be flat
+}
