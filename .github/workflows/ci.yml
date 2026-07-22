@@ -26,7 +26,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-          use-cache: true
+          use-cache: false
 
       - name: zig fmt --check
         run: zig fmt --check src
@@ -74,7 +74,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: ${{ matrix.zig }}
-          use-cache: true
+          use-cache: false
 
       - name: zig version
         run: zig version
@@ -108,7 +108,7 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-          use-cache: true
+          use-cache: false
 
       # spirv-val is all the conformance suite needs. The distro spirv-tools
       # package ships it, so we skip the full LunarG Vulkan SDK (whose apt repo
@@ -142,7 +142,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-          use-cache: true
+          use-cache: false
       - name: Quick fuzz pass
         run: zig build fuzz -- --count 5000
 
@@ -172,7 +172,7 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: ${{ matrix.zig }}
-          use-cache: true
+          use-cache: false
       - name: Build C ABI library and example
         run: |
           zig build c-lib --summary all
