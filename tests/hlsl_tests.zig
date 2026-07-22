@@ -186,6 +186,25 @@ test "audit: HLSL atomic captures the old value via the out param (3-arg Interlo
     try assertNotContains(hlsl, "3u);");
 }
 
+// #474: glslang emits an SSBO with no instance name (`buffer C { ... };`) as an
+// OpVariable named "" -> the HLSL buffer decl (`RWStructuredBuffer<C>  :`) and every
+// access (`[0].counter`) lost the buffer name = non-compiling HLSL. Same unnamed-block
+// pattern as #471's gl_PerVertex. Synthesize a stable name. Named SSBOs were fine.
+test "#474: unnamed SSBO block gets a synthesized buffer name (decl + access)" {
+    const spirv = compileToSpirv("ssbo_unnamed_hlsl",
+        \\#version 450
+        \\layout(std430, binding=0) buffer C { uint counter; };
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(counter)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "_ssbo_"); // synthesized name present
+    try assertNotContains(hlsl, ">  :"); // no nameless `RWStructuredBuffer<C>  :`
+    try assertNotContains(hlsl, "= [0]."); // no nameless `= [0].counter` access
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
