@@ -626,7 +626,8 @@ pub fn nanoTimestamp() i128 {
 /// clock (std.Io.Clock.awake); on 0.15, where std.Io has no clock, it reads a
 /// process-lifetime std.time.Timer (also monotonic). The 0.15 idiom differs but
 /// gives the same non-decreasing nanosecond stream. COMPAT(0.15).
-threadlocal var mono_epoch: if (is_0_16) void else ?std.time.Timer = if (is_0_16) {} else null;
+threadlocal var mono_epoch: if (is_0_16) void else ?std.time.Timer = if (is_0_16)
+{} else null;
 
 fn monotonicNanos() i128 {
     if (is_0_16) {
