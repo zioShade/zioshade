@@ -76,6 +76,47 @@ fn glslValidateOrSkip(name: []const u8, glsl_src: []const u8) !void {
     return error.GlslValidationFailed;
 }
 
+/// Rewrite the FIRST instruction with opcode `from_op` to `to_op` (same word count).
+/// The zioshade/glslang frontends emit OpFMod for GLSL `mod()` and never OpFRem, so the
+/// only way to exercise the FRem arm is to rewrite the opcode on real SPIR-V. Caller frees.
+fn rewriteFirstOpcode(words: []const u32, from_op: u16, to_op: u16) ![]u32 {
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: usize = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == from_op) {
+            const out = try alloc.dupe(u32, words);
+            out[pos] = (@as(u32, @intCast(wc)) << 16) | @as(u32, to_op);
+            return out;
+        }
+        pos += wc;
+    }
+    return error.OpcodeNotFound;
+}
+
+// OpFRem takes the sign of operand 1 (the DIVIDEND) -- C fmod / truncation -- whereas GLSL
+// mod() is floor-based (sign of the DIVISOR) and differs for opposite-sign operands. GLSL
+// was the only backend that lowered OpFRem to mod() (a silent miscompile on ordinary finite
+// inputs); MSL/HLSL/WGSL already emit fmod / float `%`. It must now emit `a - b*trunc(a/b)`.
+// glslang emits OpFMod (141) for `mod()`, rewritten to OpFRem (140) on real SPIR-V. (#170)
+test "glsl: OpFRem lowers to the sign-of-dividend truncation form, not mod() (#170)" {
+    const spv = try compileToSpirv("frem",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(mod(a, b)); }
+    );
+    defer alloc.free(spv);
+    const rw = try rewriteFirstOpcode(spv, 141, 140); // OpFMod -> OpFRem
+    defer alloc.free(rw);
+    const glsl = try zioshade.spirvToGLSL(alloc, rw, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "trunc(");
+    try assertNotContains(glsl, "mod("); // must NOT reuse the sign-of-divisor mod()
+    try glslValidateOrSkip("frem", glsl);
+}
+
 // A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
 // INNER merge blocks, not the immediate true/false labels. Matching predecessors by
 // label equality picked the wrong incoming value, SWAPPING the branches and emitting
