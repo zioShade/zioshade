@@ -5623,7 +5623,13 @@ fn emitInstruction(
             }
             try w.writeAll(");\n");
         },
-        .ControlBarrier => try w.writeAll("    GroupMemoryBarrierWithGroupSync();\n"),
+        // #475: GroupMemoryBarrierWithGroupSync fences only group memory (+ exec sync);
+        // an SSBO/device write before the barrier wouldn't be visible after. Also emit
+        // DeviceMemoryBarrier (conservative both-fence; safe — no-op when no device mem).
+        .ControlBarrier => {
+            try w.writeAll("    GroupMemoryBarrierWithGroupSync();\n");
+            try w.writeAll("    DeviceMemoryBarrier();\n");
+        },
         .MemoryBarrier => try w.writeAll("    DeviceMemoryBarrier();\n"),
         .ImageTexelPointer => {
             // No code emission needed — result used by atomic ops
