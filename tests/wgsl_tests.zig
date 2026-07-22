@@ -1597,6 +1597,36 @@ test "wgsl: unordered float inequality on a vector lowers componentwise (#170)" 
     try nagaValidateOrSkip(wgsl, "funord-vec");
 }
 
+// #170: an `if / else-if / else` chain where every branch RETURNS must lower to a
+// properly right-nested WGSL if/else. The WGSL structurizer emits `} else {` when a
+// true-branch OpBranches to the merge; but a branch that DIVERGES (return/discard,
+// no branch to merge) never triggered that, so the false-branch bodies collapsed
+// INTO the first then-block as dead code after the return, the trailing returns were
+// lost, and the function fell through with no return -> naga "missing return".
+// (Compounding it, OpUnreachable in the now-dead merge blocks was emitted as the
+// invalid WGSL token `unreachable;`.) naga is the oracle; the bug produced output
+// that a real validator rejects, so this guards both the mis-nesting and the token.
+test "wgsl: if/else-if/else return chain nests correctly, no missing-return (#170)" {
+    const wgsl = try compileToWgsl(
+        \\#version 450
+        \\layout(location = 0) in float t;
+        \\layout(location = 0) out vec4 fragColor;
+        \\vec3 getColor(float x) {
+        \\    if (x < 0.25) { return vec3(0.0, x, 1.0); }
+        \\    else if (x < 0.5) { return vec3(x, 1.0, 0.0); }
+        \\    else if (x < 0.75) { return vec3(1.0, x, 0.0); }
+        \\    else { return vec3(x, 0.0, x); }
+        \\}
+        \\void main() { fragColor = vec4(getColor(t), 1.0); }
+    );
+    defer alloc.free(wgsl);
+    // `unreachable;` is not valid WGSL; a diverging-branch chain must never emit it.
+    try assertNotContains(wgsl, "unreachable");
+    // The else-chain must survive as real nested else blocks, not collapse away.
+    try assertContains(wgsl, "} else {");
+    try nagaValidateOrSkip(wgsl, "if-elseif-return-chain");
+}
+
 // A SPIR-V opcode that zioshade's `Op` enum does not NAME (here OpUMulExtended=151,
 // emitted by GLSL `umulExtended`) must fail loud with error.UnsupportedOp — never
 // crash. The honest-error fallback formatted the op via `@tagName(inst.op)`, which

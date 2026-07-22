@@ -6539,6 +6539,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             continue;
                         }
                     }
+                    // A DIVERGING true-branch (ended in return/discard/unreachable, so
+                    // it never OpBranch'd to the merge) means the `.Branch` handler never
+                    // emitted the `} else {` -- control reaches the false-branch label
+                    // directly with the else still pending. Open the else here so the
+                    // false branch nests correctly instead of leaking into the (still
+                    // open) then block after the return. Without this, an
+                    // `if (a) { return x; } else if (b) { ... }` return-chain collapsed
+                    // into the first then-block as dead code and dropped the trailing
+                    // returns -> naga "missing return". Mirrors the Branch-handler else
+                    // emission (net indent unchanged; the `if` stays open). (#170)
+                    if (if_depth > 0 and pending_false_label != null and label_id == pending_false_label.?) {
+                        indent -= 1;
+                        try writeInd(w, indent);
+                        try w.writeAll("} else {\n");
+                        indent += 1;
+                        pending_false_label = null;
+                    }
                     // Check if this label matches an if merge (close if)
                     if (if_depth > 0 and merge_stack.items.len > 0) {
                         const cur_merge = merge_stack.items[merge_stack.items.len - 1];
@@ -7724,11 +7741,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try w.writeAll("discard;\n");
             },
 
-            // Unreachable
-            .Unreachable => {
-                try writeInd(w, indent);
-                try w.writeAll("unreachable;\n");
-            },
+            // Unreachable: WGSL has NO `unreachable` statement (naga parses the bare
+            // word as an identifier and rejects `unreachable;`). OpUnreachable marks a
+            // block control flow never reaches -- every path into it already diverged
+            // (return/discard) -- so, like the MSL/HLSL/GLSL backends, emit nothing.
+            // naga's own divergence analysis then sees the enclosing if/switch arms all
+            // return and accepts the function without a trailing terminator. (#170)
+            .Unreachable => {},
 
             // Undef — zero-initialize
             .Undef => {
