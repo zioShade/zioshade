@@ -426,6 +426,49 @@ test "conditional continue in a loop keeps an explicit then-block, not collapsed
     try std.testing.expect(!spirvConditionalTargetsLoopContinue(spv));
 }
 
+// A loop-carried struct variable (`pt = spawn(uv); for(...) pt = update(pt, dt);`) must
+// reload `pt` each iteration, not reuse the pre-loop value. The store-forward cache kept
+// pt's pointer -> the spawn result across the loop header (unssaAllScopes only spilled
+// still-SSA vars, not this already-memory-backed one), so every iteration called
+// update(spawn_result) instead of update(current_pt) -- the loop never accumulated. Fixed
+// by clearing the load caches in unssaAllScopes. Assert the in-loop call does not take the
+// raw spawn result as its argument.
+test "a loop-carried struct is reloaded each iteration, not the pre-loop value" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct P { vec2 pos; float life; };
+        \\P spawn(vec2 u) { P p; p.pos = u; p.life = 1.0; return p; }
+        \\P step(P p) { p.pos += p.life; p.life -= 0.1; return p; }
+        \\void main() {
+        \\    P pt = spawn(gl_FragCoord.xy / 300.0);
+        \\    for (int i = 0; i < 3; i++) { pt = step(pt); }
+        \\    fragColor = vec4(pt.pos, pt.life, 1.0);
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The first OpFunctionCall (spawn) result must NOT be the argument of the in-loop call.
+    var idx: usize = 5;
+    var spawn_res: u32 = 0;
+    var reuses_preloop = false;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(spv[idx] & 0xFFFF)) == 57 and wc >= 5) { // OpFunctionCall res_ty res fn arg0...
+            if (spawn_res == 0) {
+                spawn_res = spv[idx + 2]; // the spawn call's result
+            } else if (spv[idx + 4] == spawn_res) {
+                reuses_preloop = true; // a later call takes the spawn result directly as arg0
+            }
+        }
+        idx += wc;
+    }
+    try std.testing.expect(!reuses_preloop);
+}
+
 // A function that returns the loaded value of a local variable it mutated
 // (`Particle update(Particle p){ p.pos += …; return p; }`) must not be inlined by
 // inlineTrivialFuncs: the inliner forwarded the caller's read of the result back to the
