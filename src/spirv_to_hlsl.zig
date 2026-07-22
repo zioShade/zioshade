@@ -2845,6 +2845,12 @@ fn emitFunction(
                 first_input = false;
                 if (bi == .sample_mask) {
                     try w.print("out uint {s} : {s}", .{ bo_name, semantic });
+                } else if (bi == .frag_depth) {
+                    // Fragment depth output: `out float gl_FragDepth : SV_Depth`. The old code
+                    // hardcoded `int` and (via the else semantic) `TEXCOORD0`, producing invalid
+                    // HLSL (wrong type + non-depth semantic) for any shader writing gl_FragDepth.
+                    // spirv-cross uses SV_Depth + float. (#170, #470)
+                    try w.print("out float {s} : {s}", .{ bo_name, semantic });
                 } else {
                     try w.print("out {s} {s} : {s}", .{ "int", bo_name, semantic });
                 }
@@ -3033,6 +3039,7 @@ fn builtInToSemantic(b: u32) []const u8 {
         .sample_position => "SV_Position",
         .bary_coord_khr => "SV_Barycentrics",
         .bary_coord_no_persp_khr => "SV_Barycentrics1",
+        .frag_depth => "SV_Depth", // fragment depth output (matches spirv-cross) (#170, #470)
         else => "TEXCOORD0",
     };
 }

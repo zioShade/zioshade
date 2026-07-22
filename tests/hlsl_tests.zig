@@ -15209,3 +15209,17 @@ test "hlsl: integer/flat fragment varyings get nointerpolation, plain floats do 
     try assertContains(hlsl, "nointerpolation int vId");
     try assertNotContains(hlsl, "nointerpolation float2 uv"); // a plain float varying must NOT be flat
 }
+
+// gl_FragDepth must be `out float gl_FragDepth : SV_Depth`. The old code emitted
+// `out int gl_FragDepth : TEXCOORD0` -- invalid HLSL (wrong type + a non-depth semantic) for
+// any shader writing gl_FragDepth. Matches spirv-cross (SV_Depth + float). (#170, #470)
+test "hlsl: gl_FragDepth is out float : SV_Depth, not int/TEXCOORD" {
+    const hlsl = try compileToHlsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(1.0); gl_FragDepth = 0.25; }
+    );
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "out float gl_FragDepth : SV_Depth");
+    try assertNotContains(hlsl, "gl_FragDepth : TEXCOORD"); // the old broken form
+}
