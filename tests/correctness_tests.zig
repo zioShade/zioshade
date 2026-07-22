@@ -426,6 +426,34 @@ test "conditional continue in a loop keeps an explicit then-block, not collapsed
     try std.testing.expect(!spirvConditionalTargetsLoopContinue(spv));
 }
 
+// A function that returns the loaded value of a local variable it mutated
+// (`Particle update(Particle p){ p.pos += …; return p; }`) must not be inlined by
+// inlineTrivialFuncs: the inliner forwarded the caller's read of the result back to the
+// PRE-mutation argument, dropping the update (the shader rendered the original particle
+// state). Such functions are left as calls (the backend compiles them correctly); assert
+// the call survives.
+test "a function returning a mutated local is not inlined (would drop the mutation)" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct Particle { vec2 pos; vec2 vel; float life; };
+        \\Particle update(Particle p, float dt) { p.pos += p.vel * dt; p.life -= dt; return p; }
+        \\void main() {
+        \\    Particle p; p.pos = gl_FragCoord.xy; p.vel = vec2(1.0, -0.5); p.life = 1.0;
+        \\    p = update(p, 0.016);
+        \\    p = update(p, 0.016);
+        \\    fragColor = vec4(p.pos * 0.005, p.life, 1.0);
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The modify-and-return function stays an OpFunctionCall (57) rather than being inlined
+    // by the (buggy-for-this-pattern) inliner, which would drop the mutation.
+    try std.testing.expect(spirvHasOpcode(spv, 57));
+}
+
 // A switch where multiple cases each `return` a value must emit EVERY case's return, not
 // just the first. The dead-code-after-return suppression flag (`has_returned`) was set by
 // the first returning case and never reset between cases, so `analyzeStatement` silently
