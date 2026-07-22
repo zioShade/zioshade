@@ -426,6 +426,39 @@ test "conditional continue in a loop keeps an explicit then-block, not collapsed
     try std.testing.expect(!spirvConditionalTargetsLoopContinue(spv));
 }
 
+// The SAME struct type used in two interface blocks with CONFLICTING matrix layouts
+// (`layout(row_major) S` in one, `layout(column_major) S` in another, where S has a matrix
+// member that inherits the block qualifier) cannot be represented with a single SPIR-V
+// struct type: the first layout wins and the other block silently reads the matrix
+// transposed. zioshade cannot emit distinct per-layout struct types yet, so it HONEST-ERRORS
+// rather than miscompile. A non-conflicting reuse (same layout in both blocks) still compiles.
+test "conflicting matrix layout on a shared struct type honest-errors, not silently transposes" {
+    const alloc = std.testing.allocator;
+    const conflicting =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct S { mat4 m; };
+        \\layout(binding = 0, std140) uniform A { layout(row_major) S a; } ua;
+        \\layout(binding = 1, std140) uniform B { layout(column_major) S b; } ub;
+        \\void main() { fragColor = ua.a.m[0] + ub.b.m[0]; }
+    ;
+    try std.testing.expectError(error.CodegenFailed, zioshade.compileToSPIRV(alloc, conflicting, .{ .stage = .fragment }));
+
+    // Same layout in both blocks is fine -- the shared struct type is correct for both.
+    const ok =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct S { mat4 m; };
+        \\layout(binding = 0, std140) uniform A { layout(row_major) S a; } ua;
+        \\layout(binding = 1, std140) uniform B { layout(row_major) S b; } ub;
+        \\void main() { fragColor = ua.a.m[0] + ub.b.m[0]; }
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, ok, .{ .stage = .fragment });
+    alloc.free(spv);
+}
+
 // A loop-carried struct variable (`pt = spawn(uv); for(...) pt = update(pt, dt);`) must
 // reload `pt` each iteration, not reuse the pre-loop value. The store-forward cache kept
 // pt's pointer -> the spawn result across the loop header (unssaAllScopes only spilled

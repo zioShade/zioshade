@@ -164,6 +164,11 @@ fn generateInternal(
     // Patch header bound field
     cg.words.items[3] = cg.next_id;
 
+    // Honest-error: a struct type reused across interface blocks with conflicting matrix
+    // layouts cannot be faithfully represented (it would silently transpose one block), so
+    // fail loud instead of miscompiling.
+    if (cg.unsupported_conflicting_layout) return error.CodegenFailed;
+
     const raw = try cg.words.toOwnedSlice(alloc);
     if (no_opt) return raw;
 
@@ -400,7 +405,8 @@ const Codegen = struct {
     emitted_array_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
     emitted_tensor_types: std.AutoHashMapUnmanaged(u64, u32), // hash -> type_id
     emitted_array_stride: std.AutoHashMapUnmanaged(u32, void), // array type_ids with ArrayStride already emitted
-    emitted_struct_layout: std.AutoHashMapUnmanaged(u32, void), // struct type_ids with layout decorations already emitted
+    emitted_struct_layout: std.AutoHashMapUnmanaged(u32, bool), // struct type_id -> parent row_major used for its layout decorations
+    unsupported_conflicting_layout: bool = false, // set when a struct type is reused across blocks with conflicting matrix layout (honest-error, checked after codegen)
     emitted_named_types: std.StringHashMapUnmanaged(u32), // struct name -> type_id
     emitted_interface_named_types: std.StringHashMapUnmanaged(u32), // struct name -> interface type_id (bool->uint)
     emitted_ptr_types: std.AutoHashMapUnmanaged(u64, u32), // (type_key << 32 | sc) -> ptr_type_id
@@ -2911,6 +2917,15 @@ const Codegen = struct {
                 for (td.members) |member| {
                     for (member.name) |c| layout_key = layout_key *% 33 +% @as(u64, c);
                     layout_key = layout_key *% 33 +% 0xFF; // member-name boundary
+                    // Fold each member's row/column-major qualifier: `{ layout(row_major) S a }`
+                    // and `{ layout(column_major) S a }` have identical member names+types+block
+                    // layout but decorate their matrix members oppositely, so they are distinct
+                    // types and must NOT dedup to one (which silently transposed one block).
+                    // Keeping them distinct also lets the nested-struct decorator observe the
+                    // shared inner struct being decorated with two conflicting layouts and
+                    // honest-error (see emitNestedStructLayoutInner).
+                    const eff_rm: u8 = if (member.layout) |l| (if (l.row_major) 2 else 1) else 0;
+                    layout_key = layout_key *% 33 +% @as(u64, eff_rm);
                 }
                 layout_key = layout_key *% 33 +% @as(u64, @intFromEnum(block_layout));
                 layout_key = layout_key *% 33 +% @as(u64, @intFromBool(block_row_major));
@@ -3885,9 +3900,23 @@ const Codegen = struct {
     }
 
     fn emitNestedStructLayoutInner(self: *Codegen, struct_type_id: u32, members: []const ast.StructMember, kind: LayoutKind, parent_row_major: bool) !void {
-        // Prevent decorating the same struct twice
-        if (self.emitted_struct_layout.contains(struct_type_id)) return;
-        try self.emitted_struct_layout.put(self.alloc, struct_type_id, {});
+        // Prevent decorating the same struct twice. But if the SAME struct type is reused
+        // across two interface blocks with CONFLICTING matrix layouts (`layout(row_major) S`
+        // in one, `layout(column_major) S` in another, where S has a matrix member that
+        // INHERITS the block's qualifier), the first decoration wins and the second is
+        // silently dropped -- so the column-major block reads the matrix transposed
+        // (silent-wrong). We cannot represent this today: it needs distinct SPIR-V struct
+        // types keyed by the inherited layout (an acknowledged codegen limitation; a
+        // post-launch fix). Fail LOUD instead of miscompiling, per the honest-error contract.
+        if (self.emitted_struct_layout.get(struct_type_id)) |prev_row_major| {
+            if (prev_row_major != parent_row_major and self.structHasInheritLayoutMatrix(members)) {
+                // Cannot propagate a distinct error through ensureType's fixed error set, so
+                // flag it; generateInternal turns this into a loud CodegenFailed after emission.
+                self.unsupported_conflicting_layout = true;
+            }
+            return;
+        }
+        try self.emitted_struct_layout.put(self.alloc, struct_type_id, parent_row_major);
         var offset: u32 = 0;
         for (members, 0..) |member, i| {
             const member_is_row_major = if (member.layout) |l| l.row_major else parent_row_major;
@@ -3953,6 +3982,25 @@ const Codegen = struct {
             .mat2, .mat2x2, .mat2x3, .mat2x4, .mat3, .mat3x2, .mat3x3, .mat3x4, .mat4, .mat4x2, .mat4x3, .mat4x4 => true,
             else => false,
         };
+    }
+
+    /// True if the struct has a matrix member (direct or array-of-matrix) that INHERITS its
+    /// row/column-major layout from the enclosing block (no explicit member `layout(...)`).
+    /// Such a struct's SPIR-V layout depends on the parent block's qualifier, so reusing one
+    /// struct type across a row_major and a column_major block is a silent conflict.
+    fn structHasInheritLayoutMatrix(self: *Codegen, members: []const ast.StructMember) bool {
+        for (members) |member| {
+            if (member.layout != null) continue; // explicit member layout does not inherit
+            var effective_ty = member.ty;
+            while (effective_ty == .array) effective_ty = effective_ty.array.base.*;
+            if (self.isMatrixType(effective_ty)) return true;
+            if (effective_ty == .named) {
+                if (self.module.types.get(effective_ty.named)) |nested_td| {
+                    if (self.structHasInheritLayoutMatrix(nested_td.members)) return true;
+                }
+            }
+        }
+        return false;
     }
 
     /// Emit ArrayStride for array types at all nesting levels
