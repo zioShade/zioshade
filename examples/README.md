@@ -24,7 +24,7 @@ Add zioshade to your `build.zig.zon`:
 ```zig
 .dependencies = .{
     .zioshade = .{
-        .url = "https://github.com/deblasis/zioshade/archive/<commit>.tar.gz",
+        .url = "https://github.com/zioshade/zioshade/archive/<commit>.tar.gz",
         .hash = "<run zig fetch to get the hash>",
     },
 },
