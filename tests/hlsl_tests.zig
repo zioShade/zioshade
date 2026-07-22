@@ -223,6 +223,22 @@ test "#474: coarse/fine derivatives map to ddx_coarse/ddy_fine (not plain)" {
     try assertContains(hlsl, "ddy_fine");
 }
 
+// #475: NoPerspective varyings must emit `noperspective` (HLSL SM4+ native); dropping
+// it silently perspective-interpolates a screen-space/UI UV. Oracle spelling: HLSL
+// `noperspective`.
+test "#475: NoPerspective varying emits noperspective" {
+    const spirv = compileToSpirv("noperspective_hlsl",
+        \\#version 450
+        \\layout(location=0) noperspective in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(uv, 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "noperspective ");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------

@@ -233,6 +233,38 @@ test "#474: MSL loop-body if/else merge-phi is materialized, not aliased to firs
     try std.testing.expect(std.mem.count(u8, msl, "_phi = ") >= 2);
 }
 
+// #475: MSL interpolation attributes on the fragment stage-in.
+//  - Flat-on-FLOAT needs [[flat]] (Metal auto-flats only INTEGERS, not floats) -- the
+//    prior MSL [[flat]]-on-integers change was reverted because integers don't need it;
+//    floats do. Without it, MSL perspective-interpolates a flat value.
+//  - NoPerspective needs [[center_no_perspective]].
+// Oracle spellings verified against spirv-cross --msl.
+test "#475: MSL Flat-on-float fragment input gets [[flat]]" {
+    const spirv = compileToSpirv("flat_float_msl",
+        \\#version 450
+        \\layout(location=0) flat in vec3 color;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(color, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "[[user(locn0), flat]]");
+}
+
+test "#475: MSL NoPerspective fragment input gets [[center_no_perspective]]" {
+    const spirv = compileToSpirv("noperspective_msl",
+        \\#version 450
+        \\layout(location=0) noperspective in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(uv, 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "[[user(locn0), center_no_perspective]]");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang

@@ -859,6 +859,16 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
     return false;
 }
 
+/// The GLSL interpolation-qualifier prefix for a varying (`flat ` / `noperspective `,
+/// else "" for the default `smooth`). Flat (no interpolation) and NoPerspective (linear)
+/// are mutually exclusive; Flat wins if both are set. Matches spirv-cross. (#475)
+/// Centroid/Sample are orthogonal auxiliary qualifiers — handled separately if added.
+fn glslInterpQual(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) []const u8 {
+    if (hasDec(decs, id, .flat)) return "flat ";
+    if (hasDec(decs, id, .no_perspective)) return "noperspective ";
+    return "";
+}
+
 // ---- Public API ----
 /// Options for SPIR-V → GLSL cross-compilation.
 pub const GlslCompileOptions = struct {
@@ -1918,7 +1928,7 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         if (isBuiltinBlockVar(m, ivid)) continue;
         const it = try glslType(m, inst.words[1], names, alloc);
         const in_name = names.get(ivid) orelse continue;
-        const flat_q: []const u8 = if (hasDec(decs, ivid, .flat)) "flat " else "";
+        const flat_q: []const u8 = glslInterpQual(decs, ivid);
         const drop_loc = dropVaryingLocation(version, m.execution_model, .in);
         if (!drop_loc) if (getDecVal(decs, ivid, .location)) |l| {
             try w.print("layout(location = {d}) {s}in {s} {s};\n", .{ l, flat_q, it, in_name });
@@ -1937,7 +1947,7 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         if (isBuiltinBlockVar(m, ovid)) continue;
         const ot = try glslType(m, inst.words[1], names, alloc);
         const on = names.get(ovid) orelse "_out";
-        const flat_q: []const u8 = if (hasDec(decs, ovid, .flat)) "flat " else "";
+        const flat_q: []const u8 = glslInterpQual(decs, ovid);
         const drop_loc = dropVaryingLocation(version, m.execution_model, .out);
         if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
             // Dual-source blending: two outputs share location 0, distinguished by

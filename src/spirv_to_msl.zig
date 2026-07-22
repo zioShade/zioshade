@@ -41,7 +41,7 @@ const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// `location` field carries N in both cases; only the attribute spelling
 /// differs at emit time. Built-in inputs (gl_FragCoord etc.) are NOT collected
 /// here — they keep their existing `[[position]]`/builtin path.
-const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32 };
+const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, interp: []const u8 = "" };
 /// A vertex stage output that becomes a `main0_out` field and is referenced in
 /// the body as `out.<name>`. Two kinds:
 ///   - user varyings (`is_position == false`): `T name [[user(locnN)]]`,
@@ -1935,6 +1935,31 @@ fn memberDecVal(m: *const ParsedModule, struct_id: u32, member: u32, dec: spirv.
     return null;
 }
 
+/// True if member `member` of `struct_id` carries `dec` (works for VALUE-LESS
+/// MemberDecorate like Flat/NoPerspective, which memberDecVal -- requiring a value
+/// word -- cannot detect). (#475)
+fn memberHasDec(m: *const ParsedModule, struct_id: u32, member: u32, dec: spirv.Decoration) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 4) continue;
+        if (inst.words[1] == struct_id and inst.words[2] == member and
+            inst.words[3] == @intFromEnum(dec)) return true;
+    }
+    return false;
+}
+
+/// True if `type_id` (or its scalar element, through vector/array/matrix) is an integer.
+/// Used to OMIT `[[flat]]` for integer varyings: Metal AUTO-FLATS integers, so the
+/// (redundant) Flat decoration glslang emits on them must be dropped to match spirv-cross
+/// (#475 — re-trips the prior T15.5 trap if not).
+fn mslElementIsInt(m: *const ParsedModule, type_id: u32) bool {
+    const inst = getDef(m, type_id) orelse return false;
+    return switch (inst.op) {
+        .TypeInt => true,
+        .TypeVector, .TypeArray, .TypeMatrix => if (inst.words.len > 2) mslElementIsInt(m, inst.words[2]) else false,
+        else => false,
+    };
+}
+
 /// Append `set` to `list` only if it's not already present. Used to gather
 /// the unique set indices in use by an argument-buffer-mode entry point.
 fn addUniqueSet(list: *std.ArrayList(u32), set: u32, alloc: std.mem.Allocator) !void {
@@ -2395,7 +2420,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                 // spirv-cross uses interpolation::perspective for these (even for flat).
                 try w.print("    interpolant<{s}, interpolation::perspective> {s} [[user(locn{d})]];\n", .{ tn, si.name, si.location });
             } else {
-                try w.print("    {s} {s} [[user(locn{d})]];\n", .{ tn, si.name, si.location });
+                try w.print("    {s} {s} [[user(locn{d}){s}]];\n", .{ tn, si.name, si.location, si.interp });
             }
         }
         try w.writeAll("};\n\n");
@@ -3081,6 +3106,18 @@ fn needsForwardDecls(m: *const ParsedModule, func_ids: []const u32, entry_id: u3
 }
 
 fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), inputs: *std.ArrayList(StageInputDecl), block_flat: *std.AutoHashMap(u64, []const u8), alloc: std.mem.Allocator) void {
+    // #475: MSL interpolation attribute appended to the fragment stage-in `[[user(locnN)]]`.
+    // Flat-on-FLOAT needs `[[flat]]` (Metal auto-flats only INTEGERS — so glslang's Flat
+    // decoration on an integer varying is OMITTED, matching spirv-cross; emitting it broke
+    // T15.5). NoPerspective needs `[[center_no_perspective]]`. Vertex stage-in is
+    // `[[attribute(N)]]` (fetched, not interpolated) so this is unused there.
+    const mslInterpAttr = struct {
+        fn forVar(mod: *const ParsedModule, d: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, type_id: u32) []const u8 {
+            if (hasDec(d, id, .flat) and !mslElementIsInt(mod, type_id)) return ", flat";
+            if (hasDec(d, id, .no_perspective)) return ", center_no_perspective";
+            return "";
+        }
+    };
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
@@ -3110,13 +3147,18 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
                 const mname = getMemberName(m, pt, mi, &nbuf);
                 const flat = std.fmt.allocPrint(alloc, "{s}_{s}", .{ inst_name, mname }) catch continue;
                 const mloc = memberDecVal(m, pt, mi, .location) orelse (loc + mi);
-                inputs.append(alloc, .{ .var_id = rid, .name = flat, .type_id = mtype, .location = mloc }) catch {};
+                const memb_interp: []const u8 = blk: {
+                    if (memberHasDec(m, pt, mi, .flat) and !mslElementIsInt(m, mtype)) break :blk ", flat";
+                    if (memberHasDec(m, pt, mi, .no_perspective)) break :blk ", center_no_perspective";
+                    break :blk "";
+                };
+                inputs.append(alloc, .{ .var_id = rid, .name = flat, .type_id = mtype, .location = mloc, .interp = memb_interp }) catch {};
                 block_flat.put(blockFlatKey(rid, mi), flat) catch {};
             }
             continue;
         }
         const name = names.get(rid) orelse continue;
-        inputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .location = loc }) catch {};
+        inputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .location = loc, .interp = mslInterpAttr.forVar(m, decs, rid, pt) }) catch {};
     }
     const SortCtx = struct {
         fn lessThan(_: void, a: StageInputDecl, b: StageInputDecl) bool {
