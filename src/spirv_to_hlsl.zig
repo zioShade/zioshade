@@ -5418,89 +5418,110 @@ fn emitInstruction(
             const texel = if (inst.words.len > 3) names.get(inst.words[3]) orelse "0" else "0";
             try w.print("    {s}[{s}] = {s};\n", .{ img, coord, texel });
         },
-        // Atomics: Interlocked* in HLSL
+        // Atomics: Interlocked* in HLSL.
+        // CRITICAL (audit): HLSL Interlocked* do NOT return the pre-op value the way
+        // GLSL/MSL/WGSL atomics do -- they write it into an `out` LAST parameter. The
+        // 2-arg form left the SSA result declared-but-uninitialized, so any consumer
+        // of the atomic's old value (the ubiquitous `slot = atomicAdd(counter,1)`
+        // allocation idiom) read garbage = silent-wrong. Pass the result var as the
+        // out param. Matches the spirv-cross HLSL oracle.
         .AtomicIAdd => {
             // OpAtomicIAdd: result_type, result, pointer, memory_scope, semantics, value
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicISub => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1" else "1";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, -({s}));\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], -({s}));\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, -({s}), {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], -({s}), {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicSMin, .AtomicUMin => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedMin({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedMin({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedMin({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedMin({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicSMax, .AtomicUMax => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedMax({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedMax({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedMax({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedMax({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicAnd => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAnd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedAnd({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAnd({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAnd({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicOr => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedOr({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedOr({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedOr({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedOr({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicXor => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedXor({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedXor({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedXor({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedXor({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicExchange => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "0" else "0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedExchange({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedExchange({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedExchange({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedExchange({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .AtomicCompareExchange => {
-            // OpAtomicCompareExchange: result_type, result, pointer, sc1, sem1, sem2, value, comparator
+            // OpAtomicCompareExchange: result_type, result, pointer, sc1, sem1, sem2, value, comparator.
+            // HLSL: InterlockedCompareExchange(dest, compare_value, value, out original). The
+            // out original param is REQUIRED (the 3-arg no-out variant is InterlockedCompareStore),
+            // so omitting it left the result uninitialized. Operand order (cmp then val) is correct.
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 7) names.get(inst.words[7]) orelse "0" else "0";
             const cmp = if (inst.words.len > 8) names.get(inst.words[8]) orelse "0" else "0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedCompareExchange({s}, {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, cmp, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedCompareExchange({s}[{s}], {s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, cmp, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedCompareExchange({s}, {s}, {s}, {s});\n", .{ rt, res, ptr, cmp, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedCompareExchange({s}[{s}], {s}, {s}, {s});\n", .{ rt, res, p.img, p.coord, cmp, val, res }),
             }
         },
         .AtomicFAddEXT => {
-            // OpAtomicFAddEXT: floating-point atomic add
+            // OpAtomicFAddEXT: floating-point atomic add. (HLSL InterlockedAdd is
+            // integer-only; true float atomics need a CAS loop -- separate limitation.
+            // Capture the old value in the out param for consistency.)
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const res = names.get(inst.words[2]) orelse "v";
             const val = if (inst.words.len > 6) names.get(inst.words[6]) orelse "1.0" else "1.0";
             switch (classifyHlslAtomicPtr(module, names, inst.words[3])) {
-                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", ptr, val }),
-                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], {s});\n", .{ rt, names.get(inst.words[2]) orelse "v", p.img, p.coord, val }),
+                .ssbo => |ptr| try w.print("    {s} {s}; InterlockedAdd({s}, {s}, {s});\n", .{ rt, res, ptr, val, res }),
+                .image => |p| try w.print("    {s} {s}; InterlockedAdd({s}[{s}], {s}, {s});\n", .{ rt, res, p.img, p.coord, val, res }),
             }
         },
         .Return => {

@@ -166,6 +166,26 @@ test "#472-audit: OpSwitch cases terminate with break; (no C fallthrough)" {
     try std.testing.expect(std.mem.count(u8, hlsl, "break;") >= 3);
 }
 
+// audit: HLSL Interlocked* do NOT return the pre-op value (GLSL/MSL/WGSL atomics do);
+// they write it into an `out` LAST param. The 2-arg form left the atomic's SSA result
+// uninitialized -> the ubiquitous `old = atomicAdd(...)` idiom read garbage
+// (silent-wrong). Must pass the result var as the out param (matches spirv-cross).
+test "audit: HLSL atomic captures the old value via the out param (3-arg Interlocked*)" {
+    const spirv = compileToSpirv("atomic_oldval",
+        \\#version 450
+        \\layout(r32ui, binding=0) uniform uimage2D img;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ uint old = imageAtomicAdd(img, ivec2(0), 3u); o = vec4(float(old)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "InterlockedAdd(");
+    // The value arg must be followed by the out (result) param, not a closing paren.
+    try assertContains(hlsl, "3u, ");
+    try assertNotContains(hlsl, "3u);");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
