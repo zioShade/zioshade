@@ -2,6 +2,21 @@
     .name = .zioshade,
     .version = "0.3.0",
     .minimum_zig_version = "0.15.2",
+    .dependencies = .{
+        // Dual-version (0.15.2 + 0.16) monotonic-clock lib. compat.zig's
+        // Timer/monotonic shim delegates to it (this is ziotime's reason to
+        // exist: centralize the 0.16 std.Io.Clock churn in one place).
+        .ziotime = .{
+            .url = "https://github.com/deblasis/ziotime/archive/refs/tags/v0.1.0.tar.gz",
+            .hash = "ziotime-0.1.0-QxPLaYY2AACgpYtIWteiycYwj34dpEU6sVromYNklBoH",
+        },
+        // Dual-version JSON escaper over std.Io.Writer (present on both 0.15.2
+        // and 0.16). reflection.zig's hand-rolled string escaper delegates to it.
+        .ziojson = .{
+            .url = "https://github.com/deblasis/ziojson/archive/refs/tags/v0.2.0.tar.gz",
+            .hash = "ziojson-0.2.0-5G9pUuJyAABKcYtbfZbQu4X86hTrKMcwhw2gQgwE9a86",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",

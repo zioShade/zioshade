@@ -12,6 +12,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+// Sibling zio libraries. Both are dual-version (0.15.2 + 0.16) and select by
+// capability detection, exactly like this file, so they do not narrow the
+// support window.
+//   * ziotime centralizes the monotonic-clock churn (0.16 moved timing behind
+//     std.Io.Clock); the `Timer` below delegates its reads and its
+//     non-decreasing clamp to it.
+//   * ziojson centralizes JSON string escaping over `std.Io.Writer` (present on
+//     both versions); `appendJsonEscapedString` below delegates to it.
+const ziotime = @import("ziotime");
+const ziojson = @import("ziojson");
+
 /// Hard floor. Anything older than this is unsupported and fails to compile
 /// here with an actionable message rather than a cryptic stdlib error later.
 pub const min_zig = std.SemanticVersion{ .major = 0, .minor = 15, .patch = 2 };
@@ -618,50 +629,45 @@ pub fn nanoTimestamp() i128 {
     }
 }
 
-/// Monotonic nanoseconds for interval measurement, hiding the 0.15/0.16 split.
-/// Unlike `nanoTimestamp` (wall clock), this reads a MONOTONIC clock, so a
-/// backward NTP or manual clock step cannot yield a negative interval; the Timer
-/// below relies on that to keep its `if (d < 0) 0` clamp a true invariant rather
-/// than a guard against a real regression. On 0.16 it reads std.Io's monotonic
-/// clock (std.Io.Clock.awake); on 0.15, where std.Io has no clock, it reads a
-/// process-lifetime std.time.Timer (also monotonic). The 0.15 idiom differs but
-/// gives the same non-decreasing nanosecond stream. COMPAT(0.15).
-threadlocal var mono_epoch: if (is_0_16) void else ?std.time.Timer = if (is_0_16)
-{} else null;
-
-fn monotonicNanos() i128 {
+/// Read ziotime's monotonic clock as `u64` nanoseconds. Unlike `nanoTimestamp`
+/// (wall clock), this is a MONOTONIC reading, so a backward NTP or manual clock
+/// step cannot yield a negative interval; the Timer below relies on that.
+///
+/// The dual-version concern (0.16 moved the monotonic clock behind
+/// `std.Io.Clock.awake`; 0.15.2 has no such clock and uses a process-lifetime
+/// `std.time.Timer`) now lives entirely in ziotime, which exists to centralize
+/// exactly this churn. On 0.16 ziotime.monotonicNanos needs an `std.Io`, so we
+/// build a short-lived one per read; that keeps `Timer.start()` argument-free
+/// (its dev-bench call sites pass no io and never tear a Timer down). A fresh Io
+/// per read is fine on those cold paths. On 0.15.2 `ziotime.Io` is `void`.
+/// COMPAT(0.15): when the floor moves to 0.16, thread a real io instead.
+fn monotonicNanos() u64 {
     if (is_0_16) {
         var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
         defer threaded.deinit();
-        const ts = std.Io.Timestamp.now(threaded.io(), .awake);
-        return @as(i128, ts.nanoseconds);
+        return ziotime.monotonicNanos(threaded.io());
     } else {
-        if (mono_epoch == null) {
-            // If the monotonic clock is unavailable, fall back to the wall clock
-            // rather than fail; the clamp below still keeps intervals non-negative.
-            mono_epoch = std.time.Timer.start() catch return std.time.nanoTimestamp();
-        }
-        return @as(i128, mono_epoch.?.read());
+        return ziotime.monotonicNanos({});
     }
 }
 
-/// Monotonic elapsed timer mirroring the subset of std.time.Timer that the dev
-/// bench tools use (start / read / lap / reset), hiding the 0.16 removal of
-/// std.time.Timer and std.time.Instant (timing moved behind std.Io). Backed by
-/// `monotonicNanos`, so an NTP/manual clock step cannot produce a negative
-/// interval; `start` cannot fail here (the std API returned an error union), so
-/// callers drop the `try`/`catch`. COMPAT(0.15): revisit when the floor is 0.16.
+/// Monotonic elapsed timer mirroring the subset of `std.time.Timer` that the dev
+/// bench tools use (start / read / lap / reset). The clock reading and the
+/// non-decreasing interval clamp are delegated to ziotime (`monotonicNanos` +
+/// `elapsedSince`), so the 0.16 removal of `std.time.Timer`/`std.time.Instant`
+/// is handled in one shared place. The public shape is unchanged: `start` takes
+/// no arguments and cannot fail, so existing call sites keep working verbatim.
+/// COMPAT(0.15): revisit when the floor is 0.16 (thread a persistent io).
 pub const Timer = struct {
-    start_ns: i128,
+    start_ns: u64,
 
     pub fn start() Timer {
         return .{ .start_ns = monotonicNanos() };
     }
 
-    /// Nanoseconds elapsed since start (or the last reset).
+    /// Nanoseconds elapsed since start (or the last reset). Never negative.
     pub fn read(self: Timer) u64 {
-        const d = monotonicNanos() - self.start_ns;
-        return if (d < 0) 0 else @intCast(d);
+        return ziotime.elapsedSince(self.start_ns, monotonicNanos());
     }
 
     pub fn reset(self: *Timer) void {
@@ -671,11 +677,27 @@ pub const Timer = struct {
     /// Nanoseconds since the last lap/start, and restart the interval.
     pub fn lap(self: *Timer) u64 {
         const now = monotonicNanos();
-        const d = now - self.start_ns;
+        const elapsed = ziotime.elapsedSince(self.start_ns, now);
         self.start_ns = now;
-        return if (d < 0) 0 else @intCast(d);
+        return elapsed;
     }
 };
+
+/// Append `s` to `list` as a complete, quoted, correctly-escaped JSON string
+/// literal (leading `"`, escaped contents, trailing `"`). Delegates the escaping
+/// to ziojson.writeStringEscaped, which centralizes the injection-safe rule
+/// (`"` and `\` backslash-escaped; `\n \r \t \b \f` short escapes; other bytes
+/// below 0x20 as `\uXXXX`; everything else, including multibyte UTF-8, verbatim).
+///
+/// ziojson writes to a `*std.Io.Writer` (present on both 0.15.2 and 0.16), so we
+/// escape through a small `Allocating` writer and append the result. This is a
+/// cold path (reflection JSON emission), so the extra buffer is immaterial.
+pub fn appendJsonEscapedString(alloc: std.mem.Allocator, list: *std.ArrayList(u8), s: []const u8) !void {
+    var aw = std.Io.Writer.Allocating.init(alloc);
+    defer aw.deinit();
+    ziojson.writeStringEscaped(&aw.writer, s) catch return error.OutOfMemory;
+    try list.appendSlice(alloc, aw.written());
+}
 
 /// Resolve a Vulkan SDK CLI tool by basename. Prefer `$VULKAN_SDK/Bin/<tool>[.exe]`
 /// (`.exe` appended only on Windows); fall back to the bare name on PATH when

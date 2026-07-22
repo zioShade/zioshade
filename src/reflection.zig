@@ -3,6 +3,7 @@
 const std = @import("std");
 const spirv = @import("spirv.zig");
 const compact_ids = @import("compact_ids.zig");
+const compat = @import("compat.zig");
 
 pub const TypeKind = enum {
     unknown,
@@ -999,28 +1000,11 @@ const JsonWriter = struct {
     }
 
     /// Emit a JSON string literal with proper escaping of control chars,
-    /// quotes and backslashes.
+    /// quotes and backslashes. Delegates to ziojson (via compat) so the
+    /// injection-safe escaping rule lives in one shared, tested place; the byte
+    /// output is identical to the former hand-rolled switch.
     fn jsonString(self: JsonWriter, s: []const u8) !void {
-        try self.buf.append(self.alloc, '"');
-        for (s) |c| {
-            switch (c) {
-                '"' => try self.buf.appendSlice(self.alloc, "\\\""),
-                '\\' => try self.buf.appendSlice(self.alloc, "\\\\"),
-                '\n' => try self.buf.appendSlice(self.alloc, "\\n"),
-                '\r' => try self.buf.appendSlice(self.alloc, "\\r"),
-                '\t' => try self.buf.appendSlice(self.alloc, "\\t"),
-                0x08 => try self.buf.appendSlice(self.alloc, "\\b"),
-                0x0C => try self.buf.appendSlice(self.alloc, "\\f"),
-                else => if (c < 0x20) {
-                    var tmp: [8]u8 = undefined;
-                    const e = std.fmt.bufPrint(&tmp, "\\u{x:0>4}", .{c}) catch return error.OutOfMemory;
-                    try self.buf.appendSlice(self.alloc, e);
-                } else {
-                    try self.buf.append(self.alloc, c);
-                },
-            }
-        }
-        try self.buf.append(self.alloc, '"');
+        try compat.appendJsonEscapedString(self.alloc, self.buf, s);
     }
 
     fn sectionHeader(self: JsonWriter, first: *bool, key: []const u8) !void {
