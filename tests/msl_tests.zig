@@ -2978,6 +2978,28 @@ test "T19.6: textureGather(sampler2DArray) → .gather splits array layer" {
     try assertContains(msl, "component::x");
 }
 
+// #170/#470: NON-arrayed textureGather with an explicit component. MSL's
+// gather(sampler, coord, offset, component::<swizzle>) takes the channel as a
+// trailing enum; the non-arrayed path was passing the bare integer index into the
+// OFFSET slot -> wrong channel sampled (silent-wrong). Matches spirv-cross
+// `gather(s, uv, int2(0), component::z)`.
+test "T19.6b: textureGather(sampler2D, comp=2) selects component::z via the enum, not the offset slot" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureGather(tex, uv, 2); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, ".gather(");
+    // Channel selected via the component enum, with an explicit offset arg.
+    try assertContains(msl, "int2(0), component::z");
+    // Must NOT pass the raw component index as a positional (offset) arg.
+    try assertNotContains(msl, ", 2)");
+}
+
 test "T19.7: textureGather(samplerCubeArray) → .gather splits array layer" {
     const source =
         \\#version 450
