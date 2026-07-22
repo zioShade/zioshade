@@ -700,29 +700,27 @@ test "wgsl constant mod by zero folds to a NaN bitcast (#254)" {
     try nagaValidateOrSkip(wgsl, "const-mod-by-zero");
 }
 
-// #258: a pre-existing emitBinOp band-aid emitted `let v: T = 0.0;` for ANY division
-// whose divisor renders as a literal zero. Integer constants render as bare "0", so an
-// INTEGER division by a literal zero hit it — producing `let v: i32 = 0.0;`, which naga
-// rejects as a type error ("expected i32, got AbstractFloat"). A RUNTIME integer
-// divide-by-zero is well-defined in WGSL (x / 0 == x) and naga accepts the raw `b / 0`,
-// so it must be emitted as a normal division, not the type-wrong `0.0`.
-test "wgsl runtime integer division by zero emits a valid division, not 0.0 (#258)" {
+// #258: an INTEGER division whose divisor is a const-expression zero is a WGSL
+// shader-creation error whether the dividend is a constant (`4 / 0`) or a runtime
+// value (`b / 0`) -- naga 0.30 rejects both with "Division by zero", and WGSL has no
+// integer inf/nan to represent the result. (An earlier revision emitted a bare `b / 0`
+// on the theory that naga accepts a runtime dividend; it does not.) zioshade must
+// honest-error rather than emit either the type-wrong `0.0` band-aid or naga-invalid
+// `b / 0`. The float analogue (`x / 0.0`) folds to a non-finite bitcast (#254) and is
+// unaffected.
+test "wgsl integer division by a constant zero honest-errors (runtime dividend, #258)" {
     const source: [:0]const u8 =
         \\#version 450
         \\layout(location = 0) flat in int b;
         \\layout(location = 0) out vec4 fragColor;
         \\void main() {
-        \\    int a = b / 0; // runtime dividend; WGSL defines x/0 == x
+        \\    int a = b / 0; // const-zero divisor -> WGSL creation error, unrepresentable
         \\    fragColor = vec4(float(a), 0.0, 0.0, 1.0);
         \\}
     ;
     const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
-    defer alloc.free(wgsl);
-    // The type-wrong band-aid output must be gone.
-    try std.testing.expect(std.mem.indexOf(u8, wgsl, ": i32 = 0.0;") == null);
-    try nagaValidateOrSkip(wgsl, "runtime-int-div-zero");
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 // #258: an INTEGER CONSTANT divided by a constant zero (`4 / 0`) is genuinely
