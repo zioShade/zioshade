@@ -117,6 +117,29 @@ test "glsl: OpFRem lowers to the sign-of-dividend truncation form, not mod() (#1
     try glslValidateOrSkip("frem", glsl);
 }
 
+// OpSRem is truncated (sign of the DIVIDEND); GLSL `%` is FLOORED (sign of the divisor --
+// glslang emits OpSMod for GLSL `int %`), so a bare `%` miscompiles OpSRem for opposite-sign
+// operands. GLSL was the lone backend getting this wrong (WGSL/HLSL/MSL `%` is truncated).
+// It must emit `x - y*(x/y)` (GLSL `/` truncates toward zero). glslang emits OpSMod (139)
+// for `%`; rewritten to OpSRem (138) on real SPIR-V. (#170)
+test "glsl: OpSRem lowers to the truncated x - y*(x/y), not a bare % (#170)" {
+    const spv = try compileToSpirv("srem",
+        \\#version 450
+        \\layout(location = 0) flat in int a;
+        \\layout(location = 1) flat in int b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(a % b)); }
+    );
+    defer alloc.free(spv);
+    const rw = try rewriteFirstOpcode(spv, 139, 138); // OpSMod -> OpSRem
+    defer alloc.free(rw);
+    const glsl = try zioshade.spirvToGLSL(alloc, rw, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "* ("); // the x - y*(x/y) truncation form
+    try assertContains(glsl, " / ");
+    try glslValidateOrSkip("srem", glsl);
+}
+
 // A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
 // INNER merge blocks, not the immediate true/false labels. Matching predecessors by
 // label equality picked the wrong incoming value, SWAPPING the branches and emitting

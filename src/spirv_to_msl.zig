@@ -5409,7 +5409,12 @@ fn emitInstruction(
         .FSub, .ISub => try emitBinOp(m, names, inst, "-", w, alloc),
         .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
         .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
-        .UMod, .SRem, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
+        .UMod, .SRem => try emitBinOp(m, names, inst, "%", w, alloc),
+        // OpSMod is floored (sign of the DIVISOR); Metal `%` is truncated (sign of the
+        // dividend = OpSRem), so `((x % y) + y) % y` adjusts it to floored for every sign
+        // combination. Componentwise. Matches spirv-cross's spvSMod helper. Bare `%` was a
+        // silent miscompile on opposite-sign operands (glslang emits OpSMod for GLSL `int %`). (#170)
+        .SMod => try emitSMod(m, names, inst, w, alloc),
         .FRem => {
             // OpFRem takes the sign of operand 1 (the dividend) — exactly C/Metal fmod.
             const rtt = try mslType(m, inst.words[1], names, alloc);
@@ -6580,6 +6585,16 @@ fn emitInstruction(
 fn emitBinOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
     const rtt = try mslType(m, inst.words[1], names, alloc);
     try w.print("    {s} {s} = {s} {s} {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "a", op, names.get(inst.words[4]) orelse "b" });
+}
+
+/// #170: OpSMod (floored signed modulo, sign of the DIVISOR) as `((x % y) + y) % y`. Metal
+/// `%` is truncated (sign of the dividend = OpSRem); this compound turns it floored for every
+/// sign combination. Componentwise. Equivalent to spirv-cross's spvSMod helper.
+fn emitSMod(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    const rtt = try mslType(m, inst.words[1], names, alloc);
+    const x = names.get(inst.words[3]) orelse "a";
+    const y = names.get(inst.words[4]) orelse "b";
+    try w.print("    {s} {s} = (({s} % {s}) + {s}) % {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", x, y, y, y });
 }
 
 fn emitCall(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
