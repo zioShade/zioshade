@@ -3888,7 +3888,16 @@ fn emitInstruction(
             if (is_buffer) {
                 try w.print("    {s} {s} = texelFetch({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
             } else {
-                try w.print("    {s} {s} = texelFetch({s}, {s}, 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
+                // OpImageFetch: pass the explicit LOD (image-operand Lod bit 0x2, value at
+                // words[6]) instead of hardcoding mip 0. `texelFetch` REQUIRES a lod arg for a
+                // sampled 2D image, and dropping the operand silently read the base mip for any
+                // `texelFetch(s, coord, lod>0)`. WGSL already passes it; HLSL/MSL still drop
+                // it (validator-gated follow-up). (#170)
+                const lod: []const u8 = if (inst.words.len > 6 and (inst.words[5] & 0x2) != 0)
+                    names.get(inst.words[6]) orelse "0"
+                else
+                    "0";
+                try w.print("    {s} {s} = texelFetch({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0", lod });
             }
         },
         .ImageGather => {
