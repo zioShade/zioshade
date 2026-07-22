@@ -3426,7 +3426,18 @@ fn emitInstruction(
                 rtt, names.get(inst.words[2]) orelse "v", a, b, a, b,
             });
         },
-        .UMod, .SRem, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
+        // GLSL `%` is FLOORED (sign of the divisor) -- glslang emits OpSMod for GLSL `int %`
+        // -- so it is correct for OpSMod and OpUMod, but WRONG for OpSRem, which is truncated
+        // (sign of the DIVIDEND). Emit `x - y*(x/y)` for SRem (GLSL `/` truncates toward
+        // zero, giving the truncated remainder). Componentwise. GLSL was the lone backend
+        // getting SRem wrong (WGSL/HLSL/MSL `%` is already truncated). (#170)
+        .UMod, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
+        .SRem => {
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const x = names.get(inst.words[3]) orelse "a";
+            const y = names.get(inst.words[4]) orelse "b";
+            try w.print("    {s} {s} = {s} - {s} * ({s} / {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", x, y, x, y });
+        },
         .FNegate, .SNegate => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = -{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });

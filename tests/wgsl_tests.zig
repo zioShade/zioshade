@@ -112,6 +112,26 @@ test "wgsl: OpVectorShuffle picks the right component of a WIDER second source (
     try nagaValidateOrSkip(wgsl, "shuffle-mixed-width");
 }
 
+// OpSMod is floored (sign of the DIVISOR); WGSL `%` is truncated (sign of the dividend =
+// OpSRem), so a bare `%` miscompiles opposite-sign operands. glslang emits OpSMod for GLSL
+// `int % int` (a COMMON case), so it must lower to the floored `((x % y) + y) % y`. The
+// formula was verified exhaustively against every sign combination via naga const_assert. (#170)
+test "wgsl: OpSMod lowers to the floored ((x%y)+y)%y, not a bare % (#170)" {
+    const spirv = try compileToSpirv("smod",
+        \\#version 450
+        \\layout(location = 0) flat in int a;
+        \\layout(location = 1) flat in int b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(float(a % b)); }
+    );
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "(("); // the floored form ((x % y) + y) % y, not a bare `x % y`
+    try assertContains(wgsl, ") % ");
+    try nagaValidateOrSkip(wgsl, "smod");
+}
+
 /// Same as compileToSpirv but writes a `.vert` source so glslang compiles it at
 /// the VERTEX stage (the extension selects the stage). Produces the EXTERNAL
 /// glslang IR shape — notably gl_Position wrapped in a member-decorated
