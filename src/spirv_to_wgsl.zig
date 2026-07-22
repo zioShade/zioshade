@@ -7155,6 +7155,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FUnordGreaterThan => try emitUnorderedCompare(module, names, &inline_exprs, inst, "<=", w, arena, indent),
             .FUnordLessThanEqual => try emitUnorderedCompare(module, names, &inline_exprs, inst, ">", w, arena, indent),
             .FUnordGreaterThanEqual => try emitUnorderedCompare(module, names, &inline_exprs, inst, "<", w, arena, indent),
+            // Unordered equality: (a==b) || isNaN(a) || isNaN(b), not the naive ordered
+            // `==` (false on NaN). No single-operator complement, so a direct lowering. (#170)
+            .FUnordEqual => try emitUnorderedEqual(module, names, &inline_exprs, inst, w, arena, indent),
 
             // Logical
             .LogicalOr => try emitBinOp(module, names, &inline_exprs, inst, "||", w, arena, indent),
@@ -8602,11 +8605,11 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
 ///   FUnordLessThanEqual(a,b)    == !(a > b)    (complement FOrdGreaterThan)
 ///   FUnordGreaterThanEqual(a,b) == !(a < b)    (complement FOrdLessThan)
 /// WGSL `!` is componentwise on vecN<bool>, so this is uniform for scalar and vector
-/// results with no typed constant. (OpFUnordEqual is deliberately NOT handled here:
-/// its exact lowering needs a nested-`select` OR-composition -- it stays a named
-/// honest-error until a follow-up batch, never a naive `==`.) These ops are kept out
-/// of every inline/symbol table on purpose, so they always materialize through this
-/// emitter and can never be re-derived as a bare (wrong) `lhs op rhs`.
+/// results with no typed constant. (OpFUnordEqual is the one unordered comparison that
+/// does NOT fit this negate-a-complement shape -- its complement OpFOrdNotEqual has no
+/// single WGSL operator -- so it is handled separately by emitUnorderedEqual.) These ops
+/// are kept out of every inline/symbol table on purpose, so they always materialize
+/// through this emitter and can never be re-derived as a bare (wrong) `lhs op rhs`.
 fn emitUnorderedCompare(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, complement_op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
     const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
@@ -8616,6 +8619,34 @@ fn emitUnorderedCompare(module: *const ParsedModule, names: *std.AutoHashMap(u32
     const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
     try writeIndentStatic(w, indent);
     try w.print("let {s}: {s} = !({s} {s} {s});\n", .{ result_name, rt, lhs, complement_op, rhs });
+}
+
+/// #170: emit OpFUnordEqual, the unordered float equality. It is TRUE when the operands
+/// are equal OR either is NaN, so -- like the unordered inequalities -- mapping it onto
+/// a naive `==` (ordered, false on NaN, as MSL/HLSL/spirv-cross do) is plausible-but-wrong
+/// on a NaN operand. Unlike the inequalities it has no single-operator ordered complement
+/// (`FOrdNotEqual` is not a WGSL operator), so it is lowered directly from the IEEE-754 /
+/// SPIR-V definition:
+///   FUnordEqual(a,b) == (a == b) || isNaN(a) || isNaN(b),   isNaN(x) == (x != x)
+/// WGSL has no `||` on vecN<bool> (it is scalar-bool short-circuit only) and no bool
+/// vector constant is available without knowing the width, so the OR is composed with
+/// `select`: OR(P,Q) == `select(Q, P, P)` (P true -> true; else Q), which is uniform for
+/// scalar and vecN<bool>. Nesting it twice gives (a==b) OR (isNaN(a) OR isNaN(b)). Kept
+/// out of every inline/symbol table (like emitUnorderedCompare) so it always materializes
+/// here and is never re-derived as a bare `==`.
+fn emitUnorderedEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
+    const rhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
+    const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+    const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
+    try writeIndentStatic(w, indent);
+    // select(isNaN(a)||isNaN(b), a==b, a==b) where the inner select is isNaN(a)||isNaN(b).
+    try w.print(
+        "let {s}: {s} = select(select({s} != {s}, {s} != {s}, {s} != {s}), {s} == {s}, {s} == {s});\n",
+        .{ result_name, rt, rhs, rhs, lhs, lhs, lhs, lhs, lhs, rhs, lhs, rhs },
+    );
 }
 
 /// OpFMod takes the sign of operand 2 (the divisor) — GLSL mod() semantics. WGSL's
@@ -9124,6 +9155,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         .FUnordGreaterThan => try emitUnorderedCompare(module, names, inline_exprs, inst, "<=", w, arena, indent),
         .FUnordLessThanEqual => try emitUnorderedCompare(module, names, inline_exprs, inst, ">", w, arena, indent),
         .FUnordGreaterThanEqual => try emitUnorderedCompare(module, names, inline_exprs, inst, "<", w, arena, indent),
+        .FUnordEqual => try emitUnorderedEqual(module, names, inline_exprs, inst, w, arena, indent),
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops

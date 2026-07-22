@@ -1597,6 +1597,50 @@ test "wgsl: unordered float inequality on a vector lowers componentwise (#170)" 
     try nagaValidateOrSkip(wgsl, "funord-vec");
 }
 
+// #170: OpFUnordEqual is the one unordered comparison with no single-operator ordered
+// complement, so it lowers to the definition (a==b) || isNaN(a) || isNaN(b) composed with
+// nested `select` (WGSL has no `||` on vecN<bool>). NOT the naive ordered `==` (false on
+// NaN = silent-wrong). glslang emits ORDERED FOrdEqual (180) for GLSL `==`, so the opcode
+// is rewritten to FUnordEqual (181) on real SPIR-V. Scalar and vec3 both validate under naga.
+test "wgsl: unordered float equality lowers to the isNaN-aware select form (#170)" {
+    // Scalar: `a == b` -> FOrdEqual, rewritten to FUnordEqual, fed through a select so it survives.
+    const scalar = try compileToSpirv("funord_eq_scalar",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = (a == b) ? vec4(1.0) : vec4(0.0); }
+    );
+    defer alloc.free(scalar);
+    const s_rw = try rewriteFirstOpcode(scalar, 180, 181);
+    defer alloc.free(s_rw);
+    const s_wgsl = try zioshade.spirvToWGSL(alloc, s_rw, .{});
+    defer alloc.free(s_wgsl);
+    // The nested-select OR-composition, not a bare `==` comparison result.
+    try assertContains(s_wgsl, "select(select(");
+    try nagaValidateOrSkip(s_wgsl, "funord-eq-scalar");
+
+    // Vector: `equal(a,b)` on vec3 -> FOrdEqual on a bvec3 result; the select form must be
+    // componentwise-valid (select on vecN<bool> with vecN<bool> operands).
+    const vec = try compileToSpirv("funord_eq_vec",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec3 c = equal(a, b);
+        \\    fragColor = vec4(float(c.x), float(c.y), float(c.z), 1.0);
+        \\}
+    );
+    defer alloc.free(vec);
+    const v_rw = try rewriteFirstOpcode(vec, 180, 181);
+    defer alloc.free(v_rw);
+    const v_wgsl = try zioshade.spirvToWGSL(alloc, v_rw, .{});
+    defer alloc.free(v_wgsl);
+    try assertContains(v_wgsl, "select(select(");
+    try nagaValidateOrSkip(v_wgsl, "funord-eq-vec");
+}
+
 // #170: an `if / else-if / else` chain where every branch RETURNS must lower to a
 // properly right-nested WGSL if/else. The WGSL structurizer emits `} else {` when a
 // true-branch OpBranches to the merge; but a branch that DIVERGES (return/discard,
