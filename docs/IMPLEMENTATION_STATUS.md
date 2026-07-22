@@ -206,6 +206,23 @@ The structured-GLSL fuzzer is clean over **1,000,000** iterations (reproduce wit
 | 77 | 10,000 | 0 | 0 |
 | **Total** | **50,000** | **0** | **0** |
 
+### 3.6 Deliberately-rejected constructs (honest-errors)
+
+The full render/execute differential proof (`PROVE_FULL=1 just prove`, `docs/DIFFERENTIAL_PROOF.md`)
+runs zioshade against a glslang→SPIRV-Cross reference on a real GPU. It surfaced two GLSL
+patterns zioshade cannot yet translate faithfully. Rather than emit plausible-but-wrong output,
+both **honest-error** (`error.CodegenFailed`) -- the proof reports them in a distinct `honest-err`
+column, never as a pass and never as a divergence.
+
+| # | Construct | Why it's rejected | Fix path |
+|---|-----------|-------------------|----------|
+| 1 | **Conflicting matrix layout on a shared struct type** -- the same `struct S { mat4 m; }` used with `layout(row_major)` in one UBO and `layout(column_major)` in another. | A single SPIR-V struct type can carry only one matrix-layout decoration; honoring both would require emitting two distinct types and rewriting every access. Emitting one silently transposes one of the two reads. | Fixable post-launch: split the shared struct into per-layout type instances. Tracked as a known limitation, not a launch blocker. |
+| 2 | **Dangling `continue` in a nested loop/switch/while** -- a `continue` inside a `switch` `default` that itself contains a `while` loop, all inside an outer `for`. | The frontend fails to resolve the `continue` target and emits a control-flow instruction pointing at id 0 (invalid SPIR-V). An optimizer pass (`deadLoopElim`) could then delete the malformed loop, converting a loud invalid into a silent-wrong render. The `hasMalformedCFG` gate on the raw frontend output catches the dangling target and fails loud. | Fixable post-launch: correct continue-target resolution for deeply-nested structured control flow. |
+
+Both are guarded by regression tests in `tests/correctness_tests.zig` ("conflicting matrix layout
+on a shared struct type honest-errors" and "a dangling continue target in a nested loop/switch
+honest-errors") so a future change that starts silently miscompiling either pattern fails the suite.
+
 ---
 
 ## 4. Performance
