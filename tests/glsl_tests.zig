@@ -174,6 +174,26 @@ test "glsl: ConstOffset on an implicit-lod sample becomes textureOffset, not dro
     try glslValidateOrSkip("const-offset-implicit", glsl);
 }
 
+// OpImageSampleDrefExplicitLod (shadow textureLod): the compare coord for a 2D shadow is
+// vec3(uv, dref), not vec4, and the LOD must be the real operand. The old
+// `textureLod(s, vec4(uv, dref, 0.0), 0)` was wrong-arity (a compile error) and dropped the
+// LOD. glslang validation is the real gate (it rejects the old vec4 form). (#170)
+test "glsl: shadow textureLod uses a vec3 compare coord + real LOD, not vec4/0 (#170)" {
+    const glsl = try compileToGlsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 1) in float cmp;
+        \\layout(location = 2) flat in float lod;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(textureLod(tex, vec3(uv, cmp), lod)); }
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureLod(");
+    try assertNotContains(glsl, ", 0.0), 0)"); // the old wrong vec4 + hardcoded-0 form
+    try glslValidateOrSkip("shadow-lod", glsl);
+}
+
 // A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
 // INNER merge blocks, not the immediate true/false labels. Matching predecessors by
 // label equality picked the wrong incoming value, SWAPPING the branches and emitting

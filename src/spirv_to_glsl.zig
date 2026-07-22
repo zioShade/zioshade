@@ -3776,12 +3776,20 @@ fn emitInstruction(
             try w.print("    {s} {s} = texture({s}, vec3({s}, {s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref });
         },
         .ImageSampleDrefExplicitLod => {
-            // Shadow texture with explicit LOD
+            // Shadow texture with explicit LOD: `textureLod(sampler2DShadow, vec3(uv, dref), lod)`.
+            // The compare coord for a 2D shadow is vec3 (uv + dref) -- the old `vec4(uv, dref, 0.0)`
+            // was wrong-arity (a likely compile error) -- and the LOD must be the real operand, not
+            // a hardcoded 0. Operand layout: words[5]=Dref, words[6]=image-operands mask, and the
+            // Lod value (bit 0x2) at words[7]. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = textureLod({s}, vec4({s}, {s}, 0.0), 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref });
+            const lod: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x2) != 0)
+                names.get(inst.words[7]) orelse "0.0"
+            else
+                "0.0";
+            try w.print("    {s} {s} = textureLod({s}, vec3({s}, {s}), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, lod });
         },
         .ImageSampleProjImplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
