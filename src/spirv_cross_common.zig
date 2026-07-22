@@ -267,6 +267,9 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .FUnordGreaterThan,
         .FUnordLessThanEqual,
         .FUnordGreaterThanEqual,
+        // OpFUnordEqual too (WGSL lowers it to a nested select composing the
+        // (a==b)||isNaN(a)||isNaN(b) definition; same id-registration need). (#170)
+        .FUnordEqual,
         .ShiftRightLogical,
         .ShiftRightArithmetic,
         .ShiftLeftLogical,
