@@ -15,18 +15,38 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Sibling zio libraries the library depends on. Both are dual-version
+    // (0.15.2 + 0.16) and select their implementation by capability detection,
+    // mirroring src/compat.zig, so depending on them does not narrow zioshade's
+    // support window. ziotime centralizes the monotonic-clock shim; ziojson the
+    // JSON string escaper. compat.zig re-exports/uses the former; reflection.zig
+    // (via compat) uses the latter.
+    const ziotime_mod = b.dependency("ziotime", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("ziotime");
+    const ziojson_mod = b.dependency("ziojson", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("ziojson");
+
     const zioshade_mod = b.createModule(.{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    zioshade_mod.addImport("ziotime", ziotime_mod);
+    zioshade_mod.addImport("ziojson", ziojson_mod);
 
-    // Expose as named module for consumers (e.g., wintty)
-    _ = b.addModule("zioshade", .{
+    // Expose as named module for consumers (e.g., wintty). It compiles the same
+    // src/root.zig, so it needs the same sibling imports wired in.
+    const zioshade_public_mod = b.addModule("zioshade", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
+    zioshade_public_mod.addImport("ziotime", ziotime_mod);
+    zioshade_public_mod.addImport("ziojson", ziojson_mod);
 
     const lib = b.addLibrary(.{
         .name = "zioshade",
@@ -79,6 +99,16 @@ pub fn build(b: *std.Build) void {
             .target = rt_target,
             .optimize = .ReleaseFast,
         });
+        // Sibling deps must match this module's target/optimize (their exported
+        // module pins the target passed to b.dependency), so build per-target.
+        rt_lib_mod.addImport("ziotime", b.dependency("ziotime", .{
+            .target = rt_target,
+            .optimize = .ReleaseFast,
+        }).module("ziotime"));
+        rt_lib_mod.addImport("ziojson", b.dependency("ziojson", .{
+            .target = rt_target,
+            .optimize = .ReleaseFast,
+        }).module("ziojson"));
         const rt_cli_mod = b.createModule(.{
             .root_source_file = b.path("src/cli.zig"),
             .target = rt_target,
@@ -810,6 +840,14 @@ pub fn build(b: *std.Build) void {
         .target = msvc_target,
         .optimize = .ReleaseFast,
     });
+    zioshade_msvc.addImport("ziotime", b.dependency("ziotime", .{
+        .target = msvc_target,
+        .optimize = .ReleaseFast,
+    }).module("ziotime"));
+    zioshade_msvc.addImport("ziojson", b.dependency("ziojson", .{
+        .target = msvc_target,
+        .optimize = .ReleaseFast,
+    }).module("ziojson"));
     const lib_bench_mod = b.createModule(.{
         .root_source_file = b.path("tools/lib_bench.zig"),
         .target = msvc_target,
@@ -1091,6 +1129,14 @@ pub fn build(b: *std.Build) void {
         .target = wasm_target,
         .optimize = .ReleaseSmall,
     });
+    wasm_lib_mod.addImport("ziotime", b.dependency("ziotime", .{
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    }).module("ziotime"));
+    wasm_lib_mod.addImport("ziojson", b.dependency("ziojson", .{
+        .target = wasm_target,
+        .optimize = .ReleaseSmall,
+    }).module("ziojson"));
     const wasm_mod = b.createModule(.{
         .root_source_file = b.path("src/wasm.zig"),
         .target = wasm_target,
