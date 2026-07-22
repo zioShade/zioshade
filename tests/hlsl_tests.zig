@@ -72,6 +72,80 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     return words;
 }
 
+/// Compile a VERTEX GLSL shader → SPIR-V with the *glslang* reference compiler
+/// (the `.vert` extension makes glslang infer the vertex stage). Unlike zioshade's
+/// own frontend, glslang wraps vertex outputs (gl_Position/gl_PointSize/...) in a
+/// member-decorated `gl_PerVertex` interface Block written via OpAccessChain+OpStore
+/// — the form every real Vulkan toolchain emits (#471). Skips if glslang absent.
+fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_test_{s}.vert", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_test_{s}_vert.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+fn spirvToHlsl60(spirv: []const u32) ![]const u8 {
+    return zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+}
+
+// ---------------------------------------------------------------------------
+// #471: gl_PerVertex interface-block vertex outputs (external glslang/shaderc form).
+// glslang wraps gl_Position et al. in a member-decorated Block written via
+// OpAccessChain<var> <member> + OpStore, NOT as direct BuiltIn-decorated output
+// vars (which is all zioshade's own frontend emits — hence the rest of this suite
+// never exercises this path). Previously the HLSL backend skipped the block
+// entirely, emitting an empty VS_OUTPUT and a `.gl_Position =` store with an empty
+// object name — invalid HLSL for EVERY real Vulkan vertex shader. WGSL/GLSL were
+// already correct; oracle is spirv-cross.
+// ---------------------------------------------------------------------------
+
+test "#471: glslang gl_PerVertex block promotes gl_Position to SV_Position (no empty-object store)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec3 pos;
+        \\void main(){ gl_Position = vec4(pos, 1.0); }
+    ;
+    const spirv = compileVertToSpirv("pervertex_posonly", source) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    // gl_Position promoted into the output struct with the SV_Position semantic.
+    try assertContains(hlsl, "gl_Position : SV_Position");
+    // The store targets the named output object, not an empty-object dangling ref.
+    try assertContains(hlsl, "output.gl_Position");
+    try assertNotContains(hlsl, "    .gl_Position");
+}
+
+test "#471: glslang gl_PerVertex block drops gl_PointSize (unrepresentable in HLSL), keeps gl_Position" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec3 pos;
+        \\void main(){ gl_Position = vec4(pos, 1.0); gl_PointSize = 2.0; }
+    ;
+    const spirv = compileVertToSpirv("pervertex_pointsize", source) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "gl_Position : SV_Position");
+    // gl_PointSize has no HLSL representation and must be dropped entirely -- no
+    // field, no dangling store.
+    try assertNotContains(hlsl, "gl_PointSize");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
