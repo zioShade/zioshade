@@ -6103,11 +6103,10 @@ fn emitInstruction(
             if (inst.words.len > 6 and (inst.words[6] & 0x38) != 0) {
                 return error.UnsupportedImageOperands;
             }
-            // MSL: tex.gather(samp, coord, component)
+            // MSL: tex.gather(samp, coord, offset, component::<swizzle>)
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
-            const comp = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             // textureGather on an ARRAY texture: split the array layer into a
             // separate integer arg, matching spirv-cross --msl exactly:
             //   2D array:   gather(s, c.xy, uint(rint(c.z)), int2(0), component::x)
@@ -6124,7 +6123,13 @@ fn emitInstruction(
                     try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, int2(0), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, split, gcomp });
                 }
             } else {
-                try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, comp });
+                // Non-arrayed: the 3rd positional arg is the OFFSET (int2), and the
+                // gather channel is a trailing `component::<swizzle>` enum -- NOT the
+                // bare integer index. Passing the raw component into the offset slot
+                // sampled the wrong channel (silent-wrong). Matches spirv-cross
+                // `gather(s, coord, int2(0), component::z)`. (#170, #470)
+                const gcomp = if (inst.words.len > 5) mslGatherComponent(m, inst.words[5]) else "component::x";
+                try w.print("    {s} {s} = {s}.gather({s}Smplr, {s}, int2(0), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, gcomp });
             }
         },
         .ImageDrefGather => {
