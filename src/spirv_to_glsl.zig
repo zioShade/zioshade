@@ -2195,6 +2195,14 @@ fn emitFunction(
                     .local_invocation_index => "gl_LocalInvocationIndex",
                     .vertex_id => "gl_VertexID",
                     .instance_id => "gl_InstanceID",
+                    // SPIR-V VertexIndex(42)/InstanceIndex(43) -- the builtins Vulkan-origin
+                    // shaders actually use -- map to the DESKTOP GL builtins. `gl_VertexIndex`/
+                    // `gl_InstanceIndex` are Vulkan-GLSL only and are undeclared identifiers
+                    // under a desktop `#version` (compile error). This matches spirv-cross's
+                    // default-GL lowering. (The Vulkan base-vertex/base-instance offset is not
+                    // reflected by desktop gl_VertexID/gl_InstanceID; correct for base 0.) (#170)
+                    .vertex_index => "gl_VertexID",
+                    .instance_index => "gl_InstanceID",
                     .base_vertex => "gl_BaseVertex",
                     .base_instance => "gl_BaseInstance",
                     .draw_index => "gl_DrawID",

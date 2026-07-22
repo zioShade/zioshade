@@ -194,6 +194,23 @@ test "glsl: shadow textureLod uses a vec3 compare coord + real LOD, not vec4/0 (
     try glslValidateOrSkip("shadow-lod", glsl);
 }
 
+// SPIR-V VertexIndex(42)/InstanceIndex(43) must map to the DESKTOP GL builtins
+// gl_VertexID/gl_InstanceID. gl_VertexIndex/gl_InstanceIndex are Vulkan-GLSL only and are
+// undeclared identifiers under a desktop `#version` -- a compile error on every
+// Vulkan-origin vertex shader. (glslValidateOrSkip is fragment-only, so this test asserts
+// the mapping via text; the emitted vertex GLSL was glslang-vert-validated by hand.) (#170)
+test "glsl: VertexIndex/InstanceIndex map to gl_VertexID/gl_InstanceID, not the Vulkan builtins (#170)" {
+    const glsl = try compileToGlslStage(
+        \\#version 450
+        \\void main() { gl_Position = vec4(float(gl_VertexIndex), float(gl_InstanceIndex), 0.0, 1.0); }
+    , .vertex);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "gl_VertexID");
+    try assertContains(glsl, "gl_InstanceID");
+    try assertNotContains(glsl, "gl_VertexIndex"); // Vulkan-only -> undeclared in desktop GL
+    try assertNotContains(glsl, "gl_InstanceIndex");
+}
+
 // A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
 // INNER merge blocks, not the immediate true/false labels. Matching predecessors by
 // label equality picked the wrong incoming value, SWAPPING the branches and emitting
