@@ -140,6 +140,24 @@ test "glsl: OpSRem lowers to the truncated x - y*(x/y), not a bare % (#170)" {
     try glslValidateOrSkip("srem", glsl);
 }
 
+// OpImageFetch (GLSL texelFetch) must pass the EXPLICIT LOD image-operand, not hardcode mip 0.
+// Dropping it silently read the base mip for any `texelFetch(s, coord, lod>0)` -- a
+// silent-pixel miscompile. WGSL already passes the operand; GLSL was hardcoding 0. (#170)
+test "glsl: OpImageFetch passes the explicit LOD, not a hardcoded 0 (#170)" {
+    const glsl = try compileToGlsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) flat in int lod;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texelFetch(tex, ivec2(uv), lod); }
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "texelFetch(");
+    try assertContains(glsl, ", lod)"); // the real LOD operand, not a literal 0
+    try glslValidateOrSkip("imagefetch-lod", glsl);
+}
+
 // A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
 // INNER merge blocks, not the immediate true/false labels. Matching predecessors by
 // label equality picked the wrong incoming value, SWAPPING the branches and emitting
