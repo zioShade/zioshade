@@ -15193,3 +15193,22 @@ test "hlsl: local matrix multiply swaps operands; uniform matrix does not (#497)
     try assertNotContains(uh, "mul(v, ");
     try assertContains(uh, ", v)");
 }
+
+// #170: HLSL has no packHalf2x16/unpackHalf2x16 intrinsic. The backend used to emit the
+// Metal/OpenCL names `pack_half2x16`/`unpack_half2x16`, which are NOT HLSL -- plausible-but-
+// wrong output that only fails at fxc/dxc. It must emit the canonical f32tof16/f16tof32 bit
+// form (what spirv-cross emits). No DXC oracle is available locally or in CI, so this guards
+// the emitted TEXT (the real intrinsic present, the fabricated names absent).
+test "hlsl: packHalf2x16/unpackHalf2x16 use f32tof16/f16tof32, not fabricated intrinsics" {
+    const hlsl = try compileToHlsl(
+        \\#version 450
+        \\layout(location=0) in vec2 v;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ uint p = packHalf2x16(v); vec2 q = unpackHalf2x16(p); o = vec4(q, float(p & 0xffffu), 0.0); }
+    );
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "f32tof16(");
+    try assertContains(hlsl, "f16tof32(");
+    try assertNotContains(hlsl, "pack_half2x16"); // fabricated Metal/OpenCL name
+    try assertNotContains(hlsl, "unpack_half2x16");
+}
