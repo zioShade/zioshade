@@ -307,6 +307,8 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageSampleDrefExplicitLod,
         .ImageSampleProjImplicitLod,
         .ImageSampleProjExplicitLod,
+        .ImageSampleProjDrefImplicitLod,
+        .ImageSampleProjDrefExplicitLod,
         .ImageDrefGather,
         .ImageQueryLod,
         .ImageQueryLevels,

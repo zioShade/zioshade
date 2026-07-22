@@ -1942,6 +1942,28 @@ test "T17.1: sampler2DShadow + textureGather → depth2d<float> (gather_compare)
     try assertContains(msl, ".gather_compare(");
 }
 
+// #170/#470: textureProj on a shadow sampler (OpImageSampleProjDref). The op was
+// missing from resultIdFromOp, so its result was never named and the output store
+// defaulted to 0 -- a SILENT NO-OP shadow. And the projective divide reached the
+// coordinate but not the Dref. Both must hold: sample_compare(s, uv/q, dref/q), with
+// the result consumed. Matches the spirv-cross MSL oracle.
+test "T17.1b: textureProj(sampler2DShadow) divides BOTH coord and Dref, result not discarded" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec4 projCoord;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureProj(shadowTex, projCoord); }
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, ".sample_compare(");
+    // Both coordinate and Dref divided by the projective divisor.
+    try std.testing.expect(std.mem.count(u8, msl, " / ") >= 2);
+    // The compare result must be used, not silently replaced by 0.
+    try assertNotContains(msl, "o = 0");
+}
+
 test "T17.2: sampler2DShadow + texture() compare → depth2d<float> (sample_compare)" {
     const source =
         \\#version 450

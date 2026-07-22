@@ -2339,6 +2339,29 @@ test "T31.5: textureProjLod(sampler2D, vec3) divides by .z (not .w) + SampleLeve
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "c.w") == null);
 }
 
+// #170/#470: textureProj on a shadow sampler (OpImageSampleProjDref). Two bugs:
+// (1) the op was absent from resultIdFromOp, so its result was never named and the
+// store to the output defaulted to 0 -- a SILENT NO-OP shadow. (2) the projective
+// divide was applied to the coordinate but NOT the depth reference. Both must hold:
+// SampleCmp(s, uv/q, dref/q), and the result must actually be consumed. Matches the
+// spirv-cross HLSL oracle and the WGSL/GLSL lowerings.
+test "T31.6: textureProj(sampler2DShadow) divides BOTH coord and Dref, result not discarded" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow shadowTex;
+        \\layout(location = 0) in vec4 projCoord;
+        \\layout(location = 0) out float o;
+        \\void main() { o = textureProj(shadowTex, projCoord); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleCmp");
+    // Both the coordinate and the Dref must be divided by the projective divisor.
+    try std.testing.expect(std.mem.count(u8, hlsl, " / ") >= 2);
+    // The compare result must be used, not silently replaced by 0.
+    try assertNotContains(hlsl, "o = 0");
+}
+
 test "T31.5: textureGather maps to Gather" {
     const source =
         \\#version 430
