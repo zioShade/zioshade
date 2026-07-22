@@ -3743,14 +3743,28 @@ fn emitInstruction(
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
-            // A Bias image operand (mask bit 0, value at words[6]) is the GLSL LOD
-            // bias — `texture(s, coord, bias)`. Dropping it samples the wrong mip
-            // level (silent-wrong). Only ConstOffset (bit 3) may also appear here;
-            // any other operand bit has no plain-texture form → carry just the bias.
-            if (inst.words.len > 6 and (inst.words[5] & 0x1) != 0) {
-                try w.print("    {s} {s} = texture({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[6]) orelse "0.0" });
+            // Image operands: Bias (bit 0, 0x1) is the GLSL LOD bias; ConstOffset (bit 3,
+            // 0x8) is a compile-time texel offset -> `textureOffset`. Values follow the mask
+            // in ascending bit order (Bias before ConstOffset). Dropping either is
+            // silent-wrong (wrong mip / wrong texel); the ConstOffset was previously discarded
+            // here (`textureOffset(sampler2D, uv, off)` lowers to implicit-lod + ConstOffset). (#170)
+            const mask: u32 = if (inst.words.len > 5) inst.words[5] else 0;
+            const has_bias = (mask & 0x1) != 0;
+            const has_offset = (mask & 0x8) != 0;
+            const bias_idx: usize = 6; // Bias is the lowest operand bit, so its value is first
+            const offset_idx: usize = if (has_bias) 7 else 6;
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (has_offset and inst.words.len > offset_idx) {
+                const off = names.get(inst.words[offset_idx]) orelse "ivec2(0)";
+                if (has_bias and inst.words.len > bias_idx) {
+                    try w.print("    {s} {s} = textureOffset({s}, {s}, {s}, {s});\n", .{ rtt, gname, si, coord, off, names.get(inst.words[bias_idx]) orelse "0.0" });
+                } else {
+                    try w.print("    {s} {s} = textureOffset({s}, {s}, {s});\n", .{ rtt, gname, si, coord, off });
+                }
+            } else if (has_bias and inst.words.len > bias_idx) {
+                try w.print("    {s} {s} = texture({s}, {s}, {s});\n", .{ rtt, gname, si, coord, names.get(inst.words[bias_idx]) orelse "0.0" });
             } else {
-                try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord });
+                try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, gname, si, coord });
             }
         },
         .ImageSampleDrefImplicitLod => {
