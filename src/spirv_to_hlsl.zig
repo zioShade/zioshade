@@ -41,6 +41,10 @@ threadlocal var g_hoist_stripping: bool = false;
 // temp is out of scope at the merge — DXC rejects it). Mirrors the MSL backend's
 // g_materialized_phis. See collectMergePhisHLSL. (#491)
 threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
+// #471: OpStore targets (OpAccessChain result ids) into UNREPRESENTABLE gl_PerVertex
+// block members (gl_PointSize) that must be dropped — HLSL has no equivalent, so the
+// store is skipped entirely rather than emitted against a non-existent output field.
+threadlocal var g_pv_dropped_stores: ?*std.AutoHashMap(u32, void) = null;
 // Loop-context maps threaded to emitWhileLoopHLSL. emitBlock (the branch-arm emitter)
 // reads these to delegate a loop nested in a branch arm to emitWhileLoopHLSL; set once in
 // emitBody (they are emitBody-local vars everywhere else), reset in its defer.
@@ -2133,6 +2137,56 @@ fn posSemantic(shader_model: u32) []const u8 {
     return if (shader_model < 60) "POSITION" else "SV_Position";
 }
 
+// #471 — glslang/shaderc gl_PerVertex interface-block support (external SPIR-V).
+// These frontends wrap gl_Position (+ gl_PointSize/ClipDistance/CullDistance) in a
+// member-decorated Block Output struct, written via OpAccessChain <var> <member> +
+// OpStore — NOT the direct BuiltIn-decorated output vars zioshade's own frontend
+// emits. Mirrors the already-correct WGSL backend's handling.
+
+/// BuiltIn decorating member `member_idx` of `struct_id` (`OpMemberDecorate <struct>
+/// <idx> BuiltIn <b>`), or null if the member is undecorated.
+fn hlslMemberBuiltin(module: *const ParsedModule, struct_id: u32, member_idx: u32) ?spirv.BuiltIn {
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 5) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .built_in) continue;
+        return @enumFromInt(inst.words[4]);
+    }
+    return null;
+}
+
+/// If `var_id` is an Output variable whose pointee is a struct whose member 0 is
+/// decorated `BuiltIn Position`, returns that struct type id — glslang's gl_PerVertex
+/// Block. Otherwise null.
+fn perVertexBlockStructType(module: *const ParsedModule, var_id: u32) ?u32 {
+    const vdef = getDef(module, var_id) orelse return null;
+    if (vdef.op != .Variable or vdef.words.len < 4) return null;
+    if (@as(spirv.StorageClass, @enumFromInt(vdef.words[3])) != .Output) return null;
+    const ptr = getDef(module, vdef.words[1]) orelse return null;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return null;
+    const sty = ptr.words[3];
+    const sdef = getDef(module, sty) orelse return null;
+    if (sdef.op != .TypeStruct) return null;
+    if ((hlslMemberBuiltin(module, sty, 0) orelse return null) != .position) return null;
+    return sty;
+}
+
+/// True if member `member_idx` of gl_PerVertex block var `var_id` is WRITTEN, i.e.
+/// some `OpAccessChain <var_id> <const member_idx>` result is an OpStore target.
+/// (glslang declares all four members but only writes the ones the shader assigns.)
+fn perVertexMemberWritten(module: *const ParsedModule, var_id: u32, member_idx: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op != .AccessChain or inst.words.len < 5) continue;
+        if (inst.words[3] != var_id) continue;
+        const idx_def = getDef(module, inst.words[4]) orelse continue;
+        if (idx_def.op != .Constant or idx_def.words.len < 4 or idx_def.words[3] != member_idx) continue;
+        for (module.instructions) |s| {
+            if (s.op == .Store and s.words.len >= 2 and s.words[1] == inst.words[2]) return true;
+        }
+    }
+    return false;
+}
+
 fn emitFunction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -2266,6 +2320,17 @@ fn emitFunction(
     defer vtx_inputs.deinit(alloc);
     var vtx_outputs = std.ArrayList(VtxField).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer vtx_outputs.deinit(alloc);
+    // #471: the gl_PerVertex block Output var (glslang/shaderc form), if present, plus
+    // the set of stores into its dropped members (gl_PointSize). Live for the whole
+    // function so the body's OpStore handler can consult g_pv_dropped_stores.
+    var pv_var_id: ?u32 = null;
+    var pv_struct: u32 = 0;
+    var pv_dropped = std.AutoHashMap(u32, void).init(alloc);
+    defer {
+        pv_dropped.deinit();
+        g_pv_dropped_stores = null;
+    }
+    g_pv_dropped_stores = &pv_dropped;
     if (is_vertex) {
         for (module.instructions) |inst| {
             if (inst.op != .Variable or inst.words.len < 4) continue;
@@ -2276,12 +2341,22 @@ fn emitFunction(
             const orig = names.get(vid) orelse "var";
             const builtin = getDecorationValue(decorations, vid, .built_in);
             const loc = getDecorationValue(decorations, vid, .location);
-            // Skip per-vertex interface blocks (gl_PerVertex etc.) — out of scope for v1.
-            // These appear as struct-typed Input/Output. Bare scalars/vectors and
-            // builtins with known semantics are handled.
+            // Struct-typed I/O = per-vertex interface blocks. gl_PerVertex Output
+            // blocks (glslang/shaderc) carry gl_Position et al. as member-decorated
+            // fields written via OpAccessChain+OpStore; record the block var so its
+            // representable members are promoted into VS_OUTPUT below (#471). Other
+            // struct-typed I/O stays out of scope.
             const pt_inst = getDef(module, pointee);
             if (pt_inst) |pi| {
-                if (pi.op == .TypeStruct) continue;
+                if (pi.op == .TypeStruct) {
+                    if (sc == .Output) {
+                        if (perVertexBlockStructType(module, vid)) |sty| {
+                            pv_var_id = vid;
+                            pv_struct = sty;
+                        }
+                    }
+                    continue;
+                }
             }
             const field = VtxField{
                 .id = vid,
@@ -2353,6 +2428,31 @@ fn emitFunction(
                 try w.print("    {s} {s} : TEXCOORD{d};\n", .{ tname, fld.orig_name, fld.location orelse 0 });
             }
         }
+        // #471: promote representable, WRITTEN gl_PerVertex block members into
+        // VS_OUTPUT. Position -> SV_Position. gl_PointSize is unrepresentable in HLSL
+        // and dropped (its stores are suppressed below). ClipDistance/CullDistance
+        // affect rasterization, so a written one honest-errors rather than silently
+        // dropping (promotion to SV_ClipDistance/SV_CullDistance is a follow-up).
+        if (pv_var_id) |pvid| {
+            const sdef = getDef(module, pv_struct);
+            const nmembers: usize = if (sdef) |sd| (if (sd.words.len > 2) sd.words.len - 2 else 0) else 0;
+            var mi: u32 = 0;
+            while (mi < nmembers) : (mi += 1) {
+                if (!perVertexMemberWritten(module, pvid, mi)) continue;
+                const mbi = hlslMemberBuiltin(module, pv_struct, mi) orelse continue;
+                switch (mbi) {
+                    .position => {
+                        var mname_buf: [32]u8 = undefined;
+                        const mname = hlslGetMemberName(module, pv_struct, mi, &mname_buf);
+                        const mtype_id = sdef.?.words[2 + mi];
+                        const tn = try hlslType(module, mtype_id, names, alloc);
+                        try w.print("    {s} {s} : {s};\n", .{ tn, mname, posSemantic(shader_model) });
+                    },
+                    .point_size => {}, // dropped: no HLSL point-size semantic
+                    else => return error.UnsupportedOp, // written ClipDistance/CullDistance
+                }
+            }
+        }
         try w.writeAll("};\n\n");
 
         // Rewrite Input/Output names to `input.<orig>` / `output.<orig>` so
@@ -2374,6 +2474,21 @@ fn emitFunction(
             }
             const new_name = try std.fmt.allocPrint(alloc, "output.{s}", .{fld.orig_name});
             if (try names.fetchPut(fld.id, new_name)) |old| alloc.free(old.value);
+        }
+        // #471: route the gl_PerVertex block var to the VS_OUTPUT instance so
+        // OpAccessChain <block> <member> resolves to `output.<member>` (e.g.
+        // output.gl_Position). Record stores into DROPPED members (gl_PointSize) so
+        // the OpStore handler suppresses them instead of writing a non-existent field.
+        if (pv_var_id) |pvid| {
+            const routed = try alloc.dupe(u8, "output");
+            if (try names.fetchPut(pvid, routed)) |old| alloc.free(old.value);
+            for (module.instructions) |inst| {
+                if (inst.op != .AccessChain or inst.words.len < 5 or inst.words[3] != pvid) continue;
+                const idx_def = getDef(module, inst.words[4]) orelse continue;
+                if (idx_def.op != .Constant or idx_def.words.len < 4) continue;
+                const mbi = hlslMemberBuiltin(module, pv_struct, idx_def.words[3]) orelse continue;
+                if (mbi == .point_size) pv_dropped.put(inst.words[2], {}) catch {};
+            }
         }
     }
 
@@ -4310,6 +4425,9 @@ fn emitInstruction(
 
         .Store => {
             if (inst.words.len < 3) return;
+            // #471: suppress stores into dropped gl_PerVertex members (gl_PointSize) —
+            // HLSL has no such output, so there is nothing to write.
+            if (g_pv_dropped_stores) |dropped| if (dropped.contains(inst.words[1])) return;
             const obj_name = names.get(inst.words[2]) orelse "0";
             try w.writeAll("    ");
             try writeResolvePointer(module, names, inst.words[1], w);
