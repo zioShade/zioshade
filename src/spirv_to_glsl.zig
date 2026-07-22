@@ -148,6 +148,15 @@ fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator
     // more than a pragma, so they are left to refuse/deeper work, not half-fixed.
     const map = [_]struct { token: []const u8, ext: []const u8 }{
         .{ .token = "gl_FragStencilRefARB", .ext = "GL_ARB_shader_stencil_export" },
+        // #474: coarse/fine derivatives are 4.5 core but need this ARB extension on
+        // the older #version zioshade targets by default. All six spellings gate on
+        // the same extension; requiring it is harmless (satisfied) when already core.
+        .{ .token = "dFdxCoarse", .ext = "GL_ARB_derivative_control" },
+        .{ .token = "dFdxFine", .ext = "GL_ARB_derivative_control" },
+        .{ .token = "dFdyCoarse", .ext = "GL_ARB_derivative_control" },
+        .{ .token = "dFdyFine", .ext = "GL_ARB_derivative_control" },
+        .{ .token = "fwidthCoarse", .ext = "GL_ARB_derivative_control" },
+        .{ .token = "fwidthFine", .ext = "GL_ARB_derivative_control" },
     };
     var block = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
     defer block.deinit(alloc);
@@ -3696,9 +3705,19 @@ fn emitInstruction(
             }
             try w.writeAll(");\n");
         },
-        .DPdx, .DPdxFine, .DPdxCoarse => try emitCall(m, names, inst, "dFdx", w, alloc),
-        .DPdy, .DPdyFine, .DPdyCoarse => try emitCall(m, names, inst, "dFdy", w, alloc),
-        .Fwidth, .FwidthFine, .FwidthCoarse => try emitCall(m, names, inst, "fwidth", w, alloc),
+        // #474: preserve the coarse/fine precision request. GLSL has the variants
+        // natively (GL_ARB_derivative_control / 4.5 core); collapsing them to plain
+        // dFdx/dFdy/fwidth silently changes the derivative (plain is impl-defined
+        // coarse-or-fine). The extension is spliced when these tokens are emitted.
+        .DPdx => try emitCall(m, names, inst, "dFdx", w, alloc),
+        .DPdxCoarse => try emitCall(m, names, inst, "dFdxCoarse", w, alloc),
+        .DPdxFine => try emitCall(m, names, inst, "dFdxFine", w, alloc),
+        .DPdy => try emitCall(m, names, inst, "dFdy", w, alloc),
+        .DPdyCoarse => try emitCall(m, names, inst, "dFdyCoarse", w, alloc),
+        .DPdyFine => try emitCall(m, names, inst, "dFdyFine", w, alloc),
+        .Fwidth => try emitCall(m, names, inst, "fwidth", w, alloc),
+        .FwidthCoarse => try emitCall(m, names, inst, "fwidthCoarse", w, alloc),
+        .FwidthFine => try emitCall(m, names, inst, "fwidthFine", w, alloc),
         .All => try emitCall(m, names, inst, "all", w, alloc),
         .Any => try emitCall(m, names, inst, "any", w, alloc),
         .ExtInst => {

@@ -205,6 +205,24 @@ test "#474: unnamed SSBO block gets a synthesized buffer name (decl + access)" {
     try assertNotContains(hlsl, "= [0]."); // no nameless `= [0].counter` access
 }
 
+// #474: coarse/fine derivatives must keep their precision -- HLSL SM4+ has
+// ddx_coarse/ddx_fine/ddy_coarse/ddy_fine natively; collapsing to plain ddx/ddy
+// silently changes the derivative (plain is impl-defined coarse-or-fine).
+test "#474: coarse/fine derivatives map to ddx_coarse/ddy_fine (not plain)" {
+    const spirv = compileToSpirv("deriv_coarsefine_hlsl",
+        \\#version 450
+        \\#extension GL_ARB_derivative_control : enable
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(dFdxCoarse(uv), dFdyFine(uv)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "ddx_coarse");
+    try assertContains(hlsl, "ddy_fine");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------

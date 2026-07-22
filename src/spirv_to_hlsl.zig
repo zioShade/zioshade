@@ -4899,13 +4899,31 @@ fn emitInstruction(
         },
 
         // Derivatives
-        .DPdx, .DPdxFine, .DPdxCoarse => try emitCall(module, names, inst, "ddx", w, alloc),
-        .DPdy, .DPdyFine, .DPdyCoarse => try emitCall(module, names, inst, "ddy", w, alloc),
+        // #474: preserve the coarse/fine precision request (HLSL SM4+ has ddx_coarse/
+        // ddx_fine/ddy_coarse/ddy_fine natively). Collapsing to plain ddx/ddy silently
+        // changes the derivative (plain is impl-defined coarse-or-fine).
+        .DPdx => try emitCall(module, names, inst, "ddx", w, alloc),
+        .DPdxCoarse => try emitCall(module, names, inst, "ddx_coarse", w, alloc),
+        .DPdxFine => try emitCall(module, names, inst, "ddx_fine", w, alloc),
+        .DPdy => try emitCall(module, names, inst, "ddy", w, alloc),
+        .DPdyCoarse => try emitCall(module, names, inst, "ddy_coarse", w, alloc),
+        .DPdyFine => try emitCall(module, names, inst, "ddy_fine", w, alloc),
         .Fwidth, .FwidthFine, .FwidthCoarse => {
+            // HLSL has no fwidth_coarse/fine; build it from the matching-precision ddx/ddy.
+            const dx: []const u8 = switch (inst.op) {
+                .FwidthCoarse => "ddx_coarse",
+                .FwidthFine => "ddx_fine",
+                else => "ddx",
+            };
+            const dy: []const u8 = switch (inst.op) {
+                .FwidthCoarse => "ddy_coarse",
+                .FwidthFine => "ddy_fine",
+                else => "ddy",
+            };
             const arg = if (inst.words.len > 3) names.get(inst.words[3]) orelse "0" else "0";
             const result = if (inst.words.len > 2) names.get(inst.words[2]) orelse "v" else "v";
             const rt = if (inst.words.len > 1) hlslType(module, inst.words[1], names, alloc) catch "float" else "float";
-            try w.print("    {s} {s} = abs(ddx({s})) + abs(ddy({s}));\n", .{ rt, result, arg, arg });
+            try w.print("    {s} {s} = abs({s}({s})) + abs({s}({s}));\n", .{ rt, result, dx, arg, dy, arg });
         },
 
         .All => try emitCall(module, names, inst, "all", w, alloc),
