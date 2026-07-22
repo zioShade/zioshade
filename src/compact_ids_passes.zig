@@ -4996,6 +4996,17 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
             var has_var = false; // OpVariable in body — allowed but needs var reordering
             var return_value_id: u32 = 0;
             var param_ids = std.ArrayListUnmanaged(u32).empty;
+            // Track function-local OpVariables and OpLoad result→pointer so we can detect a
+            // function that RETURNS the loaded value of a local var it mutated (the classic
+            // `T f(T p){ p.x += …; return p; }` -> `%v=OpVariable; store %v param; …mutate %v…;
+            // %rv=OpLoad %v; OpReturnValue %rv`). The inliner mis-handles inlining such a
+            // function (it forwards the pre-mutation param value to the caller's read of the
+            // result, dropping the mutation -> silent-wrong). Leave those as calls; the
+            // backend compiles un-inlined calls correctly.
+            var local_vars = std.AutoHashMapUnmanaged(u32, void).empty;
+            defer local_vars.deinit(alloc);
+            var load_src = std.AutoHashMapUnmanaged(u32, u32).empty; // load-result -> pointer
+            defer load_src.deinit(alloc);
 
             var fp = ie;
             while (fp < words.len) {
@@ -5013,7 +5024,11 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                     block_count += 1;
                     if (block_count == 1) body_start = fie;
                 }
-                if (fop == 59) has_var = true; // OpVariable — allowed for single-block inlining
+                if (fop == 59) { // OpVariable
+                    has_var = true;
+                    if (fwc >= 3) local_vars.put(alloc, words[fp + 2], {}) catch {};
+                }
+                if (fop == 61 and fwc >= 4) load_src.put(alloc, words[fp + 2], words[fp + 3]) catch {}; // OpLoad result ptr
                 if (fop == 57) has_call_or_cf = true; // OpFunctionCall
                 if (fop == 249 or fop == 250 or fop == 251) {
                     if (block_count <= 1) has_call_or_cf = true;
@@ -5026,7 +5041,9 @@ pub fn inlineTrivialFuncs(alloc: std.mem.Allocator, words: []const u32) error{Ou
                 }
                 fp = fie;
             }
-            const is_inlineable = block_count == 1 and !has_call_or_cf and body_start > 0 and body_end >= body_start;
+            // Non-inlineable if the return value is a load of a function-local variable.
+            const returns_local_load = if (load_src.get(return_value_id)) |ptr| local_vars.contains(ptr) else false;
+            const is_inlineable = block_count == 1 and !has_call_or_cf and body_start > 0 and body_end >= body_start and !returns_local_load;
             const ps = try param_ids.toOwnedSlice(alloc);
             try param_slices.append(alloc, ps);
             try funcs.append(alloc, .{
