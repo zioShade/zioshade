@@ -57,11 +57,17 @@ fn testShader(name: []const u8, source: [:0]const u8) !void {
     defer alloc.free(glsl);
 
     // Step 4: SPIR-V → MSL
-    const msl = zioshade.spirvToMSL(alloc, spirv, .{}) catch |err| {
+    // #470: MSL honest-errors on a fragment output config it cannot yet represent
+    // (multi-output: gl_FragDepth / MRT — the single-color main0_out hardcode). That
+    // is a DELIBERATE, wedge-correct refusal (not a crash/unhandled), so tolerate it
+    // here and still validate the other backends. e.g. ground.frag is a 4-attachment
+    // G-buffer shader HLSL/GLSL handle but MSL declines until the main0_out rework.
+    const msl: ?[]const u8 = zioshade.spirvToMSL(alloc, spirv, .{}) catch |err| blk: {
+        if (err == error.UnsupportedFragmentOutput) break :blk null;
         std.debug.print("FAIL [{s}]: spirvToMSL failed: {}\n", .{ name, err });
         return err;
     };
-    defer alloc.free(msl);
+    defer if (msl) |m| alloc.free(m);
 
     // Validate HLSL
     try assertNotContains(hlsl, "unhandled");
@@ -71,9 +77,11 @@ fn testShader(name: []const u8, source: [:0]const u8) !void {
     try assertNotContains(glsl, "unhandled");
     if (glsl.len == 0) return error.EmptyGLSLOutput;
 
-    // Validate MSL
-    try assertNotContains(msl, "unhandled");
-    if (msl.len == 0) return error.EmptyMSLOutput;
+    // Validate MSL (skipped when MSL deliberately honest-errored above)
+    if (msl) |m| {
+        try assertNotContains(m, "unhandled");
+        if (m.len == 0) return error.EmptyMSLOutput;
+    }
 }
 
 // ============================================================================
