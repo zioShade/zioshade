@@ -1740,9 +1740,18 @@ fn collectResources(
             .Uniform, .StorageBuffer => {
                 const binding = getDecorationValue(decorations, result_id, .binding) orelse 0;
                 const dset = getDecorationValue(decorations, result_id, .descriptor_set) orelse 0;
-                const raw_name = names.get(result_id) orelse "Globals";
+                var raw_name = names.get(result_id) orelse "Globals";
                 // Check if this is an SSBO (BufferBlock decoration on struct type, or StorageBuffer class)
                 const is_ssbo = hasDecoration(decorations, pointee_type, .buffer_block) or sc == .StorageBuffer;
+                // #474: glslang emits an SSBO block WITHOUT an instance name
+                // (`buffer C { ... };`) as an OpVariable named "" -- so raw_name is
+                // EMPTY, and both the declaration (`RWStructuredBuffer<C>  :`) and every
+                // access (`[0].counter`) drop the buffer name = non-compiling HLSL.
+                // Synthesize a stable unique name (same unnamed-block pattern as #471's
+                // gl_PerVertex). result_id is unique; spirv-cross uses the same `_<id>`.
+                if (is_ssbo and raw_name.len == 0) {
+                    raw_name = std.fmt.allocPrint(alloc, "_ssbo_{d}", .{result_id}) catch "_ssbo";
+                }
                 // A loose (non-block) uniform points at a scalar/vector/matrix/array
                 // rather than a struct. Gather it into the synthesized default cbuffer
                 // instead of emitting an empty `cbuffer <name> {}` per uniform (#417).
