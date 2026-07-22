@@ -1752,29 +1752,45 @@ fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *
 // brackets — `[N]` for a sized array, `[]` for a runtime array (`OpTypeRuntimeArray`) — to
 // match the SSBO body access (`B.d`) and enable native `.length()`. The two callers
 // disagreed before, producing glslang-rejected desynced output for SSBOs (#296).
+/// True if member `member_idx` of `struct_id` carries `OpMemberDecorate ... RowMajor`.
+/// A UBO/SSBO matrix member so decorated is stored row-major; GLSL defaults to
+/// column-major, so without an explicit `layout(row_major)` the bytes are read as the
+/// transpose (silent-wrong). Mirrors the MSL/HLSL/WGSL backends, which all honor it.
+fn glslMemberIsRowMajor(m: *const ParsedModule, struct_id: u32, member_idx: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 4) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) == .row_major) return true;
+    }
+    return false;
+}
+
 fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, original_names: bool) !void {
     const inst = getDef(m, struct_id) orelse return;
     if (inst.op != .TypeStruct) return;
     for (inst.words[2..], 0..) |mt_id, mi| {
         var mbuf: [32]u8 = undefined;
         const mname: []const u8 = if (original_names) getMemberName(m, struct_id, @intCast(mi), &mbuf) else "";
+        // #472-audit: honor RowMajor. Only matrices (incl. arrays of matrices) carry
+        // this decoration; a plain member without it stays column-major (the default).
+        const rm: []const u8 = if (glslMemberIsRowMajor(m, struct_id, @intCast(mi))) "layout(row_major) " else "";
         const mti = getDef(m, mt_id);
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
                 const et = try glslType(m, mi2.words[2], names, alloc);
                 const li = getDef(m, mi2.words[3]);
                 const lv: u32 = if (li) |l| (if (l.words.len > 3) l.words[3] else 1) else 1;
-                if (original_names) try w.print("    {s} {s}[{d}];\n", .{ et, mname, lv }) else try w.print("    {s} {s}_m{d}[{d}];\n", .{ et, cb_name, mi, lv });
+                if (original_names) try w.print("    {s}{s} {s}[{d}];\n", .{ rm, et, mname, lv }) else try w.print("    {s}{s} {s}_m{d}[{d}];\n", .{ rm, et, cb_name, mi, lv });
                 continue;
             }
             if (mi2.op == .TypeRuntimeArray and mi2.words.len > 2) {
                 const et = try glslType(m, mi2.words[2], names, alloc);
-                if (original_names) try w.print("    {s} {s}[];\n", .{ et, mname }) else try w.print("    {s} {s}_m{d}[];\n", .{ et, cb_name, mi });
+                if (original_names) try w.print("    {s}{s} {s}[];\n", .{ rm, et, mname }) else try w.print("    {s}{s} {s}_m{d}[];\n", .{ rm, et, cb_name, mi });
                 continue;
             }
         }
         const mt = try glslType(m, mt_id, names, alloc);
-        if (original_names) try w.print("    {s} {s};\n", .{ mt, mname }) else try w.print("    {s} {s}_m{d};\n", .{ mt, cb_name, mi });
+        if (original_names) try w.print("    {s}{s} {s};\n", .{ rm, mt, mname }) else try w.print("    {s}{s} {s}_m{d};\n", .{ rm, mt, cb_name, mi });
     }
 }
 

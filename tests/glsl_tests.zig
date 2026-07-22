@@ -76,6 +76,26 @@ fn glslValidateOrSkip(name: []const u8, glsl_src: []const u8) !void {
     return error.GlslValidationFailed;
 }
 
+// #472-audit: a RowMajor-decorated UBO matrix member must emit `layout(row_major)`.
+// GLSL defaults to column-major, so dropping the qualifier reads the matrix bytes
+// TRANSPOSED -> `u.m * v` silently computes `transpose(m) * v`. Every other backend
+// (HLSL/MSL/WGSL) honors RowMajor; GLSL was the sole one dropping it. Oracle:
+// spirv-cross emits `layout(row_major) mat4 m;`.
+test "#472-audit: RowMajor UBO matrix emits layout(row_major), not transposed" {
+    const spirv = compileToSpirv("rowmajor_ubo",
+        \\#version 450
+        \\layout(std140, binding=0, row_major) uniform U { mat4 m; } u;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = u.m * v; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "layout(row_major)");
+    try glslValidateOrSkip("rowmajor_ubo", glsl);
+}
+
 /// Rewrite the FIRST instruction with opcode `from_op` to `to_op` (same word count).
 /// The zioshade/glslang frontends emit OpFMod for GLSL `mod()` and never OpFRem, so the
 /// only way to exercise the FRem arm is to rewrite the opcode on real SPIR-V. Caller frees.
