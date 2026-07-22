@@ -52,7 +52,12 @@ const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, loc
 ///     never a bare local.
 ///   - gl_PointSize (`is_point_size == true`): `float gl_PointSize [[point_size]]`,
 ///     emitted right after gl_Position (matching spirv-cross --msl).
-const StageOutputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, is_position: bool, is_point_size: bool = false };
+///   - `from_block == true`: this decl was decomposed from a gl_PerVertex interface
+///     Block (glslang/shaderc form), so `var_id` is the BLOCK var (shared across the
+///     block's members) and body stores reach it via OpAccessChain, not a direct
+///     var rename. The entry routes the block var to `out` once and skips these in
+///     the per-var rename loop. (#471)
+const StageOutputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, is_position: bool, is_point_size: bool = false, from_block: bool = false };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
@@ -3112,6 +3117,49 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
     std.sort.insertion(StageInputDecl, inputs.items, {}, SortCtx.lessThan);
 }
 
+// #471 — gl_PerVertex interface-block support (external glslang/shaderc SPIR-V), the
+// MSL analogue of the HLSL helpers. Mirrors the already-correct WGSL backend.
+
+/// BuiltIn decorating member `member_idx` of `struct_id`, or null if undecorated.
+fn mslMemberBuiltin(m: *const ParsedModule, struct_id: u32, member_idx: u32) ?spirv.BuiltIn {
+    for (m.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 5) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .built_in) continue;
+        return @enumFromInt(inst.words[4]);
+    }
+    return null;
+}
+
+/// If `var_id` is an Output var whose pointee struct has member 0 decorated
+/// BuiltIn Position, returns that struct type id — glslang's gl_PerVertex Block.
+fn perVertexBlockStructType(m: *const ParsedModule, var_id: u32) ?u32 {
+    const vdef = getDef(m, var_id) orelse return null;
+    if (vdef.op != .Variable or vdef.words.len < 4) return null;
+    if (@as(spirv.StorageClass, @enumFromInt(vdef.words[3])) != .Output) return null;
+    const ptr = getDef(m, vdef.words[1]) orelse return null;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return null;
+    const sty = ptr.words[3];
+    const sdef = getDef(m, sty) orelse return null;
+    if (sdef.op != .TypeStruct) return null;
+    if ((mslMemberBuiltin(m, sty, 0) orelse return null) != .position) return null;
+    return sty;
+}
+
+/// True if member `member_idx` of block var `var_id` is written (an
+/// OpAccessChain <var_id> <const member_idx> result is an OpStore target).
+fn perVertexMemberWritten(m: *const ParsedModule, var_id: u32, member_idx: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .AccessChain or inst.words.len < 5 or inst.words[3] != var_id) continue;
+        const idx_def = getDef(m, inst.words[4]) orelse continue;
+        if (idx_def.op != .Constant or idx_def.words.len < 4 or idx_def.words[3] != member_idx) continue;
+        for (m.instructions) |s| {
+            if (s.op == .Store and s.words.len >= 2 and s.words[1] == inst.words[2]) return true;
+        }
+    }
+    return false;
+}
+
 /// Collect vertex Output variables into `outputs`, ordered to match
 /// spirv-cross --msl `main0_out` field order: user varyings sorted ascending
 /// by Location FIRST, then `gl_Position` (BuiltIn Position) appended LAST.
@@ -3166,6 +3214,41 @@ fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
     // spirv-cross --msl ordering).
     if (position) |p| outputs.append(alloc, p) catch {};
     if (point_size) |p| outputs.append(alloc, p) catch {};
+
+    // #471: gl_PerVertex Block outputs (glslang/shaderc). gl_Position/gl_PointSize
+    // live as member-decorated fields of a struct Output var (skipped above), written
+    // via OpAccessChain+OpStore. Promote the written, representable members into
+    // main0_out (Position -> [[position]], PointSize -> [[point_size]] — Metal has
+    // both). The block var is routed to `out` by the entry (from_block=true); Clip/
+    // Cull promotion + honest-error are handled there. Only the FIRST block is taken.
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+        const bvar = inst.words[2];
+        const sty = perVertexBlockStructType(m, bvar) orelse continue;
+        const sdef = getDef(m, sty) orelse continue;
+        const nmem: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
+        var mi: u32 = 0;
+        while (mi < nmem) : (mi += 1) {
+            if (!perVertexMemberWritten(m, bvar, mi)) continue;
+            const mbi = mslMemberBuiltin(m, sty, mi) orelse continue;
+            const is_pos = mbi == .position;
+            const is_ps = mbi == .point_size;
+            if (!is_pos and !is_ps) continue; // Clip/Cull handled in the entry
+            var nbuf: [32]u8 = undefined;
+            const mname = getMemberName(m, sty, mi, &nbuf);
+            outputs.append(alloc, .{
+                .var_id = bvar,
+                .name = alloc.dupe(u8, mname) catch continue,
+                .type_id = sdef.words[2 + mi],
+                .location = 0,
+                .is_position = is_pos,
+                .is_point_size = is_ps,
+                .from_block = true,
+            }) catch {};
+        }
+        break; // one gl_PerVertex block per stage
+    }
 }
 
 /// Return the BuiltIn enum value (as a u32) decorated on `id`, or null if `id`
@@ -4110,8 +4193,38 @@ fn emitFunction(
         }
         // Rename outputs (user varyings AND gl_Position) to `out.<name>`.
         for (stage_outputs.items) |so| {
+            if (so.from_block) continue; // routed via the block var below
             const aliased = std.fmt.allocPrint(alloc, "out.{s}", .{so.name}) catch continue;
             if (names.fetchPut(so.var_id, aliased) catch null) |old| alloc.free(old.value);
+        }
+        // #471: route the gl_PerVertex block var to the `out` instance so
+        // OpAccessChain <block> <member> resolves to `out.gl_Position` /
+        // `out.gl_PointSize` (both promoted as main0_out fields above). Written
+        // ClipDistance/CullDistance affect rasterization and have no field yet, so
+        // honest-error rather than emit a dangling store (promotion is a follow-up).
+        {
+            var pv_block_var: ?u32 = null;
+            for (stage_outputs.items) |so| {
+                if (so.from_block) {
+                    pv_block_var = so.var_id;
+                    break;
+                }
+            }
+            if (pv_block_var) |bv| {
+                if (perVertexBlockStructType(m, bv)) |sty| {
+                    const sdef = getDef(m, sty).?;
+                    const nmem: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
+                    var mi: u32 = 0;
+                    while (mi < nmem) : (mi += 1) {
+                        const mbi = mslMemberBuiltin(m, sty, mi) orelse continue;
+                        if ((mbi == .clip_distance or mbi == .cull_distance) and perVertexMemberWritten(m, bv, mi)) {
+                            return error.UnsupportedBuiltin;
+                        }
+                    }
+                }
+                const routed = try alloc.dupe(u8, "out");
+                if (names.fetchPut(bv, routed) catch null) |old| alloc.free(old.value);
+            }
         }
 
         // Input built-ins (gl_VertexIndex → [[vertex_id]], gl_InstanceIndex →
