@@ -530,6 +530,62 @@ test "a loop-carried struct is reloaded each iteration, not the pre-loop value" 
     try std.testing.expect(!reuses_preloop);
 }
 
+// A loop-carried struct whose MEMBERS are read after the loop (`cur = mix(cur, ...);`
+// in a loop, then `cur.r`/`cur.g`/`cur.b`) must stay valid SPIR-V. loopCounterToPhi
+// promoted the struct variable to an OpPhi value and deleted its OpVariable, but the
+// post-loop member reads were OpAccessChain into the (now-removed) pointer -- a dangling
+// ID that spirv-val rejects ("ID '%N' has not been defined"). The pass must skip any
+// variable used as an OpAccessChain base. Guard: every OpAccessChain base is defined.
+test "a loop-carried struct read by member after the loop stays valid SPIR-V" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\struct Color { float r; float g; float b; };
+        \\Color mixC(Color a, Color b, float t) {
+        \\    Color c; c.r = a.r*(1.0-t)+b.r*t; c.g = a.g*(1.0-t)+b.g*t; c.b = a.b*(1.0-t)+b.b*t; return c;
+        \\}
+        \\void main() {
+        \\    Color base; base.r = 0.1; base.g = 0.2; base.b = 0.3;
+        \\    Color tgt; tgt.r = 0.4; tgt.g = 0.5; tgt.b = 0.6;
+        \\    Color cur = base;
+        \\    for (int i = 0; i < 5; i++) { cur = mixC(cur, tgt, float(i) * 0.1); }
+        \\    fragColor = vec4(cur.r, cur.g, cur.b, 1.0);
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // Oracle-free def-use check: collect every result id that can be an access-chain
+    // base (OpVariable, OpAccessChain, OpPhi, OpFunctionParameter -- each carries its
+    // result in word[2]), then assert no OpAccessChain references an undefined base.
+    var defined = std.AutoHashMap(u32, void).init(alloc);
+    defer defined.deinit();
+    var i: usize = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spv[i] & 0xFFFF);
+        switch (op) {
+            59, 65, 245, 55 => if (wc >= 3) try defined.put(spv[i + 2], {}), // Variable/AccessChain/Phi/FunctionParameter
+            else => {},
+        }
+        i += wc;
+    }
+    i = 5;
+    while (i < spv.len) {
+        const wc = spv[i] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(spv[i] & 0xFFFF)) == 65 and wc >= 4) { // OpAccessChain base = word[3]
+            try std.testing.expect(defined.contains(spv[i + 3]));
+        }
+        i += wc;
+    }
+
+    try spirvValOrSkip(spv);
+}
+
 // A function that returns the loaded value of a local variable it mutated
 // (`Particle update(Particle p){ p.pos += …; return p; }`) must not be inlined by
 // inlineTrivialFuncs: the inliner forwarded the caller's read of the result back to the

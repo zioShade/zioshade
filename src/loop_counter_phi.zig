@@ -152,6 +152,12 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
         pointee_type: u32,
         stores: std.ArrayListUnmanaged(StoreInfo),
         loads: std.ArrayListUnmanaged(LoadInfo),
+        // True if the variable is ever the base of an OpAccessChain (a member/element
+        // access). Such a variable cannot be SSA-promoted to an OpPhi value: the Phi
+        // holds a whole value, and the access-chain reads (e.g. a post-loop `s.member`)
+        // would be left referencing the removed OpVariable pointer. Only whole-value
+        // load/store variables (like an int loop counter) are safe to promote.
+        has_access_chain: bool,
     };
     var vars = std.ArrayListUnmanaged(VarInfo).empty;
     defer {
@@ -191,6 +197,7 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                     .pointee_type = pointee_type,
                     .stores = .empty,
                     .loads = .empty,
+                    .has_access_chain = false,
                 });
             }
         }
@@ -224,6 +231,12 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                 }
             }
         }
+        if (opcode == 65 and wc >= 4) { // OpAccessChain (base = words[pos+3])
+            const base = words[pos + 3];
+            for (vars.items) |*v| {
+                if (v.var_id == base) v.has_access_chain = true;
+            }
+        }
         pos = ie;
     }
 
@@ -251,6 +264,10 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
         if (v.stores.items.len != 2) continue;
         if (v.loads.items.len == 0) continue;
         if (v.pointee_type == 0) continue;
+        // A variable read via member/element access (OpAccessChain) cannot be promoted
+        // to an OpPhi value without rewriting those accesses; leaving them would dangle
+        // (e.g. a loop-carried struct whose members are read after the loop). Skip it.
+        if (v.has_access_chain) continue;
 
         var lhi = loop_info.iterator();
         while (lhi.next()) |entry| {
