@@ -3402,14 +3402,28 @@ fn emitInstruction(
         .FSub, .ISub => try emitBinOp(m, names, inst, "-", w, alloc),
         .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
         .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
-        .FMod, .FRem => {
-            // GLSL float modulo uses mod() function, not % operator
+        .FMod => {
+            // OpFMod takes the sign of operand 2 (the divisor) -- exactly GLSL mod()'s
+            // floor-based semantics (`x - y*floor(x/y)`), so mod() is correct here.
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = mod({s}, {s});\n", .{
                 rtt,
                 names.get(inst.words[2]) orelse "v",
                 names.get(inst.words[3]) orelse "a",
                 names.get(inst.words[4]) orelse "b",
+            });
+        },
+        .FRem => {
+            // OpFRem takes the sign of operand 1 (the DIVIDEND) -- C fmod / truncation,
+            // NOT GLSL mod() (which is floor-based = sign of the divisor and differs for
+            // opposite-sign operands). GLSL has no fmod, so emit the truncation form
+            // `a - b*trunc(a/b)`. The MSL/HLSL/WGSL backends already get FRem right
+            // (fmod / float `%`); GLSL was the lone backend miscompiling it to mod(). (#170)
+            const rtt = try glslType(m, inst.words[1], names, alloc);
+            const a = names.get(inst.words[3]) orelse "a";
+            const b = names.get(inst.words[4]) orelse "b";
+            try w.print("    {s} {s} = {s} - {s} * trunc({s} / {s});\n", .{
+                rtt, names.get(inst.words[2]) orelse "v", a, b, a, b,
             });
         },
         .UMod, .SRem, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
