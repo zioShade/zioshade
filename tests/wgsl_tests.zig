@@ -43,6 +43,75 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     return words;
 }
 
+/// Assemble SPIR-V text (spirv-as) into words. glslang never emits some spec-valid shapes
+/// (e.g. an OpVectorShuffle whose two source vectors have DIFFERENT widths), so those are
+/// authored directly. Skips if spirv-as is unavailable. Caller frees.
+fn assembleSpirv(name: []const u8, asm_src: [:0]const u8) ![]u32 {
+    const tmp_asm = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_asm_{s}.spvasm", .{name});
+    defer alloc.free(tmp_asm);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_asm_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_asm, std.mem.sliceTo(asm_src, 0));
+    const spirv_as = zioshade.compat.resolveVulkanTool(alloc, "spirv-as") catch return error.SkipZigTest;
+    defer alloc.free(spirv_as);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ spirv_as, tmp_asm, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+    const data = try zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024);
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+// OpVectorShuffle selects from the CONCATENATION of its two source vectors; a component of
+// the SECOND source is `idx - v1_count`, not `idx % v1_count`. The two agree only when the
+// sources have the same width, so the WGSL backend silently picked the wrong second-source
+// component whenever v2 was wider than v1. glslang never emits a mixed-width shuffle, so this
+// authors one: shuffle(a:vec2, b:vec4, [0,1,4,5]) must be (a.x, a.y, b.z, b.w) -- the old
+// `% v1_count` gave (a.x, a.y, b.x, b.y).
+test "wgsl: OpVectorShuffle picks the right component of a WIDER second source (#170)" {
+    const spv = try assembleSpirv("shuffle_mixed",
+        \\               OpCapability Shader
+        \\          %1 = OpExtInstImport "GLSL.std.450"
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %a %b %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %a Location 0
+        \\               OpDecorate %b Location 1
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\      %float = OpTypeFloat 32
+        \\    %v2float = OpTypeVector %float 2
+        \\    %v4float = OpTypeVector %float 4
+        \\        %pi2 = OpTypePointer Input %v2float
+        \\        %pi4 = OpTypePointer Input %v4float
+        \\        %po4 = OpTypePointer Output %v4float
+        \\          %a = OpVariable %pi2 Input
+        \\          %b = OpVariable %pi4 Input
+        \\          %o = OpVariable %po4 Output
+        \\       %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %av = OpLoad %v2float %a
+        \\         %bv = OpLoad %v4float %b
+        \\          %r = OpVectorShuffle %v4float %av %bv 0 1 4 5
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // second source (b, the vec4) components 4->.z (4-2) and 5->.w (5-2), NOT .x/.y.
+    try assertContains(wgsl, ".z, ");
+    try assertContains(wgsl, ".w)");
+    try nagaValidateOrSkip(wgsl, "shuffle-mixed-width");
+}
+
 /// Same as compileToSpirv but writes a `.vert` source so glslang compiles it at
 /// the VERTEX stage (the extension selects the stage). Produces the EXTERNAL
 /// glslang IR shape — notably gl_Position wrapped in a member-decorated

@@ -7090,7 +7090,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (!first) try w.writeAll(", ");
                         first = false;
                         const src = if (idx < v1_count) v1 else v2;
-                        const comp = idx % v1_count;
+                        // OpVectorShuffle selects from the CONCATENATION of v1 (indices
+                        // 0..v1_count-1) and v2 (indices v1_count..); a component of v2 is
+                        // `idx - v1_count`, NOT `idx % v1_count`. The two agree only when
+                        // v1 and v2 have the SAME width (the common two-vecN case), so `%`
+                        // silently picked the wrong v2 component whenever v2 was wider --
+                        // e.g. shuffle(a:vec2, b:vec4, [0,4]) is (a.x, b.z) but `%` gave
+                        // (a.x, b.x). v1's own components (idx < v1_count) are unaffected.
+                        const comp = if (idx < v1_count) idx else idx - v1_count;
                         const sw = switch (comp) {
                             0 => ".x",
                             1 => ".y",
