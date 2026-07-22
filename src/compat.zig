@@ -51,17 +51,27 @@ pub const IoType = if (is_0_16) std.Io else void;
 /// executables. Without it, `std.process.run` takes argv[0] literally and every
 /// bare-name oracle spawn fails with FileNotFound (0.15's POSIX exec searched
 /// PATH regardless, which is why this only bites on 0.16). COMPAT(0.15).
+/// The process environment for the current build context on 0.16. Test binaries
+/// read the environ the test runner installs at `std.testing.environ`; executables
+/// read what `setMainInit` stashed from `std.process.Init`; otherwise there is no
+/// environ (empty). Kept in one place so `MainIo` (which seeds Threaded I/O) and
+/// `getEnvVarOwned` (which reads a single var) resolve env from the same source.
+/// Only referenced from `is_0_16` branches, so it is never analyzed on 0.15 (where
+/// `std.process.Environ` does not exist). COMPAT(0.15).
+fn currentEnviron() std.process.Environ {
+    return if (builtin.is_test)
+        std.testing.environ
+    else if (main_init_set)
+        main_init_storage.environ
+    else
+        std.process.Environ.empty;
+}
+
 pub fn MainIo() type {
     return if (is_0_16) struct {
         inner: std.Io.Threaded,
         pub fn init(gpa: std.mem.Allocator) @This() {
-            const environ = if (builtin.is_test)
-                std.testing.environ
-            else if (main_init_set)
-                main_init_storage.environ
-            else
-                std.process.Environ.empty;
-            return .{ .inner = std.Io.Threaded.init(gpa, .{ .environ = environ }) };
+            return .{ .inner = std.Io.Threaded.init(gpa, .{ .environ = currentEnviron() }) };
         }
         pub fn deinit(self: *@This()) void {
             self.inner.deinit();
@@ -319,8 +329,7 @@ pub fn readFileAbsolute(alloc: std.mem.Allocator, abs_path: []const u8, limit: u
 /// Return the OS temporary directory as a caller-owned absolute path, with any
 /// trailing separator stripped. Honors TMPDIR/TEMP/TMP (CI runners and Windows
 /// set these to a user-writable location), falling back to a platform default
-/// when the environment is unreadable, as on 0.16 where env access sits behind
-/// std.Io and getEnvVarOwned degrades to null.
+/// when none is set or the environment is unreadable.
 ///
 /// Tests and dev tools stage oracle input/output files here. A hardcoded "/tmp"
 /// is not a valid path on Windows (createFileAbsolute fails with FileNotFound /
@@ -578,14 +587,18 @@ pub fn processRun(io: IoType, alloc: std.mem.Allocator, argv: []const []const u8
 
 /// Read an environment variable, caller-owned, or null if unset or unreadable.
 /// Zig 0.16 removed std.process.getEnvVarOwned (env access moved behind std.Io),
-/// so this centralizes the split and degrades to null on 0.16, where callers
-/// fall back to a PATH lookup. Selected by capability, not version number.
+/// so this centralizes the split. On 0.16 the environ IS reachable: it is the same
+/// one `MainIo` seeds Threaded I/O with (the test runner installs it at
+/// std.testing.environ; executables stash std.process.Init via setMainInit).
+/// `Environ.getAlloc` builds the environ map, looks the name up, and dupes the
+/// value so the caller owns it, matching the 0.15 branch's ownership contract.
+/// Gated on `is_0_16` (a capability constant), not a version number.
 /// COMPAT(0.15): simplify when the floor moves to 0.16.
 pub fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) ?[]const u8 {
-    if (comptime @hasDecl(std.process, "getEnvVarOwned")) {
-        return std.process.getEnvVarOwned(alloc, name) catch null;
+    if (is_0_16) {
+        return currentEnviron().getAlloc(alloc, name) catch null;
     } else {
-        return null;
+        return std.process.getEnvVarOwned(alloc, name) catch null;
     }
 }
 
@@ -605,31 +618,58 @@ pub fn nanoTimestamp() i128 {
     }
 }
 
-/// Monotonic-ish elapsed timer mirroring the subset of std.time.Timer that the
-/// dev bench tools use (start / read / lap / reset), hiding the 0.16 removal of
+/// Monotonic nanoseconds for interval measurement, hiding the 0.15/0.16 split.
+/// Unlike `nanoTimestamp` (wall clock), this reads a MONOTONIC clock, so a
+/// backward NTP or manual clock step cannot yield a negative interval; the Timer
+/// below relies on that to keep its `if (d < 0) 0` clamp a true invariant rather
+/// than a guard against a real regression. On 0.16 it reads std.Io's monotonic
+/// clock (std.Io.Clock.awake); on 0.15, where std.Io has no clock, it reads a
+/// process-lifetime std.time.Timer (also monotonic). The 0.15 idiom differs but
+/// gives the same non-decreasing nanosecond stream. COMPAT(0.15).
+threadlocal var mono_epoch: if (is_0_16) void else ?std.time.Timer = if (is_0_16) {} else null;
+
+fn monotonicNanos() i128 {
+    if (is_0_16) {
+        var threaded = std.Io.Threaded.init(std.heap.page_allocator, .{});
+        defer threaded.deinit();
+        const ts = std.Io.Timestamp.now(threaded.io(), .awake);
+        return @as(i128, ts.nanoseconds);
+    } else {
+        if (mono_epoch == null) {
+            // If the monotonic clock is unavailable, fall back to the wall clock
+            // rather than fail; the clamp below still keeps intervals non-negative.
+            mono_epoch = std.time.Timer.start() catch return std.time.nanoTimestamp();
+        }
+        return @as(i128, mono_epoch.?.read());
+    }
+}
+
+/// Monotonic elapsed timer mirroring the subset of std.time.Timer that the dev
+/// bench tools use (start / read / lap / reset), hiding the 0.16 removal of
 /// std.time.Timer and std.time.Instant (timing moved behind std.Io). Backed by
-/// nanoTimestamp; `start` cannot fail here (the std API returned an error union),
-/// so callers drop the `try`/`catch`. COMPAT(0.15): revisit when the floor is 0.16.
+/// `monotonicNanos`, so an NTP/manual clock step cannot produce a negative
+/// interval; `start` cannot fail here (the std API returned an error union), so
+/// callers drop the `try`/`catch`. COMPAT(0.15): revisit when the floor is 0.16.
 pub const Timer = struct {
     start_ns: i128,
 
     pub fn start() Timer {
-        return .{ .start_ns = nanoTimestamp() };
+        return .{ .start_ns = monotonicNanos() };
     }
 
     /// Nanoseconds elapsed since start (or the last reset).
     pub fn read(self: Timer) u64 {
-        const d = nanoTimestamp() - self.start_ns;
+        const d = monotonicNanos() - self.start_ns;
         return if (d < 0) 0 else @intCast(d);
     }
 
     pub fn reset(self: *Timer) void {
-        self.start_ns = nanoTimestamp();
+        self.start_ns = monotonicNanos();
     }
 
     /// Nanoseconds since the last lap/start, and restart the interval.
     pub fn lap(self: *Timer) u64 {
-        const now = nanoTimestamp();
+        const now = monotonicNanos();
         const d = now - self.start_ns;
         self.start_ns = now;
         return if (d < 0) 0 else @intCast(d);
@@ -809,6 +849,31 @@ test "tempFilePath yields an absolute path with no doubled separator" {
     try std.testing.expect(std.mem.endsWith(u8, path, "zioshade-probe.tmp"));
     // The join must not have produced an empty component (doubled separator).
     try std.testing.expect(std.mem.indexOf(u8, path, "//") == null);
+}
+
+test "getEnvVarOwned returns a variable present in the environment" {
+    // The pre-fix 0.16 branch unconditionally returned null (it gated on
+    // std.process.getEnvVarOwned, absent on 0.16), so it could never pass this.
+    // On POSIX 0.16 we install a known environ into std.testing.environ - the same
+    // source currentEnviron/MainIo read from in test binaries - and assert the
+    // lookup finds it. Windows crafts its environ from the PEB, not a plain slice,
+    // so the meaningful assertion is POSIX-only; the 0.15 path uses the stdlib's
+    // own env reader and is exercised by the stdlib itself.
+    if (comptime is_0_16 and builtin.os.tag != .windows) {
+        const alloc = std.testing.allocator;
+        const saved = std.testing.environ;
+        defer std.testing.environ = saved;
+
+        const entries = [_:null]?[*:0]const u8{"ZIOSHADE_ENV_PROBE=zioshade-probe-value"};
+        std.testing.environ = .{ .block = .{ .slice = &entries } };
+
+        const got = getEnvVarOwned(alloc, "ZIOSHADE_ENV_PROBE") orelse return error.EnvVarMissing;
+        defer alloc.free(got);
+        try std.testing.expectEqualStrings("zioshade-probe-value", got);
+
+        // A name that is absent must still yield null, not a spurious hit.
+        try std.testing.expect(getEnvVarOwned(alloc, "ZIOSHADE_ENV_ABSENT_XYZ") == null);
+    }
 }
 
 test "randomInt advances the PRNG within a process" {

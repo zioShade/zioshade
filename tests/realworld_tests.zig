@@ -19,6 +19,7 @@
 
 const std = @import("std");
 const zioshade = @import("zioshade");
+const compat = zioshade.compat;
 
 const Backend = enum {
     spirv,
@@ -57,18 +58,32 @@ const PerShaderResult = struct {
 };
 
 pub fn main() !void {
-    var gpa_impl = std.heap.DebugAllocator(.{}){};
+    var gpa_impl = compat.Gpa(.{}){};
     defer _ = gpa_impl.deinit();
     const alloc = gpa_impl.allocator();
 
-    const args = try std.process.argsAlloc(alloc);
-    defer std.process.argsFree(alloc, args);
+    // I/O context: on 0.16 file/process ops sit behind std.Io; on 0.15 this is void.
+    var main_io = compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const io = main_io.io();
 
+    // On 0.15: parse args for an optional shader-dir override. On 0.16 args are not
+    // reachable from a void main, so we keep the default (mirrors tests/runner.zig).
     var shader_dir: []const u8 = "tests/external";
-    if (args.len >= 2) shader_dir = args[1];
+    var shader_dir_owned: ?[]u8 = null;
+    defer if (shader_dir_owned) |s| alloc.free(s);
+    if (!compat.is_0_16) {
+        const args = try std.process.argsAlloc(alloc);
+        defer std.process.argsFree(alloc, args);
+        // Own the override so it outlives `args` (freed just below) without leaking.
+        if (args.len >= 2) {
+            shader_dir_owned = try alloc.dupe(u8, args[1]);
+            shader_dir = shader_dir_owned.?;
+        }
+    }
 
     // Probe naga once up front. If it isn't on PATH we skip the column entirely.
-    const naga_available = probeNaga(alloc);
+    const naga_available = probeNaga(io, alloc);
 
     // Collect shader files
     var shader_files = try std.ArrayList([]const u8).initCapacity(alloc, 64);
@@ -77,17 +92,17 @@ pub fn main() !void {
         shader_files.deinit(alloc);
     }
 
-    var dir = std.fs.cwd().openDir(shader_dir, .{ .iterate = true }) catch |err| {
+    const dir = compat.dirOpenDir(io, compat.cwd(), shader_dir, .{ .iterate = true }) catch |err| {
         std.debug.print("Cannot open shader directory '{s}': {}\n", .{ shader_dir, err });
         std.debug.print("Usage: realworld_tests [shader_directory]\n", .{});
         std.debug.print("Populate tests/external/ with GLSL shaders to test.\n", .{});
         return;
     };
-    defer dir.close();
+    defer compat.dirClose(io, dir);
 
-    var walker = try dir.walk(alloc);
+    var walker = try compat.dirWalk(dir, alloc);
     defer walker.deinit();
-    while (try walker.next()) |entry| {
+    while (try compat.walkerNext(io, &walker)) |entry| {
         if (entry.kind != .file) continue;
         const ext = std.fs.path.extension(entry.basename);
         if (std.mem.eql(u8, ext, ".frag") or std.mem.eql(u8, ext, ".vert") or
@@ -117,7 +132,7 @@ pub fn main() !void {
 
     for (shader_files.items) |path| {
         const stage = detectStage(path) orelse .fragment;
-        const res = runShader(alloc, path, stage, naga_available);
+        const res = runShader(io, alloc, path, stage, naga_available);
         printShaderRow(res);
         try results.append(alloc, res);
         // Transfer ownership of `path` from shader_files to results.
@@ -138,7 +153,7 @@ fn detectStage(path: []const u8) ?zioshade.Stage {
     return null;
 }
 
-fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: zioshade.Stage, naga_available: bool) PerShaderResult {
+fn runShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, stage: zioshade.Stage, naga_available: bool) PerShaderResult {
     var result: PerShaderResult = .{
         .path = alloc.dupe(u8, path) catch unreachable,
         .stage = stage,
@@ -147,7 +162,7 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: zioshade.Stage, 
     };
 
     // Read source
-    const raw = std.fs.cwd().readFileAlloc(alloc, path, 10 * 1024 * 1024) catch |err| {
+    const raw = compat.readFileByPath(alloc, path, 10 * 1024 * 1024) catch |err| {
         result.statuses[@intFromEnum(Backend.spirv)] = .fail;
         result.messages[@intFromEnum(Backend.spirv)] = std.fmt.allocPrint(alloc, "read: {}", .{err}) catch null;
         return result;
@@ -216,7 +231,7 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: zioshade.Stage, 
         defer alloc.free(wgsl);
         result.statuses[@intFromEnum(Backend.wgsl)] = .pass;
         if (naga_available) {
-            const naga_msg = runNagaValidate(alloc, wgsl) catch |err| blk: {
+            const naga_msg = runNagaValidate(io, alloc, wgsl) catch |err| blk: {
                 break :blk std.fmt.allocPrint(alloc, "naga subprocess: {}", .{err}) catch null;
             };
             if (naga_msg) |m| {
@@ -240,32 +255,26 @@ fn runShader(alloc: std.mem.Allocator, path: []const u8, stage: zioshade.Stage, 
     return result;
 }
 
-fn probeNaga(alloc: std.mem.Allocator) bool {
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "naga", "--version" },
-    }) catch return false;
+fn probeNaga(io: compat.IoType, alloc: std.mem.Allocator) bool {
+    const result = compat.processRun(io, alloc, &.{ "naga", "--version" }) catch return false;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
-    return result.term == .Exited and result.term.Exited == 0;
+    return (result.term.exitedCode() orelse 1) == 0;
 }
 
-fn runNagaValidate(alloc: std.mem.Allocator, wgsl_source: []const u8) ![]const u8 {
-    var tmp = std.testing.tmpDir(.{});
-    defer tmp.cleanup();
-    try tmp.dir.writeFile(.{ .sub_path = "test.wgsl", .data = wgsl_source });
+fn runNagaValidate(io: compat.IoType, alloc: std.mem.Allocator, wgsl_source: []const u8) ![]const u8 {
+    // Stage the WGSL under the OS temp dir (compat picks a writable, portable
+    // location and hides the 0.15/0.16 absolute-file split), then run naga on it.
+    const tmp_path = try compat.tempFilePathFmt(alloc, "zioshade-naga-{x}.wgsl", .{compat.randomInt(u64)});
+    defer alloc.free(tmp_path);
+    try compat.writeFileAbsolute(alloc, tmp_path, wgsl_source);
+    defer compat.deleteFileAbsolute(alloc, tmp_path) catch {};
 
-    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try tmp.dir.realpath("test.wgsl", &path_buf);
-
-    const result = try std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "naga", "--input-kind", "wgsl", tmp_path },
-    });
+    const result = try compat.processRun(io, alloc, &.{ "naga", "--input-kind", "wgsl", tmp_path });
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);
 
-    if (result.term == .Exited and result.term.Exited == 0) {
+    if ((result.term.exitedCode() orelse 1) == 0) {
         return try alloc.dupe(u8, "");
     }
     return std.fmt.allocPrint(alloc, "{s}{s}", .{ result.stdout, result.stderr });
