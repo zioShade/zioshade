@@ -38,10 +38,6 @@ tests/wintty/*.dxil
 /PLAN.md
 /purge-list.txt
 
-# Internal planning docs (roadmaps, design specs). Kept locally under
-# docs/internal/ but untracked so private planning stays out of the public repo.
-docs/internal/
-
 # Downloaded test caches
 .shader_fetch_cache/
 shadertoy_test_cache/
