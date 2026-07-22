@@ -6643,7 +6643,27 @@ fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32
 
 fn emitStd450(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {
     const rt = try hlslType(module, inst.words[1], names, alloc);
+    const result_name = names.get(inst.words[2]) orelse "v";
     const func: spirv.GLSLstd450 = @enumFromInt(instruction);
+
+    // #170: HLSL has no packHalf2x16/unpackHalf2x16 intrinsic (the names `pack_half2x16`/
+    // `unpack_half2x16` this backend used to emit are Metal/OpenCL, not HLSL -- invalid HLSL
+    // that only fails downstream at fxc/dxc). Emit the canonical f32tof16/f16tof32 bit form
+    // that spirv-cross uses: two 16-bit halves packed into / unpacked from a uint.
+    switch (func) {
+        .PackHalf2x16 => {
+            const v = names.get(inst.words[5]) orelse "x";
+            try w.print("    {s} {s} = f32tof16({s}.x) | (f32tof16({s}.y) << 16);\n", .{ rt, result_name, v, v });
+            return;
+        },
+        .UnpackHalf2x16 => {
+            const u = names.get(inst.words[5]) orelse "x";
+            try w.print("    {s} {s} = float2(f16tof32({s} & 0xffffu), f16tof32({s} >> 16));\n", .{ rt, result_name, u, u });
+            return;
+        },
+        else => {},
+    }
+
     const hlsl_func: []const u8 = std450ToHlsl(func) orelse {
         try w.print("    // unhandled std450 #{d}\n", .{instruction});
         return;
@@ -6775,7 +6795,9 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 46 => "lerp", // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
-                50 => "mad", // FMA (fused multiply-add) — HLSL uses mad for float
+                50 => "fma", // OpFma is the FUSED (single-rounded) multiply-add; `mad` is a
+                // plain a*b+c the compiler may double-round. HLSL `fma` (SM5+) is the true
+                // fused op and matches the WGSL/MSL/GLSL backends. (#170)
                 51 => "frexp", // Frexp (scalar return, pointer out-param)
                 52 => "frexp", // FrexpStruct (struct return - intercepted)
                 53 => "ldexp", // Ldexp
@@ -6792,16 +6814,14 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 79 => "min",
                 80 => "max",
                 81 => "clamp",
-                54 => "pack_snorm4x8",
-                55 => "pack_unorm4x8",
-                56 => "pack_snorm2x16",
-                57 => "pack_unorm2x16",
-                58 => "pack_half2x16",
-                60 => "unpack_snorm2x16",
-                61 => "unpack_unorm2x16",
-                62 => "unpack_half2x16",
-                63 => "unpack_snorm4x8",
-                64 => "unpack_unorm4x8",
+                // #170: PackHalf2x16 (58) / UnpackHalf2x16 (62) are handled directly in
+                // emitStd450 with the canonical f32tof16/f16tof32 form. The snorm/unorm
+                // pack/unpack (54-57, 60,61,63,64) previously emitted `pack_snorm4x8` etc.,
+                // which are Metal/OpenCL names, NOT HLSL intrinsics -- plausible-but-wrong
+                // (invalid HLSL that only fails at fxc/dxc). Dropped to the honest "unhandled
+                // std450" path until validated HLSL helper forms are added (needs a DXC oracle,
+                // unavailable here). Correct HLSL is a scale/round/asuint bit helper per
+                // spirv-cross's spvPack{S,U}norm* helpers.
                 76 => "EvaluateAttributeAtCentroid",
                 77 => "EvaluateAttributeAtSample",
                 78 => "EvaluateAttributeSnapped",
