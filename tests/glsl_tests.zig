@@ -2621,6 +2621,24 @@ test "glsl: textureProjLodOffset keeps the const offset (#170)" {
     try assertContains(glsl, "ivec2(2, -1)");
 }
 
+// #170/#470: textureProj on a shadow sampler (OpImageSampleProjDref) was missing
+// from resultIdFromOp, so its result was never named and the output store defaulted
+// to 0 -- a SILENT NO-OP shadow. GLSL lowers to the native textureProj (which does
+// the projective divide internally); the only defect here was the discarded result.
+test "glsl: textureProj(sampler2DShadow) result is used, not discarded (#170)" {
+    const source =
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec4 projCoord;
+        \\layout(location=0) out float o;
+        \\void main(){ o = textureProj(shadowTex, projCoord); }
+    ;
+    const glsl = try compileToGlsl(source);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureProj(");
+    try assertNotContains(glsl, "o = 0");
+}
+
 // #170: textureProjGradOffset → GLSL native textureProjGradOffset(s, coord, ddx, ddy, offset).
 test "glsl: textureProjGradOffset keeps the const offset (#170)" {
     const source =

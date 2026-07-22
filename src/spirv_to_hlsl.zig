@@ -534,6 +534,8 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ImageSampleDrefExplicitLod,
         .ImageSampleProjImplicitLod,
         .ImageSampleProjExplicitLod,
+        .ImageSampleProjDrefImplicitLod,
+        .ImageSampleProjDrefExplicitLod,
         .ImageDrefGather,
         .ImageQueryLod,
         .ImageQueryLevels,
@@ -4958,8 +4960,13 @@ fn emitInstruction(
                 }
                 break :blk ".z";
             } else ".z";
-            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}{s}, {s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref,
+            // OpImageSampleProjDref divides BOTH the coordinate AND the depth
+            // reference by the projective divisor (the coordinate's last component).
+            // Emitting the raw Dref would silently compare against the un-projected
+            // depth. Matches the spirv-cross oracle `SampleCmp(.., uv/q, dref/q)` and
+            // the WGSL backend's textureSampleCompare lowering. (#170, #470)
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref, coord, last_swizzle,
             });
         },
         .ImageSampleProjDrefExplicitLod => {
@@ -4982,8 +4989,9 @@ fn emitInstruction(
                 }
                 break :blk ".z";
             } else ".z";
-            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}{s}, {s});\n", .{
-                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref,
+            // Projective divide applies to the Dref too (see ProjDrefImplicitLod). (#170, #470)
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{
+                rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref, coord, last_swizzle,
             });
         },
         .ImageSampleProjExplicitLod => {
