@@ -8530,24 +8530,25 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
             return;
         }
     }
-    // #258: a division/remainder whose DIVISOR is a constant zero. (The float
-    // const/const case was folded to a bitcast above, #254.) What remains:
-    //   - runtime dividend / const-zero → a valid RUNTIME division naga accepts
-    //     (WGSL defines integer `x / 0 == x`; float `x / 0.0` is a runtime inf) →
-    //     emit normally;
-    //   - INTEGER const dividend / const-zero → naga const-evaluates and rejects
-    //     ("Division by zero"), and WGSL has no integer inf/nan, so it is
-    //     unrepresentable → honest-error. (The old band-aid emitted `0.0` here,
-    //     which is itself naga-invalid for an integer result.)
+    // #258: an INTEGER division/remainder whose DIVISOR is a const-expression zero.
+    // Per the WGSL spec this is a shader-creation error whenever the divisor is a
+    // const-expression evaluating to 0 -- REGARDLESS of whether the dividend is a
+    // constant or a runtime value (naga 0.30 rejects both `4 / 0` and `b / 0` with
+    // "Division by zero"). WGSL has no integer inf/nan, so the result is
+    // unrepresentable either way; honest-error rather than emit naga-invalid WGSL.
+    // (The old band-aid emitted `0.0`, itself naga-invalid for an integer result;
+    // an earlier revision emitted a bare `b / 0`, which naga also rejects.) The float
+    // const/const case was already folded to a non-finite bitcast above (#254), and a
+    // runtime float `x / 0.0` is a legitimate runtime inf, so this guard is
+    // integer-only.
     if (inst.words.len >= 5 and
         (std.mem.eql(u8, op, "/") or std.mem.eql(u8, op, "%")) and
         isConstantZero(module, inst.words[4]) and
-        isConstant(module, inst.words[3]) and
         isIntegerType(module, inst.words[1]))
     {
         last_error_detail = std.fmt.bufPrint(
             &last_error_detail_buf,
-            "integer constant division by zero has no WGSL representation",
+            "integer division by a constant zero has no WGSL representation",
             .{},
         ) catch null;
         return error.UnsupportedOp;
