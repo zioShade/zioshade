@@ -1642,6 +1642,16 @@ const Analyzer = struct {
         for (self.scopes.items) |*scope| {
             try self.unssaScope(scope);
         }
+        // Invalidate the store-forward load caches. unssaScope only spills variables that
+        // are still SSA; a variable that is ALREADY memory-backed keeps its cached
+        // store-forwarded value in the cross-block `global_load_cache` (e.g. `Particle pt =
+        // spawn(uv);` caches pt's pointer -> the spawn result in the entry block). Called
+        // before a loop or switch header, that stale entry means a loop-carried read
+        // (`pt = update(pt, dt)` each iteration) reuses the PRE-LOOP value instead of
+        // reloading the variable the loop just stored -- the loop never accumulates. Clearing
+        // both caches forces reloads inside the loop; invariant globals simply re-cache.
+        self.load_cache.clearRetainingCapacity();
+        self.global_load_cache.clearRetainingCapacity();
     }
 
     fn unssaScope(self: *Analyzer, scope: *Scope) !void {
