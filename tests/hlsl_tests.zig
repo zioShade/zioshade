@@ -146,6 +146,26 @@ test "#471: glslang gl_PerVertex block drops gl_PointSize (unrepresentable in HL
     try assertNotContains(hlsl, "gl_PointSize");
 }
 
+// #472-audit: SPIR-V OpSwitch cases do NOT fall through (each terminates in
+// OpBranch %merge), but C-family `switch` falls through without `break;`. HLSL was
+// emitting braced case bodies with NO break -> `case 0` fell into `case 1` (and since
+// `default` is emitted first, it fell into every case) = silent-wrong. Each case must
+// end with break;, matching the GLSL backend and spirv-cross.
+test "#472-audit: OpSwitch cases terminate with break; (no C fallthrough)" {
+    const spirv = compileToSpirv("switch_break",
+        \\#version 450
+        \\layout(location=0) flat in int sel;
+        \\layout(location=0) out vec4 c;
+        \\void main(){ switch(sel){ case 0: c=vec4(1.0); break; case 1: c=vec4(0.5); break; default: c=vec4(0.2); break; } }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "switch");
+    // 2 cases + default, all break-terminated -> at least 3 `break;`.
+    try std.testing.expect(std.mem.count(u8, hlsl, "break;") >= 3);
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------

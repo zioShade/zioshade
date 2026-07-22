@@ -160,6 +160,23 @@ test "#470: MSL multiple color attachments (MRT) honest-error (not silent single
     try std.testing.expectError(error.UnsupportedFragmentOutput, zioshade.spirvToMSL(alloc, spirv, .{}));
 }
 
+// #472-audit: SPIR-V OpSwitch cases do NOT fall through, but C++/Metal `switch` does
+// without `break;`. MSL was emitting braced case bodies with NO break -> silent-wrong
+// fallthrough. Each case must end with break;, matching GLSL and spirv-cross.
+test "#472-audit: OpSwitch cases terminate with break; (no C fallthrough)" {
+    const spirv = compileToSpirv("switch_break",
+        \\#version 450
+        \\layout(location=0) flat in int sel;
+        \\layout(location=0) out vec4 c;
+        \\void main(){ switch(sel){ case 0: c=vec4(1.0); break; case 1: c=vec4(0.5); break; default: c=vec4(0.2); break; } }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "switch");
+    try std.testing.expect(std.mem.count(u8, msl, "break;") >= 3);
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
