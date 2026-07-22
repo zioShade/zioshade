@@ -6447,8 +6447,11 @@ fn emitInstruction(
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = clock();\n", .{ rtt, names.get(inst.words[2]) orelse "t" });
         },
+        // #475: fence BOTH threadgroup AND device memory so an SSBO write before the
+        // barrier is visible after (mem_threadgroup alone fences only workgroup memory).
+        // threadgroup_barrier takes combined flags; this is the conservative both-fence.
         .ControlBarrier => {
-            try w.writeAll("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+            try w.writeAll("    threadgroup_barrier(mem_flags::mem_device | mem_flags::mem_threadgroup);\n");
         },
         .MemoryBarrier => {
             try w.writeAll("    threadgroup_barrier(mem_flags::mem_device);\n");

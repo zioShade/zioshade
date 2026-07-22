@@ -4292,6 +4292,29 @@ test "wgsl: workgroup atomic scalar is typed atomic<u32> with atomicStore/atomic
     try nagaValidateOrSkip(wgsl, "workgroup atomic scalar");
 }
 
+// #475: OpControlBarrier commonly carries UniformMemory semantics (SSBO writes).
+// workgroupBarrier() fences ONLY workgroup memory; an SSBO write before the barrier
+// must also see a storageBarrier() to be visible after. Emit BOTH (conservative).
+test "#475: ControlBarrier fences both workgroup + storage (SSBO write visible)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(local_size_x = 32) in;
+        \\layout(std430, binding = 0) buffer B { uint data[]; };
+        \\shared uint s;
+        \\void main(){
+        \\    uint i = gl_LocalInvocationID.x;
+        \\    s = i;
+        \\    barrier();
+        \\    data[i] = s;
+        \\}
+    ;
+    const wgsl = try compileCompToWgsl(src);
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "workgroupBarrier();");
+    try assertContains(wgsl, "storageBarrier();");
+    try nagaValidateOrSkip(wgsl, "controlbarrier storage");
+}
+
 // #170 (H): a whole-matrix store to a flattened matrix output that lands inside
 // a `switch` case body is replayed through `emitSimpleInstruction` — a separate
 // Store path that has no access to the matrix-output map — so it emitted

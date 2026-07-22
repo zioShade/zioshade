@@ -8353,10 +8353,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try w.print("let {s}: {s} = arrayLength(&{s}.{s});\n", .{ result_name, rt, buf_name, member_name });
             },
 
-            // ControlBarrier / MemoryBarrier
+            // ControlBarrier / MemoryBarrier.
+            // #475: OpControlBarrier commonly carries UniformMemory semantics (SSBO
+            // writes). workgroupBarrier() fences ONLY workgroup memory (+ execution
+            // sync) — an SSBO write before the barrier would NOT be visible after,
+            // silently. Also emit storageBarrier() (the conservative both-fence GLSL
+            // uses via barrier()+memoryBarrier()) so storage writes are visible.
+            // Over-fencing is safe (a no-op when there's no storage access).
             .ControlBarrier => {
                 try writeInd(w, indent);
                 try w.writeAll("workgroupBarrier();\n");
+                try writeInd(w, indent);
+                try w.writeAll("storageBarrier();\n");
             },
             .MemoryBarrier => {
                 try writeInd(w, indent);
