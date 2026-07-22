@@ -1531,6 +1531,72 @@ test "wgsl: bvec equal/notEqual (vector OpLogicalEqual/NotEqual) lower component
     try nagaValidateOrSkip(wgsl, "logical-eq-vec");
 }
 
+// #170: the UNORDERED float inequalities (OpFUnordLessThan / OpFUnordGreaterThan /
+// OpFUnordLessThanEqual / OpFUnordGreaterThanEqual) must lower to the logical
+// negation of the COMPLEMENTARY ordered comparison -- `!(a >= b)` for FUnordLessThan
+// etc. -- which is exact on a NaN operand (the unordered form is TRUE there). Mapping
+// them onto the ordered `<`/`>=` (as MSL/HLSL/spirv-cross do) is false-on-NaN =
+// silent-wrong, exactly the class zioshade refuses to emit. glslang lowers every GLSL
+// relational to the ORDERED FOrd* form, so -- like OpShiftRightArithmetic -- the only
+// way to reach these arms is to rewrite the opcode on real SPIR-V. Each rewritten
+// module must (a) validate under naga and (b) carry the `!(...)` negation in its WGSL
+// (proving the naive-operator path was NOT taken). The FOrd*/FUnord* opcodes are
+// consecutive: 184/185 LessThan, 186/187 GreaterThan, 188/189 LessThanEqual,
+// 190/191 GreaterThanEqual.
+test "wgsl: unordered float inequalities lower to negated ordered complement (#170)" {
+    const Case = struct { name: [:0]const u8, glsl_op: []const u8, from_op: u16, to_op: u16 };
+    const cases = [_]Case{
+        .{ .name = "funord-lt", .glsl_op = "<", .from_op = 184, .to_op = 185 },
+        .{ .name = "funord-gt", .glsl_op = ">", .from_op = 186, .to_op = 187 },
+        .{ .name = "funord-le", .glsl_op = "<=", .from_op = 188, .to_op = 189 },
+        .{ .name = "funord-ge", .glsl_op = ">=", .from_op = 190, .to_op = 191 },
+    };
+    for (cases) |c| {
+        // A single runtime `a OP b` fed through a select so the comparison survives
+        // DCE and stays a runtime op (not const-folded).
+        const src = try std.fmt.allocPrintSentinel(alloc,
+            \\#version 450
+            \\layout(location = 0) in float a;
+            \\layout(location = 1) in float b;
+            \\layout(location = 0) out vec4 fragColor;
+            \\void main() {{ fragColor = (a {s} b) ? vec4(1.0) : vec4(0.0); }}
+        , .{c.glsl_op}, 0);
+        defer alloc.free(src);
+        const base = try compileToSpirv(c.name, src);
+        defer alloc.free(base);
+        const rewritten = try rewriteFirstOpcode(base, c.from_op, c.to_op);
+        defer alloc.free(rewritten);
+        const wgsl = try zioshade.spirvToWGSL(alloc, rewritten, .{});
+        defer alloc.free(wgsl);
+        try assertContains(wgsl, "!(");
+        try nagaValidateOrSkip(wgsl, c.name);
+    }
+}
+
+// The vector form must lower componentwise: `!(a >= b)` where the operands are
+// vec3<f32> and the result vec3<bool>, exercising WGSL's componentwise `!` on a bool
+// vector (no typed constant needed). (#170)
+test "wgsl: unordered float inequality on a vector lowers componentwise (#170)" {
+    const base = try compileToSpirv("funord_vec",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec3 c = lessThan(a, b);
+        \\    fragColor = vec4(float(c.x), float(c.y), float(c.z), 1.0);
+        \\}
+    );
+    defer alloc.free(base);
+    // FOrdLessThan (184) -> FUnordLessThan (185) on a bvec3 result.
+    const rewritten = try rewriteFirstOpcode(base, 184, 185);
+    defer alloc.free(rewritten);
+    const wgsl = try zioshade.spirvToWGSL(alloc, rewritten, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "!(");
+    try nagaValidateOrSkip(wgsl, "funord-vec");
+}
+
 // A SPIR-V opcode that zioshade's `Op` enum does not NAME (here OpUMulExtended=151,
 // emitted by GLSL `umulExtended`) must fail loud with error.UnsupportedOp — never
 // crash. The honest-error fallback formatted the op via `@tagName(inst.op)`, which

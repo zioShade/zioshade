@@ -258,6 +258,15 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .FOrdGreaterThan,
         .FOrdLessThanEqual,
         .FOrdGreaterThanEqual,
+        // Unordered float inequalities produce a bool result id like their ordered
+        // siblings. Without this the parser never records their result in id_defs,
+        // so a non-inlined use (e.g. the scalar-bool splat into vecN<bool> for an
+        // OpSelect condition, or an OpStore) can't resolve the name and falls back
+        // to a bare "0". The WGSL backend lowers them to `!(ordered complement)`. (#170)
+        .FUnordLessThan,
+        .FUnordGreaterThan,
+        .FUnordLessThanEqual,
+        .FUnordGreaterThanEqual,
         .ShiftRightLogical,
         .ShiftRightArithmetic,
         .ShiftLeftLogical,
