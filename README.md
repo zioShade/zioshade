@@ -2,7 +2,7 @@
 
 **A pure-Zig shading-language compiler: GLSL to SPIR-V to HLSL / MSL / GLSL / WGSL, in one module, no C++ runtime.**[^name]
 
-[![CI](https://github.com/deblasis/zioshade/actions/workflows/ci.yml/badge.svg)](https://github.com/deblasis/zioshade/actions/workflows/ci.yml)
+[![CI](https://github.com/zioshade/zioshade/actions/workflows/ci.yml/badge.svg)](https://github.com/zioshade/zioshade/actions/workflows/ci.yml)
 [![Conformance](https://img.shields.io/badge/strict--gate-PASS%202104-brightgreen)](docs/STATUS.md)
 [![Fuzz](https://img.shields.io/badge/fuzz-1M%20clean-brightgreen)](#correctness-how-a-single-maintainer-compiler-earns-trust)
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d)](https://ziglang.org/download/0.15.2/)
@@ -150,7 +150,7 @@ Add zioshade to `build.zig.zon` with `zig fetch`, then `exe.root_module.addImpor
 ## Known limitations
 
 - **GLSL output is 430 only.** Other versions are not generated.
-- **WGSL backend is shallow** versus SPIRV-Cross: common opcodes only. Deepening it is tracked in [#170](https://github.com/deblasis/zioshade/issues/170).
+- **WGSL backend is shallow** versus SPIRV-Cross: common opcodes only. Deepening it is tracked in [#170](https://github.com/zioshade/zioshade/issues/170).
 - **Cross-compiler control flow:** structured SPIR-V works on every backend; unstructured-but-reducible `if`/`switch` (missing `OpSelectionMerge`) is structurized transparently by a pre-pass. Unstructured loops (missing `OpLoopMerge`) and irreducible CFGs **fail loud** with `error.UnstructuredControlFlow` rather than miscompile. zioshade's own SPIR-V is always structured; this only affects externally-optimized or hand-authored input.
 - **Single contributor.** Treat as alpha if you are not the wintty project.
 
@@ -158,9 +158,9 @@ See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the compl
 
 ## Roadmap
 
-- **WGSL opcode depth** toward SPIRV-Cross parity: [#170](https://github.com/deblasis/zioshade/issues/170).
-- **Zig 0.16 dev tools**: the library, CLI, C ABI, and test suite already build and pass on 0.16; the standalone dev tools under `tools/` are the last holdout ([#424](https://github.com/deblasis/zioshade/issues/424)).
-- **GLSL backend fixes** for legacy / array-of-structs / loose-uniform edge cases: [#417](https://github.com/deblasis/zioshade/issues/417), [#418](https://github.com/deblasis/zioshade/issues/418), [#419](https://github.com/deblasis/zioshade/issues/419), [#420](https://github.com/deblasis/zioshade/issues/420).
+- **WGSL opcode depth** toward SPIRV-Cross parity: [#170](https://github.com/zioshade/zioshade/issues/170).
+- **Zig 0.16 dev tools**: the library, CLI, C ABI, and test suite already build and pass on 0.16; the standalone dev tools under `tools/` are the last holdout ([#424](https://github.com/zioshade/zioshade/issues/424)).
+- **GLSL backend fixes** for legacy / array-of-structs / loose-uniform edge cases: [#417](https://github.com/zioshade/zioshade/issues/417), [#418](https://github.com/zioshade/zioshade/issues/418), [#419](https://github.com/zioshade/zioshade/issues/419), [#420](https://github.com/zioshade/zioshade/issues/420).
 - **Front-end lib-vs-lib benchmark** against `libglslang.a` (the GLSL to SPIR-V half is not yet wired).
 
 ## FAQ
@@ -183,7 +183,7 @@ Zig has no stability guarantee before 1.0, so zioshade tracks a rolling window r
 - **Tested window: the last three Zig releases**, enforced by the CI matrix. As a new Zig ships it is added and the oldest is eventually dropped from CI (it loses *guaranteed* support but is not deliberately broken).
 - **Newer than the window: best effort.** Version-divergent code is isolated in `src/compat.zig` (runtime) and `build_compat.zig` (build), selected by *capability detection* (`@hasDecl`) rather than version numbers, so a release that keeps an API shape works untouched.
 
-Current status: the library, CLI, C ABI, and complete test suite build and pass on both 0.15.2 and 0.16. The `std.Io` / process-API divergence between the two is centralized in `src/compat.zig`. The one remaining 0.16 gap is the standalone developer tools under `tools/` ([#424](https://github.com/deblasis/zioshade/issues/424)); they are not part of the library, CLI, or shipped test steps. Contributors who prefer the pinned toolchain can `mise install` to get 0.15.2.
+Current status: the library, CLI, C ABI, and complete test suite build and pass on both 0.15.2 and 0.16. The `std.Io` / process-API divergence between the two is centralized in `src/compat.zig`. The one remaining 0.16 gap is the standalone developer tools under `tools/` ([#424](https://github.com/zioshade/zioshade/issues/424)); they are not part of the library, CLI, or shipped test steps. Contributors who prefer the pinned toolchain can `mise install` to get 0.15.2.
 
 ## Building
 

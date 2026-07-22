@@ -1329,7 +1329,7 @@ fn mslValueType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u3
         // literal at words[3]) gives that. A spec-constant length, an
         // `OpSpecConstantOp`-computed length, or a missing/zero-word def must NOT
         // silently default to 1 (a silent-wrong sizing); fail loud instead.
-        // Deferred to a frontend fix — see deblasis/zioshade#173.
+        // Deferred to a frontend fix — see zioshade/zioshade#173.
         const len_def = getDef(m, inst.words[3]) orelse return error.UnresolvableArrayLength;
         if (len_def.op != .Constant or len_def.words.len <= 3) return error.UnresolvableArrayLength;
         const n: u32 = len_def.words[3];
@@ -2061,7 +2061,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // arrays (`const mat4 M[N]`), which the FRONTEND does not fold to an
     // OpConstantComposite (float/vec ARE folded). Rather than emit a reference to
     // an undeclared name (silent-wrong), fail loud until the frontend folds them
-    // (deferred to a frontend fix — see deblasis/zioshade#173). Detect: a Private OpVariable whose
+    // (deferred to a frontend fix — see zioshade/zioshade#173). Detect: a Private OpVariable whose
     // unwrapped pointee is an array, with no initializer operand and no recovered
     // const initializer, that is actually referenced by the body.
     for (module.instructions) |inst| {
