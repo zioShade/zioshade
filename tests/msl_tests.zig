@@ -177,6 +177,62 @@ test "#472-audit: OpSwitch cases terminate with break; (no C fallthrough)" {
     try std.testing.expect(std.mem.count(u8, msl, "break;") >= 3);
 }
 
+/// glslang -> spirv-opt -O: produces SSA/phi form (glslang alone emits mutable locals
+/// for branch-divergent values; -O runs mem2reg -> OpPhi). Needed to exercise the
+/// loop-body merge-phi path. Skips if glslang OR spirv-opt is unavailable.
+fn compileFragOptToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}.frag", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    const tmp_opt = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}_opt.spv", .{name});
+    defer alloc.free(tmp_opt);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const spirvopt = zioshade.compat.resolveVulkanTool(alloc, "spirv-opt") catch return error.SkipZigTest;
+    defer alloc.free(spirvopt);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const r1 = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(r1.stdout);
+    defer alloc.free(r1.stderr);
+    if ((r1.term.exitedCode() orelse 1) != 0) return error.SkipZigTest;
+    const r2 = zioshade.compat.processRun(main_io.io(), alloc, &.{ spirvopt, "-O", tmp_spv, "-o", tmp_opt }) catch return error.SkipZigTest;
+    defer alloc.free(r2.stdout);
+    defer alloc.free(r2.stderr);
+    if ((r2.term.exitedCode() orelse 1) != 0) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_opt, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+// #474: a loop-body if/else whose two arms assign a value used after the merge
+// (kept as a real if/else, e.g. conditional texture samples) lowers to an OpPhi at
+// the merge. MSL's loop-body handler didn't materialize it, so the generic Phi
+// fallback aliased the result to its FIRST incoming value -> the else branch's value
+// was silently dropped (and its temp referenced out of scope). Must declare a _phi
+// var assigned in BOTH arms, like emitBody/emitBlock and the other backends.
+test "#474: MSL loop-body if/else merge-phi is materialized, not aliased to first arm" {
+    const spirv = compileFragOptToSpirv("loopbody_phi",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D t;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=1) flat in int n;
+        \\layout(location=2) flat in int cond;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ vec4 acc=vec4(0.0); for(int i=0;i<n;i++){ vec4 v; if(cond>i){v=texture(t,uv*float(i));}else{v=texture(t,uv+float(i));} acc+=v; } o=acc; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "_phi");
+    // Assigned in BOTH the if and else arms (not aliased to a single branch value).
+    try std.testing.expect(std.mem.count(u8, msl, "_phi = ") >= 2);
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang

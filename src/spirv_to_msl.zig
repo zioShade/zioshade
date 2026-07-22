@@ -5135,13 +5135,48 @@ fn emitWhileLoopMSL(
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                         try w.writeAll("        }\n");
                     } else {
+                        // #474: materialize selection-merge phis of a loop-body if/else
+                        // (mirrors emitBody/emitBlock). Without this, a value that differs
+                        // by branch (`v = cond ? a : b` kept as a real if/else, e.g.
+                        // conditional texture samples) aliases to its FIRST incoming
+                        // operand -> the else branch's value is silently dropped and the
+                        // true-branch temp is referenced out of scope in the else path.
+                        var mphis: std.ArrayList(MslMergePhi) = .empty;
+                        defer mphis.deinit(alloc);
+                        collectMergePhis(m, label_map, nmv, &mphis, alloc);
+                        for (mphis.items) |pv| {
+                            const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            if (nhe) {
+                                try w.print("        {s} {s}_phi;\n", .{ t, vn });
+                            } else {
+                                const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                try w.print("        {s} {s}_phi = {s};\n", .{ t, vn, mslExprName(m, names, false_val, alloc) });
+                            }
+                        }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        for (mphis.items) |pv| {
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            const true_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                            try w.print("            {s}_phi = {s};\n", .{ vn, mslExprName(m, names, true_val, alloc) });
+                        }
                         if (nhe) {
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                            for (mphis.items) |pv| {
+                                const vn = names.get(pv.result_id) orelse "pv";
+                                const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                try w.print("            {s}_phi = {s};\n", .{ vn, mslExprName(m, names, false_val, alloc) });
+                            }
                         }
                         try w.writeAll("        }\n");
+                        for (mphis.items) |pv| {
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                            if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
+                            if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
+                        }
                     }
                     if (label_map.get(nmv)) |nmi| {
                         bi = nmi;
