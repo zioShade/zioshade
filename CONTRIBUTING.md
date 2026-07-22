@@ -7,6 +7,14 @@ Thank you for considering a contribution! zioshade is a young, single-contributo
 - For anything beyond a trivial fix or documentation patch, **please open an issue first** describing the change. Many gaps listed in [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) are intentional scope decisions (e.g. WGSL opcode coverage, reflection completeness) - confirming we want the change avoids wasted effort.
 - The scope is intentionally narrow: zioshade targets the GLSL surface needed by [wintty](https://github.com/deblasis/wintty) and similar projects. PRs that expand the dialect, add backends, or introduce major optimization passes are welcome, but expect scrutiny on test coverage and conformance impact.
 
+## Cloning
+
+A plain `git clone` is all you need to build, test, and contribute. The repo also
+references a **private** submodule at `docs/internal` (maintainer planning notes); it is
+not required for anything in this repo. `git clone --recursive` will report a permission
+error on that submodule for non-maintainers, which is expected and harmless -- clone
+without `--recursive` (or run `git -c submodule."docs/internal".update=none clone ...`).
+
 ## Toolchain
 
 - **Zig 0.15.2.** A `.mise.toml` is checked in so `mise install` will pull the right version. The `justfile` recipes invoke `mise exec -- zig` to guarantee version pinning.
