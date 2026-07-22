@@ -3574,6 +3574,12 @@ const Analyzer = struct {
                 // Emit case bodies with proper labels
                 for (case_infos.items, 0..) |ci, idx| {
                     try self.emitLabel(ci.label);
+                    // Each case is a SEPARATE control-flow path entered directly from the
+                    // OpSwitch, so a `return` in an earlier case does not make this one dead
+                    // code. Reset the dead-code-after-return suppression per case; otherwise
+                    // `analyzeStatement` bails on every case after the first that returns
+                    // (`switch(i){case 0:return a; case 1:return b; ...}` would drop b, c, …).
+                    self.has_returned = false;
                     const case_node = cases[ci.body_idx];
                     // A `case N:` node stores its value expression as the first child, so its
                     // body begins at index 1; a `default:` node has no value child, so its body
@@ -3619,6 +3625,10 @@ const Analyzer = struct {
                 // Switch merge block dominates subsequent blocks
                 try self.emitLabel(merge_label);
                 self.cache_globals = true;
+                // The merge is reachable unless every case returns/breaks out; conservatively
+                // treat code after the switch as live (do not suppress it because the last
+                // case happened to return). Matches the if/else "restore" behavior.
+                self.has_returned = false;
                 _ = self.loop_stack.pop();
             },
             .for_stmt => {

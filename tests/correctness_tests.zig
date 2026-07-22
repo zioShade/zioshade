@@ -426,6 +426,45 @@ test "conditional continue in a loop keeps an explicit then-block, not collapsed
     try std.testing.expect(!spirvConditionalTargetsLoopContinue(spv));
 }
 
+// A switch where multiple cases each `return` a value must emit EVERY case's return, not
+// just the first. The dead-code-after-return suppression flag (`has_returned`) was set by
+// the first returning case and never reset between cases, so `analyzeStatement` silently
+// dropped the `return` in every later case (they became empty fall-through blocks that the
+// optimizer then collapsed onto an unreachable merge). Reset per case: each case is a
+// distinct path entered directly from the OpSwitch. Caught by the full render proof
+// (switch_nested_func rendered a flat color instead of the 4-way ramp).
+test "every returning case of a switch emits its return, not just the first" {
+    const alloc = std.testing.allocator;
+    const source =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\float pick(int i) {
+        \\    switch (i) {
+        \\        case 0: return 0.8;
+        \\        case 1: return 0.6;
+        \\        case 2: return 0.4;
+        \\        default: return 0.2;
+        \\    }
+        \\}
+        \\void main() {
+        \\    int idx = int(gl_FragCoord.x / 80.0);
+        \\    fragColor = vec4(vec3(pick(idx)), 1.0);
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    var idx: usize = 5;
+    var returns: usize = 0;
+    while (idx < spv.len) {
+        const wc = spv[idx] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(spv[idx] & 0xFFFF)) == 254) returns += 1; // OpReturnValue
+        idx += wc;
+    }
+    try std.testing.expect(returns >= 4);
+}
+
 // A `switch` whose `default:` case carries a real body must emit that body. The parser
 // gives a `case N:` node a leading value-expr child but a `default:` node none, so its
 // children are body statements from index 0. The switch lowering used to slice every
