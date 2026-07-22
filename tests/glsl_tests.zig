@@ -96,6 +96,27 @@ test "#472-audit: RowMajor UBO matrix emits layout(row_major), not transposed" {
     try glslValidateOrSkip("rowmajor_ubo", glsl);
 }
 
+// #474: coarse/fine derivatives (OpDPdxCoarse/Fine etc.) must keep their precision --
+// GLSL has dFdxCoarse/dFdxFine natively (4.5 core / GL_ARB_derivative_control).
+// Collapsing to plain dFdx silently changes the derivative. Splice the extension for
+// the older #version zioshade targets by default so the output stays valid.
+test "#474: coarse/fine derivatives preserved + extension spliced" {
+    const spirv = compileToSpirv("deriv_coarsefine",
+        \\#version 450
+        \\#extension GL_ARB_derivative_control : enable
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(dFdxCoarse(uv), dFdyFine(uv)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "dFdxCoarse");
+    try assertContains(glsl, "dFdyFine");
+    try assertContains(glsl, "GL_ARB_derivative_control");
+    try glslValidateOrSkip("deriv_coarsefine", glsl);
+}
+
 /// Rewrite the FIRST instruction with opcode `from_op` to `to_op` (same word count).
 /// The zioshade/glslang frontends emit OpFMod for GLSL `mod()` and never OpFRem, so the
 /// only way to exercise the FRem arm is to rewrite the opcode on real SPIR-V. Caller frees.
