@@ -124,6 +124,11 @@ pub fn build(b: *std.Build) void {
         .root_module = c_abi_mod,
         .linkage = .static,
     });
+    // Force the LLVM backend for the C ABI static archive. Zig 0.15.2's self-hosted
+    // backend produces a malformed `libzioshade_c.a` on Linux x86_64 targets (ld.lld:
+    // "truncated or malformed archive ... after member c_abi.o"), which breaks the
+    // c-example link on ubuntu 0.15.2. LLVM emits a well-formed archive.
+    c_static.use_llvm = true;
     const c_shared = b.addLibrary(.{
         .name = "zioshade_c_shared",
         .root_module = c_abi_shared_mod,
@@ -164,6 +169,10 @@ pub fn build(b: *std.Build) void {
         .root_module = c_example_mod,
     });
     c_example_mod.linkLibrary(c_static);
+    // Match c_static's backend (see above): the self-hosted backend mis-generates the
+    // C consumer's objects on Linux x86_64 under 0.15.2. LLVM keeps producer and
+    // consumer consistent so the link succeeds.
+    c_example_exe.use_llvm = true;
     b.installArtifact(c_example_exe);
     c_example_step.dependOn(&c_example_exe.step);
 
