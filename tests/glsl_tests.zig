@@ -117,6 +117,23 @@ test "#474: coarse/fine derivatives preserved + extension spliced" {
     try glslValidateOrSkip("deriv_coarsefine", glsl);
 }
 
+// #475: NoPerspective varyings (screen-space / UI / post-process UVs) must emit
+// `noperspective`; dropping it silently perspective-interpolates the value. Oracle
+// spelling: GLSL `noperspective`.
+test "#475: NoPerspective varying emits noperspective (not perspective default)" {
+    const spirv = compileToSpirv("noperspective_var",
+        \\#version 450
+        \\layout(location=0) noperspective in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(uv, 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "noperspective in");
+    try glslValidateOrSkip("noperspective_var", glsl);
+}
+
 /// Rewrite the FIRST instruction with opcode `from_op` to `to_op` (same word count).
 /// The zioshade/glslang frontends emit OpFMod for GLSL `mod()` and never OpFRem, so the
 /// only way to exercise the FRem arm is to rewrite the opcode on real SPIR-V. Caller frees.

@@ -2940,11 +2940,13 @@ fn emitFunction(
                     // dxc errors on the integer case and silently PERSPECTIVE-interpolates a flat
                     // float (wrong values). The qualifier was previously dropped here -- a
                     // plausible-but-wrong / compile-error miscompile. (#170, #470)
-                    const flat_pfx: []const u8 = if (hasDecoration(decorations, ivid, .flat) or
-                        std.mem.startsWith(u8, iv_type, "int") or std.mem.startsWith(u8, iv_type, "uint"))
-                        "nointerpolation "
-                    else
-                        "";
+                    const flat_pfx: []const u8 = blk: {
+                        if (hasDecoration(decorations, ivid, .flat) or
+                            std.mem.startsWith(u8, iv_type, "int") or std.mem.startsWith(u8, iv_type, "uint"))
+                            break :blk "nointerpolation ";
+                        if (hasDecoration(decorations, ivid, .no_perspective)) break :blk "noperspective ";
+                        break :blk "";
+                    };
                     if (loc) |l| {
                         if (!first_input) try w.writeAll(", ");
                         first_input = false;
