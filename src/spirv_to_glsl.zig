@@ -95,6 +95,27 @@ fn emitRelOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), i
         try w.print("    {s} {s} = {s} {s} {s};\n", .{ rtt, rn, a, op, b });
     }
 }
+
+/// #170: emit a NaN-correct UNORDERED float inequality as the negation of its COMPLEMENTARY
+/// ordered comparison. GLSL relational operators/functions are ORDERED (false when either
+/// operand is NaN), so mapping OpFUnordLessThan and friends onto `<`/`lessThan` (as
+/// spirv-cross does) is plausible-but-wrong on a NaN operand -- the unordered form must be
+/// TRUE there, and `!ordered-complement` is exact by the IEEE-754 / SPIR-V definition. GLSL
+/// has no scalar-operator form for vectors and no `!` on bvec, so the vector path uses
+/// `not(complementFunc(a, b))`. `complement_op` is the scalar operator, `complement_vfunc`
+/// the vector function of the ORDERED complement. Deliberate divergence from spirv-cross
+/// toward correctness.
+fn emitNegatedRelOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, complement_op: []const u8, complement_vfunc: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    const rtt = try glslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const a = names.get(inst.words[3]) orelse "a";
+    const b = names.get(inst.words[4]) orelse "b";
+    if (isVectorType(m, inst.words[1])) {
+        try w.print("    {s} {s} = not({s}({s}, {s}));\n", .{ rtt, rn, complement_vfunc, a, b });
+    } else {
+        try w.print("    {s} {s} = !({s} {s} {s});\n", .{ rtt, rn, a, complement_op, b });
+    }
+}
 /// Element type reached by descending one composite level: the element type of an
 /// array (fixed or runtime), the column type of a matrix, or the component type of
 /// a vector. Used per access-chain index for the runtime-index descent (#419).
@@ -3426,10 +3447,18 @@ fn emitInstruction(
         .OuterProduct => try emitCall(m, names, inst, "outerProduct", w, alloc),
         .FOrdEqual, .FUnordEqual, .IEqual => try emitRelOp(m, names, inst, "==", "equal", w, alloc),
         .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitRelOp(m, names, inst, "!=", "notEqual", w, alloc),
-        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitRelOp(m, names, inst, "<", "lessThan", w, alloc),
-        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitRelOp(m, names, inst, ">", "greaterThan", w, alloc),
-        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitRelOp(m, names, inst, "<=", "lessThanEqual", w, alloc),
-        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitRelOp(m, names, inst, ">=", "greaterThanEqual", w, alloc),
+        .FOrdLessThan, .SLessThan, .ULessThan => try emitRelOp(m, names, inst, "<", "lessThan", w, alloc),
+        .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitRelOp(m, names, inst, ">", "greaterThan", w, alloc),
+        .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitRelOp(m, names, inst, "<=", "lessThanEqual", w, alloc),
+        .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitRelOp(m, names, inst, ">=", "greaterThanEqual", w, alloc),
+        // #170: unordered float inequalities are TRUE on NaN, so `!(ordered complement)`
+        // (scalar) / `not(complementFunc(a,b))` (vector), not the naive ordered op (false
+        // on NaN = plausible-but-wrong, as spirv-cross emits). See emitNegatedRelOp.
+        // (FUnordEqual stays on `==`/`equal` for now -- documented follow-up, see the MSL note.)
+        .FUnordLessThan => try emitNegatedRelOp(m, names, inst, ">=", "greaterThanEqual", w, alloc),
+        .FUnordGreaterThan => try emitNegatedRelOp(m, names, inst, "<=", "lessThanEqual", w, alloc),
+        .FUnordLessThanEqual => try emitNegatedRelOp(m, names, inst, ">", "greaterThan", w, alloc),
+        .FUnordGreaterThanEqual => try emitNegatedRelOp(m, names, inst, "<", "lessThan", w, alloc),
         .LogicalOr => try emitBinOp(m, names, inst, "||", w, alloc),
         .LogicalAnd => try emitBinOp(m, names, inst, "&&", w, alloc),
         .IsNan => try emitCall(m, names, inst, "isnan", w, alloc),

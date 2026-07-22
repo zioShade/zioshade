@@ -76,6 +76,65 @@ fn glslValidateOrSkip(name: []const u8, glsl_src: []const u8) !void {
     return error.GlslValidationFailed;
 }
 
+/// Rewrite the FIRST instruction with opcode `from_op` to `to_op` (same word count).
+/// glslang lowers GLSL relationals to the ORDERED FOrd* form, so the only way to reach
+/// the FUnord* arms is to rewrite the opcode on real SPIR-V. Caller frees the result.
+fn rewriteFirstOpcode(words: []const u32, from_op: u16, to_op: u16) ![]u32 {
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: usize = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == from_op) {
+            const out = try alloc.dupe(u32, words);
+            out[pos] = (@as(u32, @intCast(wc)) << 16) | @as(u32, to_op);
+            return out;
+        }
+        pos += wc;
+    }
+    return error.OpcodeNotFound;
+}
+
+// #170: the unordered float inequalities (OpFUnordLessThan etc.) are TRUE on a NaN operand,
+// so mapping them onto the naive ordered operator (`<`/`>=`, false on NaN) is
+// plausible-but-wrong -- the same class fixed in the WGSL backend. GLSL now lowers them to
+// the negation of the complementary ordered comparison: scalar `!(a >= b)`, vector
+// `not(greaterThanEqual(a, b))` (GLSL has no `!` on bvec). This is a DELIBERATE divergence
+// from spirv-cross toward correctness. glslang emits ordered FOrdLessThan (184), rewritten
+// to FUnordLessThan (185) on real SPIR-V; glslang then validates the emitted GLSL.
+test "glsl: unordered float inequality lowers to the NaN-correct negated complement (#170)" {
+    // scalar
+    const s_spv = try compileToSpirv("funord_lt_s",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = (a < b) ? vec4(1.0) : vec4(0.0); }
+    );
+    defer alloc.free(s_spv);
+    const s_rw = try rewriteFirstOpcode(s_spv, 184, 185);
+    defer alloc.free(s_rw);
+    const s_glsl = try zioshade.spirvToGLSL(alloc, s_rw, .{ .version = 430 });
+    defer alloc.free(s_glsl);
+    try assertContains(s_glsl, "!(");
+    try glslValidateOrSkip("funord-lt-scalar", s_glsl);
+
+    // vector
+    const v_spv = try compileToSpirv("funord_lt_v",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { bvec3 c = lessThan(a, b); o = vec4(float(c.x), float(c.y), float(c.z), 1.0); }
+    );
+    defer alloc.free(v_spv);
+    const v_rw = try rewriteFirstOpcode(v_spv, 184, 185);
+    defer alloc.free(v_rw);
+    const v_glsl = try zioshade.spirvToGLSL(alloc, v_rw, .{ .version = 430 });
+    defer alloc.free(v_glsl);
+    try assertContains(v_glsl, "not(greaterThanEqual(");
+    try glslValidateOrSkip("funord-lt-vec", v_glsl);
+}
+
 // A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
 // INNER merge blocks, not the immediate true/false labels. Matching predecessors by
 // label equality picked the wrong incoming value, SWAPPING the branches and emitting

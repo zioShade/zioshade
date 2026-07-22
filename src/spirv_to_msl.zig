@@ -5470,10 +5470,19 @@ fn emitInstruction(
         },
         .FOrdEqual, .FUnordEqual, .IEqual => try emitBinOp(m, names, inst, "==", w, alloc),
         .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitBinOp(m, names, inst, "!=", w, alloc),
-        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitBinOp(m, names, inst, "<", w, alloc),
-        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(m, names, inst, ">", w, alloc),
-        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(m, names, inst, "<=", w, alloc),
-        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(m, names, inst, ">=", w, alloc),
+        .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(m, names, inst, "<", w, alloc),
+        .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(m, names, inst, ">", w, alloc),
+        .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(m, names, inst, "<=", w, alloc),
+        .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(m, names, inst, ">=", w, alloc),
+        // #170: unordered float inequalities are TRUE on NaN, so `!(ordered complement)`,
+        // not the naive ordered op (false on NaN = plausible-but-wrong, as spirv-cross
+        // emits). See emitNegatedCompare. (FUnordEqual stays on `==` for now: its exact
+        // lowering needs an isNaN-aware bool-vector OR whose Metal form is unvalidated
+        // locally -- a documented follow-up.)
+        .FUnordLessThan => try emitNegatedCompare(m, names, inst, ">=", w, alloc),
+        .FUnordGreaterThan => try emitNegatedCompare(m, names, inst, "<=", w, alloc),
+        .FUnordLessThanEqual => try emitNegatedCompare(m, names, inst, ">", w, alloc),
+        .FUnordGreaterThanEqual => try emitNegatedCompare(m, names, inst, "<", w, alloc),
         .LogicalOr => try emitBinOp(m, names, inst, "||", w, alloc),
         .LogicalAnd => try emitBinOp(m, names, inst, "&&", w, alloc),
         .IsNan => try emitCall(m, names, inst, "isnan", w, alloc),
@@ -6580,6 +6589,18 @@ fn emitInstruction(
 fn emitBinOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
     const rtt = try mslType(m, inst.words[1], names, alloc);
     try w.print("    {s} {s} = {s} {s} {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "a", op, names.get(inst.words[4]) orelse "b" });
+}
+
+/// #170: emit a NaN-correct UNORDERED float inequality as `!(complementary ordered op)`.
+/// Metal relational operators are ORDERED (false when either operand is NaN), so mapping
+/// OpFUnordLessThan and friends onto `<`/`>=` (as spirv-cross does) is plausible-but-wrong
+/// on a NaN operand -- the unordered form must be TRUE there, and `!ordered-complement` is
+/// exact by the IEEE-754 / SPIR-V definition (the complement is already false when the
+/// operands are unordered). Metal `!` is componentwise on bool vectors, so this is uniform
+/// for scalar and vector. Deliberate divergence from spirv-cross toward correctness.
+fn emitNegatedCompare(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, complement_op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    const rtt = try mslType(m, inst.words[1], names, alloc);
+    try w.print("    {s} {s} = !({s} {s} {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "a", complement_op, names.get(inst.words[4]) orelse "b" });
 }
 
 fn emitCall(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
