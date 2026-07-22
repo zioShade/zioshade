@@ -3,7 +3,7 @@
 **A pure-Zig shading-language compiler: GLSL to SPIR-V to HLSL / MSL / GLSL / WGSL, in one module, no C++ runtime.**[^name]
 
 [![CI](https://github.com/zioshade/zioshade/actions/workflows/ci.yml/badge.svg)](https://github.com/zioshade/zioshade/actions/workflows/ci.yml)
-[![Conformance](https://img.shields.io/badge/strict--gate-PASS%202104-brightgreen)](docs/STATUS.md)
+[![Conformance](https://img.shields.io/badge/strict--gate-PASS%202102-brightgreen)](docs/STATUS.md)
 [![Fuzz](https://img.shields.io/badge/fuzz-1M%20clean-brightgreen)](#correctness-how-a-single-maintainer-compiler-earns-trust)
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d)](https://ziglang.org/download/0.15.2/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](#license)
@@ -17,7 +17,7 @@
 
 The cost of that toolchain is not really its byte size. Measured on a typical Homebrew install, the glslang and SPIRV-Cross libraries a host links come to roughly 9 MB (about 19 MB for the full toolchain with headers and CLIs) — comparable to zioshade's own binary, so size alone is a wash. What zioshade actually removes is the C++ build and dependency surface: two CMake projects, their transitive headers, and either an in-process C++ link or a per-shader subprocess spawn, all replaced by a single Zig module that compiles into the host. That simplification, not a raw megabyte count, is the point; the performance win over the subprocess path (below) is the measurable payoff.
 
-> **Scope:** zioshade is **not** a full Khronos drop-in. It is a focused replacement for the shader-compilation surface wintty needs (GLSL 330-460 class shaders to SPIR-V to a backend), validated on the projects' own reference suites and a 2104-fixture strict gate. If you need full GLSL ES, complete descriptor-set reflection, or SPIRV-Cross-grade WGSL output, use upstream. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the full gap analysis.
+> **Scope:** zioshade is **not** a full Khronos drop-in. It is a focused replacement for the shader-compilation surface wintty needs (GLSL 330-460 class shaders to SPIR-V to a backend), validated on the projects' own reference suites and a 2,100+ fixture strict gate. If you need full GLSL ES, complete descriptor-set reflection, or SPIRV-Cross-grade WGSL output, use upstream. See [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) for the full gap analysis.
 
 ## How it compares
 
@@ -30,7 +30,7 @@ The cost of that toolchain is not really its byte size. Measured on a typical Ho
 | MSL out | Yes | Yes | Yes | Yes |
 | WGSL out | Yes (shallow, see below) | No (SPIRV-Cross has no WGSL backend) | Yes | Yes |
 | License | MIT / Apache-2.0 | Apache-2.0 / BSD | MIT / Apache-2.0 | BSD-3-Clause |
-| Coverage | **wintty scope**, validated on the 2104-fixture strict gate; **not** full Khronos | Full Khronos reference coverage | Broad, production (Firefox / wgpu) | Broad, production (Chrome / Dawn) |
+| Coverage | **wintty scope**, validated on the 2,100+ fixture strict gate; **not** full Khronos | Full Khronos reference coverage | Broad, production (Firefox / wgpu) | Broad, production (Chrome / Dawn) |
 
 The honest line is the last row. glslang + SPIRV-Cross, naga, and Tint are broad, mature, multi-contributor projects. zioshade is deliberately narrow: it does the transforms wintty needs, extremely fast, in-process from Zig, and it is validated against those exact fixtures rather than the full specification surface. It wins on embed-ability and startup cost, not on breadth.
 
@@ -67,7 +67,7 @@ Using it as a Zig dependency, the C ABI (`include/zioshade.h`, built with `zig b
 
 A compiler written by one person is only worth using if you can check its work without trusting the author. zioshade's answer is to validate every output with the competitors' own tools, so the claim is not "trust me" but "the reference implementations agree":
 
-- **Khronos `spirv-val` on 2000+ fixtures.** Every fixture's SPIR-V is validated by the Khronos validator. `zig build strict-gate` reports **PASS 2104, XFAIL 11 (documented rejections), 0 FP-regression**; [docs/STATUS.md](docs/STATUS.md) is the single source of truth for these counts.
+- **Khronos `spirv-val` on 2000+ fixtures.** Every fixture's SPIR-V is validated by the Khronos validator. `zig build strict-gate` reports **PASS 2102, XFAIL 13 (documented rejections), 0 FP-regression**; [docs/STATUS.md](docs/STATUS.md) is the single source of truth for these counts.
 - **DXC on the HLSL output.** Emitted HLSL is fed to Microsoft's `dxc` and compiled to DXIL; 47/51 fragment fixtures pass at SM 6.0 (the rest need SM 6.1+ dialects), see [BENCHMARKS.md](BENCHMARKS.md).
 - **naga-gated WGSL.** WGSL output is piped through `naga` (the wgpu / Firefox implementation) as an external acceptance check; the WGSL fix history is a long list of "naga rejected this, so we fixed it or turned it into a loud error."
 - **`just prove` — a reproducible differential proof across all three shader stages.** zioshade's output and an independent glslang → SPIRV-Cross reference are *executed on a real GPU* and compared: fragment shaders by rendered pixels, vertex shaders by captured `gl_Position`, compute shaders by output buffers. One command prints an honest report (`verified / benign / divergences / skipped-with-reason`) and exits nonzero on any real divergence, so it doubles as a regression gate. A representative run is **164 shaders verified, 0 divergences** — spanning both SPIRV-Cross's own test suite and a hand-written real-world corpus (mandelbrot, julia, plasma, phong, hash-noise, terrain). This is the strongest check: compile-clean is not render-correct, and a differential render/execution oracle is the only thing that catches a silently-wrong output. See [docs/DIFFERENTIAL_PROOF.md](docs/DIFFERENTIAL_PROOF.md).
@@ -75,7 +75,7 @@ A compiler written by one person is only worth using if you can check its work w
 
 ### The named principle: honest error, never miscompile
 
-The contract underneath all of that is one rule: **when zioshade cannot faithfully translate a construct, it returns a loud error rather than emitting plausible-but-wrong output.** A rejected shader is a bug report; a silently miscompiled shader is a trap. Every entry in the WGSL history above exists because a "silent-wrong" was found and converted into either a correct lowering or an explicit `error.UnsupportedOp`. The 11 XFAIL fixtures are documented, curated rejections (see `KNOWN_UNSUPPORTED` in `tests/runner.zig`), not silent failures.
+The contract underneath all of that is one rule: **when zioshade cannot faithfully translate a construct, it returns a loud error rather than emitting plausible-but-wrong output.** A rejected shader is a bug report; a silently miscompiled shader is a trap. Every entry in the WGSL history above exists because a "silent-wrong" was found and converted into either a correct lowering or an explicit `error.UnsupportedOp`. The 13 XFAIL fixtures are documented, curated rejections (see `KNOWN_UNSUPPORTED` in `tests/runner.zig`), not silent failures.
 
 ## Performance
 
@@ -191,7 +191,7 @@ Current status: the library, CLI, C ABI, and complete test suite build and pass 
 zig build                    # library
 zig build cli                # CLI tool
 zig build test               # unit tests
-zig build strict-gate        # compile-side conformance gate (PASS 2104)
+zig build strict-gate        # compile-side conformance gate (PASS 2102)
 zig build conformance        # spirv-val conformance suite (needs spirv-val on PATH)
 zig build fuzz -- --count N  # fuzzer (headline: 1,000,000 clean via `just fuzz-million`)
 ```

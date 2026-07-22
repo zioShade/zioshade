@@ -36,7 +36,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Cross-compilers (HLSL, GLSL, MSL, WGSL) | ~12,000 |
 | Optimizer (compact_ids_passes) | ~10,200 |
 | Preprocessor | ~1,800 |
-| Conformance passing | 2104 PASS / 0 FP-regression / 11 XFAIL (`zig build strict-gate`); full spirv-val-validated counts in [`docs/STATUS.md`](STATUS.md) (single source of truth) |
+| Conformance passing | 2102 PASS / 0 FP-regression / 13 XFAIL (`zig build strict-gate`); full spirv-val-validated counts in [`docs/STATUS.md`](STATUS.md) (single source of truth) |
 | External DXC SPIR-V fixtures | 47 / 51 compile (4 limited by DXC SM 6.1+ / 2 KB structured-buffer cap) |
 | WGSL stress tests | 470 / 470 |
 | Fuzzer iterations (clean) | 1,000,000 (run `just fuzz-million` to reproduce; ad-hoc: `zig build fuzz -- --count N`) |
@@ -57,7 +57,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 2104 PASS / 0 FP-regression / 11 XFAIL (honest rejections), exits 0; counts in `docs/STATUS.md` | ✅ |
+| spirv-val conformance | Reference | 2102 PASS / 0 FP-regression / 13 XFAIL (honest rejections), exits 0; counts in `docs/STATUS.md` | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
 
@@ -167,7 +167,7 @@ DXC and the Metal compiler are **platform SDK tools** that produce GPU-specific 
 
 ### 3.1 SPIR-V Validation
 
-Runnable fixtures pass `spirv-val`, the official SPIR-V validator (see `docs/STATUS.md`, the single source of truth for counts; `zig build strict-gate` reports **2104 PASS / 0 FP-regression / 11 XFAIL**). 11 known-unsupported fixtures are **honestly rejected** as `error.SemanticFailed` (XFAIL) instead of silently emitting hollow SPIR-V. The suite exits **0**. The 11 XFAIL fixtures (the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig`) cover: 64-bit int/float types (`fp64`, `int64`, `spv.double`), OpExtInst new-form texture builtins (`newTexture`, `spv.newTexture`), AMD/NV extensions (`gcn_shader`, `shader_ballot`, `spv.nvAtomicFp16Vec`), the clock extension (`shader-clock`), arrays-of-arrays (`spv.AofA`), and `struct-material`. (`extended-arithmetic`, `image-query`, `ray_sphere_test`, and `spec-constant-work-group-size` were previously XFAIL but now **pass**.) These are expected honest rejections, not regressions.
+Runnable fixtures pass `spirv-val`, the official SPIR-V validator (see `docs/STATUS.md`, the single source of truth for counts; `zig build strict-gate` reports **2102 PASS / 0 FP-regression / 13 XFAIL**). 13 known-unsupported fixtures are **honestly rejected** (XFAIL) instead of silently emitting hollow SPIR-V. The suite exits **0**. The XFAIL fixtures (the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig`) cover: 64-bit int/float types (`fp64`, `int64`, `spv.double`), OpExtInst new-form texture builtins (`newTexture`, `spv.newTexture`), AMD/NV extensions (`gcn_shader`, `shader_ballot`, `spv.nvAtomicFp16Vec`), the clock extension (`shader-clock`), arrays-of-arrays (`spv.AofA`), `struct-material` (all `error.SemanticFailed`), plus the two deliberately-rejected constructs documented in [3.6](#36-deliberately-rejected-constructs-honest-errors) -- `ubo_layout` (conflicting matrix layout on a shared struct type) and `loop-dominator-and-switch-default` (an unstructurizable `continue`), both `error.CodegenFailed`. (`extended-arithmetic`, `image-query`, `ray_sphere_test`, and `spec-constant-work-group-size` were previously XFAIL but now **pass**.) These are expected honest rejections, not regressions.
 
 ### 3.2 DXC Validation
 
