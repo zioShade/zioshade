@@ -7131,6 +7131,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, &inline_exprs, inst, ">", w, arena, indent),
             .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, &inline_exprs, inst, "<=", w, arena, indent),
             .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, &inline_exprs, inst, ">=", w, arena, indent),
+            // Unordered float inequalities: `!(complementary ordered op)`, exact on
+            // NaN (see emitUnorderedCompare). NOT `<`/`>=` -- those are ordered and
+            // silent-wrong when an operand is NaN. (#170)
+            .FUnordLessThan => try emitUnorderedCompare(module, names, &inline_exprs, inst, ">=", w, arena, indent),
+            .FUnordGreaterThan => try emitUnorderedCompare(module, names, &inline_exprs, inst, "<=", w, arena, indent),
+            .FUnordLessThanEqual => try emitUnorderedCompare(module, names, &inline_exprs, inst, ">", w, arena, indent),
+            .FUnordGreaterThanEqual => try emitUnorderedCompare(module, names, &inline_exprs, inst, "<", w, arena, indent),
 
             // Logical
             .LogicalOr => try emitBinOp(module, names, &inline_exprs, inst, "||", w, arena, indent),
@@ -8562,6 +8569,36 @@ fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     try w.print("let {s}: {s} = {s} {s} {s};\n", .{ result_name, rt, lhs, op, rhs });
 }
 
+/// #170: emit an UNORDERED float comparison (OpFUnordLessThan and friends). WGSL's
+/// relational operators are all ORDERED -- `a < b`, `a >= b` etc. return false when
+/// either operand is NaN -- so mapping OpFUnord* straight onto `<`/`>=` (as the
+/// MSL/HLSL backends and spirv-cross do) is plausible-but-wrong on a NaN operand:
+/// the unordered form must return TRUE there. Rather than emit that silent-wrong
+/// output we lower each unordered inequality to the logical negation of its
+/// COMPLEMENTARY ordered comparison, which is exact by the IEEE-754 / SPIR-V
+/// definition (unordered-OP == !ordered-complement, because the ordered complement
+/// is itself already false whenever the operands are unordered):
+///   FUnordLessThan(a,b)         == !(a >= b)   (complement FOrdGreaterThanEqual)
+///   FUnordGreaterThan(a,b)      == !(a <= b)   (complement FOrdLessThanEqual)
+///   FUnordLessThanEqual(a,b)    == !(a > b)    (complement FOrdGreaterThan)
+///   FUnordGreaterThanEqual(a,b) == !(a < b)    (complement FOrdLessThan)
+/// WGSL `!` is componentwise on vecN<bool>, so this is uniform for scalar and vector
+/// results with no typed constant. (OpFUnordEqual is deliberately NOT handled here:
+/// its exact lowering needs a nested-`select` OR-composition -- it stays a named
+/// honest-error until a follow-up batch, never a naive `==`.) These ops are kept out
+/// of every inline/symbol table on purpose, so they always materialize through this
+/// emitter and can never be re-derived as a bare (wrong) `lhs op rhs`.
+fn emitUnorderedCompare(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, complement_op: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
+    const rhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
+    const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+    const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = !({s} {s} {s});\n", .{ result_name, rt, lhs, complement_op, rhs });
+}
+
 /// OpFMod takes the sign of operand 2 (the divisor) — GLSL mod() semantics. WGSL's
 /// float `%` takes the sign of operand 1 (truncated remainder, like C fmod), so it
 /// is silently wrong for operands of opposite sign. Emit the sign-correct expansion
@@ -9059,6 +9096,15 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         // route it here too so a replayed FMod (switch-case body / CFG replay) is
         // not re-emitted as the wrong `%` via getBinOpSymbol below.
         .FMod => try emitFMod(module, names, inline_exprs, inst, w, arena, indent),
+        // Unordered float inequalities need the `!(ordered complement)` lowering
+        // (see emitUnorderedCompare), not the ordered `<`/`>=` the generic
+        // getBinOpSymbol path below would emit -- route them here too so a replayed
+        // FUnord* (switch-case body / CFG replay) is exact on NaN, not silent-wrong.
+        // (getBinOpSymbol has no entry for them, so they would otherwise fail loud.) (#170)
+        .FUnordLessThan => try emitUnorderedCompare(module, names, inline_exprs, inst, ">=", w, arena, indent),
+        .FUnordGreaterThan => try emitUnorderedCompare(module, names, inline_exprs, inst, "<=", w, arena, indent),
+        .FUnordLessThanEqual => try emitUnorderedCompare(module, names, inline_exprs, inst, ">", w, arena, indent),
+        .FUnordGreaterThanEqual => try emitUnorderedCompare(module, names, inline_exprs, inst, "<", w, arena, indent),
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops
