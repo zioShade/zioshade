@@ -2720,6 +2720,17 @@ fn emitFunction(
                 const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
                 const vname = names.get(inst.words[2]) orelse "_private";
                 try w.print("static {s} {s}{s};\n", .{ type_name, vname, arr_suffix });
+            } else if (sc == .Workgroup) {
+                // #475: Workgroup (shared) memory. HLSL `groupshared` is module-scope
+                // only -- it must be emitted HERE (global), not inside the entry
+                // function, or DXC rejects it. Previously the Workgroup var was dropped
+                // entirely (collectResources's catch-all swallowed it) while the body
+                // still referenced the name -> "undeclared identifier" for EVERY
+                // shared-memory compute shader. Matches spirv-cross's `groupshared`.
+                const type_name = try hlslType(module, inst.words[1], names, alloc);
+                const arr_suffix = try hlslGetArraySuffix(module, inst.words[1]);
+                const vname = names.get(inst.words[2]) orelse "_shared";
+                try w.print("groupshared {s} {s}{s};\n", .{ type_name, vname, arr_suffix });
             }
         }
     }

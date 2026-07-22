@@ -239,6 +239,45 @@ test "#475: NoPerspective varying emits noperspective" {
     try assertContains(hlsl, "noperspective ");
 }
 
+// #475: Workgroup (shared) memory. HLSL `groupshared` is module-scope only; the
+// Workgroup var was dropped entirely (body still referenced the name -> "undeclared
+// identifier" for every shared-memory compute shader). Must emit `groupshared` as a
+// global. Matches spirv-cross. (glslang via compileToSpirv stage-inferred from .comp.)
+fn compileCompToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_test_{s}.comp", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_test_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+test "#475: HLSL shared (Workgroup) memory emits groupshared global" {
+    const spirv = compileCompToSpirv("groupshared",
+        \\#version 450
+        \\layout(local_size_x=64) in;
+        \\layout(std430, binding=0) buffer O { float data[]; };
+        \\shared float s[64];
+        \\void main(){ uint i=gl_LocalInvocationID.x; s[i]=float(gl_GlobalInvocationID.x); barrier(); data[gl_GlobalInvocationID.x]=s[(i+1u)%64u]; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "groupshared float s[64];");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
