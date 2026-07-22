@@ -158,6 +158,22 @@ test "glsl: OpImageFetch passes the explicit LOD, not a hardcoded 0 (#170)" {
     try glslValidateOrSkip("imagefetch-lod", glsl);
 }
 
+// OpImageSampleImplicitLod must carry a ConstOffset image-operand as GLSL `textureOffset`,
+// not drop it. `textureOffset(sampler2D, uv, off)` lowers to implicit-lod + ConstOffset;
+// the backend used to discard the offset -> silently sampled the wrong texel. (#170)
+test "glsl: ConstOffset on an implicit-lod sample becomes textureOffset, not dropped (#170)" {
+    const glsl = try compileToGlsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(tex, uv, ivec2(1, 1)); }
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureOffset(");
+    try glslValidateOrSkip("const-offset-implicit", glsl);
+}
+
 // A nested struct-typed ternary lowers to an outer OpPhi whose predecessors are the
 // INNER merge blocks, not the immediate true/false labels. Matching predecessors by
 // label equality picked the wrong incoming value, SWAPPING the branches and emitting
