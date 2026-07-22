@@ -7117,7 +7117,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .FMul, .IMul => try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent),
             .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, &inline_exprs, inst, "/", w, arena, indent),
             .FMod => try emitFMod(module, names, &inline_exprs, inst, w, arena, indent),
-            .UMod, .SRem, .SMod, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
+            .UMod, .SRem, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
+            // OpSMod is floored (sign of DIVISOR); WGSL `%` is truncated (sign of dividend =
+            // OpSRem), so `((x % y) + y) % y` adjusts it to floored for every sign combination
+            // (verified exhaustively via naga const_assert). Kept out of the inline/symbol
+            // tables below so it always materializes through emitSMod, never a bare `%`. (#170)
+            .SMod => try emitSMod(module, names, &inline_exprs, inst, w, arena, indent),
             // All three shifts share emitShift, which applies the u32/vecN<u32>
             // amount cast and the #170 constant over-shift mask. ShiftRightArithmetic
             // (signed `>>`) used to route through the generic emitBinOp, which did
@@ -8680,6 +8685,22 @@ fn emitFMod(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     try w.print("let {s}: {s} = {s} - {s} * floor({s} / {s});\n", .{ result_name, rt, lhs, rhs, lhs, rhs });
 }
 
+/// #170: emit OpSMod (floored signed modulo, sign of the DIVISOR) as `((x % y) + y) % y`.
+/// WGSL `%` is truncated (sign of the dividend = OpSRem), so it is wrong for opposite-sign
+/// operands; this compound turns the truncated remainder into the floored one for every
+/// sign combination (verified exhaustively via naga const_assert). Componentwise, no
+/// conditional. Kept out of the inline/symbol tables so it never re-derives as a bare `%`.
+fn emitSMod(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const x_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
+    const y_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
+    const x = if (isCompoundExpr(x_raw)) try std.fmt.allocPrint(arena, "({s})", .{x_raw}) else x_raw;
+    const y = if (isCompoundExpr(y_raw)) try std.fmt.allocPrint(arena, "({s})", .{y_raw}) else y_raw;
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = (({s} % {s}) + {s}) % {s};\n", .{ result_name, rt, x, y, y, y });
+}
+
 /// Emit a WGSL shift (`<<` / `>>`) for any of OpShiftLeftLogical,
 /// OpShiftRightLogical, OpShiftRightArithmetic. WGSL requires the shift AMOUNT to
 /// be u32-typed with the SAME vector dimension as the base (`vecN<T> << vecN<u32>`;
@@ -9153,6 +9174,9 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         // route it here too so a replayed FMod (switch-case body / CFG replay) is
         // not re-emitted as the wrong `%` via getBinOpSymbol below.
         .FMod => try emitFMod(module, names, inline_exprs, inst, w, arena, indent),
+        // OpSMod floored lowering here too (replay path) -- getBinOpSymbol has no `%` entry
+        // for it, so it would otherwise fail loud in a switch/loop body. (#170)
+        .SMod => try emitSMod(module, names, inline_exprs, inst, w, arena, indent),
         // Unordered float inequalities need the `!(ordered complement)` lowering
         // (see emitUnorderedCompare), not the ordered `<`/`>=` the generic
         // getBinOpSymbol path below would emit -- route them here too so a replayed
@@ -9200,7 +9224,7 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .FDiv => "/",
         // OpFMod deliberately absent: WGSL float `%` has the wrong (dividend) sign,
         // so FMod must not be inlined/replayed as `%` — it routes to emitFMod.
-        .SMod, .SRem, .FRem, .UMod => "%",
+        .SRem, .FRem, .UMod => "%", // NOT .SMod -- it needs the floored `((x%y)+y)%y`, see emitSMod (#170)
         .ShiftRightLogical => ">>",
         .ShiftLeftLogical => "<<",
         .BitwiseAnd => "&",
@@ -9378,7 +9402,7 @@ fn isInlineableArithOp(op: spirv.Op) bool {
     return switch (op) {
         // OpFMod excluded: it must not be inlined as `%` (wrong sign in WGSL); it
         // routes to emitFMod's floor expansion as a named statement instead.
-        .FMul, .FAdd, .FSub, .FDiv, .FNegate, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .ExtInst => true,
+        .FMul, .FAdd, .FSub, .FDiv, .FNegate, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .ExtInst => true,
         else => false,
     };
 }
@@ -9390,7 +9414,7 @@ fn getInlineBinOp(op: spirv.Op) ?[]const u8 {
         .FAdd, .IAdd => "+",
         .FSub, .ISub => "-",
         .FDiv, .SDiv, .UDiv => "/",
-        .SMod => "%",
+        // NOT .SMod -- floored, needs `((x%y)+y)%y` (emitSMod), never a bare `%`. (#170)
         .FOrdLessThan => "<",
         .FOrdGreaterThan => ">",
         .FOrdLessThanEqual => "<=",
@@ -9428,7 +9452,7 @@ fn buildInlineExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u3
         },
         // Binary arithmetic ops: lhs op rhs (OpFMod excluded — wrong-sign `%` in
         // WGSL; it is never inlined, see isInlineableArithOp / emitFMod)
-        .FMul, .FAdd, .FSub, .FDiv, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .SMod, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual => {
+        .FMul, .FAdd, .FSub, .FDiv, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual => {
             if (inst.words.len < 5) return null;
             const op_sym = getInlineBinOp(inst.op) orelse return null;
             const lhs = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, depth + 1);
