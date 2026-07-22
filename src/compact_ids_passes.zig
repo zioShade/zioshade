@@ -1918,6 +1918,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             // breaking switch/loop dominance invariants
             // Note: skip the loop's own OpLoopMerge by tracking if we've seen it
             var has_nested_struct = false;
+            var has_nested_switch = false;
             var saw_own_merge = false;
             var in_loop2 = false;
             pos = 5;
@@ -1937,7 +1938,10 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                     } else if (op2 == 246) {
                         has_nested_struct = true; // nested loop
                     }
-                    if (op2 == 251) has_nested_struct = true; // OpSwitch
+                    if (op2 == 251) {
+                        has_nested_struct = true; // OpSwitch
+                        has_nested_switch = true;
+                    }
                     if (op2 == 62 and wc2 >= 3) { // OpStore
                         const store_target = words[pos + 1];
                         if (func_vars.contains(store_target)) {
@@ -1948,8 +1952,17 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 pos += wc2;
             }
 
-            // For simple loops without nested struct, also track AC+Store to composite vars
-            if (!has_nested_struct) {
+            // Track AccessChain+Store to composite (array/struct) func-locals so a loop that
+            // writes e.g. `values[i]` (read after the loop) is recognized as live. Extended to
+            // run when the loop contains a nested LOOP (previously gated on `!has_nested_struct`,
+            // which also excluded nested loops): a bubble-sort whose outer `pass` loop wraps the
+            // inner swap loop left `loop_stored_locals` empty and was silently deleted (unsorted
+            // output). Still SKIPPED when the loop contains a nested SWITCH — that is the
+            // separate loop-dominator-and-switch-default case whose frontend CFG is malformed;
+            // keeping its loop yields invalid SPIR-V, so leave that path unchanged (its own bug
+            // is fixed elsewhere). Keeping a loop is always correct, so this only ever adds
+            // keeps, never removals.
+            if (!has_nested_switch) {
                 var ac_to_base_dl = std.AutoHashMapUnmanaged(u32, u32).empty;
                 defer ac_to_base_dl.deinit(alloc);
                 in_loop2 = false;
