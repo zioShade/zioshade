@@ -42,6 +42,15 @@ const KNOWN_UNSUPPORTED = [_][]const u8{
     "tests/spirv-cross/shader-clock.frag",
     "tests/spirv-cross/shader_ballot.comp",
     "tests/spirv-cross/struct-material.frag",
+    // Deliberate honest-errors (documented in docs/IMPLEMENTATION_STATUS.md 3.6, with
+    // regression tests in tests/correctness_tests.zig). ubo_layout shares one struct type
+    // across two UBOs with conflicting row/column-major matrix layout (a single SPIR-V
+    // struct type can carry only one), #521. loop-dominator-and-switch-default has a
+    // `continue` in a switch-default containing a nested loop inside an outer loop, which
+    // the frontend cannot structurize (it emitted a dangling branch); both fail loud rather
+    // than emit a silent-wrong translation.
+    "tests/spirv-cross/ubo_layout.frag",
+    "tests/spirv-cross/loop-dominator-and-switch-default.frag",
 };
 
 fn isKnownUnsupported(path: []const u8) bool {
