@@ -57,39 +57,53 @@ bash tools/compute_diff.sh > "$TMP/comp" 2>/dev/null || true
 
 # ---- tallies ----
 # FRAGMENT: MATCH | EDGE(fast-math-fp) | DIFFER(frontend=MISCOMPILE) | skip-*
+# NOTE: skip-zioshade-compile means zioshade DELIBERATELY refused (honest-error) -- an
+# unsupported construct it declines to miscompile. We count it in its OWN column, distinct
+# from reference-unbuildable/harness-unfeedable skips, so a regression that "goes green" by
+# honest-erroring MORE shaders is visible rather than hidden in the skip bucket. (devil's rider)
 f_match=$(grep -c ': MATCH$' "$TMP/frag" || true)
 f_edge=$(grep -c 'EDGE(fast-math-fp' "$TMP/frag" || true)
 f_bug=$(grep -c 'frontend=MISCOMPILE' "$TMP/frag" || true)
-f_skip=$(grep -c ': skip-' "$TMP/frag" || true)
+f_herr=$(grep -c ': skip-zioshade-compile$' "$TMP/frag" || true)
+f_skip=$(( $(grep -c ': skip-' "$TMP/frag" || true) - f_herr ))
 # FRAGMENT real-world corpus (hand-written, not SPIRV-Cross's test suite)
 rw_match=$(grep -c ': MATCH$' "$TMP/fragrw" || true)
 rw_edge=$(grep -c 'EDGE(fast-math-fp' "$TMP/fragrw" || true)
 rw_bug=$(grep -c 'frontend=MISCOMPILE' "$TMP/fragrw" || true)
-rw_skip=$(grep -c ': skip-' "$TMP/fragrw" || true)
+rw_herr=$(grep -c ': skip-zioshade-compile$' "$TMP/fragrw" || true)
+rw_skip=$(( $(grep -c ': skip-' "$TMP/fragrw" || true) - rw_herr ))
 # VERTEX: MATCH(covered) | MATCH(trivial-zero) | DIFFER(...) | skip-*
 v_match=$(grep -c 'MATCH(covered)' "$TMP/vert" || true)
 v_triv=$(grep -c 'MATCH(trivial-zero)' "$TMP/vert" || true)
 v_bug=$(grep -c ': DIFFER(' "$TMP/vert" || true)
-v_skip=$(grep -c ': skip-' "$TMP/vert" || true)
+v_herr=$(grep -c ': skip-zioshade-compile$' "$TMP/vert" || true)
+v_skip=$(( $(grep -c ': skip-' "$TMP/vert" || true) - v_herr ))
 # COMPUTE: MATCH | DIFFER | ERR-*
 c_match=$(grep -cE '[[:space:]]MATCH[[:space:]]' "$TMP/comp" || true)
 c_bug=$(grep -cE '[[:space:]]DIFFER[[:space:]]' "$TMP/comp" || true)
 c_err=$(grep -cE 'ERR-' "$TMP/comp" || true)
 
 [ "${PROVE_FULL:-0}" = 1 ] && fragnote="full corpus" || fragnote="1/25 sample + regression set"
-printf "%-14s %8s %8s %10s %8s\n" "stage" "verified" "benign" "diverge" "skipped"
+printf "%-14s %8s %8s %10s %10s %8s\n" "stage" "verified" "benign" "diverge" "honest-err" "skipped"
 hr
-printf "%-14s %8s %8s %10s %8s   (%s)\n" "fragment" "$f_match" "$f_edge" "$f_bug" "$f_skip" "$fragnote"
-printf "%-14s %8s %8s %10s %8s   (%s)\n" "frag/realworld" "$rw_match" "$rw_edge" "$rw_bug" "$rw_skip" "hand-written, full"
-printf "%-14s %8s %8s %10s %8s\n" "vertex" "$v_match" "$v_triv" "$v_bug" "$v_skip"
-printf "%-14s %8s %8s %10s %8s\n" "compute" "$c_match" "-" "$c_bug" "$c_err"
+printf "%-14s %8s %8s %10s %10s %8s   (%s)\n" "fragment" "$f_match" "$f_edge" "$f_bug" "$f_herr" "$f_skip" "$fragnote"
+printf "%-14s %8s %8s %10s %10s %8s   (%s)\n" "frag/realworld" "$rw_match" "$rw_edge" "$rw_bug" "$rw_herr" "$rw_skip" "hand-written, full"
+printf "%-14s %8s %8s %10s %10s %8s\n" "vertex" "$v_match" "$v_triv" "$v_bug" "$v_herr" "$v_skip"
+printf "%-14s %8s %8s %10s %10s %8s\n" "compute" "$c_match" "-" "$c_bug" "-" "$c_err"
 hr
 bugs=$(( f_bug + rw_bug + v_bug + c_bug ))
 verified=$(( f_match + rw_match + v_match + c_match ))
+herr=$(( f_herr + rw_herr + v_herr ))
 echo "verified (rendered/executed identical to reference): $verified"
 echo "divergences (real miscompiles):                       $bugs"
 echo "benign (precise-fp-clean / trivial-zero):             $(( f_edge + rw_edge + v_triv ))"
+echo "honest-errors (deliberate refusals, never emitted):   $herr"
 echo
+if [ "$herr" -ne 0 ]; then
+  echo "honest-errored shaders (zioshade declined rather than risk a wrong translation):"
+  grep -H ': skip-zioshade-compile$' "$TMP/frag" "$TMP/fragrw" "$TMP/vert" 2>/dev/null | sed 's/^/  /'
+  echo
+fi
 
 if [ "$bugs" -ne 0 ]; then
   echo "RESULT: FAIL -- $bugs divergence(s) found:"

@@ -459,6 +459,34 @@ test "conflicting matrix layout on a shared struct type honest-errors, not silen
     alloc.free(spv);
 }
 
+// A `continue` inside a switch-default that itself contains a nested while-loop, all inside
+// an outer for-loop, made the frontend emit a control-flow instruction targeting id 0 (a
+// dangling continue label it could not resolve) = invalid SPIR-V. deadLoopElim could then
+// delete the whole malformed loop, turning a loud invalid into a silent-wrong render. The
+// hasMalformedCFG gate on the raw frontend output catches the dangling target and fails loud.
+test "a dangling continue target in a nested loop/switch honest-errors, not silent-wrong" {
+    const alloc = std.testing.allocator;
+    const pathological =
+        \\#version 310 es
+        \\precision highp float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\  vec4 f4;
+        \\  int c = int(f4.x);
+        \\  for (int j = 0; j < c; j++) {
+        \\    switch (c) {
+        \\      case 0: f4.y = 0.0; break;
+        \\      case 1: f4.y = 1.0; break;
+        \\      default: { int i = 0; while (i++ < c) { f4.y += 0.5; } continue; }
+        \\    }
+        \\    f4.y += 0.5;
+        \\  }
+        \\  fragColor = f4;
+        \\}
+    ;
+    try std.testing.expectError(error.CodegenFailed, zioshade.compileToSPIRV(alloc, pathological, .{ .stage = .fragment }));
+}
+
 // A loop-carried struct variable (`pt = spawn(uv); for(...) pt = update(pt, dt);`) must
 // reload `pt` each iteration, not reuse the pre-loop value. The store-forward cache kept
 // pt's pointer -> the spawn result across the loop header (unssaAllScopes only spilled

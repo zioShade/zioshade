@@ -58,6 +58,54 @@ pub fn generateNoOpt(
     return generateInternal(alloc, module, stage, spirv_version, glsl_version, is_essl, default_layout, true);
 }
 
+/// True if the module has a malformed control-flow graph: a basic block with no terminator,
+/// OR a branch/merge instruction that targets id 0 (a dangling label the frontend failed to
+/// resolve). Either makes the SPIR-V invalid. A block runs from an OpLabel to its terminator;
+/// hitting the next OpLabel or OpFunctionEnd while still "in" a block means it was never
+/// terminated. A 0 in a branch/merge target slot is a dangling reference (spirv-val: "Id is 0").
+fn hasMalformedCFG(words: []const u32) bool {
+    if (words.len < 5) return false;
+    var pos: usize = 5;
+    var in_block = false;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) return true; // zero-length instruction = corrupt stream
+        const op: u16 = @truncate(words[pos] & 0xFFFF);
+        switch (op) {
+            248 => { // OpLabel -- starts a block
+                if (in_block) return true;
+                in_block = true;
+            },
+            249 => { // OpBranch target
+                if (wc < 2 or words[pos + 1] == 0) return true;
+                in_block = false;
+            },
+            250 => { // OpBranchConditional cond true false
+                if (wc < 4 or words[pos + 2] == 0 or words[pos + 3] == 0) return true;
+                in_block = false;
+            },
+            251 => { // OpSwitch selector default [literal target]...
+                if (wc < 3 or words[pos + 2] == 0) return true;
+                var i: usize = pos + 3;
+                while (i + 1 < pos + wc) : (i += 2) if (words[i + 1] == 0) return true;
+                in_block = false;
+            },
+            // Block terminators with no id operands: Kill, Return, ReturnValue, Unreachable,
+            // IgnoreIntersectionKHR (4414), TerminateRayKHR (4415), TerminateInvocation (4416),
+            // EmitMeshTasksEXT (5294). This is the complete SPIR-V terminator set that carries
+            // no branch target -- omitting a valid one (e.g. the mesh/ray terminators) would make
+            // a well-formed final block look "unterminated" and false-positive the honest-error.
+            252, 253, 254, 255, 4414, 4415, 4416, 5294 => in_block = false,
+            246 => if (wc < 3 or words[pos + 1] == 0 or words[pos + 2] == 0) return true, // OpLoopMerge merge continue
+            247 => if (wc < 2 or words[pos + 1] == 0) return true, // OpSelectionMerge merge
+            56 => if (in_block) return true, // OpFunctionEnd with an open block
+            else => {},
+        }
+        pos += wc;
+    }
+    return in_block;
+}
+
 fn generateInternal(
     alloc: std.mem.Allocator,
     module: *const ir.Module,
@@ -170,6 +218,17 @@ fn generateInternal(
     if (cg.unsupported_conflicting_layout) return error.CodegenFailed;
 
     const raw = try cg.words.toOwnedSlice(alloc);
+    // Honest-error on a malformed CFG: every basic block must end in a terminator. Some
+    // pathological nests (a `continue` inside a switch `default:` that itself contains a
+    // nested loop, inside an outer loop -- the loop-dominator-and-switch-default fixture)
+    // make the frontend emit a block with no terminator = invalid SPIR-V. An optimizer pass
+    // (deadLoopElim) can then delete the malformed loop and hide it, turning a loud invalid
+    // into a silent-wrong render. Catch it here, on the raw frontend output, and fail loud
+    // rather than emit-invalid-or-silently-miscompile.
+    if (hasMalformedCFG(raw)) {
+        alloc.free(raw);
+        return error.CodegenFailed;
+    }
     if (no_opt) return raw;
 
     // NOTE: raw is the unoptimized SPIR-V output. generateNoOpt() returns this directly.
