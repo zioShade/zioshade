@@ -2346,6 +2346,15 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
     }
 
+    // #470: the fragment main0_out below is a SINGLE hardcoded color attachment.
+    // Multi-output fragments -- gl_FragDepth ([[depth(any)]]), MRT (>1 color), or any
+    // other output builtin -- cannot be represented here and previously emitted
+    // silent-wrong / invalid MSL (depth scrambled into the color param, extra colors
+    // dropped). Honest-error instead, per the wedge, until the multi-field main0_out
+    // rework lands. Single-color fragments (the common case) are unaffected.
+    if (is_frag and mslFragmentHasUnsupportedOutput(&module, &decs)) {
+        return error.UnsupportedFragmentOutput;
+    }
     // Output struct for fragment (single hardcoded color attachment).
     if (is_frag) {
         try w.writeAll("struct main0_out\n{\n    float4 _fragColor [[color(0)]];\n};\n\n");
@@ -3158,6 +3167,23 @@ fn perVertexMemberWritten(m: *const ParsedModule, var_id: u32, member_idx: u32) 
         }
     }
     return false;
+}
+
+/// #470: true if a FRAGMENT has an Output the single hardcoded `_fragColor
+/// [[color(0)]]` cannot represent — any output builtin (gl_FragDepth/gl_SampleMask/
+/// gl_FragStencilRef/...) or more than one color attachment (MRT). Such shaders are
+/// honest-errored (the multi-field main0_out rework that would support them is
+/// tracked separately). A single color output returns false (the working common case).
+fn mslFragmentHasUnsupportedOutput(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) bool {
+    var color_count: u32 = 0;
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+        // An output builtin (FragDepth/SampleMask/...) is unrepresentable here.
+        if (builtinOf(decs, inst.words[2]) != null) return true;
+        color_count += 1; // a location color attachment
+    }
+    return color_count > 1;
 }
 
 /// Collect vertex Output variables into `outputs`, ordered to match

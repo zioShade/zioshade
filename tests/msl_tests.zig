@@ -132,6 +132,34 @@ test "#471: glslang gl_PerVertex block promotes gl_PointSize to [[point_size]] (
     try assertContains(msl, "out.gl_PointSize");
 }
 
+// #470: the MSL FRAGMENT output is a hardcoded single `float4 _fragColor [[color(0)]]`
+// (spirv_to_msl.zig). Multi-output fragments -- gl_FragDepth ([[depth(any)]]) and MRT
+// (multiple color attachments) -- cannot be represented and previously emitted
+// SILENT-WRONG / invalid MSL (depth scrambled into the color param, second color
+// dropped). Per the wedge ("honest-error, never plausible-but-wrong"), reject them
+// loudly until the proper multi-field main0_out rework lands (tracked separately).
+// Single-color fragments are unaffected.
+test "#470: MSL fragment writing gl_FragDepth honest-errors (not silent-invalid)" {
+    const spirv = compileToSpirv("fragdepth_out",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(1.0); gl_FragDepth = 0.25; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedFragmentOutput, zioshade.spirvToMSL(alloc, spirv, .{}));
+}
+
+test "#470: MSL multiple color attachments (MRT) honest-error (not silent single-color)" {
+    const spirv = compileToSpirv("mrt_two",
+        \\#version 450
+        \\layout(location=0) out vec4 a;
+        \\layout(location=1) out vec4 b;
+        \\void main(){ a = vec4(1.0); b = vec4(0.5); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedFragmentOutput, zioshade.spirvToMSL(alloc, spirv, .{}));
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
