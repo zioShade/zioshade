@@ -2235,6 +2235,28 @@ test "T31.1: texelFetch maps to Load (int2 coord)" {
     try assertContains(hlsl, "discard");
 }
 
+// #170/#470: texelFetch's explicit LOD (SPIR-V ImageFetch Lod operand) must land
+// in the .z slot of Texture2D.Load's int3, not be hardcoded to 0 (silent wrong-mip).
+// Matches spirv-cross `Load(int3(coord, lod))`.
+test "T31.1b: texelFetch LOD is carried into Load's int3.z, not dropped to 0" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    ivec2 coord = ivec2(gl_FragCoord.xy);
+        \\    fragColor = texelFetch(tex, coord, 3);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "Load(int3(");
+    // LOD 3 must appear in the .z slot ...
+    try assertContains(hlsl, ", 3))");
+    // ... and the level must NOT be silently hardcoded to 0.
+    try assertNotContains(hlsl, ", 0))");
+}
+
 test "T31.2: textureLod maps to SampleLevel" {
     const source =
         \\#version 430

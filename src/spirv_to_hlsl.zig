@@ -5117,14 +5117,22 @@ fn emitInstruction(
             // SPIR-V Image Operands: word[5] has bitmask, Sample = 0x20
             var is_ms_tex = false;
             var sample_idx: []const u8 = "0";
+            // Explicit LOD (image operand bit 0x2). HLSL Texture2D.Load takes the
+            // mip level in the .z slot of its int3 arg; dropping it (hardcoding 0)
+            // silently reads the wrong mip. Value is the first operand after the
+            // mask (Lod outranks Sample; the two are mutually exclusive in practice
+            // — MS textures have no mips). Matches spirv-cross's `Load(int3(uv, lod))`.
+            var lod_val: []const u8 = "0";
             if (inst.words.len > 5) {
                 // Check if word[5] is the Image Operands bitmask (not a result ID)
-                // Sample bit = 0x20
+                // Sample bit = 0x40, Lod bit = 0x2
                 const operands_mask = inst.words[5];
                 if (operands_mask & 0x40 != 0 and inst.words.len > 6) {
                     // Has Sample operand — this is a multisampled fetch
                     is_ms_tex = true;
                     sample_idx = names.get(inst.words[6]) orelse "0";
+                } else if (operands_mask & 0x2 != 0 and inst.words.len > 6) {
+                    lod_val = names.get(inst.words[6]) orelse "0";
                 }
             }
             if (is_buffer_tex) {
@@ -5136,8 +5144,8 @@ fn emitInstruction(
                     rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, sample_idx,
                 });
             } else {
-                try w.print("    {s} {s} = {s}.Load(int3({s}, 0));\n", .{
-                    rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name,
+                try w.print("    {s} {s} = {s}.Load(int3({s}, {s}));\n", .{
+                    rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, lod_val,
                 });
             }
         },
