@@ -102,6 +102,58 @@ fn spirvToHlsl60(spirv: []const u32) ![]const u8 {
     return zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
 }
 
+/// glslang -> spirv-opt -O: produces optimized SSA/phi form (switch-merge phis etc.).
+/// Skips if glslang OR spirv-opt is unavailable.
+fn compileFragOptToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_test_{s}.frag", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_test_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    const tmp_opt = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_test_{s}_opt.spv", .{name});
+    defer alloc.free(tmp_opt);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const spirvopt = zioshade.compat.resolveVulkanTool(alloc, "spirv-opt") catch return error.SkipZigTest;
+    defer alloc.free(spirvopt);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const r1 = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(r1.stdout);
+    defer alloc.free(r1.stderr);
+    if ((r1.term.exitedCode() orelse 1) != 0) return error.SkipZigTest;
+    const r2 = zioshade.compat.processRun(main_io.io(), alloc, &.{ spirvopt, "-O", tmp_spv, "-o", tmp_opt }) catch return error.SkipZigTest;
+    defer alloc.free(r2.stdout);
+    defer alloc.free(r2.stderr);
+    if ((r2.term.exitedCode() orelse 1) != 0) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_opt, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+// #477: a switch-merge OpPhi (after spirv-opt -O mem2reg) was aliased to one fixed
+// incoming -> a switch always yielded one case's value regardless of the selector. Now
+// materialized as a `_phi` var with one assignment per case. (HLSL; MSL/GLSL/WGSL follow.)
+test "#477: HLSL switch-merge phi materialized per-case (not aliased to one)" {
+    const spirv = compileFragOptToSpirv("swphi",
+        \\#version 450
+        \\layout(location=0) flat in int mode;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ vec3 color; switch(mode){ case 0: color=vec3(1,0,0); break; case 1: color=vec3(0,1,0); break; default: color=vec3(0,0,1); break; } o=vec4(color,1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    // A _phi var materialized, with per-case assignments (not one fixed value).
+    try assertContains(hlsl, "_phi");
+    try assertContains(hlsl, "switch (");
+    // Each case's color must appear as a _phi assignment (not just one).
+    try assertContains(hlsl, "_phi = float3(1.0, 0.0, 0.0)");
+    try assertContains(hlsl, "_phi = float3(0.0, 1.0, 0.0)");
+}
+
 /// Assemble SPIR-V from textual assembly via spirv-as (skips if absent). Needed for
 /// opcodes glslang doesn't emit, e.g. OpExecutionMode LocalSizeId.
 fn assembleSpirv(name: []const u8, asm_src: [:0]const u8) ![]u32 {

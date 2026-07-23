@@ -204,6 +204,50 @@ fn finalizeMergePhisHLSL(names: *std.AutoHashMap(u32, []const u8), mphis: []cons
     }
 }
 
+// #477: SWITCH-merge phi materialization. An OpSwitch with a merge block can carry N-
+// incoming OpPhis (one per case) — the 2-incoming selection-phi machinery above doesn't
+// fit. Instead: declare a `_phi` var per phi before the switch, and at the end of each
+// case body assign the incoming whose predecessor is that case's label. Separate code
+// path (the if/else machinery is untouched). Handles the common single-block-per-case
+// shape that spirv-opt -O produces; multi-block cases (phi pred != case entry) are a
+// follow-up.
+fn collectSwitchMergePhisHLSL(module: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), ml: u32, list: *std.ArrayList(Instruction), alloc: std.mem.Allocator) void {
+    const midx = label_map.get(ml) orelse return;
+    var pj: usize = midx + 1;
+    while (pj < module.instructions.len) : (pj += 1) {
+        const minst = module.instructions[pj];
+        if (minst.op != .Phi) break;
+        list.append(alloc, minst) catch {};
+    }
+}
+fn emitSwitchPhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    for (phis) |phi| {
+        const t = hlslType(module, phi.words[1], names, alloc) catch "float";
+        const vn = names.get(phi.words[2]) orelse "pv";
+        try w.print("    {s} {s}_phi;\n", .{ t, vn }); // all cases assign, so uninitialized
+    }
+}
+fn emitSwitchPhiCaseCopyHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, case_label: u32, w: anytype, alloc: std.mem.Allocator) !void {
+    for (phis) |phi| {
+        const vn = names.get(phi.words[2]) orelse "pv";
+        var pi: usize = 3;
+        while (pi + 1 < phi.words.len) : (pi += 2) {
+            if (phi.words[pi + 1] == case_label) {
+                try w.print("        {s}_phi = {s};\n", .{ vn, hlslExprName(module, names, phi.words[pi], alloc) });
+                break;
+            }
+        }
+    }
+}
+fn finalizeSwitchPhisHLSL(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
+    for (phis) |phi| {
+        const vn = names.get(phi.words[2]) orelse "pv";
+        const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+        if (names.fetchPut(phi.words[2], pn) catch null) |old| alloc.free(old.value);
+        if (g_materialized_phis) |mp| mp.put(phi.words[2], {}) catch {};
+    }
+}
+
 const Instruction = struct {
     op: spirv.Op,
     words: []const u32,
@@ -3554,6 +3598,12 @@ fn emitBody(
             const selector_name = names.get(selector_id) orelse "s";
 
             if (merge_label) |ml| {
+                // #477: materialize switch-merge phis (N incoming) as `_phi` vars — one
+                // assignment per case — so the value reflects the case actually taken.
+                var sphis: std.ArrayList(Instruction) = .empty;
+                defer sphis.deinit(alloc);
+                collectSwitchMergePhisHLSL(module, &label_map, ml, &sphis, alloc);
+                try emitSwitchPhiDeclsHLSL(module, names, sphis.items, w, alloc);
                 try w.print("    switch ({s}) {{\n", .{selector_name});
                 // Brace each case body: a case that declares a variable makes the
                 // NEXT label's jump cross that declaration, which HLSL/DXC rejects
@@ -3570,6 +3620,7 @@ fn emitBody(
                 if (default_label != ml) {
                     try w.writeAll("    default: {\n");
                     _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, default_label, w, alloc);
                     try w.writeAll("    break;\n    }\n");
                 }
                 // Emit case labels (word 3+: pairs of literal, target)
@@ -3580,9 +3631,11 @@ fn emitBody(
                     if (target_label == ml) continue; // skip branches to merge
                     try w.print("    case {d}: {{\n", .{case_val});
                     _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
                     try w.writeAll("    break;\n    }\n");
                 }
                 try w.writeAll("    }\n");
+                finalizeSwitchPhisHLSL(names, sphis.items, alloc);
                 // Advance to merge label
                 if (label_map.get(ml)) |merge_idx| {
                     idx = merge_idx;
