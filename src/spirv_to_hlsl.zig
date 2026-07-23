@@ -5466,7 +5466,13 @@ fn emitInstruction(
                 }
                 try w.print("    int3 {s} = int3({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, result_name });
             } else {
-                try w.print("    uint {s}_w, {s}_h; {s}.GetDimensions({s}_w, {s}_h);\n", .{ result_name, result_name, tex_name, result_name, result_name });
+                // #475: non-arrayed Texture2DMS (rank 2) needs the sampleCount out-param
+                // (the 2-arg GetDimensions is invalid for MS textures -> DXC error).
+                if (imageValueIsMultisampled(module, inst.words[3])) {
+                    try w.print("    uint {s}_w, {s}_h, {s}_samples; {s}.GetDimensions({s}_w, {s}_h, {s}_samples);\n", .{ result_name, result_name, result_name, tex_name, result_name, result_name, result_name });
+                } else {
+                    try w.print("    uint {s}_w, {s}_h; {s}.GetDimensions({s}_w, {s}_h);\n", .{ result_name, result_name, tex_name, result_name, result_name });
+                }
                 try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
             }
         },
