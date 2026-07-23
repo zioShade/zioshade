@@ -6647,7 +6647,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                         try declared_local_names.put(try arena.dupe(u8, vn), {});
                         try writeInd(w, indent);
-                        try w.print("var {s}: {s};\n", .{ vn, rt });
+                        // #476: OpVariable Function with an Initializer operand (word[4]) —
+                        // emit it, else the local reads zero before any store (silent-wrong).
+                        const finit: ?[]const u8 = if (inst.words.len >= 5) names.get(inst.words[4]) else null;
+                        if (finit) |in| {
+                            try w.print("var {s}: {s} = {s};\n", .{ vn, rt, in });
+                        } else {
+                            try w.print("var {s}: {s};\n", .{ vn, rt });
+                        }
                     } else if (sc == .Private) {
                         const rt = try wgslType(module, inst.words[1], names, arena);
                         const vn = names.get(inst.words[2]) orelse "v";

@@ -3409,6 +3409,14 @@ fn emitInstruction(
             const ri = inst.words[2];
             const tn = try glslType(m, inst.words[1], names, alloc);
             const arr_suffix = try getArraySuffix(m, inst.words[1]);
+            // #476: OpVariable Function with an Initializer operand (word[4]) — emit it,
+            // else the local reads zero/garbage before any store (silent-wrong). Mirrors HLSL.
+            if (inst.words.len >= 5) {
+                if (names.get(inst.words[4])) |in| {
+                    try w.print("    {s} {s}{s} = {s};\n", .{ tn, names.get(ri) orelse "var", arr_suffix, in });
+                    return;
+                }
+            }
             try w.print("    {s} {s}{s};\n", .{ tn, names.get(ri) orelse "var", arr_suffix });
         },
         .Load => {
