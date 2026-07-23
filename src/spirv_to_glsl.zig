@@ -2337,6 +2337,44 @@ fn emitFunction(
     try w.writeAll("}\n");
 }
 
+// #477: SWITCH-merge phi materialization (N incoming). Mirrors HLSL/MSL — declare a
+// `_phi` var per phi before the switch, assign the matching incoming at each case end.
+fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), ml: u32, list: *std.ArrayList(Instruction), alloc: std.mem.Allocator) void {
+    const midx = label_map.get(ml) orelse return;
+    var pj: usize = midx + 1;
+    while (pj < m.instructions.len) : (pj += 1) {
+        const minst = m.instructions[pj];
+        if (minst.op != .Phi) break;
+        list.append(alloc, minst) catch {};
+    }
+}
+fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    for (phis) |phi| {
+        const t = try glslType(m, phi.words[1], names, alloc);
+        const vn = names.get(phi.words[2]) orelse "pv";
+        try w.print("    {s} {s}_phi;\n", .{ t, vn });
+    }
+}
+fn emitSwitchPhiCaseCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, case_label: u32, w: anytype, alloc: std.mem.Allocator) !void {
+    for (phis) |phi| {
+        const vn = names.get(phi.words[2]) orelse "pv";
+        var pi: usize = 3;
+        while (pi + 1 < phi.words.len) : (pi += 2) {
+            if (phi.words[pi + 1] == case_label) {
+                try w.print("        {s}_phi = {s};\n", .{ vn, exprName(m, names, phi.words[pi], alloc) });
+                break;
+            }
+        }
+    }
+}
+fn finalizeSwitchPhis(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
+    for (phis) |phi| {
+        const vn = names.get(phi.words[2]) orelse "pv";
+        const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+        if (names.fetchPut(phi.words[2], pn) catch null) |old| alloc.free(old.value);
+    }
+}
+
 fn emitBody(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -2580,10 +2618,17 @@ fn emitBody(
             const dl = inst.words[2];
             const ml = bc_merge.get(idx);
             if (ml) |mval| {
+                // #477: materialize switch-merge phis (N incoming) as `_phi` vars.
+                var sphis: std.ArrayList(Instruction) = .empty;
+                defer sphis.deinit(alloc);
+                collectSwitchMergePhis(m, &label_map, mval, &sphis, alloc);
+                try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                 try w.print("    switch ({s}) {{\n", .{sn});
                 if (dl != mval) {
                     try w.writeAll("    default:\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                    try w.writeAll("    break;\n");
                 }
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -2591,9 +2636,12 @@ fn emitBody(
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
                     try w.print("    case {d}:\n", .{cv});
-                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", true);
+                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
+                    try w.writeAll("    break;\n");
                 }
                 try w.writeAll("    }\n");
+                finalizeSwitchPhis(names, sphis.items, alloc);
                 if (label_map.get(mval)) |mi| {
                     idx = mi;
                 }
