@@ -58,6 +58,28 @@ fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     return words;
 }
 
+/// Compute (.comp) GLSL → SPIR-V via glslang (skips if absent).
+fn compileCompToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "glsl_test_{s}.comp", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "glsl_test_{s}_comp.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
 /// Validate emitted GLSL by compiling it with glslangValidator; skip if the tool
 /// is unavailable (keeps `zig build test` hermetic). Fails if glslang rejects it.
 fn glslValidateOrSkip(name: []const u8, glsl_src: []const u8) !void {
@@ -94,6 +116,25 @@ test "#472-audit: RowMajor UBO matrix emits layout(row_major), not transposed" {
     defer alloc.free(glsl);
     try assertContains(glsl, "layout(row_major)");
     try glslValidateOrSkip("rowmajor_ubo", glsl);
+}
+
+// #475: Workgroup (shared) memory. GLSL REQUIRES `shared` at GLOBAL scope (function-scope
+// `shared` is illegal); zioshade emitted it inside main() AND scanned the wrong range
+// (missed module-scope vars) AND dropped the array suffix. Must emit `shared T name[N];`
+// at global scope.
+test "#475: GLSL shared memory declared at global scope with array suffix" {
+    const spirv = compileCompToSpirv("workgroup_glsl",
+        \\#version 450
+        \\layout(local_size_x=64) in;
+        \\layout(std430, binding=0) buffer O { float data[]; };
+        \\shared float s[64];
+        \\void main(){ uint i=gl_LocalInvocationID.x; s[i]=float(gl_GlobalInvocationID.x); barrier(); data[gl_GlobalInvocationID.x]=s[(i+1u)%64u]; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "shared float s[64];");
+    // (Manually glslang-validated -S comp: rc=0; glslValidateOrSkip hardcodes -S frag.)
 }
 
 // #474: coarse/fine derivatives (OpDPdxCoarse/Fine etc.) must keep their precision --

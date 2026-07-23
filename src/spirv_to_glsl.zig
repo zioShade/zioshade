@@ -2194,6 +2194,24 @@ fn emitFunction(
         }
     }
 
+    // #475: Workgroup (shared) variables are MODULE-scope OpVariables; GLSL REQUIRES
+    // `shared` at global scope (function-scope `shared` is a GLSL error). Emit them here,
+    // before the entry signature, scanning the whole module (the old in-body scan at
+    // func_idx+1 both missed module-scope vars and placed them illegally).
+    if (is_entry and m.execution_model == .GLCompute) {
+        for (m.instructions) |inst| {
+            if (inst.op == .Variable and inst.words.len >= 4) {
+                if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) == .Workgroup) {
+                    const ri = inst.words[2];
+                    const tn = try glslType(m, inst.words[1], names, alloc);
+                    const arr = try getArraySuffix(m, inst.words[1]);
+                    try w.print("shared {s} {s}{s};\n", .{ tn, names.get(ri) orelse "shared_var", arr });
+                }
+            }
+        }
+        try w.writeAll("\n");
+    }
+
     try w.print("{s} {s}(", .{ rt, func_name });
 
     for (param_ids.items, 0..) |pid, i| {
@@ -2272,23 +2290,6 @@ fn emitFunction(
     }
 
     try w.writeAll(")\n{\n");
-
-    // For compute shaders: emit shared variable declarations
-    if (is_entry and m.execution_model == .GLCompute) {
-        var si = func_idx + 1;
-        while (si < m.instructions.len) : (si += 1) {
-            const inst = m.instructions[si];
-            if (inst.op == .FunctionEnd) break;
-            if (inst.op == .Variable and inst.words.len >= 4) {
-                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-                if (sc == .Workgroup) {
-                    const ri = inst.words[2];
-                    const tn = try glslType(m, inst.words[1], names, alloc);
-                    try w.print("    shared {s} {s};\n", .{ tn, names.get(ri) orelse "shared_var" });
-                }
-            }
-        }
-    }
 
     try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id);
     try w.writeAll("}\n");

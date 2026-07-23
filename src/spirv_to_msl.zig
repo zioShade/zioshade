@@ -4222,17 +4222,18 @@ fn emitFunction(
             }
         }
 
-        // Emit workgroup (shared) variables
-        var idx = func_idx + 1;
-        while (idx < m.instructions.len) : (idx += 1) {
-            const inst = m.instructions[idx];
-            if (inst.op == .FunctionEnd) break;
+        // Emit workgroup (shared) variables. These are MODULE-scope OpVariables (per
+        // SPIR-V spec), so scan the whole module — not func_idx+1…FunctionEnd (which is
+        // the function body and misses them -> undeclared identifier). Metal permits
+        // function-scope threadgroup, so placement here (inside the impl) is valid. (#475)
+        for (m.instructions) |inst| {
             if (inst.op == .Variable and inst.words.len >= 4) {
                 const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                 if (sc == .Workgroup) {
                     const ri = inst.words[2];
                     const tn = try mslType(m, inst.words[1], names, alloc);
-                    try w.print("    threadgroup {s} {s};\n", .{ tn, names.get(ri) orelse "shared_var" });
+                    const arr = try mslGetArraySuffix(m, inst.words[1]);
+                    try w.print("    threadgroup {s} {s}{s};\n", .{ tn, names.get(ri) orelse "shared_var", arr });
                 }
             }
         }
