@@ -102,6 +102,56 @@ fn spirvToHlsl60(spirv: []const u32) ![]const u8 {
     return zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
 }
 
+/// Assemble SPIR-V from textual assembly via spirv-as (skips if absent). Needed for
+/// opcodes glslang doesn't emit, e.g. OpExecutionMode LocalSizeId.
+fn assembleSpirv(name: []const u8, asm_src: [:0]const u8) ![]u32 {
+    const tmp_asm = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_asm_{s}.spvasm", .{name});
+    defer alloc.free(tmp_asm);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "hlsl_asm_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_asm, std.mem.sliceTo(asm_src, 0));
+    const spirv_as = zioshade.compat.resolveVulkanTool(alloc, "spirv-as") catch return error.SkipZigTest;
+    defer alloc.free(spirv_as);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ spirv_as, tmp_asm, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+// #475: OpExecutionMode LocalSizeId (spec-constant workgroup size, SPIR-V value 38).
+// Operands are OpSpecConstant result IDs; resolve each to its default so [numthreads]
+// gets the specialized size (was staying (1,1,1) = silent-wrong). glslang resolves to
+// plain LocalSize, so this needs hand-assembled SPIR-V.
+test "#475: LocalSizeId resolves spec-constant defaults to numthreads" {
+    const spirv = assembleSpirv("localsizeid",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main"
+        \\OpExecutionMode %main LocalSizeId %x %y %z
+        \\%void = OpTypeVoid
+        \\%func = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%x = OpSpecConstant %uint 8
+        \\%y = OpSpecConstant %uint 4
+        \\%z = OpSpecConstant %uint 2
+        \\%main = OpFunction %void None %func
+        \\%lbl = OpLabel
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "[numthreads(8, 4, 2)]");
+}
+
 // ---------------------------------------------------------------------------
 // #471: gl_PerVertex interface-block vertex outputs (external glslang/shaderc form).
 // glslang wraps gl_Position et al. in a member-decorated Block written via

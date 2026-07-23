@@ -100,6 +100,19 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
                     inst.words[5],
                 };
             }
+            // #475: LocalSizeId (spec-constant workgroup size) — operands are the
+            // RESULT IDs of OpSpecConstant integers, not literals. Resolve each to its
+            // default value (OpSpecConstant layout: [op, type, result, value...]) so
+            // the backends emit the specialized (default) @workgroup_size / [numthreads] /
+            // local_size. Without this, module.local_size stayed (1,1,1) and the shader
+            // dispatched a 1x1x1 workgroup instead of the intended size (silent-wrong).
+            if (mode == .LocalSizeId and inst.words.len >= 6) {
+                module.local_size = .{
+                    specConstantDefault(&module, inst.words[3], 1),
+                    specConstantDefault(&module, inst.words[4], 1),
+                    specConstantDefault(&module, inst.words[5], 1),
+                };
+            }
             // Mesh shader execution modes
             if (mode == .OutputTrianglesEXT) {
                 module.mesh_topology = .triangles;
@@ -373,6 +386,16 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     const idx = if (id < module.id_defs.len) module.id_defs[id] orelse return null else return null;
     if (idx >= module.instructions.len) return null;
     return module.instructions[idx];
+}
+
+/// The default value of an integer OpSpecConstant `id` (its literal word[3]), used to
+/// resolve LocalSizeId operands to concrete workgroup dimensions. Falls back to
+/// `fallback` if `id` is not an OpSpecConstant (shouldn't happen for valid SPIR-V).
+/// (#475)
+pub fn specConstantDefault(module: *const ParsedModule, id: u32, fallback: u32) u32 {
+    const def = getDef(module, id) orelse return fallback;
+    if (def.op != .SpecConstant or def.words.len <= 3) return fallback;
+    return def.words[3];
 }
 
 /// True if a struct type carries `Block` or `BufferBlock` — a UBO/SSBO interface
