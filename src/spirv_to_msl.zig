@@ -2506,6 +2506,17 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // collectStageInputs and stay on their builtin path. The attribute spelling
     // is stage-gated: fragment → `[[user(locnN)]]`, vertex → `[[attribute(N)]]`.
     if ((is_frag or is_vertex) and stage_inputs.items.len > 0) {
+        // A stage-in field can be struct-typed (a nested interface-block member, e.g.
+        // Foo). main0_in is emitted BEFORE the full struct decls, so emit those struct
+        // types fully here (recursively, deduped via emitted_names_msl so the later
+        // local-struct pass skips them) to avoid "unknown type name".
+        for (stage_inputs.items) |si| {
+            if (getDef(&module, si.type_id)) |t| {
+                if (t.op == .TypeStruct) {
+                    mslEmitOneStructForwardDecl(&module, &names, si.type_id, w, aa, &emitted_structs, &emitted_names_msl) catch {};
+                }
+            }
+        }
         try w.writeAll("struct main0_in\n{\n");
         for (stage_inputs.items) |si| {
             const tn = try mslType(&module, si.type_id, &names, aa);
@@ -3340,6 +3351,21 @@ fn mslSanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
     return name;
 }
 
+/// Number of location slots a type consumes in a flattened stage-in (for computing
+/// per-member locations of an interface block). A scalar/vector is 1 slot; a struct is
+/// the sum of its members' slots (recursive). (multiple-struct-flattening: a Foo{vec4,vec4}
+/// member occupies 2 locations, so the next member starts at +2, not +1.)
+fn typeLocFootprint(m: *const ParsedModule, type_id: u32) u32 {
+    const t = getDef(m, type_id) orelse return 1;
+    if (t.op == .TypeStruct) {
+        var sum: u32 = 0;
+        var i: usize = 2;
+        while (i < t.words.len) : (i += 1) sum += typeLocFootprint(m, t.words[i]);
+        return sum;
+    }
+    return 1;
+}
+
 fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), inputs: *std.ArrayList(StageInputDecl), block_flat: *std.AutoHashMap(u64, []const u8), alloc: std.mem.Allocator) void {
     // #475: MSL interpolation attribute appended to the fragment stage-in `[[user(locnN)]]`.
     // Flat-on-FLOAT needs `[[flat]]` (Metal auto-flats only INTEGERS — so glslang's Flat
@@ -3381,13 +3407,14 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
             const inst_name = names.get(rid) orelse "vin";
             const nmembers: u32 = @intCast(pti.words.len - 2);
             var mi: u32 = 0;
+            var offset = loc; // cumulative location: a struct-typed member occupies its footprint
             while (mi < nmembers) : (mi += 1) {
                 const mtype = pti.words[mi + 2];
                 var nbuf: [32]u8 = undefined;
                 const mname = getMemberName(m, pt, mi, &nbuf);
                 const flat = std.fmt.allocPrint(alloc, "{s}_{s}", .{ inst_name, mname }) catch continue;
                 const safe_flat = mslSanitizeName(alloc, flat) catch flat;
-                const mloc = memberDecVal(m, pt, mi, .location) orelse (loc + mi);
+                const mloc = memberDecVal(m, pt, mi, .location) orelse offset;
                 const memb_interp: []const u8 = blk: {
                     if (memberHasDec(m, pt, mi, .flat) and !mslElementIsInt(m, mtype)) break :blk ", flat";
                     if (memberHasDec(m, pt, mi, .no_perspective)) break :blk ", center_no_perspective";
@@ -3395,6 +3422,7 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
                 };
                 inputs.append(alloc, .{ .var_id = rid, .name = safe_flat, .type_id = mtype, .location = mloc, .interp = memb_interp }) catch {};
                 block_flat.put(blockFlatKey(rid, mi), safe_flat) catch {};
+                offset = mloc + typeLocFootprint(m, mtype);
             }
             continue;
         }
