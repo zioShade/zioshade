@@ -3933,6 +3933,30 @@ fn std450ToMsl(val: u32) ?[]const u8 {
 
 // ---- Function emission (MSL dialect) ----
 
+/// Render a scalar OpConstant / OpSpecConstant / bool-constant id as an MSL literal
+/// (float via {d}; signed int sign-corrected via @bitCast). Falls back to the
+/// constant's already-declared module name, then "0". Used to initialize the
+/// per-invocation local copy of a mutable module-scope (Private) global.
+fn mslConstLiteral(m: *const ParsedModule, const_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+    const c = getDef(m, const_id) orelse return "0";
+    if (c.op == .ConstantTrue) return "true";
+    if (c.op == .ConstantFalse) return "false";
+    if (c.op == .Constant and c.words.len >= 4) {
+        const ty = getDef(m, c.words[1]) orelse return "0";
+        const lit = c.words[3];
+        if (ty.op == .TypeFloat) {
+            const fv: f32 = @bitCast(lit);
+            return std.fmt.allocPrint(alloc, "{d}", .{fv});
+        }
+        if (ty.op == .TypeInt and ty.words.len >= 4 and ty.words[3] == 1) {
+            const iv: i32 = @bitCast(lit);
+            return std.fmt.allocPrint(alloc, "{d}", .{iv});
+        }
+        return std.fmt.allocPrint(alloc, "{d}", .{lit});
+    }
+    return names.get(const_id) orelse "0";
+}
+
 fn emitFunction(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -4106,6 +4130,45 @@ fn emitFunction(
         }
 
         try w.writeAll(")\n{\n");
+        // Mutable module-scope (Private) globals with a scalar initializer: Metal
+        // forbids file-scope mutable vars (constant address space only), but these
+        // are per-invocation and zioshade inlines every call into this one impl
+        // body, so declare each as a LOCAL here, initialized to its SPIR-V default.
+        // The body's bare references then resolve to it. Only MUTATED scalars:
+        // read-only const globals are already module-promoted/aliased (re-declaring
+        // would be a redefinition), and arrays are #173-honest-errored.
+        for (m.instructions) |ginst| {
+            if (ginst.op != .Variable or ginst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(ginst.words[3])) != .Private) continue;
+            const gptr = getDef(m, ginst.words[1]) orelse continue;
+            if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
+            const gpt = gptr.words[3];
+            const gpti = getDef(m, gpt) orelse continue;
+            if (gpti.op != .TypeFloat and gpti.op != .TypeInt and gpti.op != .TypeBool) continue;
+            const gvar = ginst.words[2];
+            var mutated = false;
+            for (m.instructions) |u| {
+                // OpStore has no result type/id: word layout is [op, pointer, object],
+                // so the pointer is words[1] (unlike Load/AccessChain where it's words[3]).
+                if (u.op == .Store and u.words.len >= 3 and pointerRootsAt(m, u.words[1], gvar)) {
+                    mutated = true;
+                    break;
+                }
+            }
+            if (!mutated) continue;
+            const gname = names.get(gvar) orelse continue;
+            const gtn = mslType(m, gpt, names, alloc) catch continue;
+            if (ginst.words.len >= 5) {
+                // Initializer operand present (spirv-cross-emitted SPIR-V): init here.
+                const glit = mslConstLiteral(m, ginst.words[4], names, alloc) catch continue;
+                try w.print("    {s} {s} = {s};\n", .{ gtn, gname, glit });
+            } else {
+                // No initializer operand (zioshade/glslang emit OpStore-after-decl): the
+                // body's store assigns before any read; declare bare (matches SPIR-V
+                // Private semantics -- undefined until stored).
+                try w.print("    {s} {s};\n", .{ gtn, gname });
+            }
+        }
         try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures, arraylen_buf_index);
         try w.writeAll("}\n\n");
 
