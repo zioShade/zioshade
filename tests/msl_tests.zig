@@ -379,6 +379,29 @@ test "#480: MSL spec constant emits function_constant ternary (no init on FC var
     try assertNotContains(msl, "[[function_constant(10)]] = ");
 }
 
+// #481: a SPIR-V stage input named after a Metal function-qualifier / address-space
+// keyword (e.g. `vertex`) collides — Metal rejects `float4 vertex [[user(locn0)]]`
+// ("'vertex' is a function qualifier"). Sanitize the stage-in field name (vertex ->
+// vertex_) consistently across the main0_in decl and the in.<name> access, matching
+// spirv-cross's collision avoidance. (avoid-expression-lowering-to-loop in the
+// spirv-cross corpus.)
+test "#481: MSL stage input named like a Metal keyword is sanitized" {
+    const spirv = compileToSpirv("kw_input_msl",
+        \\#version 450
+        \\layout(location=0) in vec4 vertex;
+        \\layout(location=0) out float o;
+        \\void main(){ o = vertex.x; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    // The stage-in field and the in.<name> access both use the sanitized name.
+    try assertContains(msl, "vertex_ [[user(locn0)]]");
+    try assertContains(msl, "in.vertex_");
+    // The raw keyword must never appear as the field identifier.
+    try assertNotContains(msl, "vertex [[user(locn0)]]");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang

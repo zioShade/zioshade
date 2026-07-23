@@ -3201,6 +3201,28 @@ fn needsForwardDecls(m: *const ParsedModule, func_ids: []const u32, entry_id: u3
     return false;
 }
 
+/// Metal reserved identifiers that are NOT GLSL/SPIR-V keywords, so a SPIR-V
+/// stage input can legitimately be named one of them (e.g. `vertex`). Using such a
+/// name as an MSL field/variable is a hard Metal compile error ("'vertex' is a
+/// function qualifier"), so append `_`. This is the MSL analog of spirv-cross's
+/// identifier-collision avoidance (it appends the location, e.g. `vertex0`). The
+/// list is limited to Metal-specific keywords: GLSL/C keywords can never appear as
+/// SPIR-V names (the frontend rejects them), and MSL attribute values like
+/// `color`/`position` are valid as identifiers.
+fn mslSanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
+    const reserved = [_][]const u8{
+        // Function qualifiers (pipeline stages).
+        "vertex",  "fragment",               "kernel", "compute",     "mesh",     "object",      "primitive",      "ray",       "payload",
+        // Address spaces.
+        "device",  "constant",               "thread", "threadgroup", "ray_data", "object_data", "primitive_data", "mesh_data", "imageblock",
+        "visible", "threadgroup_imageblock",
+    };
+    for (reserved) |kw| {
+        if (std.mem.eql(u8, name, kw)) return std.fmt.allocPrint(alloc, "{s}_", .{name});
+    }
+    return name;
+}
+
 fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), inputs: *std.ArrayList(StageInputDecl), block_flat: *std.AutoHashMap(u64, []const u8), alloc: std.mem.Allocator) void {
     // #475: MSL interpolation attribute appended to the fragment stage-in `[[user(locnN)]]`.
     // Flat-on-FLOAT needs `[[flat]]` (Metal auto-flats only INTEGERS — so glslang's Flat
@@ -3247,19 +3269,21 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
                 var nbuf: [32]u8 = undefined;
                 const mname = getMemberName(m, pt, mi, &nbuf);
                 const flat = std.fmt.allocPrint(alloc, "{s}_{s}", .{ inst_name, mname }) catch continue;
+                const safe_flat = mslSanitizeName(alloc, flat) catch flat;
                 const mloc = memberDecVal(m, pt, mi, .location) orelse (loc + mi);
                 const memb_interp: []const u8 = blk: {
                     if (memberHasDec(m, pt, mi, .flat) and !mslElementIsInt(m, mtype)) break :blk ", flat";
                     if (memberHasDec(m, pt, mi, .no_perspective)) break :blk ", center_no_perspective";
                     break :blk "";
                 };
-                inputs.append(alloc, .{ .var_id = rid, .name = flat, .type_id = mtype, .location = mloc, .interp = memb_interp }) catch {};
-                block_flat.put(blockFlatKey(rid, mi), flat) catch {};
+                inputs.append(alloc, .{ .var_id = rid, .name = safe_flat, .type_id = mtype, .location = mloc, .interp = memb_interp }) catch {};
+                block_flat.put(blockFlatKey(rid, mi), safe_flat) catch {};
             }
             continue;
         }
         const name = names.get(rid) orelse continue;
-        inputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .location = loc, .interp = mslInterpAttr.forVar(m, decs, rid, pt) }) catch {};
+        const safe = mslSanitizeName(alloc, name) catch name;
+        inputs.append(alloc, .{ .var_id = rid, .name = safe, .type_id = pt, .location = loc, .interp = mslInterpAttr.forVar(m, decs, rid, pt) }) catch {};
     }
     const SortCtx = struct {
         fn lessThan(_: void, a: StageInputDecl, b: StageInputDecl) bool {
