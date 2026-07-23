@@ -3804,18 +3804,32 @@ fn emitInstruction(
             const object = names.get(inst.words[3]) orelse "obj";
             const composite = names.get(inst.words[4]) orelse "comp";
             try w.print("    {s} {s} = {s};\n", .{ rtt, rname, composite });
-            const pt = getTypeOf(m, inst.words[4]);
-            const is_vec = if (pt) |ptv| blk: {
-                const pti = getDef(m, ptv);
-                break :blk pti != null and pti.?.op == .TypeVector;
-            } else false;
+            // #475: walk the type chain per-index level (was a single is_vec flag that
+            // emitted [0] for struct members = GLSL compile error). Mirrors WGSL/HLSL.
             try w.print("    {s}", .{rname});
+            var cur_type_id: ?u32 = getTypeOf(m, inst.words[4]);
             for (inst.words[5..]) |index| {
-                if (is_vec) {
-                    try w.writeAll(swizzleChar(index));
-                } else {
-                    try w.print("[{d}]", .{index});
+                if (cur_type_id) |ctid| {
+                    if (getDef(m, ctid)) |ci| switch (ci.op) {
+                        .TypeVector => {
+                            try w.writeAll(swizzleChar(index));
+                            cur_type_id = if (ci.words.len > 2) ci.words[2] else null;
+                            continue;
+                        },
+                        .TypeStruct => {
+                            var mb: [32]u8 = undefined;
+                            try w.print(".{s}", .{getMemberName(m, ctid, index, &mb)});
+                            cur_type_id = if (ci.words.len > 2 + index) ci.words[2 + index] else null;
+                            continue;
+                        },
+                        else => {
+                            try w.print("[{d}]", .{index});
+                            cur_type_id = if (ci.words.len > 2) ci.words[2] else null;
+                            continue;
+                        },
+                    };
                 }
+                try w.print("[{d}]", .{index});
             }
             try w.print(" = {s};\n", .{object});
         },
