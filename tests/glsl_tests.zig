@@ -137,6 +137,23 @@ test "#475: GLSL shared memory declared at global scope with array suffix" {
     // (Manually glslang-validated -S comp: rc=0; glslValidateOrSkip hardcodes -S frag.)
 }
 
+// #475: a negative signed-int spec constant default (high bit set, e.g. -1) must print
+// as the NEGATIVE value, not the raw u32 (4294967295) — glslang rejects the out-of-range
+// int literal. WGSL/HLSL already bitCast to signed; GLSL/MSL did not.
+test "#475: GLSL negative signed-int spec constant default -> -1, not 4294967295" {
+    const spirv = compileToSpirv("specconst_neg",
+        \\#version 450
+        \\layout(constant_id=0) const int N = -1;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(N)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "const int N = -1;");
+    try assertNotContains(glsl, "4294967295");
+}
+
 // #474: coarse/fine derivatives (OpDPdxCoarse/Fine etc.) must keep their precision --
 // GLSL has dFdxCoarse/dFdxFine natively (4.5 core / GL_ARB_derivative_control).
 // Collapsing to plain dFdx silently changes the derivative. Splice the extension for

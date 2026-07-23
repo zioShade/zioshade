@@ -1185,6 +1185,12 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             if (std.mem.eql(u8, type_str, "float")) {
                 const fv: f32 = @bitCast(default_val);
                 try w.print("layout(constant_id = {d}) const {s} {s} = {d};\n", .{ sid, type_str, name, fv });
+            } else if (std.mem.eql(u8, type_str, "int")) {
+                // #475: a signed-int default with the high bit set (e.g. -1) must print
+                // as the negative value, not the raw u32 (4294967295) — glslang rejects
+                // the out-of-range int literal.
+                const iv: i32 = @bitCast(default_val);
+                try w.print("layout(constant_id = {d}) const {s} {s} = {d};\n", .{ sid, type_str, name, iv });
             } else {
                 try w.print("layout(constant_id = {d}) const {s} {s} = {d};\n", .{ sid, type_str, name, default_val });
             }
