@@ -1241,6 +1241,12 @@ threadlocal var g_hoist_stripping: bool = false;
 // Key packs (block_var_id, member_index); value is the flat field name (no `in.`
 // prefix). Set before function emission (#478). Fragment interface blocks only.
 threadlocal var g_block_flat: ?*const std.AutoHashMap(u64, []const u8) = null;
+
+// #491: OpSampledImage combines a bare image + a sampler into a sampled-image value.
+// ImageSample* needs BOTH: `<image>.sample(<sampler>, ...)`. For a resource the sampler
+// is the paired `<name>Smplr`; for a bare-image+separate-sampler it's the OpSampledImage
+// sampler operand (recorded here, keyed by the OpSampledImage result id).
+threadlocal var g_sampled_sampler: ?*std.AutoHashMap(u32, []const u8) = null;
 fn blockFlatKey(var_id: u32, member: u32) u64 {
     return (@as(u64, var_id) << 20) | @as(u64, member);
 }
@@ -2250,6 +2256,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     }
     g_block_flat = &block_flat;
     defer g_block_flat = null;
+
+    var sampled_sampler = std.AutoHashMap(u32, []const u8).init(aa);
+    defer sampled_sampler.deinit();
+    g_sampled_sampler = &sampled_sampler;
+    defer g_sampled_sampler = null;
 
     // #481: gl_SampleMaskIn is an int[] in GLSL but [[sample_mask]] is a scalar
     // uint in Metal; record its var so writeAccessExprPlain drops the `[0]` index.
@@ -4792,6 +4803,26 @@ fn emitFunction(
                 is_ptr = true;
             }
         }
+        // Opaque sampler/image params (by-value, not pointers) -- Metal has separate
+        // sampler/texture types. mslType falls to float4 for these; type them directly.
+        // combined-texture-sampler (bare sampler/image fn params).
+        if (getDef(m, itid)) |it| {
+            if (it.op == .TypeSampler) {
+                try w.print("sampler {s}", .{pn});
+                continue;
+            }
+            if (it.op == .TypeImage or it.op == .TypeSampledImage) {
+                const img = if (it.op == .TypeSampledImage and it.words.len > 2) (getDef(m, it.words[2]) orelse it) else it;
+                if (img.op == .TypeImage) {
+                    const dim: u32 = if (img.words.len > 3) img.words[3] else 1;
+                    const arrayed = img.words.len > 5 and img.words[5] == 1;
+                    const ms = img.words.len > 6 and img.words[6] == 1;
+                    const tex_ty = buildMslTextureType(alloc, imageTypeIsDepth(m, img), dim, arrayed, ms, mslSampledComponent(m, img), "");
+                    try w.print("{s} {s}", .{ tex_ty, pn });
+                    continue;
+                }
+            }
+        }
         const pt2 = try mslType(m, itid, names, alloc);
         // A Function-storage pointer param is always out/inout (the frontend emits a
         // pointer only for those, never a by-value copy); Metal passes both as a
@@ -6578,6 +6609,14 @@ fn emitInstruction(
             const iname = names.get(inst.words[3]) orelse "tex";
             const a = try alloc.dupe(u8, iname);
             if (names.fetchPut(ri, a) catch null) |old| alloc.free(old.value);
+            // #491: record the sampler operand so ImageSample* uses it (not <image>Smplr).
+            if (g_sampled_sampler) |ss| {
+                if (inst.words.len > 4) {
+                    if (names.get(inst.words[4])) |sname| {
+                        ss.put(ri, alloc.dupe(u8, sname) catch return) catch {};
+                    }
+                }
+            }
         },
         .OpImage => {
             // OpImage extracts image from sampled_image — in MSL, texture is already separate
@@ -6590,6 +6629,12 @@ fn emitInstruction(
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
+            // #491: the sampler is the OpSampledImage sampler operand for a bare
+            // image+separate-sampler; else the paired <name>Smplr (resource).
+            var samp: []const u8 = try std.fmt.allocPrint(alloc, "{s}Smplr", .{si});
+            if (g_sampled_sampler) |ss| {
+                if (ss.get(inst.words[3])) |s| samp = s;
+            }
             // A Bias image operand (mask bit 0, value at words[6]) → MSL `bias(b)`.
             // GLSL's LOD bias is fragment-only; dropping it samples the wrong mip
             // level (silent-wrong, #170).
@@ -6601,9 +6646,9 @@ fn emitInstruction(
             // as a SEPARATE argument (coord.xy, uint(rint(coord.z)) for 2d_array).
             if (imageValueIsArrayed(m, inst.words[3])) {
                 const args = try mslArrayedSampleArgs(alloc, coord, imageValueDim(m, inst.words[3]));
-                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, args, bias_suffix });
+                try w.print("    {s} {s} = {s}.sample({s}, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, args, bias_suffix });
             } else {
-                try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, bias_suffix });
+                try w.print("    {s} {s} = {s}.sample({s}, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, bias_suffix });
             }
         },
         // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.
