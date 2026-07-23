@@ -3224,6 +3224,13 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                     .TypeImage => {
                         tex.append(alloc, .{ .name = name, .binding = binding, .descriptor_set = set, .is_depth = is_depth, .dim = dim, .arrayed = arrayed, .msl_type = msl_type, .var_id = rid, .is_storage = is_storage }) catch {};
                     },
+                    .TypeSampler => {
+                        // Bare GLSL sampler (GL_EXT_samplerless_texture_functions) -- a
+                        // separate sampler resource. is_storage=true reuses the
+                        // "no paired Smplr" path; msl_type="sampler" types it; the
+                        // wrapper switches [[texture]]->[[sampler]]. combined-texture-sampler.
+                        tex.append(alloc, .{ .name = name, .binding = binding, .descriptor_set = set, .msl_type = "sampler", .var_id = rid, .is_storage = true }) catch {};
+                    },
                     else => {},
                 }
             },
@@ -4380,8 +4387,13 @@ fn emitFunction(
             for (textures.items) |tex| {
                 if (!first_param) try w.writeAll(", ");
                 const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
-                try w.print("{s} {s} [[texture({d})]]", .{ tex.msl_type, tex.name, tex_b });
-                if (!tex.is_storage) try w.print(", sampler {s}Smplr [[sampler({d})]]", .{ tex.name, tex_b });
+                // A bare sampler (msl_type=="sampler") binds to [[sampler(N)]], not [[texture(N)]].
+                if (std.mem.eql(u8, tex.msl_type, "sampler")) {
+                    try w.print("sampler {s} [[sampler({d})]]", .{ tex.name, tex_b });
+                } else {
+                    try w.print("{s} {s} [[texture({d})]]", .{ tex.msl_type, tex.name, tex_b });
+                    if (!tex.is_storage) try w.print(", sampler {s}Smplr [[sampler({d})]]", .{ tex.name, tex_b });
+                }
                 first_param = false;
             }
         }
