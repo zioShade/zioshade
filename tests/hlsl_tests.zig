@@ -539,6 +539,24 @@ test "#476: signed int16 constant sign-extends (-1, not 65535)" {
     try assertNotContains(hlsl, "65535");
 }
 
+// #478: a switch inside a loop body was SILENTLY DROPPED in HLSL — all case bodies ran
+// as sequential code. Now the loop-body scanner handles .Switch. TRIVIAL reachability
+// (standard glslang -V, no spirv-opt).
+test "#478: HLSL switch inside loop body is emitted (not dropped)" {
+    const spirv = compileToSpirv("swinloop",
+        \\#version 450
+        \\layout(location=0) flat in int sel;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ float v=0.0; for(int i=0;i<3;i++){ switch(sel){ case 0: v+=1.0; break; case 1: v+=2.0; break; default: v+=3.0; break; } } o=vec4(v); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "switch (sel)");
+    try assertContains(hlsl, "case 0:");
+    try assertContains(hlsl, "case 1:");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
