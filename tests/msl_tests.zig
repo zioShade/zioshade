@@ -351,8 +351,32 @@ test "#475: MSL negative signed-int spec constant default -> -1" {
     defer alloc.free(spirv);
     const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
     defer alloc.free(msl);
-    try assertContains(msl, "= -1;");
+    // #480: spec constants now use the spirv-cross is_function_constant_defined
+    // ternary (MSL forbids an initializer on a [[function_constant]] var), so the
+    // default renders in the ternary's else branch, not as `= -1;`.
+    try assertContains(msl, ": -1;");
     try assertNotContains(msl, "4294967295");
+}
+
+// #480: MSL forbids an initializer on a `[[function_constant(N)]]` variable.
+// Mirror spirv-cross: emit `<name>_tmp [[function_constant(N)]]` (no init) plus
+// `<name> = is_function_constant_defined(<name>_tmp) ? <name>_tmp : <default>`.
+// Without this, zioshade emitted `... [[function_constant(N)]] = 2;`, which Metal
+// rejects (spec-constant-block-size in the spirv-cross corpus).
+test "#480: MSL spec constant emits function_constant ternary (no init on FC var)" {
+    const spirv = compileToSpirv("specconst_fc_msl",
+        \\#version 450
+        \\layout(constant_id=10) const int Value = 2;
+        \\layout(location=0) out float o;
+        \\void main(){ o = float(Value); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "Value_tmp [[function_constant(10)]];");
+    try assertContains(msl, "is_function_constant_defined(Value_tmp)");
+    // The function_constant variable itself must not carry an initializer.
+    try assertNotContains(msl, "[[function_constant(10)]] = ");
 }
 
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE

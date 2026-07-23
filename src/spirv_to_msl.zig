@@ -2524,21 +2524,28 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             break :blk null;
         };
         const sid = spec_id orelse continue;
+        // MSL forbids an initializer on a `[[function_constant(N)]]` variable
+        // ("variable with 'function_constant' attribute cannot have an initializer"),
+        // so mirror spirv-cross: a `<name>_tmp` holds the function constant (no
+        // init), and `<name>` selects it via is_function_constant_defined, falling
+        // back to the SPIR-V default. The body references `<name>` (unchanged).
         if (is_bool_sc) {
             const bool_val: []const u8 = if (inst.op == .SpecConstantTrue) "true" else "false";
-            try w.print("constant bool {s} [[function_constant({d})]] = {s};\n", .{ name, sid, bool_val });
+            try w.print("constant bool {s}_tmp [[function_constant({d})]];\n", .{ name, sid });
+            try w.print("constant bool {s} = is_function_constant_defined({s}_tmp) ? {s}_tmp : {s};\n", .{ name, name, name, bool_val });
         } else {
             const default_val = inst.words[3];
+            try w.print("constant {s} {s}_tmp [[function_constant({d})]];\n", .{ type_str, name, sid });
             if (std.mem.eql(u8, type_str, "float")) {
                 const fv: f32 = @bitCast(default_val);
-                try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, fv });
+                try w.print("constant {s} {s} = is_function_constant_defined({s}_tmp) ? {s}_tmp : {d};\n", .{ type_str, name, name, name, fv });
             } else if (std.mem.eql(u8, type_str, "int")) {
                 // #475: a signed-int default's high bit set (e.g. -1) must print as the
                 // NEGATIVE value, not the raw u32 (4294967295) — out-of-range int literal.
                 const iv: i32 = @bitCast(default_val);
-                try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, iv });
+                try w.print("constant {s} {s} = is_function_constant_defined({s}_tmp) ? {s}_tmp : {d};\n", .{ type_str, name, name, name, iv });
             } else {
-                try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, default_val });
+                try w.print("constant {s} {s} = is_function_constant_defined({s}_tmp) ? {s}_tmp : {d};\n", .{ type_str, name, name, name, default_val });
             }
         }
     }
