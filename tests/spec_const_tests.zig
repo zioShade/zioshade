@@ -59,7 +59,10 @@ test "M3.3 SPIR-V: bool spec const emits OpSpecConstantTrue (op 48)" {
     while (i < spv.len) {
         const wc = spv[i] >> 16;
         const op = spv[i] & 0xFFFF;
-        if (op == 48) { found = true; break; }
+        if (op == 48) {
+            found = true;
+            break;
+        }
         if (wc == 0) break;
         i += wc;
     }
@@ -98,7 +101,7 @@ test "M3.3 HLSL: bool spec const cross-compiles to [[vk::constant_id(N)]] const 
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "= true;") != null);
 }
 
-test "M3.3 MSL: bool spec const cross-compiles to [[function_constant(N)]] = true" {
+test "M3.3 MSL: bool spec const cross-compiles to function_constant ternary defaulting to true" {
     const alloc = std.testing.allocator;
     const spv = try zioshade.compileToSPIRV(alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment });
     defer alloc.free(spv);
@@ -106,7 +109,10 @@ test "M3.3 MSL: bool spec const cross-compiles to [[function_constant(N)]] = tru
     defer alloc.free(msl);
     try std.testing.expect(std.mem.indexOf(u8, msl, "constant bool") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "[[function_constant(1)]]") != null);
-    try std.testing.expect(std.mem.indexOf(u8, msl, "= true;") != null);
+    // #480: MSL forbids an initializer on a function_constant var, so the default
+    // is expressed via is_function_constant_defined(...) ? <fc> : true.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "is_function_constant_defined") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, ": true;") != null);
 }
 
 // ── M3.6: SpecOverride API + CLI flag ──
@@ -117,7 +123,10 @@ test "M3.6: SpecOverride rewrites int spec const literal" {
         .{ .spec_id = 3, .value_u32 = 99 },
     };
     const spv = try zioshade.compileToSPIRVWithSpecOverrides(
-        alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, overrides[0..],
+        alloc,
+        SHADER_INT_SPEC,
+        .{ .stage = .fragment },
+        overrides[0..],
     );
     defer alloc.free(spv);
     // Walk for OpSpecConstant (50) whose literal == 99
@@ -143,7 +152,10 @@ test "M3.6: SpecOverride swaps bool spec const True <-> False" {
         .{ .spec_id = 1, .value_u32 = 0 },
     };
     const spv = try zioshade.compileToSPIRVWithSpecOverrides(
-        alloc, SHADER_BOOL_SPEC, .{ .stage = .fragment }, overrides[0..],
+        alloc,
+        SHADER_BOOL_SPEC,
+        .{ .stage = .fragment },
+        overrides[0..],
     );
     defer alloc.free(spv);
     // After override the OpSpecConstantTrue (48) should become OpSpecConstantFalse (49).
@@ -166,7 +178,10 @@ test "M3.6: SpecOverride empty list is a no-op (no copy, no leak)" {
     const alloc = std.testing.allocator;
     const empty: []const zioshade.SpecOverride = &.{};
     const spv = try zioshade.compileToSPIRVWithSpecOverrides(
-        alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, empty,
+        alloc,
+        SHADER_INT_SPEC,
+        .{ .stage = .fragment },
+        empty,
     );
     defer alloc.free(spv);
     try std.testing.expect(spv.len > 5);
@@ -241,7 +256,10 @@ test "M3.4 SPIR-V: vec3 component default literal is 0.5 (bit pattern 0x3F000000
     while (i < spirv.len) {
         const wc = spirv[i] >> 16;
         const op = spirv[i] & 0xFFFF;
-        if (op == 50 and wc >= 4 and spirv[i + 3] == expected) { found = true; break; }
+        if (op == 50 and wc >= 4 and spirv[i + 3] == expected) {
+            found = true;
+            break;
+        }
         if (wc == 0) break;
         i += wc;
     }
@@ -337,7 +355,10 @@ test "M3.6: SpecOverride non-matching spec_id is silently ignored" {
         .{ .spec_id = 999, .value_u32 = 0xDEADBEEF },
     };
     const spv = try zioshade.compileToSPIRVWithSpecOverrides(
-        alloc, SHADER_INT_SPEC, .{ .stage = .fragment }, overrides[0..],
+        alloc,
+        SHADER_INT_SPEC,
+        .{ .stage = .fragment },
+        overrides[0..],
     );
     defer alloc.free(spv);
     // Original literal 8 should still be present (not 0xDEADBEEF)
@@ -355,7 +376,6 @@ test "M3.6: SpecOverride non-matching spec_id is silently ignored" {
     }
     try std.testing.expect(found_orig);
 }
-
 
 // -- M3.5: OpSpecConstantOp for derived spec const expressions ----------
 
