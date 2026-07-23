@@ -2237,17 +2237,44 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
             break :blk "";
         };
 
+        // #473: emit packoffset from the std140 Offset to force exact byte offsets,
+        // overriding HLSL's tighter in-row packing (vec2/vec3 packed into 16-byte
+        // rows differ from std140 alignment). Mirrors spirv-cross.
+        var pbuf: [40]u8 = undefined;
+        const packoff: []const u8 = blk: {
+            var moff: ?u32 = null;
+            for (module.instructions) |di| {
+                if (di.op == .MemberDecorate and di.words.len >= 5 and
+                    di.words[1] == struct_type_id and di.words[2] == @as(u32, @intCast(member_idx)) and
+                    @as(spirv.Decoration, @enumFromInt(di.words[3])) == .offset)
+                {
+                    moff = di.words[4];
+                    break;
+                }
+            }
+            if (moff) |off| {
+                const reg = off / 16;
+                const cs: []const u8 = switch ((off % 16) / 4) {
+                    1 => ".y",
+                    2 => ".z",
+                    3 => ".w",
+                    else => "",
+                };
+                break :blk std.fmt.bufPrint(&pbuf, " : packoffset(c{d}{s})", .{ reg, cs }) catch "";
+            }
+            break :blk "";
+        };
         if (mt_inst) |mi| {
             if (mi.op == .TypeArray and mi.words.len > 3) {
                 const elem_type = try hlslType(module, mi.words[2], names, alloc);
                 const len_id = mi.words[3];
                 const len_inst = getDef(module, len_id);
                 const len_val: u32 = if (len_inst) |li| li.words[3] else 1;
-                try w.print("    {s}{s} {s}_{s}[{d}];\n", .{ row_major_qual, elem_type, cbuffer_name, mname, len_val });
+                try w.print("    {s}{s} {s}_{s}[{d}]{s};\n", .{ row_major_qual, elem_type, cbuffer_name, mname, len_val, packoff });
                 continue;
             }
         }
-        try w.print("    {s}{s} {s}_{s};\n", .{ row_major_qual, member_type, cbuffer_name, mname });
+        try w.print("    {s}{s} {s}_{s}{s};\n", .{ row_major_qual, member_type, cbuffer_name, mname, packoff });
     }
 }
 
