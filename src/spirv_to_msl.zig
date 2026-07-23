@@ -5983,6 +5983,33 @@ fn emitInstruction(
                     bi == @intFromEnum(spirv.BuiltIn.helper_invocation)
                 else
                     false;
+                // #490: a whole-struct load of a FLATTENED stage input -- #476 overwrote
+                // names[pid] to the last member, so reconstruct the struct from its
+                // flattened fields (`Baz rn = { in.<inst>_<m0>, in.<inst>_<m1>, ... };`).
+                // multiple-struct-flattening `Baz bazzy = baz`.
+                if (!is_helper) {
+                    const rt = getDef(m, inst.words[1]);
+                    if (rt != null and rt.?.op == .TypeStruct and rt.?.words.len > 2) {
+                        if (g_block_flat) |bf| {
+                            if (bf.get(blockFlatKey(pid, 0)) != null) {
+                                const rtt = try mslValueType(m, inst.words[1], names, alloc);
+                                try w.print("    {s} {s} = {{", .{ rtt, rn });
+                                const nms: u32 = @intCast(rt.?.words.len - 2);
+                                var mi: u32 = 0;
+                                var firstm = true;
+                                while (mi < nms) : (mi += 1) {
+                                    if (bf.get(blockFlatKey(pid, mi))) |fname| {
+                                        if (!firstm) try w.writeAll(", ");
+                                        firstm = false;
+                                        try w.print("in.{s}", .{fname});
+                                    }
+                                }
+                                try w.writeAll("};\n");
+                                return;
+                            }
+                        }
+                    }
+                }
                 const a = try alloc.dupe(u8, if (is_helper) "simd_is_helper_thread()" else pn);
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
             } else {
