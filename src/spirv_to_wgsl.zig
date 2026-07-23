@@ -6074,6 +6074,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     break;
                                 }
                             }
+                            // #477: sel_phi update for this case's branch-to-merge
+                            // (the case body's OpBranch is dropped by the loop above, so
+                            // the main .Branch sel_phi update never fires from a case).
+                            if (sel_phis.get(merge_label.?)) |phi_list| {
+                                for (phi_list.items) |sp| {
+                                    if (sp.pred_label == default_label) {
+                                        const rn = names.get(sp.result_id) orelse continue;
+                                        const vn = names.get(sp.value_id) orelse continue;
+                                        try writeInd(w, body_ind);
+                                        try w.print("{s} = {s};\n", .{ rn, vn });
+                                    }
+                                }
+                            }
                             try writeInd(w, case_ind);
                             try w.writeAll("}\n");
                         } else {
@@ -6105,6 +6118,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                     }
                                     break;
+                                }
+                            }
+                            // #477: sel_phi update for this case's branch-to-merge.
+                            if (sel_phis.get(merge_label.?)) |phi_list| {
+                                for (phi_list.items) |sp| {
+                                    if (sp.pred_label == target_label) {
+                                        const rn = names.get(sp.result_id) orelse continue;
+                                        const vn = names.get(sp.value_id) orelse continue;
+                                        try writeInd(w, body_ind);
+                                        try w.print("{s} = {s};\n", .{ rn, vn });
+                                    }
                                 }
                             }
                             try writeInd(w, case_ind);
