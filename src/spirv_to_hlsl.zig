@@ -631,6 +631,30 @@ fn sampledImageDim(module: *const ParsedModule, image_value_id: u32) u32 {
     return tinst.words[3];
 }
 
+/// Number of SPATIAL out-params HLSL GetDimensions takes for the texture behind
+/// `image_value_id` (1D=1, 2D/cube=2, 2DArray/cubeArray=2+1, 3D=3). OpTypeImage layout:
+/// [.., Dim=words[3], Depth, Arrayed=words[5], MS, ..]. Used by QueryLevels/Samples,
+/// whose result is scalar so the rank can't come from the result type. (#475)
+fn hlslImageSpatialCount(module: *const ParsedModule, image_value_id: u32) u32 {
+    const vdef = getDef(module, image_value_id) orelse return 2;
+    if (vdef.words.len < 2) return 2;
+    var tinst = getDef(module, vdef.words[1]) orelse return 2;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return 2;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 6) return 2;
+    const dim = tinst.words[3]; // SPIR-V Dim: 0=1D 1=2D 2=3D 3=Cube 4=Rect 5=Buffer
+    const arrayed = tinst.words[5] != 0;
+    const base: u32 = switch (dim) {
+        0, 5 => 1, // 1D, Buffer
+        1, 4 => 2, // 2D, Rect
+        2 => 3, // 3D
+        3 => 1, // Cube (TextureCube: 1 spatial out-param)
+        else => 2,
+    };
+    return if (arrayed and dim != 2) base + 1 else base;
+}
+
 fn getTypeOf(module: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(module, id) orelse return null;
     return switch (inst.op) {
@@ -5445,6 +5469,40 @@ fn emitInstruction(
                 try w.print("    uint {s}_w, {s}_h; {s}.GetDimensions({s}_w, {s}_h);\n", .{ result_name, result_name, tex_name, result_name, result_name });
                 try w.print("    int2 {s} = int2({s}_w, {s}_h);\n", .{ result_name, result_name, result_name });
             }
+        },
+        // #475: OpImageQueryLevels / OpImageQuerySamples had no emit arm (the result id
+        // was named but never assigned -> DXC "unassigned"). HLSL has no direct mip/sample-
+        // count expression; GetDimensions returns it as the LAST out-param (numMips after a
+        // mipLevel input; numSamples with no mip for MS textures). Emit scratch uints and
+        // assign the result. Matches spirv-cross's GetDimensions(Level, …, Param) shape.
+        .ImageQueryLevels => {
+            const img_name = names.get(inst.words[3]) orelse "tex";
+            var tex_name: []const u8 = img_name;
+            if (std.mem.endsWith(u8, img_name, "_sampler")) tex_name = img_name[0 .. img_name.len - "_sampler".len];
+            const rn = names.get(inst.words[2]) orelse "v";
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            const n = hlslImageSpatialCount(module, inst.words[3]);
+            switch (n) {
+                1 => try w.print("    uint {s}_w, {s}_lv; {s}.GetDimensions(0, {s}_w, {s}_lv);\n", .{ rn, rn, tex_name, rn, rn }),
+                2 => try w.print("    uint {s}_w, {s}_h, {s}_lv; {s}.GetDimensions(0, {s}_w, {s}_h, {s}_lv);\n", .{ rn, rn, rn, tex_name, rn, rn, rn }),
+                3 => try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_lv; {s}.GetDimensions(0, {s}_w, {s}_h, {s}_d, {s}_lv);\n", .{ rn, rn, rn, rn, tex_name, rn, rn, rn, rn }),
+                else => try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_a, {s}_lv; {s}.GetDimensions(0, {s}_w, {s}_h, {s}_d, {s}_a, {s}_lv);\n", .{ rn, rn, rn, rn, rn, tex_name, rn, rn, rn, rn, rn }),
+            }
+            try w.print("    {s} {s} = {s}_lv;\n", .{ rt, rn, rn });
+        },
+        .ImageQuerySamples => {
+            const img_name = names.get(inst.words[3]) orelse "tex";
+            var tex_name: []const u8 = img_name;
+            if (std.mem.endsWith(u8, img_name, "_sampler")) tex_name = img_name[0 .. img_name.len - "_sampler".len];
+            const rn = names.get(inst.words[2]) orelse "v";
+            const rt = try hlslType(module, inst.words[1], names, alloc);
+            // MS textures: Texture2DMS (spatial 2) / Texture2DMSArray (spatial 3). No mip.
+            const n = hlslImageSpatialCount(module, inst.words[3]);
+            switch (n) {
+                3 => try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_sm; {s}.GetDimensions({s}_w, {s}_h, {s}_d, {s}_sm);\n", .{ rn, rn, rn, rn, tex_name, rn, rn, rn, rn }),
+                else => try w.print("    uint {s}_w, {s}_h, {s}_sm; {s}.GetDimensions({s}_w, {s}_h, {s}_sm);\n", .{ rn, rn, rn, tex_name, rn, rn, rn }),
+            }
+            try w.print("    {s} {s} = {s}_sm;\n", .{ rt, rn, rn });
         },
         .ImageRead => {
             // OpImageRead: result_type, result, image, coordinate

@@ -328,6 +328,38 @@ test "#475: HLSL shared (Workgroup) memory emits groupshared global" {
     try assertContains(hlsl, "groupshared float s[64];");
 }
 
+// #475: OpImageQueryLevels / OpImageQuerySamples had no HLSL emit arm (result id named
+// but never assigned -> DXC "unassigned"). HLSL returns mip/sample count as the LAST
+// GetDimensions out-param. QueryLevels uses the mip overload (mipLevel input + numMips);
+// QuerySamples uses the MS overload (numSamples, no mip).
+test "#475: HLSL textureQueryLevels emits GetDimensions(.., numMips)" {
+    const spirv = compileToSpirv("querylevels",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D t;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ int L = textureQueryLevels(t); o = vec4(float(L)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions(0,");
+    try assertContains(hlsl, "_lv;\n");
+}
+
+test "#475: HLSL textureSamples emits GetDimensions(.., numSamples)" {
+    const spirv = compileToSpirv("querysamples",
+        \\#version 460
+        \\layout(binding=0) uniform sampler2DMS t;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ int S = textureSamples(t); o = vec4(float(S)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions(");
+    try assertContains(hlsl, "_sm;\n");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
