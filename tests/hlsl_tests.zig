@@ -396,6 +396,97 @@ test "#475: HLSL inout helper param called with a local -> inout (write preserve
     try assertNotContains(hlsl, "(int x)");
 }
 
+// #476: a 64-bit numeric type is unrepresentable in a 32-bit target; a 64-bit constant
+// silently truncated/misread. Now honest-errors (module-level gate, mirrors WGSL).
+test "#476: 64-bit int type -> honest-error (not silent truncation)" {
+    const spirv = assembleSpirv("i64_const",
+        \\OpCapability Shader
+        \\OpCapability Int64
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%1 = OpTypeFunction %void
+        \\%f32 = OpTypeFloat 32
+        \\%v4f = OpTypeVector %f32 4
+        \\%i64 = OpTypeInt 64 0
+        \\%k = OpConstant %i64 8589934593
+        \\%pf = OpTypePointer Output %v4f
+        \\%o = OpVariable %pf Output
+        \\%main = OpFunction %void None %1
+        \\%l = OpLabel
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedInt64Type, spirvToHlsl60(spirv));
+}
+
+// #476: a 16-bit float constant is stored in the low 16 bits; decoding to f32 (was
+// mis-bitcast to a garbage denormal). f16 1.0 must decode to 1.0.
+test "#476: 16-bit float constant decodes (f16 1.0 -> 1.0, not garbage)" {
+    const spirv = assembleSpirv("f16_const",
+        \\OpCapability Shader
+        \\OpCapability Float16
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%1 = OpTypeFunction %void
+        \\%f32 = OpTypeFloat 32
+        \\%v4f = OpTypeVector %f32 4
+        \\%f16 = OpTypeFloat 16
+        \\%one = OpConstant %f16 1.0
+        \\%pf = OpTypePointer Output %v4f
+        \\%o = OpVariable %pf Output
+        \\%main = OpFunction %void None %1
+        \\%l = OpLabel
+        \\%of = OpFConvert %f32 %one
+        \\OpStore %o %of
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    // f16 1.0 decoded to 1.0 (not a tiny denormal like 2.xe-41, and not 0).
+    try assertContains(hlsl, "1.0");
+}
+
+// #476: a signed int16 constant's high bits are zero-filled by SPIR-V, so -1 (0x0000FFFF)
+// must sign-extend to -1, not read as 65535.
+test "#476: signed int16 constant sign-extends (-1, not 65535)" {
+    const spirv = assembleSpirv("i16_const",
+        \\OpCapability Shader
+        \\OpCapability Int16
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%1 = OpTypeFunction %void
+        \\%f32 = OpTypeFloat 32
+        \\%v4f = OpTypeVector %f32 4
+        \\%i16 = OpTypeInt 16 1
+        \\%neg1 = OpConstant %i16 -1
+        \\%pf = OpTypePointer Output %v4f
+        \\%o = OpVariable %pf Output
+        \\%main = OpFunction %void None %1
+        \\%l = OpLabel
+        \\%nf = OpConvertSToF %f32 %neg1
+        \\OpStore %o %nf
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "-1");
+    try assertNotContains(hlsl, "65535");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------

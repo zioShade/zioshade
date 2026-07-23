@@ -824,6 +824,35 @@ fn isBareIntegerString(s: []const u8) bool {
 }
 
 fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
+    // #476: width-aware. A 64-bit constant occupies TWO words but only the first is read
+    // (silent truncation/garbage); a 16-bit float literal is stored in the low bits of the
+    // word but @bitCast-as-f32 yields a garbage denormal. Honest-error both — the call
+    // site skips the declaration, so a USED constant fails loudly (undeclared) downstream
+    // rather than compiling to a wrong value. Mirrors WGSL's width gates. A signed int16's
+    // value is zero-filled in the high bits; sign-extend the low 16 bits (int16 IS a
+    // supported — widened-to-int — type, so this is a correct fix, not an error).
+    if (type_inst.op == .TypeFloat and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        // f16 literal: stored in the low 16 bits of the word; decode to f32 and format
+        // (f16 max ~65504 < 1e6, so the whole-valued ".0" form always suffices). (#476)
+        if (w == 16 and literal_words.len > 0) {
+            const h: f16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            const val: f32 = @floatCast(h);
+            if (val == @floor(val)) {
+                const ival: i32 = @intFromFloat(val);
+                return std.fmt.allocPrint(alloc, "{d}.0", .{ival});
+            }
+            return std.fmt.allocPrint(alloc, "{d}", .{val});
+        }
+    } else if (type_inst.op == .TypeInt and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        if (w == 16 and type_inst.words.len > 3 and type_inst.words[3] != 0 and literal_words.len > 0) {
+            const v: i16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            return std.fmt.allocPrint(alloc, "{d}", .{v});
+        }
+    }
     if (type_inst.op == .TypeFloat and literal_words.len > 0) {
         const val: f32 = @bitCast(literal_words[0]);
         if (val == @floor(val) and @abs(val) < 1e6) {
@@ -931,6 +960,13 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer if (_norm) |n| alloc.free(n);
     var module = try parseModule(alloc, _norm orelse spirv_words);
     defer module.deinit(alloc);
+
+    // #476: honest-error 64-bit numeric types (32-bit target; silent truncation otherwise).
+    switch (common.wide64Type(module.instructions)) {
+        .float64 => return error.UnsupportedDoubleType,
+        .int64 => return error.UnsupportedInt64Type,
+        .none => {},
+    }
 
     // Override entry point if requested
     if (!std.mem.eql(u8, options.entry_point_name, "main")) {
