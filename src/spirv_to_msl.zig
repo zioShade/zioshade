@@ -403,7 +403,14 @@ fn mslGatherComponent(m: *const ParsedModule, component_id: u32) []const u8 {
 /// The MSL texture family spelling WITHOUT the `<component>` suffix
 /// (`texture2d_array`, `depthcube`, …). The component is appended by
 /// `buildMslTextureType` so int/uint samplers get `<int>`/`<uint>` (#203).
-fn mslTextureFamily(is_depth: bool, dim: u32, arrayed: bool) []const u8 {
+fn mslTextureFamily(is_depth: bool, dim: u32, arrayed: bool, ms: bool) []const u8 {
+    // Multisampled: Metal only has MS 2D (+ 2D-array) families. sampler2DMS /
+    // isampler2DMS map here; get_num_samples() / read(coord, sample) are valid on
+    // texture2d_ms but NOT on a plain texture2d (silent-wrong: sampler-ms-query).
+    if (ms and dim == 1) {
+        if (is_depth) return if (arrayed) "depth2d_ms_array" else "depth2d_ms";
+        return if (arrayed) "texture2d_ms_array" else "texture2d_ms";
+    }
     if (is_depth) {
         return switch (dim) {
             1 => if (arrayed) "depth2d_array" else "depth2d",
@@ -429,8 +436,8 @@ fn mslTextureFamily(is_depth: bool, dim: u32, arrayed: bool) []const u8 {
 /// `int`, or `uint` (decoded from the OpTypeImage sampled type); DEPTH textures
 /// always use `float` (their `.sample_compare` is float-only). Returns an
 /// arena-allocated string; falls back to a `<float>` literal on OOM.
-fn buildMslTextureType(alloc: std.mem.Allocator, is_depth: bool, dim: u32, arrayed: bool, component: []const u8, access_suffix: []const u8) []const u8 {
-    const fam = mslTextureFamily(is_depth, dim, arrayed);
+fn buildMslTextureType(alloc: std.mem.Allocator, is_depth: bool, dim: u32, arrayed: bool, ms: bool, component: []const u8, access_suffix: []const u8) []const u8 {
+    const fam = mslTextureFamily(is_depth, dim, arrayed, ms);
     const comp = if (is_depth) "float" else component;
     return std.fmt.allocPrint(alloc, "{s}<{s}{s}>", .{ fam, comp, access_suffix }) catch (if (arrayed) "texture2d_array<float>" else "texture2d<float>");
 }
@@ -3111,6 +3118,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                 }
                 const dim: u32 = if (img.op == .TypeImage and img.words.len > 3) img.words[3] else 1;
                 const arrayed: bool = img.op == .TypeImage and img.words.len > 5 and img.words[5] == 1;
+                const ms: bool = img.op == .TypeImage and img.words.len > 6 and img.words[6] == 1;
                 // A bare OpTypeImage with Sampled==2 is a STORAGE image (read/write/atomic,
                 // no combined sampler). It takes an MSL `access::` qualifier driven by its
                 // actual OpImageRead/OpImageWrite usage; sampled images keep default access.
@@ -3121,7 +3129,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                 // must not push it to access::write (which forbids .get_width()).
                 const access_suffix = if (is_storage and !atomic_images.contains(rid)) mslStorageAccessSuffix(img_access.get(rid) orelse .{}) else "";
                 const comp = mslSampledComponent(m, img);
-                const msl_type = buildMslTextureType(alloc, is_depth, dim, arrayed, comp, access_suffix);
+                const msl_type = buildMslTextureType(alloc, is_depth, dim, arrayed, ms, comp, access_suffix);
                 switch (pei.op) {
                     .TypeSampledImage => {
                         tex.append(alloc, .{ .name = name, .binding = binding, .descriptor_set = set, .is_depth = is_depth, .dim = dim, .arrayed = arrayed, .msl_type = msl_type, .var_id = rid, .is_storage = is_storage }) catch {};

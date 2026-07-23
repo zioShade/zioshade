@@ -492,6 +492,27 @@ test "#483: MSL multi-dimensional array emits all dimensions" {
     try assertContains(msl, "[3][4]");
 }
 
+// #485: a multisampled 2D texture (sampler2DMS) was emitted as plain `texture2d<float>`,
+// so `textureSamples()` lowered to `.get_num_samples()` -- which does NOT exist on a
+// texture2d (only on texture2d_ms) -> Metal rejected it (silent-wrong:
+// sampler-ms-query in the spirv-cross corpus). Detect the OpTypeImage Multisampled flag
+// (word[6]) and emit the texture2d_ms / texture2d_ms_array family.
+test "#485: MSL multisampled 2D texture emits texture2d_ms" {
+    const spirv = compileToSpirv("ms_tex_msl",
+        \\#version 450
+        \\layout(location=0) out int o;
+        \\layout(binding=0) uniform sampler2DMS s;
+        \\void main(){ o = textureSamples(s); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "texture2d_ms<float>");
+    try assertContains(msl, "get_num_samples()");
+    // Must NOT degrade to the plain (non-MS) family.
+    try assertNotContains(msl, " texture2d<float>");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
