@@ -3439,13 +3439,15 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
         const rid = inst.words[2];
         // Built-ins keep their own [[position]]/builtin path.
         if (hasDec(decs, rid, .built_in)) continue;
-        // Must have an explicit Location to map to [[user(locnN)]].
-        const loc = getDecVal(decs, rid, .location) orelse continue;
+        // An interface block (struct-typed Input) may have NO variable-level Location
+        // (anonymous block) -- its members have Location via MemberDecorate. Check the
+        // type BEFORE requiring a variable Location so such blocks are flattened.
         const pi = getDef(m, inst.words[1]) orelse continue;
         if (pi.op != .TypePointer or pi.words.len < 4) continue;
         const pt = pi.words[3];
         const pti = getDef(m, pt) orelse continue;
         if (pti.op == .TypeStruct) {
+            const block_loc = getDecVal(decs, rid, .location) orelse 0;
             // #478: interface block `layout(location=L) in Block { members } vin;`.
             // Metal stage-in has no nested-struct fields, so FLATTEN each member
             // into its own `T <inst>_<member> [[user(locnK)]]` field with per-member
@@ -3455,7 +3457,7 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
             const inst_name = names.get(rid) orelse "vin";
             const nmembers: u32 = @intCast(pti.words.len - 2);
             var mi: u32 = 0;
-            var offset = loc; // cumulative location: a struct-typed member occupies its footprint
+            var offset = block_loc; // cumulative location: a struct-typed member occupies its footprint
             while (mi < nmembers) : (mi += 1) {
                 const mtype = pti.words[mi + 2];
                 var nbuf: [32]u8 = undefined;
@@ -3474,6 +3476,8 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
             }
             continue;
         }
+        // Non-struct Input: must have an explicit Location to map to [[user(locnN)]].
+        const loc = getDecVal(decs, rid, .location) orelse continue;
         const name = names.get(rid) orelse continue;
         const safe = mslSanitizeName(alloc, name) catch name;
         inputs.append(alloc, .{ .var_id = rid, .name = safe, .type_id = pt, .location = loc, .interp = mslInterpAttr.forVar(m, decs, rid, pt) }) catch {};
