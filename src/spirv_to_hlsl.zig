@@ -4128,6 +4128,40 @@ fn emitWhileLoopHLSL(
                 continue;
             }
             if (binst.op == .SelectionMerge) continue;
+            // #478: a switch inside a loop body — emit it (was silently dropped; all
+            // cases ran as sequential code). Mirrors the top-level Switch handler + #477.
+            if (binst.op == .Switch and binst.words.len >= 3) {
+                const selector_name = names.get(binst.words[1]) orelse "s";
+                const default_label = binst.words[2];
+                const smerge = bc_merge_map.get(bi);
+                if (smerge) |sml| {
+                    var sphis: std.ArrayList(Instruction) = .empty;
+                    defer sphis.deinit(alloc);
+                    collectSwitchMergePhisHLSL(module, label_map, sml, &sphis, alloc);
+                    try emitSwitchPhiDeclsHLSL(module, names, sphis.items, w, alloc);
+                    try w.print("        switch ({s}) {{\n", .{selector_name});
+                    if (default_label != sml) {
+                        try w.writeAll("        default: {\n");
+                        _ = try emitBlock(module, names, decorations, default_label, sml, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
+                        try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, default_label, w, alloc);
+                        try w.writeAll("        break;\n        }\n");
+                    }
+                    var swi: usize = 3;
+                    while (swi + 1 < binst.words.len) : (swi += 2) {
+                        const case_val = binst.words[swi];
+                        const target_label = binst.words[swi + 1];
+                        if (target_label == sml) continue;
+                        try w.print("        case {d}: {{\n", .{case_val});
+                        _ = try emitBlock(module, names, decorations, target_label, sml, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
+                        try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
+                        try w.writeAll("        break;\n        }\n");
+                    }
+                    try w.writeAll("        }\n");
+                    finalizeSwitchPhisHLSL(names, sphis.items, alloc);
+                    if (label_map.get(sml)) |smi| bi = smi;
+                }
+                continue;
+            }
             if (binst.op == .Branch) {
                 if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
                 continue;
