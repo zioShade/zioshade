@@ -7136,6 +7136,21 @@ fn emitInstruction(
         },
 
         else => {
+            // Unhandled opcode. If it produces a result id the module references, that
+            // result would be an undeclared identifier (silent-wrong at exit 0) -- fail
+            // loud instead (the wedge). If the result is unused (or there is no result),
+            // keep the visible stub comment: it is harmless and several shaders
+            // (e.g. block-match filter ops) legitimately reach here with an unused result.
+            if (inst.words.len >= 3) {
+                const rid = inst.words[2];
+                var uses: u32 = 0;
+                for (m.instructions) |u| {
+                    for (u.words) |wd| if (wd == rid) {
+                        uses += 1;
+                    };
+                }
+                if (uses > 1) return error.UnsupportedOpcode;
+            }
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
         },
     }
