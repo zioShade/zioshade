@@ -5428,6 +5428,39 @@ fn emitBlock(
         if (inst.op == .FunctionEnd) break;
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
         if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        // #478: a switch in a branch arm (if/else) — emit it (was silently dropped).
+        if (inst.op == .Switch and inst.words.len >= 3) {
+            const sn = names.get(inst.words[1]) orelse "s";
+            const dl = inst.words[2];
+            const smerge = bm.get(i);
+            if (smerge) |sml| {
+                var sphis: std.ArrayList(Instruction) = .empty;
+                defer sphis.deinit(alloc);
+                collectSwitchMergePhis(m, lm, sml, &sphis, alloc);
+                try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                try w.print("{s}    switch ({s}) {{\n", .{ indent, sn });
+                if (dl != sml) {
+                    try w.print("{s}    default: {{\n", .{indent});
+                    _ = try emitBlock(m, names, decs, dl, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                    try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
+                }
+                var swi: usize = 3;
+                while (swi + 1 < inst.words.len) : (swi += 2) {
+                    const cv = inst.words[swi];
+                    const target = inst.words[swi + 1];
+                    if (target == sml) continue;
+                    try w.print("{s}    case {d}: {{\n", .{ indent, cv });
+                    _ = try emitBlock(m, names, decs, target, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
+                    try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
+                }
+                try w.print("{s}    }}\n", .{indent});
+                finalizeSwitchPhis(names, sphis.items, alloc);
+                if (lm.get(sml)) |smi| i = smi;
+            }
+            continue;
+        }
         // A loop nested in this branch arm: delegate to emitWhileLoopMSL (the emitter
         // emitBody uses; it recurses through nested loops/branches). Reached bare (arm IS
         // the header) or via an OpBranch into a separate loop-header block. The header's

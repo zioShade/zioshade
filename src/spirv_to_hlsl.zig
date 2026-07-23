@@ -4372,6 +4372,39 @@ fn emitBlock(
 
         // Skip structural instructions
         if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        // #478: a switch in a branch arm (if/else) — emit it (was silently dropped).
+        if (inst.op == .Switch and inst.words.len >= 3) {
+            const selector_name = names.get(inst.words[1]) orelse "s";
+            const default_label = inst.words[2];
+            const smerge = bc_merge_map.get(i);
+            if (smerge) |sml| {
+                var sphis: std.ArrayList(Instruction) = .empty;
+                defer sphis.deinit(alloc);
+                collectSwitchMergePhisHLSL(module, label_map, sml, &sphis, alloc);
+                try emitSwitchPhiDeclsHLSL(module, names, sphis.items, w, alloc);
+                try w.print("{s}    switch ({s}) {{\n", .{ indent, selector_name });
+                if (default_label != sml) {
+                    try w.print("{s}    default: {{\n", .{indent});
+                    _ = try emitBlock(module, names, decorations, default_label, sml, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, indent);
+                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, default_label, w, alloc);
+                    try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
+                }
+                var swi: usize = 3;
+                while (swi + 1 < inst.words.len) : (swi += 2) {
+                    const case_val = inst.words[swi];
+                    const target_label = inst.words[swi + 1];
+                    if (target_label == sml) continue;
+                    try w.print("{s}    case {d}: {{\n", .{ indent, case_val });
+                    _ = try emitBlock(module, names, decorations, target_label, sml, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, indent);
+                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
+                    try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
+                }
+                try w.print("{s}    }}\n", .{indent});
+                finalizeSwitchPhisHLSL(names, sphis.items, alloc);
+                if (label_map.get(sml)) |smi| i = smi;
+            }
+            continue;
+        }
         // A loop nested in this branch arm: delegate to emitWhileLoopHLSL (the emitter
         // emitBody uses; it recurses through nested loops/branches). Reached bare (arm IS
         // the header) or via an OpBranch into a separate loop-header block. Replay the
