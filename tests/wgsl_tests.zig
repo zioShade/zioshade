@@ -4369,6 +4369,52 @@ test "#476: WGSL function-local OpVariable initializer is emitted" {
     try assertContains(wgsl, "8.5");
 }
 
+// #477: switch-merge OpPhi (after spirv-opt -O) — WGSL pre-declares the phi var and each
+// case updates it. Verified naga-valid. Was: the case-body OpBranch was dropped so the
+// sel_phi update never fired (always the init/first value).
+test "#477: WGSL switch-merge phi per-case update (naga-validated)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) flat in int mode;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ vec3 color; switch(mode){ case 0: color=vec3(1,0,0); break; case 1: color=vec3(0,1,0); break; default: color=vec3(0,0,1); break; } o=vec4(color,1.0); }
+    ;
+    // glslang + spirv-opt -O produces the switch-merge phi form.
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_swphi.frag", .{});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_swphi.spv", .{});
+    defer alloc.free(tmp_spv);
+    const tmp_opt = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_swphi_opt.spv", .{});
+    defer alloc.free(tmp_opt);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(src, 0));
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    const spirvopt = zioshade.compat.resolveVulkanTool(alloc, "spirv-opt") catch return error.SkipZigTest;
+    defer alloc.free(spirvopt);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const r1 = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(r1.stdout);
+    defer alloc.free(r1.stderr);
+    if ((r1.term.exitedCode() orelse 1) != 0) return error.SkipZigTest;
+    const r2 = zioshade.compat.processRun(main_io.io(), alloc, &.{ spirvopt, "-O", tmp_spv, "-o", tmp_opt }) catch return error.SkipZigTest;
+    defer alloc.free(r2.stdout);
+    defer alloc.free(r2.stderr);
+    if ((r2.term.exitedCode() orelse 1) != 0) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_opt, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    defer alloc.free(words);
+    const wgsl = try zioshade.spirvToWGSL(alloc, words, .{});
+    defer alloc.free(wgsl);
+    // Each case's color must appear (not just one fixed value).
+    try assertContains(wgsl, "vec3<f32>(1.0, 0.0, 0.0)");
+    try assertContains(wgsl, "vec3<f32>(0.0, 1.0, 0.0)");
+    try assertContains(wgsl, "vec3<f32>(0.0, 0.0, 1.0)");
+    try nagaValidateOrSkip(wgsl, "switch-merge-phi");
+}
+
 // #170 (H): a whole-matrix store to a flattened matrix output that lands inside
 // a `switch` case body is replayed through `emitSimpleInstruction` — a separate
 // Store path that has no access to the matrix-output map — so it emitted
