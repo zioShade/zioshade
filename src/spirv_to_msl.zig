@@ -2457,6 +2457,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (is_frag and mslFragmentHasUnsupportedOutput(&module, &decs)) {
         return error.UnsupportedFragmentOutput;
     }
+    // A multisampled storage image that is both read and written: Metal texture2d_ms
+    // rejects access::read_write, so it cannot be one Metal texture. Honest-error
+    // (genuinely Metal-limited) -- was silent-wrong (image-ms).
+    if (mslHasReadWriteMSStorageImage(&module, &img_access)) {
+        return error.UnsupportedMultiSampleStorageImage;
+    }
     // Output struct for fragment (single color attachment, TYPED to the Location-0
     // output's actual type -- not always float4; e.g. `out int`/`out float`/`out vec3`).
     if (is_frag) {
@@ -3241,6 +3247,26 @@ fn fragmentOutputMslType(m: *const ParsedModule, names: *std.AutoHashMap(u32, []
         return mslType(m, ptr.words[3], names, alloc) catch "float4";
     }
     return "float4";
+}
+
+/// True if any multisampled STORAGE image (OpTypeImage Multisampled=1 + Sampled=2) is
+/// BOTH read and written. Metal texture2d_ms rejects access::read_write (an MS texture
+/// object is read OR write, not both), so such an image cannot be one Metal texture --
+/// honest-error it (genuinely Metal-limited, not a zioshade gap). image-ms.
+fn mslHasReadWriteMSStorageImage(m: *const ParsedModule, img_access: *const std.AutoHashMap(u32, ImageAccess)) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 3) continue;
+        const ptr = getDef(m, inst.words[1]) orelse continue;
+        if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
+        const img = getDef(m, ptr.words[3]) orelse continue;
+        if (img.op != .TypeImage or img.words.len <= 7) continue;
+        if (img.words[6] == 1 and img.words[7] == 2) {
+            if (img_access.get(inst.words[2])) |acc| {
+                if (acc.read and acc.write) return true;
+            }
+        }
+    }
+    return false;
 }
 
 fn mslSanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
