@@ -43,6 +43,30 @@ fn assertNotContains(haystack: []const u8, needle: []const u8) !void {
 /// frontend). Needed for opcodes zioshade's frontend never emits — e.g. glslang
 /// lowers every GLSL float `!=` to OpFUnordNotEqual, whereas the zioshade frontend
 /// emits the ordered OpFOrdNotEqual. Skips the test if glslang is unavailable.
+// Assemble hand-authored SPIR-V (spirv-as) for opcodes/patterns the internal
+// frontend never emits (e.g. nested TypeArray for multi-dim arrays). Skips if
+// spirv-as is absent. Mirrors tests/hlsl_tests.zig + tests/wgsl_tests.zig.
+fn assembleSpirv(name: []const u8, asm_src: [:0]const u8) ![]u32 {
+    const tmp_asm = try zioshade.compat.tempFilePathFmt(alloc, "msl_asm_{s}.spvasm", .{name});
+    defer alloc.free(tmp_asm);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "msl_asm_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_asm, std.mem.sliceTo(asm_src, 0));
+    const spirv_as = zioshade.compat.resolveVulkanTool(alloc, "spirv-as") catch return error.SkipZigTest;
+    defer alloc.free(spirv_as);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ spirv_as, tmp_asm, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}.frag", .{name});
     defer alloc.free(tmp_src);
@@ -423,6 +447,49 @@ test "#482: MSL mutable module-scope global declared as an initialized local" {
     try assertContains(msl, "    float counter");
     // Not promoted to a file-scope `constant` (Metal forbids that for a mutable var).
     try assertNotContains(msl, "constant float counter");
+}
+
+// #483: a multi-dimensional array (float m[3][4]) was emitted as a 1-D decl
+// (float m[3]) -- mslGetArraySuffix passed multi_dim=false, dropping the inner [4].
+// The body still indexed m[i][j], so Metal rejected it (multi_dim_array in the
+// spirv-cross corpus). The internal frontend never emits nested TypeArray, so this
+// uses hand-assembled SPIR-V.
+test "#483: MSL multi-dimensional array emits all dimensions" {
+    const spirv = assembleSpirv("multidim",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%uint = OpTypeInt 32 0
+        \\%c1 = OpConstant %uint 1
+        \\%c2 = OpConstant %uint 2
+        \\%c3 = OpConstant %uint 3
+        \\%c4 = OpConstant %uint 4
+        \\%onef = OpConstant %float 1.0
+        \\%arr4 = OpTypeArray %float %c4
+        \\%arr34 = OpTypeArray %arr4 %c3
+        \\%ptrf_arr = OpTypePointer Function %arr34
+        \\%ptrf_float = OpTypePointer Function %float
+        \\%ptr_out = OpTypePointer Output %float
+        \\%o = OpVariable %ptr_out Output
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%m = OpVariable %ptrf_arr Function
+        \\%p = OpAccessChain %ptrf_float %m %c1 %c2
+        \\OpStore %p %onef
+        \\%v = OpLoad %float %p
+        \\OpStore %o %v
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "[3][4]");
 }
 
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE

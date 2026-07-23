@@ -1200,7 +1200,10 @@ fn mslPackedType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
 
 // ---- MSL type resolution ----
 fn mslGetArraySuffix(m: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
-    return common.commonGetArraySuffix(m.instructions, m.id_defs, ptr_type_id, false);
+    // multi_dim=true: emit ALL nested TypeArray dimensions (`[3][4]`, not just the
+    // outer `[3]`). 1-D arrays are unaffected; multi-D arrays otherwise dropped their
+    // inner dims and were indexed `m[i][j]` against a 1-D decl (multi_dim_array).
+    return common.commonGetArraySuffix(m.instructions, m.id_defs, ptr_type_id, true);
 }
 
 /// Loop-header OpPhi (the loop counter): materialized as a mutable variable so it
