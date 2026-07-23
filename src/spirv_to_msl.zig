@@ -3514,6 +3514,17 @@ fn typeNatSize(m: *const ParsedModule, type_id: u32) u32 {
             const row_count = if (rows.op == .TypeVector) rows.words[3] else 1;
             break :v cols * row_count * 4;
         },
+        // #479: compute the struct's natural Metal size (was hardcoded 4, causing
+        // UBO padding gaps to be miscomputed — the next member ended up at the wrong
+        // offset). Sum the member sizes (4-byte alignment; Metal packed_float3 is
+        // also 4-byte aligned in UBOs).
+        .TypeStruct => blk: {
+            var sz: u32 = 0;
+            for (inst.words[2..]) |mt_id| {
+                sz += typeNatSize(m, mt_id);
+            }
+            break :blk sz;
+        },
         else => 4,
     };
 }
@@ -3688,6 +3699,22 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
     for (inst.words[2..], 0..) |mt_id, mi| {
         const key = MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi) };
         const this_off = member_offsets.get(key);
+        // #479: emit explicit padding if there's a gap from the previous member's
+        // natural end to this member's std140 offset (e.g. a small struct rounds
+        // to 16 in std140 but its Metal size is < 16). Mirrors spirv-cross's
+        // `char _mN_pad[...]`.
+        if (this_off) |off| {
+            if (mi > 0) {
+                const prev_key = MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi - 1) };
+                if (member_offsets.get(prev_key)) |prev_off| {
+                    const prev_mt_id = inst.words[1 + mi];
+                    const prev_end = prev_off + typeNatSize(m, prev_mt_id);
+                    if (off > prev_end) {
+                        try w.print("    char _m{d}_pad[{d}];\n", .{ mi, off - prev_end });
+                    }
+                }
+            }
+        }
         // Next member's std140 offset (used for the vec3 packed/16-byte choice).
         const next_off = if (mi + 1 < member_count)
             member_offsets.get(MemberKey{ .struct_id = struct_id, .member_index = @intCast(mi + 1) })
