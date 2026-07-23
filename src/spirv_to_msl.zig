@@ -244,7 +244,14 @@ fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
     // MSL has `depth2d`/`depthcube` (+ _array) but no `depth1d`/`depth3d`, so
     // only 2D and Cube depth/shadow samplers map to the depth family (#208);
     // a 1D shadow keeps the texture family (no MSL depth type exists for it).
-    return depth == 1 and (dim == 1 or dim == 3);
+    if (depth == 1 and (dim == 1 or dim == 3)) return true;
+    // #493: depth-from-usage -- a regular texture (Depth=0) used in a depth
+    // OpSampledImage (e.g. GL_EXT samplerless `sampler2DShadow(t, s)`) must be
+    // depth2d for sample_compare. g_depth_tex_types holds such image type-ids.
+    if (g_depth_tex_types) |dt| {
+        if ((dim == 1 or dim == 3) and dt.contains(img.words[1])) return true;
+    }
+    return false;
 }
 
 /// True if the shader accesses gl_FragCoord component z (2) or w (3). MSL threads
@@ -1247,6 +1254,11 @@ threadlocal var g_block_flat: ?*const std.AutoHashMap(u64, []const u8) = null;
 // is the paired `<name>Smplr`; for a bare-image+separate-sampler it's the OpSampledImage
 // sampler operand (recorded here, keyed by the OpSampledImage result id).
 threadlocal var g_sampled_sampler: ?*std.AutoHashMap(u32, []const u8) = null;
+
+// #493: OpTypeImage type-ids that are USED as depth (via a depth OpSampledImage, e.g.
+// GL_EXT samplerless `sampler2DShadow(texture2D, samplerShadow)`) despite Depth=0. Such
+// textures must be depth2d for sample_compare. Populated by a scan in spirvToMSL.
+threadlocal var g_depth_tex_types: ?*const std.AutoHashMap(u32, void) = null;
 fn blockFlatKey(var_id: u32, member: u32) u64 {
     return (@as(u64, var_id) << 20) | @as(u64, member);
 }
@@ -2239,6 +2251,24 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // buffer). Collected here so collectResources can suppress the suffix for them.
     var atomic_images = try collectAtomicImages(&module, aa);
     defer atomic_images.deinit();
+    // #493: depth-from-usage -- MUST run before collectResources so depth-typed-from-
+    // usage textures (Depth=0 but used in a depth OpSampledImage, e.g. GL_EXT samplerless
+    // `sampler2DShadow(texture2D, samplerShadow)`) are typed depth2d for sample_compare.
+    var depth_tex_types = std.AutoHashMap(u32, void).init(aa);
+    defer depth_tex_types.deinit();
+    g_depth_tex_types = &depth_tex_types;
+    defer g_depth_tex_types = null;
+    for (module.instructions) |inst| {
+        if (inst.op != .SampledImage or inst.words.len < 5) continue;
+        const rt = getDef(&module, inst.words[1]) orelse continue;
+        if (rt.op != .TypeSampledImage or rt.words.len < 3) continue;
+        const di = getDef(&module, rt.words[2]) orelse continue;
+        if (di.op != .TypeImage or di.words.len <= 4) continue;
+        if (di.words[4] != 1) continue; // result is not a depth sampled image
+        const img_op = getDef(&module, inst.words[3]) orelse continue;
+        if (img_op.words.len < 2) continue;
+        depth_tex_types.put(img_op.words[1], {}) catch {};
+    }
     collectResources(&module, &names, &decs, &cbuffers, &textures, &loose_uniforms, &img_access, &atomic_images, aa);
 
     // Stage inputs (layout(location) in ...). Collected with their ORIGINAL
@@ -6696,13 +6726,17 @@ fn emitInstruction(
             // (coord.xy, uint(rint(coord.z)), dref) — matching spirv-cross --msl.
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
+            var samp: []const u8 = try std.fmt.allocPrint(alloc, "{s}Smplr", .{si});
+            if (g_sampled_sampler) |ss| {
+                if (ss.get(inst.words[3])) |s| samp = s;
+            }
             const coord_name = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const coord = if (imageValueIsArrayed(m, inst.words[3]))
                 try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
             else
                 coord_name;
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref });
+            try w.print("    {s} {s} = {s}.sample_compare({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, dref });
         },
         .ImageSampleDrefExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
