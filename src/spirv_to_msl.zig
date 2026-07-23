@@ -4262,6 +4262,12 @@ fn emitFunction(
             try w.print("constant {s}& {s}_1", .{ cb.name, cb.name });
             first_param = false;
         }
+        // Add storage-buffer (SSBO) params -- device reference (fragment SSBOs, #492).
+        for (storage_buffers.items) |sb| {
+            if (!first_param) try w.writeAll(", ");
+            try w.print("device {s}& {s}", .{ sb.name, sb.name });
+            first_param = false;
+        }
 
         // Add texture + sampler params (storage images take no sampler, #284 follow-up)
         for (textures.items) |tex| {
@@ -4365,6 +4371,12 @@ fn emitFunction(
                 try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{ cb.name, cb.name, cb_b });
                 first_param = false;
             }
+            for (storage_buffers.items) |sb| {
+                if (!first_param) try w.writeAll(", ");
+                const sb_b = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
+                try w.print("device {s}& {s} [[buffer({d})]]", .{ sb.name, sb.name, sb_b });
+                first_param = false;
+            }
             for (textures.items) |tex| {
                 if (!first_param) try w.writeAll(", ");
                 const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
@@ -4404,6 +4416,9 @@ fn emitFunction(
         } else {
             for (cbuffers.items) |cb| {
                 try w.print(", {s}_1", .{cb.name});
+            }
+            for (storage_buffers.items) |sb| {
+                try w.print(", {s}", .{sb.name});
             }
             for (textures.items) |tex| {
                 try w.print(", {s}", .{tex.name});
