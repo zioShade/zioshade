@@ -1264,21 +1264,39 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // GLSL natively supports `const int X = SPEC * 2;` over a spec const;
     // pipeline tooling re-evaluates the expression when the leaf is overridden.
     for (module.instructions) |inst| {
-        if (inst.op != .SpecConstantOp or inst.words.len < 6) continue;
+        if (inst.op != .SpecConstantOp or inst.words.len < 5) continue;
         const type_id = inst.words[1];
         const result_id = inst.words[2];
         const opcode_lit = inst.words[3];
         const name = names.get(result_id) orelse continue;
         const type_str = try glslType(&module, type_id, &names, aa);
+        // Unary ops (5 words): SNegate(126), FNegate(127), Not(200). #475
+        if (inst.words.len == 5) {
+            const op0 = names.get(inst.words[4]) orelse continue;
+            const uop: ?[]const u8 = switch (opcode_lit) {
+                126, 127 => "-",
+                200 => "~",
+                else => null,
+            };
+            if (uop) |u| try w.print("const {s} {s} = {s}({s});\n", .{ type_str, name, u, op0 });
+            continue;
+        }
+        // Binary ops (6 words). #475: extended from just +,-,*,/ to include modulo,
+        // shifts, and bitwise ops (all glslang-reachable from spec-constant expressions).
         const op_str: ?[]const u8 = switch (opcode_lit) {
-            128, 129 => @as([]const u8, "+"), // IAdd / FAdd
-            130, 131 => @as([]const u8, "-"), // ISub / FSub
-            132, 133 => @as([]const u8, "*"), // IMul / FMul
-            134, 135, 136 => @as([]const u8, "/"), // UDiv / SDiv / FDiv
+            128, 129 => "+", // IAdd / FAdd
+            130, 131 => "-", // ISub / FSub
+            132, 133 => "*", // IMul / FMul
+            134, 135, 136 => "/", // UDiv / SDiv / FDiv
+            137, 138, 139, 140, 141 => "%", // UMod / SRem / SMod / FRem / FMod
+            194, 195 => ">>", // ShiftRightLogical / ShiftRightArithmetic
+            196 => "<<", // ShiftLeftLogical
+            197 => "|", // BitwiseOr
+            198 => "^", // BitwiseXor
+            199 => "&", // BitwiseAnd
             else => null,
         };
         const op = op_str orelse continue;
-        // Binary form only (v1): wc == 6 (header + type_id + result_id + opcode + op0 + op1)
         if (inst.words.len != 6) continue;
         const op0 = names.get(inst.words[4]) orelse continue;
         const op1 = names.get(inst.words[5]) orelse continue;
