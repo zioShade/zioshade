@@ -108,6 +108,17 @@ wgsl-naga:
 msl-lint:
     @bash tools/msl_invariant_sweep.sh
 
+# large-corpus MSL backend-validity sweep with the REAL Metal compiler — the
+# compiler-grounded counterpart of msl-lint (which asserts heuristics for Windows,
+# where no Metal compiler runs). Cross-compiles every shader in a corpus to MSL and
+# compile-checks it via tools/MslCompileCheck.swift (MTLDevice.makeLibrary). Exits
+# non-zero on any shader zioshade emits at exit 0 but Metal rejects (the silent-wrong
+# class). macOS only; run on demand.
+#   just msl-metal                                  # tests/spirv-cross fragments
+#   just msl-metal tests/glslang-430 fragment frag
+msl-metal dir="tests/spirv-cross" stage="fragment" ext="frag":
+    @bash tools/msl_validity_sweep.sh {{dir}} {{stage}} {{ext}}
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
@@ -125,6 +136,18 @@ validate-dxc: generate-outputs
     dxc -T ps_6_0 -E main tests/wintty/focus_output.hlsl -Fo tests/wintty/focus_check.dxil
     rm -f tests/wintty/crt_check.dxil tests/wintty/focus_check.dxil
     @echo "DXC validation: ALL PASSED"
+
+# validate saved MSL outputs with the real Metal compiler (macOS runtime makeLibrary) —
+# the MSL analog of validate-dxc. Catches the silent-wrong class: emit valid-looking
+# MSL at exit 0 that the Metal compiler rejects. Builds tools/MslCompileCheck.swift on
+# demand (cached in .zig-cache/mslcheck). macOS only (needs swiftc).
+validate-metal:
+    @command -v swiftc >/dev/null 2>&1 || { echo "validate-metal requires swiftc (macOS)"; exit 2; }
+    @mkdir -p .zig-cache
+    @test -x .zig-cache/mslcheck -a ! tools/MslCompileCheck.swift -nt .zig-cache/mslcheck || swiftc -O tools/MslCompileCheck.swift -o .zig-cache/mslcheck
+    .zig-cache/mslcheck tests/wintty/crt_output.msl
+    .zig-cache/mslcheck tests/wintty/focus_output.msl
+    @echo "Metal validation: ALL PASSED"
 
 # regenerate saved HLSL outputs from wintty shaders
 generate-outputs:
@@ -167,7 +190,7 @@ check:
 # ── full CI pipeline ─────────────────────────────────────────────────
 
 # run everything CI would run (incl. backend oracle differentials)
-ci: test test-hlsl validate-dxc strict-gate oracle-diff
+ci: test test-hlsl validate-dxc validate-metal strict-gate oracle-diff
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED — all gates green"
