@@ -1270,6 +1270,11 @@ threadlocal var g_has_stage_in: bool = false;
 threadlocal var g_frag_out_type: ?[]const u8 = null;
 threadlocal var g_frag_out_name: ?[]const u8 = null;
 
+// #489 (builtin threading): the gl_FragCoord builtin is renamed to `_fragCoord` and
+// threaded into helpers too, so a helper that reads it (raymarch `scene()`) resolves it.
+// Set in spirvToMSL (the rename must precede helper emission); null when no FragCoord.
+threadlocal var g_frag_coord_ty: ?[]const u8 = null;
+
 fn phiTypeNameMSL(m: *const ParsedModule, type_id: u32) []const u8 {
     const tinst = getDef(m, type_id) orelse return "int";
     switch (tinst.op) {
@@ -2805,6 +2810,31 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             if (loc != 0) continue;
             g_frag_out_type = fragmentOutputMslType(&module, &names, &decs, aa);
             g_frag_out_name = names.get(rid) orelse "_fragColor";
+            break;
+        }
+    }
+    // #489 (builtin threading): rename gl_FragCoord -> _fragCoord BEFORE helpers are
+    // emitted (the entry path does it too late), so a helper reading it resolves to the
+    // threaded _fragCoord param. Compute fc_ty here too (idempotent with the entry path).
+    g_frag_coord_ty = null;
+    defer g_frag_coord_ty = null;
+    if (is_frag) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Input) continue;
+            const vid = inst.words[2];
+            const dlist = decs.get(vid) orelse continue;
+            var is_fc = false;
+            for (dlist.items) |de| {
+                if (de.decoration == .built_in and de.extra.len > 0 and de.extra[0] == @intFromEnum(spirv.BuiltIn.frag_coord)) {
+                    is_fc = true;
+                    break;
+                }
+            }
+            if (!is_fc) continue;
+            const pa = aa.dupe(u8, "_fragCoord") catch break;
+            _ = names.put(vid, pa) catch {};
+            g_frag_coord_ty = if (fragCoordNeedsFullVec(&module, vid)) "float4" else "float2";
             break;
         }
     }
@@ -4774,6 +4804,12 @@ fn emitFunction(
         if (!first_param) try w.writeAll(", ");
         first_param = false;
         try w.print("thread {s}& {s}", .{ oty, g_frag_out_name orelse "_fragColor" });
+    }
+    // #489: thread gl_FragCoord (_fragCoord) into helpers (a helper that reads it).
+    if (g_frag_coord_ty) |fty| {
+        if (!first_param) try w.writeAll(", ");
+        first_param = false;
+        try w.print("{s} _fragCoord", .{fty});
     }
 
     // #480: forward-prototype pass emits `<signature>;` and stops before the body.
@@ -7175,6 +7211,12 @@ fn emitInstruction(
                 if (!first_arg) try w.writeAll(", ");
                 first_arg = false;
                 try w.writeAll(oname);
+            }
+            // #489: pass gl_FragCoord (_fragCoord) -- matches the helper's threaded param.
+            if (g_frag_coord_ty != null) {
+                if (!first_arg) try w.writeAll(", ");
+                first_arg = false;
+                try w.writeAll("_fragCoord");
             }
             try w.writeAll(");\n");
         },
