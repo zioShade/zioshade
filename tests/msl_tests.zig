@@ -265,6 +265,24 @@ test "#475: MSL NoPerspective fragment input gets [[center_no_perspective]]" {
     try assertContains(msl, "[[user(locn0), center_no_perspective]]");
 }
 
+// #475: non-arrayed OpImageFetch with a Lod operand (texelFetch lod>0). Metal's
+// read(uint2) defaults to mip 0; the Lod was dropped -> silent wrong-mip. Must pass it
+// as read(uint2(coord), lod). Matches spirv-cross.
+test "#475: MSL texelFetch Lod carried into read(uint2, lod)" {
+    const spirv = compileToSpirv("fetchlod_msl",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D t;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = texelFetch(t, ivec2(gl_FragCoord.xy), 3); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, ".read(uint2(");
+    // Lod 3 must be passed as the second arg, not dropped to a bare read(uint2(...)).
+    try assertContains(msl, "), 3)");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang

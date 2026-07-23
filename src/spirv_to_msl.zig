@@ -6309,7 +6309,16 @@ fn emitInstruction(
                 }
             } else {
                 const ct = mslReadCoordCast(m, inst.words[4]);
-                try w.print("    {s} {s} = {s}.read({s}({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, coord_name });
+                // #475: Lod operand (image-operands mask bit 0x2 at words[5], value at
+                // words[6]). Metal's read(uint2) defaults to mip 0; dropping the Lod
+                // silently returned the base-mip texel for any texelFetch(lod>0). Pass
+                // it as read(uint2(coord), lod). Checking the Lod bit (not just len>6)
+                // avoids passing a lone ConstOffset's value as the lod. Matches spirv-cross.
+                if (inst.words.len > 6 and (inst.words[5] & 0x2) != 0) {
+                    try w.print("    {s} {s} = {s}.read({s}({s}), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, coord_name, names.get(inst.words[6]) orelse "0" });
+                } else {
+                    try w.print("    {s} {s} = {s}.read({s}({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, coord_name });
+                }
             }
         },
         .ImageGather => {
