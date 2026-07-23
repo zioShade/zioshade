@@ -513,6 +513,26 @@ test "#485: MSL multisampled 2D texture emits texture2d_ms" {
     try assertNotContains(msl, " texture2d<float>");
 }
 
+// #486: the fragment color attachment was ALWAYS hardcoded `float4 _fragColor`, so a
+// single non-float4 output (out int / out float / out vec3) declared/typed the output
+// as float4 while the body tracked the real type -> a type mismatch Metal rejected
+// (silent-wrong: for-loop-init `out int`, lut-promotion `out float`, matrix-conversion
+// `out vec3`). #470 only gates depth/MRT, not single non-float4 color. Type the single
+// attachment from the Location-0 output's actual type. (NOT the full multi-field #472.)
+test "#486: MSL single non-float4 color output is typed correctly" {
+    const spirv = compileToSpirv("int_out_msl",
+        \\#version 450
+        \\layout(location=0) out int FragColor;
+        \\void main(){ FragColor = 5; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "int _fragColor [[color(0)]]");
+    try assertContains(msl, "thread int& ");
+    try assertNotContains(msl, "float4 _fragColor");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang

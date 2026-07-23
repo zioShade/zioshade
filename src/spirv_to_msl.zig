@@ -2457,9 +2457,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (is_frag and mslFragmentHasUnsupportedOutput(&module, &decs)) {
         return error.UnsupportedFragmentOutput;
     }
-    // Output struct for fragment (single hardcoded color attachment).
+    // Output struct for fragment (single color attachment, TYPED to the Location-0
+    // output's actual type -- not always float4; e.g. `out int`/`out float`/`out vec3`).
     if (is_frag) {
-        try w.writeAll("struct main0_out\n{\n    float4 _fragColor [[color(0)]];\n};\n\n");
+        const oty = fragmentOutputMslType(&module, &names, &decs, aa);
+        try w.print("struct main0_out\n{{\n    {s} _fragColor [[color(0)]];\n}};\n\n", .{oty});
     }
 
     // Output struct for vertex (mirrors spirv-cross --msl): user varyings
@@ -3220,6 +3222,27 @@ fn needsForwardDecls(m: *const ParsedModule, func_ids: []const u32, entry_id: u3
 /// list is limited to Metal-specific keywords: GLSL/C keywords can never appear as
 /// SPIR-V names (the frontend rejects them), and MSL attribute values like
 /// `color`/`position` are valid as identifiers.
+/// MSL type of the single fragment color output (Location 0), for typing the
+/// `main0_out` color attachment + the impl's output ref param. Defaults to float4.
+/// mslFragmentHasUnsupportedOutput already gated depth/MRT/multi-output away, so the
+/// non-default path is a single scalar/vector color (out int/float/vec2/vec3) -- the
+/// hardcoded float4 was silent-wrong (for-loop-init `out int`, matrix-conversion `out vec3`).
+fn fragmentOutputMslType(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), alloc: std.mem.Allocator) []const u8 {
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+        const rid = inst.words[2];
+        const loc = getDecVal(decs, rid, .location) orelse continue;
+        if (loc != 0) continue;
+        const ptr = getDef(m, inst.words[1]) orelse return "float4";
+        if (ptr.op != .TypePointer or ptr.words.len < 4) return "float4";
+        const pti = getDef(m, ptr.words[3]) orelse return "float4";
+        if (pti.op != .TypeFloat and pti.op != .TypeInt and pti.op != .TypeVector) return "float4";
+        return mslType(m, ptr.words[3], names, alloc) catch "float4";
+    }
+    return "float4";
+}
+
 fn mslSanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
     const reserved = [_][]const u8{
         // Function qualifiers (pipeline stages).
@@ -4098,7 +4121,8 @@ fn emitFunction(
         // Add output param (thread float4&)
         if (output_var_id) |ovid| {
             const on = names.get(ovid) orelse "_fragColor";
-            try w.print("thread float4& {s}", .{on});
+            const oty = fragmentOutputMslType(m, names, decs, alloc);
+            try w.print("thread {s}& {s}", .{ oty, on });
             first_param = false;
         }
 
