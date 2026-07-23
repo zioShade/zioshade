@@ -3104,12 +3104,25 @@ fn emitFunction(
                     // dxc errors on the integer case and silently PERSPECTIVE-interpolates a flat
                     // float (wrong values). The qualifier was previously dropped here -- a
                     // plausible-but-wrong / compile-error miscompile. (#170, #470)
+                    // #475: centroid/sample are prefixed before the interp qualifier.
+                    const centroid_pfx: []const u8 = if (hasDecoration(decorations, ivid, .sample))
+                        "sample "
+                    else if (hasDecoration(decorations, ivid, .centroid))
+                        "centroid "
+                    else
+                        "";
                     const flat_pfx: []const u8 = blk: {
                         if (hasDecoration(decorations, ivid, .flat) or
                             std.mem.startsWith(u8, iv_type, "int") or std.mem.startsWith(u8, iv_type, "uint"))
-                            break :blk "nointerpolation ";
-                        if (hasDecoration(decorations, ivid, .no_perspective)) break :blk "noperspective ";
-                        break :blk "";
+                            break :blk if (centroid_pfx.len > 0)
+                                (if (std.mem.eql(u8, centroid_pfx, "sample ")) "sample nointerpolation " else "centroid nointerpolation ")
+                            else
+                                "nointerpolation ";
+                        if (hasDecoration(decorations, ivid, .no_perspective)) break :blk if (centroid_pfx.len > 0)
+                            (if (std.mem.eql(u8, centroid_pfx, "sample ")) "sample noperspective " else "centroid noperspective ")
+                        else
+                            "noperspective ";
+                        break :blk centroid_pfx;
                     };
                     if (loc) |l| {
                         if (!first_input) try w.writeAll(", ");
