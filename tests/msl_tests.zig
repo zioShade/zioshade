@@ -339,6 +339,22 @@ test "#475: MSL shared (Workgroup) memory declared with array suffix" {
     try assertContains(msl, "threadgroup float s[64];");
 }
 
+// #475: a negative signed-int spec constant default must print as -1, not the raw u32
+// (4294967295). MSL (like GLSL) was emitting the raw u32.
+test "#475: MSL negative signed-int spec constant default -> -1" {
+    const spirv = compileToSpirv("specconst_neg_msl",
+        \\#version 450
+        \\layout(constant_id=0) const int N = -1;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(N)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "= -1;");
+    try assertNotContains(msl, "4294967295");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang

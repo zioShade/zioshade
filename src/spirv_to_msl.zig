@@ -2465,6 +2465,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             if (std.mem.eql(u8, type_str, "float")) {
                 const fv: f32 = @bitCast(default_val);
                 try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, fv });
+            } else if (std.mem.eql(u8, type_str, "int")) {
+                // #475: a signed-int default's high bit set (e.g. -1) must print as the
+                // NEGATIVE value, not the raw u32 (4294967295) — out-of-range int literal.
+                const iv: i32 = @bitCast(default_val);
+                try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, iv });
             } else {
                 try w.print("constant {s} {s} [[function_constant({d})]] = {d};\n", .{ type_str, name, sid, default_val });
             }
