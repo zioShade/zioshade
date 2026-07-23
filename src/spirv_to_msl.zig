@@ -5543,6 +5543,16 @@ fn emitInstruction(
             }
             const tn = try mslType(m, inst.words[1], names, alloc);
             const arr = try mslGetArraySuffix(m, inst.words[1]);
+            // #476: OpVariable Function with an Initializer operand (word[4]) — emit it,
+            // else the local reads zero/garbage before any store (silent-wrong). Mirrors
+            // HLSL. (Array/composite inits are handled by the analyzeLocalConstArray path
+            // above; this covers the scalar/simple-constant case.)
+            if (inst.words.len >= 5) {
+                if (names.get(inst.words[4])) |in| {
+                    try w.print("    {s} {s}{s} = {s};\n", .{ tn, names.get(ri) orelse "var", arr, in });
+                    return;
+                }
+            }
             try w.print("    {s} {s}{s};\n", .{ tn, names.get(ri) orelse "var", arr });
         },
         .Load => {

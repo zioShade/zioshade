@@ -4334,6 +4334,41 @@ test "#475: WGSL NoPerspective varying -> @interpolate(linear)" {
     try nagaValidateOrSkip(wgsl, "noperspective wgsl");
 }
 
+// #476: OpVariable Function with an Initializer operand (word[4]) — the init was DROPPED
+// by MSL/GLSL/WGSL (declared bare), so the local read zero/garbage before any store
+// (silent-wrong). Must emit `var x: T = init;`. Reachable via spirv-cross/hand-crafted
+// SPIR-V (in-repo fixtures op-phi-swap.asm.comp / lut-promotion-initializer use it).
+test "#476: WGSL function-local OpVariable initializer is emitted" {
+    const spirv = assembleSpirv("varinit",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%1 = OpTypeFunction %void
+        \\%f32 = OpTypeFloat 32
+        \\%v4f = OpTypeVector %f32 4
+        \\%pf32 = OpTypePointer Output %v4f
+        \\%ppf = OpTypePointer Function %f32
+        \\%c = OpConstant %f32 8.5
+        \\%o = OpVariable %pf32 Output
+        \\%main = OpFunction %void None %1
+        \\%lbl = OpLabel
+        \\%v = OpVariable %ppf Function %c
+        \\%lv = OpLoad %f32 %v
+        \\%ov = OpCompositeConstruct %v4f %lv %lv %lv %lv
+        \\OpStore %o %ov
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // The init (8.5) must be present, not a bare declaration.
+    try assertContains(wgsl, "8.5");
+}
+
 // #170 (H): a whole-matrix store to a flattened matrix output that lands inside
 // a `switch` case body is replayed through `emitSimpleInstruction` — a separate
 // Store path that has no access to the matrix-output map — so it emitted
