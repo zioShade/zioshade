@@ -402,6 +402,29 @@ test "#481: MSL stage input named like a Metal keyword is sanitized" {
     try assertNotContains(msl, "vertex [[user(locn0)]]");
 }
 
+// #482: a mutable module-scope (Private) global with an initializer was referenced in
+// the body but NEVER declared -- Metal forbids file-scope mutable vars (constant
+// address space only), so it emitted valid-looking MSL at exit 0 that Metal rejected
+// (silent-wrong: func_side_effect `counter` in the spirv-cross corpus). The global is
+// per-invocation and zioshade inlines all calls, so declare it as a local at the impl
+// body start, initialized to its SPIR-V default; bare references resolve to it.
+test "#482: MSL mutable module-scope global declared as an initialized local" {
+    const spirv = compileToSpirv("mut_global_msl",
+        \\#version 450
+        \\layout(location=0) out float o;
+        \\float counter = 0.0;
+        \\void main(){ counter += 1.0; o = counter; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    // counter is declared as a local (bare if the frontend uses OpStore-after-decl,
+    // or `= 0` if it carries an initializer operand) -- either way no longer undeclared.
+    try assertContains(msl, "    float counter");
+    // Not promoted to a file-scope `constant` (Metal forbids that for a mutable var).
+    try assertNotContains(msl, "constant float counter");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
