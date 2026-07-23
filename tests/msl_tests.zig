@@ -533,6 +533,21 @@ test "#486: MSL single non-float4 color output is typed correctly" {
     try assertNotContains(msl, "float4 _fragColor");
 }
 
+// #487: a multisampled STORAGE image that is BOTH read and written (imageLoad +
+// imageStore) lowered to texture2d_ms<float, access::read_write>, which Metal rejects
+// (an MS texture object is read OR write, never both) -> silent-wrong (image-ms). Genuinely
+// Metal-limited (no single texture2d_ms can be read_write), so honest-error it.
+test "#487: MSL read+write multisampled storage image honest-errors (Metal-limited)" {
+    const spirv = compileToSpirv("ms_rw_image_msl",
+        \\#version 450
+        \\layout(binding=0) uniform image2DMS img;
+        \\layout(location=0) out float o;
+        \\void main(){ imageStore(img, ivec2(0), vec4(1.0)); o = imageLoad(img, ivec2(0), 0).x; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedMultiSampleStorageImage, zioshade.spirvToMSL(alloc, spirv, .{}));
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
