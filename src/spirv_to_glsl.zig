@@ -3170,10 +3170,17 @@ fn emitWhileLoop(
                 const dl = binst.words[2];
                 const sml = bc_merge.get(bi);
                 if (sml) |smv| {
+                    // #478 F3: materialize switch-merge phis (N incoming) as `_phi` vars.
+                    var sphis: std.ArrayList(Instruction) = .empty;
+                    defer sphis.deinit(alloc);
+                    collectSwitchMergePhis(m, label_map, smv, &sphis, alloc);
+                    try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                     try w.print("        switch ({s}) {{\n", .{sn});
                     if (dl != smv) {
                         try w.writeAll("        default:\n");
-                        bi = try emitBlock(m, names, decs, dl, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", true);
+                        bi = try emitBlock(m, names, decs, dl, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
+                        try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                        try w.writeAll("        break;\n");
                     }
                     var wi: usize = 3;
                     while (wi + 1 < binst.words.len) : (wi += 2) {
@@ -3181,9 +3188,12 @@ fn emitWhileLoop(
                         const target = binst.words[wi + 1];
                         if (target == smv) continue;
                         try w.print("        case {d}:\n", .{cv});
-                        bi = try emitBlock(m, names, decs, target, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", true);
+                        bi = try emitBlock(m, names, decs, target, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
+                        try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
+                        try w.writeAll("        break;\n");
                     }
                     try w.writeAll("        }\n");
+                    finalizeSwitchPhis(names, sphis.items, alloc);
                     if (label_map.get(smv)) |smi| {
                         bi = smi;
                     }
