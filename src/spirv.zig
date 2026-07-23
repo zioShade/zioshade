@@ -500,6 +500,7 @@ pub const ExecutionMode = enum(u32) {
     OutputPoints = 27,
     OutputLineStrip = 28,
     OutputTriangleStrip = 29,
+    LocalSizeId = 38,
     OutputLinesEXT = 5269,
     OutputTrianglesEXT = 5298,
     OutputPrimitivesEXT = 5270,

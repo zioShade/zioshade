@@ -22,6 +22,14 @@ fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     return m.instructions[i];
 }
 
+/// The default value of an integer OpSpecConstant `id` (its literal words[3]), used to
+/// resolve LocalSizeId operands to concrete workgroup dimensions. (#475)
+fn glslSpecConstantDefault(m: *const ParsedModule, id: u32, fallback: u32) u32 {
+    const def = getDef(m, id) orelse return fallback;
+    if (def.op != .SpecConstant or def.words.len <= 3) return fallback;
+    return def.words[3];
+}
+
 /// True if `rid` (a value's result id) is consumed as an operand by any real
 /// (non-metadata) instruction. Its own definition contributes exactly one
 /// occurrence, so >= 2 means it is referenced. Used to decide whether an UNHANDLED
@@ -1408,6 +1416,13 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         if (inst.op == .ExecutionMode and inst.words.len >= 3) {
             const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
             if (mode == .LocalSize and inst.words.len >= 6) module.local_size = .{ inst.words[3], inst.words[4], inst.words[5] };
+            // #475: LocalSizeId (spec-constant workgroup size) — operands are OpSpecConstant
+            // result IDs; resolve each to its default so layout(local_size_x=...) is right.
+            if (mode == .LocalSizeId and inst.words.len >= 6) module.local_size = .{
+                glslSpecConstantDefault(&module, inst.words[3], 1),
+                glslSpecConstantDefault(&module, inst.words[4], 1),
+                glslSpecConstantDefault(&module, inst.words[5], 1),
+            };
         }
     }
     return module;

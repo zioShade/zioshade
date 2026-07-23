@@ -297,6 +297,17 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
                     inst.words[5],
                 };
             }
+            // #475: LocalSizeId (spec-constant workgroup size) — operands are the
+            // RESULT IDs of OpSpecConstant integers; resolve each to its default so
+            // [numthreads] gets the specialized size (else stays (1,1,1) = silent-wrong).
+            if (mode == .LocalSizeId and inst.words.len >= 6) {
+                module.local_size = .{
+                    hlslSpecConstantDefault(&module, inst.words[3], 1),
+                    hlslSpecConstantDefault(&module, inst.words[4], 1),
+                    hlslSpecConstantDefault(&module, inst.words[5], 1),
+                };
+                std.debug.print("DEBUG LocalSizeId hit: {d} {d} {d} (operands {d} {d} {d})\n", .{ module.local_size[0], module.local_size[1], module.local_size[2], inst.words[3], inst.words[4], inst.words[5] });
+            }
             if (mode == .EarlyFragmentTests) {
                 module.early_fragment_tests = true;
             }
@@ -595,6 +606,14 @@ fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     const idx = if (id < module.id_defs.len) module.id_defs[id] orelse return null else return null;
     if (idx >= module.instructions.len) return null;
     return module.instructions[idx];
+}
+
+/// The default value of an integer OpSpecConstant `id` (its literal words[3]), used to
+/// resolve LocalSizeId operands to concrete workgroup dimensions. (#475)
+fn hlslSpecConstantDefault(module: *const ParsedModule, id: u32, fallback: u32) u32 {
+    const def = getDef(module, id) orelse return fallback;
+    if (def.op != .SpecConstant or def.words.len <= 3) return fallback;
+    return def.words[3];
 }
 
 /// SPIR-V `Dim` (0=1D, 1=2D, 2=3D, 3=Cube) of the image behind a sampled-image
