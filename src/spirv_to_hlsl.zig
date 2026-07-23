@@ -350,7 +350,6 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
                     hlslSpecConstantDefault(&module, inst.words[4], 1),
                     hlslSpecConstantDefault(&module, inst.words[5], 1),
                 };
-                std.debug.print("DEBUG LocalSizeId hit: {d} {d} {d} (operands {d} {d} {d})\n", .{ module.local_size[0], module.local_size[1], module.local_size[2], inst.words[3], inst.words[4], inst.words[5] });
             }
             if (mode == .EarlyFragmentTests) {
                 module.early_fragment_tests = true;
