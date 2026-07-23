@@ -548,6 +548,25 @@ test "#487: MSL read+write multisampled storage image honest-errors (Metal-limit
     try std.testing.expectError(error.UnsupportedMultiSampleStorageImage, zioshade.spirvToMSL(alloc, spirv, .{}));
 }
 
+// #488: Metal's reflect/refract are VECTOR-only -- a SCALAR call is ambiguous (no scalar
+// overload). Lower scalar reflect to `I - 2*dot(N,I)*N` (and refract to its formula) so
+// the MSL compiles; vector forms keep reflect()/refract(). scalar-refract-reflect corpus.
+test "#488: MSL scalar reflect lowered to formula (Metal vector-only)" {
+    const spirv = compileToSpirv("scalar_reflect_msl",
+        \\#version 450
+        \\layout(location=0) in float I;
+        \\layout(location=1) in float N;
+        \\layout(location=0) out float o;
+        \\void main(){ o = reflect(I, N); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    // Scalar reflect -> the formula, NOT a bare reflect() call (Metal would reject it).
+    try assertNotContains(msl, "= reflect(");
+    try assertContains(msl, "2.0 *");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
