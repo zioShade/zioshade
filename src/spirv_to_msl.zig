@@ -1757,6 +1757,28 @@ const spv_unsafe_array_template =
 ;
 
 fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
+    // #476: width-aware — honest-error 64-bit (2-word truncation) and 16-bit float (low-
+    // bits mis-bitcast); sign-extend signed int16. See spirv_to_glsl.zig for the rationale.
+    if (type_inst.op == .TypeFloat and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        if (w == 16 and literal_words.len > 0) {
+            const h: f16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            const val: f32 = @floatCast(h);
+            if (val == @floor(val)) {
+                const ival: i32 = @intFromFloat(val);
+                return std.fmt.allocPrint(alloc, "{d}.0", .{ival});
+            }
+            return std.fmt.allocPrint(alloc, "{d}", .{val});
+        }
+    } else if (type_inst.op == .TypeInt and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        if (w == 16 and type_inst.words.len > 3 and type_inst.words[3] != 0 and literal_words.len > 0) {
+            const v: i16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            return std.fmt.allocPrint(alloc, "{d}", .{v});
+        }
+    }
     if (type_inst.op == .TypeFloat and literal_words.len > 0) {
         const val: f32 = @bitCast(literal_words[0]);
         if (val == @floor(val) and @abs(val) < 1e6) {
@@ -2030,6 +2052,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // MSL keeps its existing behavior: honest-error only the bounded `tex[N]` opaque
     // array (include_runtime = false); the unbounded form is handled elsewhere. (#170)
     if (common.hasOpaqueArrayResource(&module, false)) return error.UnsupportedSamplerArray;
+    // #476: honest-error 64-bit numeric types (32-bit target; silent truncation otherwise).
+    switch (common.wide64Type(module.instructions)) {
+        .float64 => return error.UnsupportedDoubleType,
+        .int64 => return error.UnsupportedInt64Type,
+        .none => {},
+    }
 
     // Override entry point if requested
     if (!std.mem.eql(u8, options.entry_point_name, "main")) {

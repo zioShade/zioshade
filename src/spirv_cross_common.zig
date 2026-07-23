@@ -382,6 +382,20 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Detects a 64-bit numeric type (OpTypeFloat/OpTypeInt with Width=64) anywhere in the
+/// module. 32-bit targets (GLSL/HLSL/MSL/WGSL) cannot represent these; a 64-bit constant
+/// silently truncates/misreads, so each backend honest-errors up front (mirrors WGSL). (#476)
+pub const Wide64Type = enum { none, float64, int64 };
+pub fn wide64Type(instructions: anytype) Wide64Type {
+    for (instructions) |inst| {
+        if (inst.words.len > 2 and inst.words[2] == 64) {
+            if (inst.op == .TypeFloat) return .float64;
+            if (inst.op == .TypeInt) return .int64;
+        }
+    }
+    return .none;
+}
+
 pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     const idx = if (id < module.id_defs.len) module.id_defs[id] orelse return null else return null;
     if (idx >= module.instructions.len) return null;
@@ -969,6 +983,28 @@ fn wgslNonFiniteBitcast(alloc: std.mem.Allocator, module: *const ParsedModule, i
 }
 
 pub fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
+    // #476: width-aware — honest-error 64-bit (2-word truncation) and 16-bit float (low-
+    // bits mis-bitcast); sign-extend signed int16. See spirv_to_glsl.zig for the rationale.
+    if (type_inst.op == .TypeFloat and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        if (w == 16 and literal_words.len > 0) {
+            const h: f16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            const val: f32 = @floatCast(h);
+            if (val == @floor(val)) {
+                const ival: i32 = @intFromFloat(val);
+                return std.fmt.allocPrint(alloc, "{d}.0", .{ival});
+            }
+            return std.fmt.allocPrint(alloc, "{d}", .{val});
+        }
+    } else if (type_inst.op == .TypeInt and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        if (w == 16 and type_inst.words.len > 3 and type_inst.words[3] != 0 and literal_words.len > 0) {
+            const v: i16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            return std.fmt.allocPrint(alloc, "{d}", .{v});
+        }
+    }
     if (type_inst.op == .TypeFloat and literal_words.len > 0) {
         const val: f32 = @bitCast(literal_words[0]);
         if (val == @floor(val) and @abs(val) < 1e6) {

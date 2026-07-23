@@ -1020,6 +1020,13 @@ pub fn spirvToHLSL(
     // HLSL/DXC forbids recursion; a recursive call graph would emit HLSL DXC
     // rejects, so fail loud instead (#486).
     if (hlslHasRecursion(&module, alloc)) return error.UnsupportedRecursion;
+    // #476: honest-error 64-bit numeric types (32-bit target; a 64-bit constant silently
+    // truncates/misreads). Mirrors WGSL's module-level width gate.
+    switch (common.wide64Type(module.instructions)) {
+        .float64 => return error.UnsupportedDoubleType,
+        .int64 => return error.UnsupportedInt64Type,
+        .none => {},
+    }
 
     var arena = std.heap.ArenaAllocator.init(alloc);
     defer arena.deinit();
@@ -1670,6 +1677,28 @@ fn tryResolveTypeName(module: *const ParsedModule, type_id: u32) []const u8 {
 }
 
 fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_words: []const u32) ![]const u8 {
+    // #476: width-aware — honest-error 64-bit (2-word truncation) and 16-bit float (low-
+    // bits mis-bitcast); sign-extend signed int16. See spirv_to_glsl.zig for the rationale.
+    if (type_inst.op == .TypeFloat and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        if (w == 16 and literal_words.len > 0) {
+            const h: f16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            const val: f32 = @floatCast(h);
+            if (val == @floor(val)) {
+                const ival: i32 = @intFromFloat(val);
+                return std.fmt.allocPrint(alloc, "{d}.0", .{ival});
+            }
+            return std.fmt.allocPrint(alloc, "{d}", .{val});
+        }
+    } else if (type_inst.op == .TypeInt and type_inst.words.len > 2) {
+        const w = type_inst.words[2];
+        if (w == 64) return error.UnsupportedConstantWidth;
+        if (w == 16 and type_inst.words.len > 3 and type_inst.words[3] != 0 and literal_words.len > 0) {
+            const v: i16 = @bitCast(@as(u16, @truncate(literal_words[0])));
+            return std.fmt.allocPrint(alloc, "{d}", .{v});
+        }
+    }
     if (type_inst.op == .TypeFloat and literal_words.len > 0) {
         const val: f32 = @bitCast(literal_words[0]);
         // Format float: use 0.5, 1.0 etc but ensure it has a decimal point
