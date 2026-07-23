@@ -1263,6 +1263,13 @@ threadlocal var g_proto_only: bool = false;
 // the whole emitBody/emitBlock/emitInstruction call chain (#476).
 threadlocal var g_has_stage_in: bool = false;
 
+// #489: when a fragment has a color output, thread `thread <type>& <name>` into every
+// non-entry helper too (mirrors the main0_in threading), so a helper that writes the
+// output (e.g. shader-debug `func0` -> `ov`) resolves it. Set in spirvToMSL; read at the
+// helper signature + OpFunctionCall. Null when there is no fragment output.
+threadlocal var g_frag_out_type: ?[]const u8 = null;
+threadlocal var g_frag_out_name: ?[]const u8 = null;
+
 fn phiTypeNameMSL(m: *const ParsedModule, type_id: u32) []const u8 {
     const tinst = getDef(m, type_id) orelse return "int";
     switch (tinst.op) {
@@ -2781,6 +2788,26 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // so this body-only rename does not affect field spellings.
     g_has_stage_in = is_frag and stage_inputs.items.len > 0;
     defer g_has_stage_in = false;
+    // #489: thread the fragment output into helpers (set type+name; read at the helper
+    // signature + OpFunctionCall). Null when there is no Location-0 color output.
+    g_frag_out_type = null;
+    g_frag_out_name = null;
+    defer {
+        g_frag_out_type = null;
+        g_frag_out_name = null;
+    }
+    if (is_frag) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+            const rid = inst.words[2];
+            const loc = getDecVal(&decs, rid, .location) orelse continue;
+            if (loc != 0) continue;
+            g_frag_out_type = fragmentOutputMslType(&module, &names, &decs, aa);
+            g_frag_out_name = names.get(rid) orelse "_fragColor";
+            break;
+        }
+    }
     if (g_has_stage_in) {
         // This is now the SOLE stage-input rename (the entry function's own copy is
         // removed): doing it here, before non-entry functions are emitted, lets a
@@ -4741,6 +4768,12 @@ fn emitFunction(
         if (!first_param) try w.writeAll(", ");
         first_param = false;
         try w.writeAll("main0_in in");
+    }
+    // #489: thread the fragment output into helpers (a helper that writes it needs it).
+    if (g_frag_out_type) |oty| {
+        if (!first_param) try w.writeAll(", ");
+        first_param = false;
+        try w.print("thread {s}& {s}", .{ oty, g_frag_out_name orelse "_fragColor" });
     }
 
     // #480: forward-prototype pass emits `<signature>;` and stops before the body.
@@ -7136,6 +7169,12 @@ fn emitInstruction(
                 if (!first_arg) try w.writeAll(", ");
                 first_arg = false;
                 try w.writeAll("in");
+            }
+            // #489: pass the fragment output (matches the helper's threaded output param).
+            if (g_frag_out_name) |oname| {
+                if (!first_arg) try w.writeAll(", ");
+                first_arg = false;
+                try w.writeAll(oname);
             }
             try w.writeAll(");\n");
         },
