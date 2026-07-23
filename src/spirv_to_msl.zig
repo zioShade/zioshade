@@ -6380,9 +6380,13 @@ fn emitInstruction(
         },
         .ImageWrite => {
             const img = names.get(inst.words[1]) orelse "img";
+            // #475: Metal texture::write(texel, uint2) requires an UNSIGNED coord; the
+            // SPIR-V storage-image coord is signed int2. ImageRead casts via
+            // mslReadCoordCast but ImageWrite passed it raw (asymmetry -> Metal reject).
+            const ct = mslReadCoordCast(m, inst.words[2]);
             const coord = names.get(inst.words[2]) orelse "0";
             const texel = names.get(inst.words[3]) orelse "float4(0)";
-            try w.print("    {s}.write({s}, {s});\n", .{ img, texel, coord });
+            try w.print("    {s}.write({s}, {s}({s}));\n", .{ img, texel, ct, coord });
         },
         .ImageQuerySizeLod => {
             // MSL: get_width/get_height(level), get_depth(level) for 3D, and

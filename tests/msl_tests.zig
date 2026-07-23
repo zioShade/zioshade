@@ -89,6 +89,28 @@ fn compileVertToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
     return words;
 }
 
+/// Compute shader (.comp) GLSL → SPIR-V via glslang (skips if absent).
+fn compileCompToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}.comp", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "msl_test_{s}_comp.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+    const data = zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024) catch return error.SkipZigTest;
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
 // ---------------------------------------------------------------------------
 // #471: gl_PerVertex interface-block vertex outputs (external glslang/shaderc form).
 // glslang writes gl_Position et al. as members of a member-decorated Block, via
@@ -281,6 +303,23 @@ test "#475: MSL texelFetch Lod carried into read(uint2, lod)" {
     try assertContains(msl, ".read(uint2(");
     // Lod 3 must be passed as the second arg, not dropped to a bare read(uint2(...)).
     try assertContains(msl, "), 3)");
+}
+
+// #475: Metal texture::write(texel, uint2) requires an UNSIGNED coord; the SPIR-V
+// storage-image coord is signed int2. ImageRead cast via mslReadCoordCast but ImageWrite
+// passed it raw (Metal reject). Must cast. Matches spirv-cross.
+test "#475: MSL imageStore coord cast to uint2" {
+    const spirv = compileCompToSpirv("imagewrite_coord",
+        \\#version 450
+        \\layout(local_size_x=8) in;
+        \\layout(rgba32f, binding=0) uniform image2D img;
+        \\void main(){ imageStore(img, ivec2(gl_GlobalInvocationID.xy), vec4(1.0)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, ".write(");
+    try assertContains(msl, ", uint2(");
 }
 
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
