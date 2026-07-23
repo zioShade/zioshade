@@ -360,6 +360,24 @@ test "#475: HLSL textureSamples emits GetDimensions(.., numSamples)" {
     try assertContains(hlsl, "_sm;\n");
 }
 
+// #475: textureSize on a non-arrayed Texture2DMS needs the sampleCount out-param —
+// the 2-arg GetDimensions is invalid for MS textures (DXC error). The rank-2 else
+// branch didn't check MS (only rank-3 arrayed did).
+test "#475: HLSL textureSize(sampler2DMS) emits 3-arg GetDimensions (with sampleCount)" {
+    const spirv = compileToSpirv("querysize_ms",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DMS t;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ ivec2 s = textureSize(t); o = vec4(s.x, s.y, 0.0, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "GetDimensions(");
+    // 3 args (w, h, samples) — the sampleCount out-param must be present.
+    try assertContains(hlsl, "_samples;");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------
