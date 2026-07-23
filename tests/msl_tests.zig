@@ -322,6 +322,23 @@ test "#475: MSL imageStore coord cast to uint2" {
     try assertContains(msl, ", uint2(");
 }
 
+// #475: Workgroup (shared) memory. The threadgroup var is a MODULE-scope OpVariable;
+// zioshade scanned the function body (missed it -> undeclared identifier) and dropped
+// the array suffix. Must emit `threadgroup T name[N];`.
+test "#475: MSL shared (Workgroup) memory declared with array suffix" {
+    const spirv = compileCompToSpirv("workgroup_msl",
+        \\#version 450
+        \\layout(local_size_x=64) in;
+        \\layout(std430, binding=0) buffer O { float data[]; };
+        \\shared float s[64];
+        \\void main(){ uint i=gl_LocalInvocationID.x; s[i]=float(gl_GlobalInvocationID.x); barrier(); data[gl_GlobalInvocationID.x]=s[(i+1u)%64u]; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "threadgroup float s[64];");
+}
+
 // #170: a do-while whose BODY has control flow (`if(...) continue;`) emits a NATIVE
 // `do { … } while (<inlined cond>);`, which rebuilds the bottom condition over
 // persistent vars via `tryInlineDoWhileCond`. With a FLOAT `!=` condition glslang
