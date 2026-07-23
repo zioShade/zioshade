@@ -5187,6 +5187,39 @@ fn emitWhileLoopMSL(
                 continue;
             }
             if (binst.op == .SelectionMerge) continue;
+            // #478: a switch inside a loop body — emit it (was silently dropped).
+            if (binst.op == .Switch and binst.words.len >= 3) {
+                const sn = names.get(binst.words[1]) orelse "s";
+                const dl = binst.words[2];
+                const smerge = bc_merge.get(bi);
+                if (smerge) |sml| {
+                    var sphis: std.ArrayList(Instruction) = .empty;
+                    defer sphis.deinit(alloc);
+                    collectSwitchMergePhis(m, label_map, sml, &sphis, alloc);
+                    try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                    try w.print("        switch ({s}) {{\n", .{sn});
+                    if (dl != sml) {
+                        try w.writeAll("        default: {\n");
+                        _ = try emitBlock(m, names, decs, dl, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                        try w.writeAll("        break;\n        }\n");
+                    }
+                    var swi: usize = 3;
+                    while (swi + 1 < binst.words.len) : (swi += 2) {
+                        const cv = binst.words[swi];
+                        const target = binst.words[swi + 1];
+                        if (target == sml) continue;
+                        try w.print("        case {d}: {{\n", .{cv});
+                        _ = try emitBlock(m, names, decs, target, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
+                        try w.writeAll("        break;\n        }\n");
+                    }
+                    try w.writeAll("        }\n");
+                    finalizeSwitchPhis(names, sphis.items, alloc);
+                    if (label_map.get(sml)) |smi| bi = smi;
+                }
+                continue;
+            }
             if (binst.op == .Branch) {
                 if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
                 continue;
