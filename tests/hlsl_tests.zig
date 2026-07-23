@@ -378,6 +378,24 @@ test "#475: HLSL textureSize(sampler2DMS) emits 3-arg GetDimensions (with sample
     try assertContains(hlsl, "_samples;");
 }
 
+// #475: a helper with an out/inout pointer param called with a LOCAL variable. HLSL
+// emitted the param by-value (detectOutParams only catches entry->Output calls), so the
+// callee's write was silently lost. A Function-storage pointer param must be `inout`.
+test "#475: HLSL inout helper param called with a local -> inout (write preserved)" {
+    const spirv = compileToSpirv("inout_param",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\void bump(inout int x){ x = x + 1; }
+        \\void main(){ int v = 0; bump(v); o = vec4(float(v)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    // The helper param must be inout (not by-value int x).
+    try assertContains(hlsl, "inout int");
+    try assertNotContains(hlsl, "(int x)");
+}
+
 // ---------------------------------------------------------------------------
 // T1: Minimal shaders — must produce valid HLSL structure
 // ---------------------------------------------------------------------------

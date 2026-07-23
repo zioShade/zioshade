@@ -2813,10 +2813,12 @@ fn emitFunction(
         var is_out_param = false;
         var is_pointer_param = false;
         var inner_type_id = p_inst.words[1];
+        var ptr_storage: ?spirv.StorageClass = null;
         if (param_type_inst) |pti| {
             if (pti.op == .TypePointer and pti.words.len > 3) {
                 inner_type_id = pti.words[3]; // pointee type
                 is_pointer_param = true;
+                ptr_storage = @enumFromInt(pti.words[2]);
             }
         }
         // Check if this param was detected as out via call-site analysis.
@@ -2832,6 +2834,14 @@ fn emitFunction(
                 }
             }
         }
+        // #475: a Function-storage pointer param is by-REFERENCE (the callee may write
+        // through it). detectOutParams only catches ENTRY->Output calls, so a helper
+        // called with a LOCAL arg was emitted by-value and the write was silently lost.
+        // Emit `inout` for any by-ref pointer param (Function storage OR detected-out).
+        // `inout` (not `out`) is always safe and also fixes read-modify-write params,
+        // which `out` leaves uninitialized. Mirrors MSL's `thread T&` / GLSL's inout.
+        const is_inout_param = is_pointer_param and
+            (is_out_param or (ptr_storage != null and ptr_storage.? == .Function));
         const p_type = try hlslType(module, inner_type_id, names, alloc);
 
         const builtin = getDecorationValue(decorations, pid, .built_in);
@@ -2839,18 +2849,18 @@ fn emitFunction(
 
         if (builtin) |b| {
             const semantic = builtInToSemantic(b);
-            if (is_out_param) try w.writeAll("out ");
+            if (is_inout_param) try w.writeAll("inout ");
             try w.print("{s} {s} : {s}", .{ p_type, p_name, semantic });
         } else if (loc) |l| {
             if (l == 0 and i == 0) {
-                if (is_out_param) try w.writeAll("out ");
+                if (is_inout_param) try w.writeAll("inout ");
                 try w.print("{s} {s} : SV_Position", .{ p_type, p_name });
             } else {
-                if (is_out_param) try w.writeAll("out ");
+                if (is_inout_param) try w.writeAll("inout ");
                 try w.print("{s} {s} : TEXCOORD{d}", .{ p_type, p_name, l });
             }
         } else {
-            if (is_out_param) try w.writeAll("out ");
+            if (is_inout_param) try w.writeAll("inout ");
             try w.print("{s} {s}", .{ p_type, p_name });
         }
     }
