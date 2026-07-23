@@ -6067,7 +6067,64 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     while (si < module.instructions.len) : (si += 1) {
                                         const dinst = module.instructions[si];
                                         if (dinst.op == .Label and dinst.words.len > 1 and dinst.words[1] == merge_label.?) break;
-                                        if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
+                                        if (dinst.op == .Branch) break;
+                                        if (dinst.op == .BranchConditional) {
+                                            // #478 F4: emit a nested if/else within the case body (was dropped).
+                                            const bcond = names.get(dinst.words[1]) orelse "c";
+                                            const btrue = dinst.words[2];
+                                            const bfalse = if (dinst.words.len > 3) dinst.words[3] else null;
+                                            var merge_lbl: u32 = 0;
+                                            if (si > 0 and module.instructions[si - 1].op == .SelectionMerge and module.instructions[si - 1].words.len > 1)
+                                                merge_lbl = module.instructions[si - 1].words[1];
+                                            try writeInd(w, body_ind);
+                                            try w.print("if {s} {{\n", .{bcond});
+                                            // Emit true arm
+                                            {
+                                                var ti = si + 1;
+                                                while (ti < module.instructions.len) : (ti += 1) {
+                                                    if (module.instructions[ti].op == .Label and module.instructions[ti].words.len > 1 and module.instructions[ti].words[1] == btrue) {
+                                                        ti += 1;
+                                                        while (ti < module.instructions.len) : (ti += 1) {
+                                                            const tinst = module.instructions[ti];
+                                                            if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
+                                                            try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (bfalse) |bf| {
+                                                if (bf != merge_lbl) {
+                                                    try writeInd(w, body_ind);
+                                                    try w.writeAll("} else {\n");
+                                                    var fi = si + 1;
+                                                    while (fi < module.instructions.len) : (fi += 1) {
+                                                        if (module.instructions[fi].op == .Label and module.instructions[fi].words.len > 1 and module.instructions[fi].words[1] == bf) {
+                                                            fi += 1;
+                                                            while (fi < module.instructions.len) : (fi += 1) {
+                                                                const finst = module.instructions[fi];
+                                                                if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
+                                                                try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                            }
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            try writeInd(w, body_ind);
+                                            try w.writeAll("}\n");
+                                            // Advance si past the if/else blocks to the merge.
+                                            if (merge_lbl != 0) {
+                                                var mi = si + 1;
+                                                while (mi < module.instructions.len) : (mi += 1) {
+                                                    if (module.instructions[mi].op == .Label and module.instructions[mi].words.len > 1 and module.instructions[mi].words[1] == merge_lbl) {
+                                                        si = mi;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            continue;
+                                        }
                                         if (dinst.op == .Switch) break;
                                         try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                     }
@@ -6113,7 +6170,64 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     while (si < module.instructions.len) : (si += 1) {
                                         const dinst = module.instructions[si];
                                         if (dinst.op == .Label) break;
-                                        if (dinst.op == .Branch or dinst.op == .BranchConditional) break;
+                                        if (dinst.op == .Branch) break;
+                                        if (dinst.op == .BranchConditional) {
+                                            // #478 F4: emit a nested if/else within the case body (was dropped).
+                                            const bcond = names.get(dinst.words[1]) orelse "c";
+                                            const btrue = dinst.words[2];
+                                            const bfalse = if (dinst.words.len > 3) dinst.words[3] else null;
+                                            var merge_lbl: u32 = 0;
+                                            if (si > 0 and module.instructions[si - 1].op == .SelectionMerge and module.instructions[si - 1].words.len > 1)
+                                                merge_lbl = module.instructions[si - 1].words[1];
+                                            try writeInd(w, body_ind);
+                                            try w.print("if {s} {{\n", .{bcond});
+                                            // Emit true arm
+                                            {
+                                                var ti = si + 1;
+                                                while (ti < module.instructions.len) : (ti += 1) {
+                                                    if (module.instructions[ti].op == .Label and module.instructions[ti].words.len > 1 and module.instructions[ti].words[1] == btrue) {
+                                                        ti += 1;
+                                                        while (ti < module.instructions.len) : (ti += 1) {
+                                                            const tinst = module.instructions[ti];
+                                                            if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
+                                                            try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                        }
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            if (bfalse) |bf| {
+                                                if (bf != merge_lbl) {
+                                                    try writeInd(w, body_ind);
+                                                    try w.writeAll("} else {\n");
+                                                    var fi = si + 1;
+                                                    while (fi < module.instructions.len) : (fi += 1) {
+                                                        if (module.instructions[fi].op == .Label and module.instructions[fi].words.len > 1 and module.instructions[fi].words[1] == bf) {
+                                                            fi += 1;
+                                                            while (fi < module.instructions.len) : (fi += 1) {
+                                                                const finst = module.instructions[fi];
+                                                                if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
+                                                                try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                            }
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            try writeInd(w, body_ind);
+                                            try w.writeAll("}\n");
+                                            // Advance si past the if/else blocks to the merge.
+                                            if (merge_lbl != 0) {
+                                                var mi = si + 1;
+                                                while (mi < module.instructions.len) : (mi += 1) {
+                                                    if (module.instructions[mi].op == .Label and module.instructions[mi].words.len > 1 and module.instructions[mi].words[1] == merge_lbl) {
+                                                        si = mi;
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            continue;
+                                        }
                                         if (dinst.op == .Switch) break;
                                         try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                     }
