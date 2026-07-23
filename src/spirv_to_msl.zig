@@ -3185,8 +3185,13 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
     // `[[attribute(N)]]` (fetched, not interpolated) so this is unused there.
     const mslInterpAttr = struct {
         fn forVar(mod: *const ParsedModule, d: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, type_id: u32) []const u8 {
+            // #475: MSL composes position (center/centroid/sample) × interp
+            // (perspective/no_perspective). Flat has no position variant.
             if (hasDec(d, id, .flat) and !mslElementIsInt(mod, type_id)) return ", flat";
-            if (hasDec(d, id, .no_perspective)) return ", center_no_perspective";
+            const no_persp = hasDec(d, id, .no_perspective);
+            if (hasDec(d, id, .sample)) return if (no_persp) ", sample_no_perspective" else ", sample_perspective";
+            if (hasDec(d, id, .centroid)) return if (no_persp) ", centroid_no_perspective" else ", centroid_perspective";
+            if (no_persp) return ", center_no_perspective";
             return "";
         }
     };

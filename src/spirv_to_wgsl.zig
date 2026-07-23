@@ -4287,7 +4287,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Emit VertexOutput struct if vertex shader has multiple outputs
-    var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32, flat: bool, linear: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32, flat: bool, linear: bool, interp_sample: []const u8 = "" }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // Detect depth output for fragment shaders
     var use_frag_depth_struct = false;
     var use_frag_mrt_struct = false;
@@ -4462,7 +4462,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 (hasDec(&decorations, ovid, .flat) or isIntegerWgslType(type_name));
             const needs_linear = bi_name == null and !needs_flat and
                 hasDec(&decorations, ovid, .no_perspective);
-            try vertex_output_fields.append(arena, .{ .name = var_name, .type_name = type_name, .builtin = bi_name, .location = loc_val, .flat = needs_flat, .linear = needs_linear });
+            // #475: centroid/sample become the second @interpolate arg.
+            const interp_sample: []const u8 = if (bi_name == null and hasDec(&decorations, ovid, .sample))
+                ", sample"
+            else if (bi_name == null and hasDec(&decorations, ovid, .centroid))
+                ", centroid"
+            else
+                "";
+            try vertex_output_fields.append(arena, .{
+                .name = var_name,
+                .type_name = type_name,
+                .builtin = bi_name,
+                .location = loc_val,
+                .flat = needs_flat,
+                .linear = needs_linear,
+                .interp_sample = interp_sample,
+            });
         }
     }
 
@@ -4486,7 +4501,19 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         try w.writeAll("struct VertexOutput {\n");
         var auto_loc: u32 = 0;
         for (vertex_output_fields.items) |field| {
-            const interp: []const u8 = if (field.flat) "@interpolate(flat) " else if (field.linear) "@interpolate(linear) " else "";
+            const interp: []const u8 = if (field.flat) blk: {
+                break :blk if (field.interp_sample.len > 0)
+                    std.fmt.allocPrint(arena, "@interpolate(flat{s}) ", .{field.interp_sample}) catch "@interpolate(flat) "
+                else
+                    "@interpolate(flat) ";
+            } else if (field.linear) blk: {
+                break :blk if (field.interp_sample.len > 0)
+                    std.fmt.allocPrint(arena, "@interpolate(linear{s}) ", .{field.interp_sample}) catch "@interpolate(linear) "
+                else
+                    "@interpolate(linear) ";
+            } else if (field.interp_sample.len > 0) blk: {
+                break :blk std.fmt.allocPrint(arena, "@interpolate(perspective{s}) ", .{field.interp_sample}) catch "";
+            } else "";
             if (field.builtin) |bi| {
                 try w.print("    @builtin({s}) {s}: {s},\n", .{ bi, field.name, field.type_name });
             } else if (field.location) |loc| {

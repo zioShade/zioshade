@@ -453,6 +453,7 @@ pub const Decoration = enum(u32) {
     no_perspective = 13,
     flat = 14,
     centroid = 16,
+    sample = 20,
     restrict = 19,
     non_writable = 24,
     non_readable = 25,

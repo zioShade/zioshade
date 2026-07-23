@@ -901,9 +901,18 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 /// are mutually exclusive; Flat wins if both are set. Matches spirv-cross. (#475)
 /// Centroid/Sample are orthogonal auxiliary qualifiers — handled separately if added.
 fn glslInterpQual(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) []const u8 {
-    if (hasDec(decs, id, .flat)) return "flat ";
-    if (hasDec(decs, id, .no_perspective)) return "noperspective ";
-    return "";
+    // #475: Centroid/Sample are orthogonal auxiliary qualifiers prefixed before the
+    // interp type. GLSL: `centroid noperspective`, `sample flat`, etc. Compose both.
+    const aux: []const u8 = if (hasDec(decs, id, .sample)) "sample " else if (hasDec(decs, id, .centroid)) "centroid " else "";
+    if (hasDec(decs, id, .flat)) {
+        if (aux.len > 0) return if (std.mem.eql(u8, aux, "sample ")) "sample flat " else "centroid flat ";
+        return "flat ";
+    }
+    if (hasDec(decs, id, .no_perspective)) {
+        if (aux.len > 0) return if (std.mem.eql(u8, aux, "sample ")) "sample noperspective " else "centroid noperspective ";
+        return "noperspective ";
+    }
+    return aux;
 }
 
 // ---- Public API ----
