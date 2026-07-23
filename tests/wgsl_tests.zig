@@ -4315,6 +4315,25 @@ test "#475: ControlBarrier fences both workgroup + storage (SSBO write visible)"
     try nagaValidateOrSkip(wgsl, "controlbarrier storage");
 }
 
+// #475: NoPerspective varyings must emit @interpolate(linear) (WGSL's no-perspective
+// mapping). The flat:bool handling only covered Flat/integer; NoPerspective was dropped
+// -> default perspective interpolation (silent-wrong for screen-space UVs). WGSL
+// requires matching @interpolate on vertex-out AND fragment-in.
+test "#475: WGSL NoPerspective varying -> @interpolate(linear)" {
+    const src: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) noperspective out vec2 ouv;
+        \\void main(){ ouv = uv; gl_Position = vec4(0.0); }
+    ;
+    const spirv = compileVertToSpirv("noperspective_wgsl", src) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "@interpolate(linear)");
+    try nagaValidateOrSkip(wgsl, "noperspective wgsl");
+}
+
 // #170 (H): a whole-matrix store to a flattened matrix output that lands inside
 // a `switch` case body is replayed through `emitSimpleInstruction` — a separate
 // Store path that has no access to the matrix-output map — so it emitted

@@ -2128,6 +2128,19 @@ fn memberHasFlat(module: *const ParsedModule, struct_id: u32, member_index: u32)
     return false;
 }
 
+/// True if member `member_index` of `struct_id` is decorated NoPerspective. (#475)
+fn memberHasNoPerspective(module: *const ParsedModule, struct_id: u32, member_index: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op == .MemberDecorate and inst.words.len >= 4 and
+            inst.words[1] == struct_id and inst.words[2] == member_index)
+        {
+            const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+            if (dec == .no_perspective) return true;
+        }
+    }
+    return false;
+}
+
 fn memberIsRowMajor(module: *const ParsedModule, struct_id: u32, member_index: u32) bool {
     for (module.instructions) |inst| {
         if (inst.op == .MemberDecorate and inst.words.len >= 4 and
@@ -4274,7 +4287,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Emit VertexOutput struct if vertex shader has multiple outputs
-    var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32, flat: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var vertex_output_fields = std.ArrayList(struct { name: []const u8, type_name: []const u8, builtin: ?[]const u8, location: ?u32, flat: bool, linear: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // Detect depth output for fragment shaders
     var use_frag_depth_struct = false;
     var use_frag_mrt_struct = false;
@@ -4357,7 +4370,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 var mb0: [32]u8 = undefined;
                 const mname0 = getMemberName(&module, sty, 0, &mb0);
                 const m0type = try wgslType(&module, sdef.words[2], &names, arena);
-                try vertex_output_fields.append(arena, .{ .name = try arena.dupe(u8, mname0), .type_name = m0type, .builtin = "position", .location = null, .flat = false });
+                try vertex_output_fields.append(arena, .{ .name = try arena.dupe(u8, mname0), .type_name = m0type, .builtin = "position", .location = null, .flat = false, .linear = false });
                 try io_block_outputs.put(ovid, {});
                 continue;
             }
@@ -4382,7 +4395,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     var leaves = std.ArrayList(OutputLeaf).initCapacity(arena, 4) catch return error.OutOfMemory;
                     try collectOutputLeaves(&module, &names, actual_type, "", local, &leaves, arena);
                     for (leaves.items, 0..) |leaf, li| {
-                        try vertex_output_fields.append(arena, .{ .name = leaf.flat_name, .type_name = leaf.type_name, .builtin = null, .location = base + @as(u32, @intCast(li)), .flat = leaf.is_int });
+                        try vertex_output_fields.append(arena, .{ .name = leaf.flat_name, .type_name = leaf.type_name, .builtin = null, .location = base + @as(u32, @intCast(li)), .flat = leaf.is_int, .linear = false });
                         try output_copyouts.append(arena, .{ .flat = leaf.flat_name, .src = leaf.src });
                     }
                     const tn = try wgslType(&module, actual_type, &names, arena);
@@ -4396,7 +4409,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     const mname = getMemberName(&module, actual_type, @intCast(mi), &mb);
                     const mtype = try wgslType(&module, mt_id, &names, arena);
                     const mflat = memberHasFlat(&module, actual_type, @intCast(mi)) or isIntegerWgslType(mtype);
-                    try vertex_output_fields.append(arena, .{ .name = try arena.dupe(u8, mname), .type_name = mtype, .builtin = null, .location = base + @as(u32, @intCast(mi)), .flat = mflat });
+                    const mlinear = memberHasNoPerspective(&module, actual_type, @intCast(mi));
+                    try vertex_output_fields.append(arena, .{ .name = try arena.dupe(u8, mname), .type_name = mtype, .builtin = null, .location = base + @as(u32, @intCast(mi)), .flat = mflat, .linear = mlinear });
                 }
                 continue;
             }
@@ -4413,7 +4427,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         var c: u32 = 0;
                         while (c < cols) : (c += 1) {
                             const fname = try std.fmt.allocPrint(arena, "{s}_{d}", .{ var_name, c });
-                            try vertex_output_fields.append(arena, .{ .name = fname, .type_name = col_type, .builtin = null, .location = base + c, .flat = false });
+                            try vertex_output_fields.append(arena, .{ .name = fname, .type_name = col_type, .builtin = null, .location = base + c, .flat = false, .linear = false });
                         }
                         try matrix_outputs.put(ovid, .{ .base_name = try arena.dupe(u8, var_name), .cols = cols, .col_type = col_type });
                         continue;
@@ -4446,7 +4460,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // not user-interpolated, so they never carry it.
             const needs_flat = bi_name == null and
                 (hasDec(&decorations, ovid, .flat) or isIntegerWgslType(type_name));
-            try vertex_output_fields.append(arena, .{ .name = var_name, .type_name = type_name, .builtin = bi_name, .location = loc_val, .flat = needs_flat });
+            const needs_linear = bi_name == null and !needs_flat and
+                hasDec(&decorations, ovid, .no_perspective);
+            try vertex_output_fields.append(arena, .{ .name = var_name, .type_name = type_name, .builtin = bi_name, .location = loc_val, .flat = needs_flat, .linear = needs_linear });
         }
     }
 
@@ -4470,7 +4486,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         try w.writeAll("struct VertexOutput {\n");
         var auto_loc: u32 = 0;
         for (vertex_output_fields.items) |field| {
-            const interp: []const u8 = if (field.flat) "@interpolate(flat) " else "";
+            const interp: []const u8 = if (field.flat) "@interpolate(flat) " else if (field.linear) "@interpolate(linear) " else "";
             if (field.builtin) |bi| {
                 try w.print("    @builtin({s}) {s}: {s},\n", .{ bi, field.name, field.type_name });
             } else if (field.location) |loc| {
@@ -4553,7 +4569,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 const mname = getMemberName(&module, sty, @intCast(mi), &mname_buf);
                 const mtype = try wgslType(&module, mt_id, &names, arena);
                 const flat = memberHasFlat(&module, sty, @intCast(mi)) or isIntegerWgslType(mtype);
-                const interp: []const u8 = if (flat) "@interpolate(flat) " else "";
+                const linear = memberHasNoPerspective(&module, sty, @intCast(mi));
+                const interp: []const u8 = if (flat) "@interpolate(flat) " else if (linear) "@interpolate(linear) " else "";
                 try w.print("    @location({d}) {s}{s}: {s},\n", .{ base_loc + @as(u32, @intCast(mi)), interp, mname, mtype });
             }
             try w.writeAll("}\n\n");
@@ -4711,13 +4728,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 else => {},
             };
             // Fragment INPUTS that are integer-typed (or GLSL `flat`-qualified)
-            // need @interpolate(flat). Vertex inputs are attributes (fetched, not
-            // interpolated), so the attribute is illegal there — guard on stage.
-            const interp: []const u8 = if (is_fragment and
-                (hasDec(&decorations, iv.id, .flat) or isIntegerWgslType(type_name)))
-                "@interpolate(flat) "
-            else
-                "";
+            // need @interpolate(flat); NoPerspective needs @interpolate(linear).
+            // Vertex inputs are attributes (fetched, not interpolated), so the
+            // attribute is illegal there — guard on stage. (#475)
+            const interp: []const u8 = blk: {
+                if (is_fragment and (hasDec(&decorations, iv.id, .flat) or isIntegerWgslType(type_name)))
+                    break :blk "@interpolate(flat) ";
+                if (is_fragment and hasDec(&decorations, iv.id, .no_perspective))
+                    break :blk "@interpolate(linear) ";
+                break :blk "";
+            };
             if (promoted_inputs.contains(iv.id)) {
                 // Bridge: param `<name>_in` → module-scope `var<private> <name>`.
                 const pname = try std.fmt.allocPrint(arena, "{s}_in", .{var_name});
@@ -4791,10 +4811,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 try w.print(") -> @builtin({s}) {s} {{\n", .{ bi_name, type_name });
             } else {
                 const loc = getDecVal(&decorations, ov, .location) orelse 0;
-                const interp: []const u8 = if (hasDec(&decorations, ov, .flat) or isIntegerWgslType(type_name))
-                    "@interpolate(flat) "
-                else
-                    "";
+                const interp: []const u8 = blk: {
+                    if (hasDec(&decorations, ov, .flat) or isIntegerWgslType(type_name))
+                        break :blk "@interpolate(flat) ";
+                    if (hasDec(&decorations, ov, .no_perspective))
+                        break :blk "@interpolate(linear) ";
+                    break :blk "";
+                };
                 try w.print(") -> @location({d}) {s}{s} {{\n", .{ loc, interp, type_name });
             }
         } else {
