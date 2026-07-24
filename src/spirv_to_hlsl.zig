@@ -5765,11 +5765,21 @@ fn emitInstruction(
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1; // skip Bias
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    // Lod operand
+                    // Lod operand. Lod|ConstOffset (textureLodOffset): HLSL SampleLevel
+                    // takes the offset as a 4th arg — dropping it samples the wrong
+                    // texel (silent-wrong, #170).
                     const lod = names.get(inst.words[off]) orelse "0";
-                    try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, {s});\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, lod,
-                    });
+                    if (mask & 0x8 != 0 and off + 1 < inst.words.len) {
+                        try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, {s}, ", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, lod,
+                        });
+                        _ = writeHlslConstOffset(module, w, inst.words[off + 1]);
+                        try w.writeAll(");\n");
+                    } else {
+                        try w.print("    {s} {s} = {s}.SampleLevel({s}, {s}, {s});\n", .{
+                            rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, lod,
+                        });
+                    }
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
                     // Grad operands (dx, dy)
                     const dx = names.get(inst.words[off]) orelse "0";
