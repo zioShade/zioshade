@@ -1162,6 +1162,64 @@ pub fn spirvToHLSL(
         if (sc == .PushConstant) return error.UnsupportedPushConstant;
     }
 
+    // Honest-error pre-check: a stage-input varying referenced DIRECTLY inside a
+    // non-entry (helper) function. HLSL passes varyings as main() parameters, so they
+    // are scoped to main only — a helper that reads a varying emits an undeclared
+    // identifier (plausible-but-wrong). The proper fix is to thread used-varyings into
+    // helper signatures (the HLSL analog of MSL's #476 input-struct threading); until
+    // that lands, refuse rather than emit dangling references. (#170, 5-voice panel)
+    {
+        var input_var_ids = std.AutoHashMap(u32, void).init(aa);
+        defer input_var_ids.deinit();
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc == .Input) input_var_ids.put(inst.words[2], {}) catch {};
+        }
+        if (input_var_ids.count() > 0) {
+            var in_non_entry = false;
+            for (module.instructions) |inst| {
+                if (inst.op == .Function) {
+                    in_non_entry = inst.words.len >= 3 and inst.words[2] != entry_id;
+                } else if (inst.op == .FunctionEnd) {
+                    in_non_entry = false;
+                } else if (in_non_entry) {
+                    for (inst.words[1..]) |opw| {
+                        if (input_var_ids.contains(opw)) return error.UnsupportedVaryingInHelper;
+                    }
+                }
+            }
+        }
+    }
+
+    // Honest-error pre-check: gl_ClipDistance / gl_CullDistance as a stage INPUT is an
+    // array builtin emitted scalar-then-indexed (plausible-but-wrong). Vertex-OUTPUT
+    // clip/cull is honest-errored elsewhere; this covers the fragment-input case until
+    // array stage inputs / SV_ClipDistance lowering lands. (#170)
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Input) continue;
+        const bi = getDecorationValue(&decorations, inst.words[2], .built_in) orelse continue;
+        const ebi: spirv.BuiltIn = @enumFromInt(bi);
+        if (ebi == .clip_distance or ebi == .cull_distance) return error.UnsupportedBuiltinStageInput;
+    }
+
+    // Honest-error pre-check: a Vulkan SEPARATE sampler (`uniform sampler s;` used with
+    // `uniform texture2D t;` via `sampler2D(t, s)`) is a standalone OpTypeSampler that
+    // zioshade never declares (only per-texture `<tex>_sampler` pairs are emitted), so
+    // the sampler is an undeclared identifier at the .Sample() call. Honest-error until
+    // standalone-sampler declaration lands. (#170)
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .UniformConstant) continue;
+        const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
+        if (ptr_inst.op != .TypePointer or ptr_inst.words.len < 4) continue;
+        const pointee = getDef(&module, ptr_inst.words[3]) orelse continue;
+        if (pointee.op == .TypeSampler) return error.UnsupportedSeparateSampler;
+    }
+
     // Phase 3: emit HLSL
     var output = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     var output_owned = true;
@@ -3275,6 +3333,11 @@ fn emitFunction(
                     if (resolvePointeeType(module, ivid)) |pt| {
                         if (getDef(module, pt)) |pi| {
                             if (pi.op == .TypeStruct) return error.UnsupportedStructStageInput;
+                            // An ARRAY stage input (e.g. `in float gl_ClipDistance[4]`)
+                            // is emitted as a scalar then indexed -- plausible-but-wrong.
+                            // (Per-vertex arrays are handled by the earlier is_per_vertex
+                            // branch.) Honest-error until array stage inputs are lowered.
+                            if (pi.op == .TypeArray) return error.UnsupportedArrayStageInput;
                         }
                     }
                     const centroid_pfx: []const u8 = if (hasDecoration(decorations, ivid, .sample))
