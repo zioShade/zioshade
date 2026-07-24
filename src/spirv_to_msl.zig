@@ -2671,6 +2671,15 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             if (uop) |u| try w.print("constant {s} {s} = {s}({s});\n", .{ type_str, name, u, op0 });
             continue;
         }
+        // OpSelect (ternary): constant T name = cond ? tv : fv;
+        // words = [hdr, type, result, 169, cond, true, false].
+        if (opcode_lit == 169 and inst.words.len == 7) {
+            const cond = names.get(inst.words[4]) orelse continue;
+            const tv = names.get(inst.words[5]) orelse continue;
+            const fv = names.get(inst.words[6]) orelse continue;
+            try w.print("constant {s} {s} = ({s}) ? ({s}) : ({s});\n", .{ type_str, name, cond, tv, fv });
+            continue;
+        }
         const op_str: ?[]const u8 = switch (opcode_lit) {
             128, 129 => "+",
             130, 131 => "-",
@@ -2682,6 +2691,16 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             197 => "|",
             198 => "^",
             199 => "&",
+            // Integer/float comparisons (result type is bool). Ord and Unord
+            // float variants map to the same C operator; spec-constant bool
+            // results are uncommon, but glslang emits these for ternaries
+            // over spec constants (e.g. `s > 10u ? a : b`).
+            170, 180, 181 => "==",
+            171, 182, 183 => "!=",
+            172, 173, 186, 187 => ">",
+            174, 175, 190, 191 => ">=",
+            176, 177, 184, 185 => "<",
+            178, 179, 188, 189 => "<=",
             else => null,
         };
         const op = op_str orelse continue;

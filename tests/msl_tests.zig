@@ -5212,3 +5212,31 @@ test "gl_FragCoord.z reader threads the full float4 fragcoord" {
     try assertContains(msl_zw, "float4 _fragCoord");
     try assertContains(msl_xy, "float2 _fragCoord"); // xy-only stays float2
 }
+
+// #499: a spec-constant ternary (`s > N ? a : b`) lowers to OpSpecConstantOp
+// {UGreaterThan; Select}. zioshade emitted MSL that referenced the derived
+// constant `f` without ever declaring it -> Metal "use of undeclared identifier
+// 'f'" (spec-constant-ternary.vk.frag). Three compounding bugs: (1) semantic
+// mapped uint comparisons to the signed opcode (and used wrong opcode numbers
+// throughout), so spirv-val rejected "Invalid OpSpecConstantOp opcode"; (2)
+// OpSelect was emitted as opcode 5 instead of 169; (3) the MSL OpSpecConstantOp
+// handler had no comparison/Select arms, so both derived constants were dropped.
+test "#499: MSL declares spec-constant ternary (OpSelect) result" {
+    const spirv = compileToSpirv("specconst_tern_msl",
+        \\#version 450
+        \\layout(location = 0) out float FragColor;
+        \\layout(constant_id = 0) const uint s = 10u;
+        \\const uint f = s > 20u ? 30u : 50u;
+        \\void main() { FragColor = float(f); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    // The UGreaterThan condition materializes as a named bool constant.
+    try assertContains(msl, "constant bool ");
+    // The OpSelect result `f` is declared as a constant -- this is the
+    // regression: before the fix `f` was referenced but never declared.
+    try assertContains(msl, "constant uint f = ");
+    // ...rendered as an MSL ternary over the bool condition.
+    try assertContains(msl, "?");
+}

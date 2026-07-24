@@ -4337,6 +4337,7 @@ const Codegen = struct {
             const TypeTagS = @typeInfo(ast.Type).@"union".tag_type.?;
             const tagS: TypeTagS = @enumFromInt(sco.type_tag);
             const tyS: ast.Type = switch (tagS) {
+                .bool => .bool,
                 .int => .int,
                 .uint => .uint,
                 .float => .float,
