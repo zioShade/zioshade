@@ -5890,13 +5890,11 @@ fn emitInstruction(
             // word[7]). HLSL's `.Gather*` intrinsics take no per-texel offset
             // array, so emitting a plain `.GatherGreen` here would SILENTLY DROP
             // the offsets (silent-wrong). Fail loudly instead; per-texel
-            // emulation (4 offset gathers) is a follow-up. Likewise
-            // textureGatherOffset's single ConstOffset (0x8) and any runtime
-            // Offset (0x10): this plain `.Gather*` emit carries no offset arg, so
-            // honest-error on every offset-bearing operand (0x38 =
-            // ConstOffset|Offset|ConstOffsets) rather than silent-drop. (HLSL
-            // .Gather* DO accept a const offset arg; carrying it is a follow-up.)
-            if (inst.words.len > 6 and (inst.words[6] & 0x38) != 0) {
+            // emulation (4 offset gathers) is a follow-up. A runtime Offset (0x10)
+            // also honest-errors (HLSL Gather's offset must be a literal const).
+            // A single ConstOffset (0x8) IS representable — `.Gather*(sampler,
+            // coord, int2(offset))` — so carry it (textureGatherOffset). (#170)
+            if (inst.words.len > 6 and (inst.words[6] & 0x30) != 0) {
                 return error.UnsupportedImageOperands;
             }
             const rt = try hlslType(module, inst.words[1], names, alloc);
@@ -5916,9 +5914,15 @@ fn emitInstruction(
                 3 => "GatherAlpha",
                 else => "GatherRed",
             };
-            try w.print("    {s} {s} = {s}.{s}({s}, {s});\n", .{
+            try w.print("    {s} {s} = {s}.{s}({s}, {s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], gather_swiz, parts[1], coord,
             });
+            // Single ConstOffset (0x8): mask at words[6], offset value at words[7].
+            if (inst.words.len > 7 and (inst.words[6] & 0x8) != 0) {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, inst.words[7]);
+            }
+            try w.writeAll(");\n");
         },
         .ImageDrefGather => {
             // HLSL: tex.GatherCmp(sampler, coord, compare)
