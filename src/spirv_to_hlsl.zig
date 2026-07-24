@@ -1162,36 +1162,6 @@ pub fn spirvToHLSL(
         if (sc == .PushConstant) return error.UnsupportedPushConstant;
     }
 
-    // Honest-error pre-check: a stage-input varying referenced DIRECTLY inside a
-    // non-entry (helper) function. HLSL passes varyings as main() parameters, so they
-    // are scoped to main only — a helper that reads a varying emits an undeclared
-    // identifier (plausible-but-wrong). The proper fix is to thread used-varyings into
-    // helper signatures (the HLSL analog of MSL's #476 input-struct threading); until
-    // that lands, refuse rather than emit dangling references. (#170, 5-voice panel)
-    {
-        var input_var_ids = std.AutoHashMap(u32, void).init(aa);
-        defer input_var_ids.deinit();
-        for (module.instructions) |inst| {
-            if (inst.op != .Variable or inst.words.len < 4) continue;
-            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc == .Input) input_var_ids.put(inst.words[2], {}) catch {};
-        }
-        if (input_var_ids.count() > 0) {
-            var in_non_entry = false;
-            for (module.instructions) |inst| {
-                if (inst.op == .Function) {
-                    in_non_entry = inst.words.len >= 3 and inst.words[2] != entry_id;
-                } else if (inst.op == .FunctionEnd) {
-                    in_non_entry = false;
-                } else if (in_non_entry) {
-                    for (inst.words[1..]) |opw| {
-                        if (input_var_ids.contains(opw)) return error.UnsupportedVaryingInHelper;
-                    }
-                }
-            }
-        }
-    }
-
     // Honest-error pre-check: gl_ClipDistance / gl_CullDistance as a stage INPUT is an
     // array builtin emitted scalar-then-indexed (plausible-but-wrong). Vertex-OUTPUT
     // clip/cull is honest-errored elsewhere; this covers the fragment-input case until
