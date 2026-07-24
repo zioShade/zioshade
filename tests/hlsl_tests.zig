@@ -2847,6 +2847,46 @@ test "T31.6: textureProj(sampler2DShadow) divides BOTH coord and Dref, result no
     try assertNotContains(hlsl, "o = 0");
 }
 
+// #170: a texture sampled with a Dref (depth-comparison) op must declare a
+// SamplerComparisonState, not a SamplerState. SampleCmp*/GatherCmp reject a plain
+// SamplerState, so emitting the wrong type is a plausible-but-wrong compile failure.
+// Detected per-texture by tracing the Dref op's image operand back to its variable.
+test "T31.7: Dref-sampled texture declares SamplerComparisonState" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow shadowTex;
+        \\layout(location = 0) in vec3 uv;
+        \\layout(location = 0) out float o;
+        \\void main() { o = texture(shadowTex, uv); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SampleCmp");
+    try assertContains(hlsl, "SamplerComparisonState shadowTex_sampler");
+    try assertNotContains(hlsl, "SamplerState shadowTex_sampler");
+}
+
+// Per-texture detection: a shader mixing a shadow sampler and a regular sampler must
+// declare SamplerComparisonState for the former and SamplerState for the latter. The
+// old global-flag code turned EVERY sampler comparison whenever any Dref op existed.
+test "T31.8: mixed shadow + regular textures get per-texture sampler types" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DShadow shadowTex;
+        \\layout(binding = 1) uniform sampler2D colorTex;
+        \\layout(location = 0) in vec3 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    float d = texture(shadowTex, uv);
+        \\    o = texture(colorTex, uv.xy) * d;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "SamplerComparisonState shadowTex_sampler");
+    try assertContains(hlsl, "SamplerState colorTex_sampler");
+}
+
 test "T31.5: textureGather maps to Gather" {
     const source =
         \\#version 430
