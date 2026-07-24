@@ -1878,7 +1878,40 @@ fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
             else => buf.appendAssumeCapacity('_'),
         }
     }
-    return buf.toOwnedSlice(alloc);
+    const result = try buf.toOwnedSlice(alloc);
+    // A GLSL identifier that collides with an HLSL keyword (e.g. `in vec4 vector;` —
+    // `vector` is a reserved HLSL type keyword) is a parse error in HLSL even though
+    // it is legal GLSL. Append a suffix so the emitted name is never a bare keyword
+    // (plausible-but-wrong compile failure). The rename propagates everywhere because
+    // all HLSL references resolve through this name table. (#170)
+    if (isHlslKeyword(result)) {
+        defer alloc.free(result);
+        return std.fmt.allocPrint(alloc, "{s}_", .{result});
+    }
+    return result;
+}
+
+fn isHlslKeyword(name: []const u8) bool {
+    // HLSL reserved words / type keywords that realistically collide with GLSL
+    // identifiers (varying/uniform/local names). Deliberately excludes words that are
+    // NOT reserved (e.g. `scalar`, `color`, `normal`, `position`) to avoid needless
+    // renames; includes the keywords glslang's HLSL frontend rejects as identifiers.
+    const keywords = [_][]const u8{
+        "vector",   "matrix",   "texture", "sampler",  "input",     "output",
+        "linear",   "centroid", "sample",  "nointerpolation", "noperspective",
+        "uniform",  "static",   "extern",  "volatile", "groupshared",
+        "row_major", "column_major", "buffer", "cbuffer", "tbuffer",
+        "register", "packoffset", "technique", "pass", "pipeline",
+        "compile",  "this",     "typedef", "class",   "struct",
+        "enum",     "string",   "void",    "bool",    "int",
+        "uint",     "float",    "double",  "half",    "if",
+        "else",     "for",      "while",   "do",      "switch",
+        "case",     "default",  "break",   "continue", "return",
+        "discard",  "true",     "false",   "in",      "out",
+        "inout",    "precise",  "inline",  "noinline",
+    };
+    for (keywords) |kw| if (std.mem.eql(u8, kw, name)) return true;
+    return false;
 }
 
 fn parseLiteralString(alloc: std.mem.Allocator, words: []const u32) ![]const u8 {
