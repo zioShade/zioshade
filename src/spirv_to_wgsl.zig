@@ -4051,29 +4051,50 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         try w.writeAll(");\n");
         sc_composite_emitted_any = true;
     }
-    // M3.5: emit OpSpecConstantOp as a derived `const` expression. WGSL
-    // permits `override`s to participate in const-expression evaluation
-    // at pipeline-creation time, so `const NAME: T = LEAF * 2;` correctly
-    // re-evaluates when the user supplies an override for `LEAF`.
+    // M3.5: emit OpSpecConstantOp as a derived `override` expression. A spec-
+    // constant-op result derives from a specialization constant (`override`),
+    // and WGSL forbids a `const` from referencing an `override` (naga:
+    // "Unexpected override-expression"), so the derived value must itself be an
+    // `override`: `override NAME: T = LEAF * 2;` re-evaluates at pipeline-
+    // creation time when the user supplies an override for LEAF.
     var sc_op_emitted_any = false;
     for (module.instructions) |inst| {
-        if (inst.op != .SpecConstantOp or inst.words.len != 6) continue;
+        if (inst.op != .SpecConstantOp or inst.words.len < 6) continue;
         const type_id = inst.words[1];
         const result_id = inst.words[2];
         const opcode_lit = inst.words[3];
         const name = names.get(result_id) orelse continue;
         const type_str = try wgslType(&module, type_id, &names, arena);
+        // OpSelect (ternary, 7 words). WGSL has no `?:`; OpSelect's operands
+        // are [cond, true, false] and WGSL select is select(false, true, cond).
+        // (#499 -- spec-constant ternary over a spec constant.)
+        if (opcode_lit == 169 and inst.words.len == 7) {
+            const cond = names.get(inst.words[4]) orelse continue;
+            const tv = names.get(inst.words[5]) orelse continue;
+            const fv = names.get(inst.words[6]) orelse continue;
+            try w.print("override {s}: {s} = select({s}, {s}, {s});\n", .{ name, type_str, fv, tv, cond });
+            sc_op_emitted_any = true;
+            continue;
+        }
         const op_str: ?[]const u8 = switch (opcode_lit) {
             128, 129 => @as([]const u8, "+"),
             130, 131 => @as([]const u8, "-"),
             132, 133 => @as([]const u8, "*"),
             134, 135, 136 => @as([]const u8, "/"),
+            // #499: integer/float comparisons (result type is bool).
+            170, 180, 181 => @as([]const u8, "=="),
+            171, 182, 183 => @as([]const u8, "!="),
+            172, 173, 186, 187 => @as([]const u8, ">"),
+            174, 175, 190, 191 => @as([]const u8, ">="),
+            176, 177, 184, 185 => @as([]const u8, "<"),
+            178, 179, 188, 189 => @as([]const u8, "<="),
             else => null,
         };
         const op = op_str orelse continue;
+        if (inst.words.len != 6) continue;
         const op0 = names.get(inst.words[4]) orelse continue;
         const op1 = names.get(inst.words[5]) orelse continue;
-        try w.print("const {s}: {s} = {s} {s} {s};\n", .{ name, type_str, op0, op, op1 });
+        try w.print("override {s}: {s} = {s} {s} {s};\n", .{ name, type_str, op0, op, op1 });
         sc_op_emitted_any = true;
     }
     if (sc_emitted_any or sc_composite_emitted_any or sc_op_emitted_any) try w.writeAll("\n");

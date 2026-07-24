@@ -1281,8 +1281,17 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             if (uop) |u| try w.print("const {s} {s} = {s}({s});\n", .{ type_str, name, u, op0 });
             continue;
         }
+        // OpSelect (ternary, 7 words): const T name = cond ? tv : fv; (#499)
+        if (opcode_lit == 169 and inst.words.len == 7) {
+            const cond = names.get(inst.words[4]) orelse continue;
+            const tv = names.get(inst.words[5]) orelse continue;
+            const fv = names.get(inst.words[6]) orelse continue;
+            try w.print("const {s} {s} = ({s}) ? ({s}) : ({s});\n", .{ type_str, name, cond, tv, fv });
+            continue;
+        }
         // Binary ops (6 words). #475: extended from just +,-,*,/ to include modulo,
         // shifts, and bitwise ops (all glslang-reachable from spec-constant expressions).
+        // #499: integer/float comparisons (result type is bool).
         const op_str: ?[]const u8 = switch (opcode_lit) {
             128, 129 => "+", // IAdd / FAdd
             130, 131 => "-", // ISub / FSub
@@ -1294,6 +1303,12 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             197 => "|", // BitwiseOr
             198 => "^", // BitwiseXor
             199 => "&", // BitwiseAnd
+            170, 180, 181 => "==", // IEqual / FOrdEqual / FUnordEqual
+            171, 182, 183 => "!=", // INotEqual / FOrdNotEqual / FUnordNotEqual
+            172, 173, 186, 187 => ">", // U/SGreaterThan, FOrd/UnordGreaterThan
+            174, 175, 190, 191 => ">=", // U/SGreaterThanEqual, FOrd/UnordGreaterThanEqual
+            176, 177, 184, 185 => "<", // U/SLessThan, FOrd/UnordLessThan
+            178, 179, 188, 189 => "<=", // U/SLessThanEqual, FOrd/UnordLessThanEqual
             else => null,
         };
         const op = op_str orelse continue;

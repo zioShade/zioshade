@@ -1392,6 +1392,15 @@ pub fn spirvToHLSL(
             if (uop) |u| try w.print("static const {s} {s} = {s}({s});\n", .{ type_str, name, u, op0 });
             continue;
         }
+        // OpSelect (ternary): static const T name = cond ? tv : fv;
+        // words = [hdr, type, result, 169, cond, true, false].
+        if (opcode_lit == 169 and inst.words.len == 7) {
+            const cond = names.get(inst.words[4]) orelse continue;
+            const tv = names.get(inst.words[5]) orelse continue;
+            const fv = names.get(inst.words[6]) orelse continue;
+            try w.print("static const {s} {s} = ({s}) ? ({s}) : ({s});\n", .{ type_str, name, cond, tv, fv });
+            continue;
+        }
         const op_str: ?[]const u8 = switch (opcode_lit) {
             128, 129 => "+",
             130, 131 => "-",
@@ -1403,6 +1412,13 @@ pub fn spirvToHLSL(
             197 => "|",
             198 => "^",
             199 => "&",
+            // Integer/float comparisons (result type is bool).
+            170, 180, 181 => "==",
+            171, 182, 183 => "!=",
+            172, 173, 186, 187 => ">",
+            174, 175, 190, 191 => ">=",
+            176, 177, 184, 185 => "<",
+            178, 179, 188, 189 => "<=",
             else => null,
         };
         const op = op_str orelse continue;

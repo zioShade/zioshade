@@ -3382,3 +3382,22 @@ test "shadow sampler keeps its Shadow suffix in the declaration" {
     try assertContains(glsl, "sampler2DShadow");
     try glslValidateOrSkip("shadow-sampler", glsl);
 }
+
+// #499 (cross-backend): see hlsl_tests #499. GLSL must declare the derived
+// spec-constant-ternary const `f` (was referenced undeclared). (Not run through
+// glslValidateOrSkip: that helper validates in desktop mode, which rejects
+// `layout(constant_id)`; verified manually with `glslangValidator -V`.)
+test "#499: GLSL declares spec-constant ternary (OpSelect) result" {
+    const spirv = compileToSpirv("specconst_tern_glsl",
+        \\#version 450
+        \\layout(location = 0) out float FragColor;
+        \\layout(constant_id = 0) const uint s = 10u;
+        \\const uint f = s > 20u ? 30u : 50u;
+        \\void main() { FragColor = float(f); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "const bool ");
+    try assertContains(glsl, "const uint f = ");
+}

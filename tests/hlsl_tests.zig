@@ -15753,3 +15753,24 @@ test "hlsl: gl_FragDepth is out float : SV_Depth, not int/TEXCOORD" {
     try assertContains(hlsl, "out float gl_FragDepth : SV_Depth");
     try assertNotContains(hlsl, "gl_FragDepth : TEXCOORD"); // the old broken form
 }
+
+// #499 (cross-backend): a spec-constant ternary `const uint f = s>20u?30u:50u`
+// lowers to OpSpecConstantOp {UGreaterThan; Select}. The #499 frontend fix
+// emitted those opcodes for ALL backends, but only the MSL OpSpecConstantOp
+// emitter was extended -- HLSL/GLSL/WGSL dropped them, so the derived const `f`
+// was referenced undeclared (naga: "unknown identifier `f`"). Each backend must
+// declare both the bool comparison result and the Select result.
+test "#499: HLSL declares spec-constant ternary (OpSelect) result" {
+    const spirv = compileToSpirv("specconst_tern_hlsl",
+        \\#version 450
+        \\layout(location = 0) out float FragColor;
+        \\layout(constant_id = 0) const uint s = 10u;
+        \\const uint f = s > 20u ? 30u : 50u;
+        \\void main() { FragColor = float(f); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "static const bool ");
+    try assertContains(hlsl, "static const uint f = ");
+}
