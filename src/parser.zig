@@ -882,6 +882,8 @@ const Parser = struct {
                     _ = self.advance();
                     if (std.mem.eql(u8, ident_text, "location")) {
                         layout.location = std.fmt.parseInt(u32, val_text, 10) catch null;
+                    } else if (std.mem.eql(u8, ident_text, "component")) {
+                        layout.component = std.fmt.parseInt(u32, val_text, 10) catch null;
                     } else if (std.mem.eql(u8, ident_text, "index")) {
                         layout.index = std.fmt.parseInt(u32, val_text, 10) catch null;
                     } else if (std.mem.eql(u8, ident_text, "binding")) {

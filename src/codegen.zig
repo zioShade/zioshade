@@ -3040,6 +3040,19 @@ const Codegen = struct {
                     // emitNestedStructLayout here (that would introduce a new diff vs the
                     // oracle and mis-decorate the interface).
                     try self.emitDecorationSectionDecorateNoExtra(id, @intFromEnum(spirv.Decoration.block));
+                    // Per-member Location/Component for component packing: emit
+                    // MemberDecorate for io-block members carrying an explicit
+                    // `layout(location=N, component=M)` (e.g. layout-component).
+                    for (td.members, 0..) |member, i| {
+                        if (member.layout) |ml| {
+                            if (ml.location) |loc| {
+                                try self.emitDecorationSectionMemberDecorate(id, @as(u32, @intCast(i)), @intFromEnum(spirv.Decoration.location), loc);
+                            }
+                            if (ml.component) |comp| {
+                                try self.emitDecorationSectionMemberDecorate(id, @as(u32, @intCast(i)), @intFromEnum(spirv.Decoration.component), comp);
+                            }
+                        }
+                    }
                 }
                 // If we emitted a forward pointer, now emit the actual pointer definition
                 if (self_ptr_id != 0) {
@@ -3380,6 +3393,9 @@ const Codegen = struct {
             if (global.layout) |layout| {
                 if (layout.location) |loc| {
                     try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.location), loc);
+                }
+                if (layout.component) |comp| {
+                    try self.emitDecorate(global.result_id, @intFromEnum(spirv.Decoration.component), comp);
                 }
                 if (layout.index) |idx| {
                     // Dual-source blending: OpDecorate Index on the second color output.
