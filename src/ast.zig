@@ -579,6 +579,9 @@ pub const ImageFormat = enum {
 
 pub const Layout = struct {
     location: ?u32 = null,
+    // Component packing (`layout(location=N, component=M)`): two inputs share a
+    // Location, distinguished by Component. MSL spells it [[user(locnN_M)]].
+    component: ?u32 = null,
     // Dual-source blending output index (`layout(location=0, index=1)`): a second
     // color output at the same location, distinguished by the Index decoration.
     index: ?u32 = null,

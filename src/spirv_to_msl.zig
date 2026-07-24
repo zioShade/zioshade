@@ -41,7 +41,7 @@ const MemberKey = struct { struct_id: u32, member_index: u32 };
 /// `location` field carries N in both cases; only the attribute spelling
 /// differs at emit time. Built-in inputs (gl_FragCoord etc.) are NOT collected
 /// here — they keep their existing `[[position]]`/builtin path.
-const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, interp: []const u8 = "" };
+const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, component: ?u32 = null, interp: []const u8 = "" };
 /// A vertex stage output that becomes a `main0_out` field and is referenced in
 /// the body as `out.<name>`. Two kinds:
 ///   - user varyings (`is_position == false`): `T name [[user(locnN)]]`,
@@ -2707,12 +2707,20 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // collectStageInputs sorts stage_inputs ascending by Location, so equal
     // Locations are adjacent.
     if (stage_inputs.items.len > 1) {
-        var si_prev = stage_inputs.items[0];
-        var si_i: usize = 1;
-        while (si_i < stage_inputs.items.len) : (si_i += 1) {
-            const si_cur = stage_inputs.items[si_i];
-            if (si_cur.location == si_prev.location) return error.UnsupportedComponentPacking;
-            si_prev = si_cur;
+        // Same Location is valid ONLY with distinct Components (component
+        // packing). A genuine collision = same Location AND same Component
+        // (incl. both unset). O(n^2) is fine (stage_inputs is small); an
+        // adjacent scan would miss same-comp pairs split by a different-comp
+        // input at the same Location.
+        var i: usize = 0;
+        while (i < stage_inputs.items.len) : (i += 1) {
+            var j: usize = i + 1;
+            while (j < stage_inputs.items.len) : (j += 1) {
+                const a = stage_inputs.items[i];
+                const b = stage_inputs.items[j];
+                if (a.location == b.location and (a.component orelse 0) == (b.component orelse 0))
+                    return error.UnsupportedComponentPacking;
+            }
         }
     }
     // Stage-in struct for location inputs (mirrors spirv-cross --msl
@@ -2743,7 +2751,14 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                 // spirv-cross uses interpolation::perspective for these (even for flat).
                 try w.print("    interpolant<{s}, interpolation::perspective> {s} [[user(locn{d})]];\n", .{ tn, si.name, si.location });
             } else {
-                try w.print("    {s} {s} [[user(locn{d}){s}]];\n", .{ tn, si.name, si.location, si.interp });
+                // Component packing: Metal natively supports a component-
+                // qualified location attribute [[user(locnN_M)]] (spirv-cross
+                // uses this for `layout(location=N, component=M)`).
+                if (si.component) |comp| {
+                    try w.print("    {s} {s} [[user(locn{d}_{d}){s}]];\n", .{ tn, si.name, si.location, comp, si.interp });
+                } else {
+                    try w.print("    {s} {s} [[user(locn{d}){s}]];\n", .{ tn, si.name, si.location, si.interp });
+                }
             }
         }
         try w.writeAll("};\n\n");
@@ -3616,9 +3631,9 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
     // carries the var name + the ancestor member names; `loc` is the accumulated
     // Location for this member.
     const recurse = struct {
-        fn run(mod: *const ParsedModule, ins: *std.ArrayList(StageInputDecl), al: std.mem.Allocator, var_id: u32, prefix: []const u8, type_id: u32, loc: u32) void {
+        fn run(mod: *const ParsedModule, ins: *std.ArrayList(StageInputDecl), al: std.mem.Allocator, var_id: u32, prefix: []const u8, type_id: u32, loc: u32, component: ?u32) void {
             const td = getDef(mod, type_id) orelse {
-                ins.append(al, .{ .var_id = var_id, .name = mslSanitizeName(al, prefix) catch prefix, .type_id = type_id, .location = loc }) catch {};
+                ins.append(al, .{ .var_id = var_id, .name = mslSanitizeName(al, prefix) catch prefix, .type_id = type_id, .location = loc, .component = component }) catch {};
                 return;
             };
             if (td.op == .TypeStruct and td.words.len > 2) {
@@ -3631,12 +3646,15 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
                     const cmname = getMemberName(mod, type_id, mi, &nbuf);
                     const cprefix = std.fmt.allocPrint(al, "{s}_{s}", .{ prefix, cmname }) catch continue;
                     const cmloc = memberDecVal(mod, type_id, mi, .location) orelse offset;
-                    run(mod, ins, al, var_id, cprefix, cmtype, cmloc);
+                    // Component: a member's own Component wins, else inherit (so a
+                    // component-packed leaf under a struct member keeps it).
+                    const cmcomp = memberDecVal(mod, type_id, mi, .component) orelse component;
+                    run(mod, ins, al, var_id, cprefix, cmtype, cmloc, cmcomp);
                     offset = cmloc + typeLocFootprint(mod, cmtype);
                 }
                 return;
             }
-            ins.append(al, .{ .var_id = var_id, .name = mslSanitizeName(al, prefix) catch prefix, .type_id = type_id, .location = loc }) catch {};
+            ins.append(al, .{ .var_id = var_id, .name = mslSanitizeName(al, prefix) catch prefix, .type_id = type_id, .location = loc, .component = component }) catch {};
         }
     };
 
@@ -3697,8 +3715,9 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
                 // buildAccessExpr / load reconstruction). The value is unused for
                 // naming now -- readers build leaf names deterministically.
                 block_flat.put(blockFlatKey(rid, mi), child_prefix) catch {};
-                // Recurse to scalar/vector leaves (handles nested structs).
-                recurse.run(m, inputs, alloc, rid, child_prefix, mtype, mloc);
+                // Recurse to scalar/vector leaves (handles nested structs). Pass
+                // the member's Component (component packing on a block member).
+                recurse.run(m, inputs, alloc, rid, child_prefix, mtype, mloc, memberDecVal(m, pt, mi, .component));
                 offset = mloc + typeLocFootprint(m, mtype);
             }
             continue;
@@ -3707,7 +3726,7 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
         const loc = getDecVal(decs, rid, .location) orelse continue;
         const name = names.get(rid) orelse continue;
         const safe = mslSanitizeName(alloc, name) catch name;
-        inputs.append(alloc, .{ .var_id = rid, .name = safe, .type_id = pt, .location = loc, .interp = mslInterpAttr.forVar(m, decs, rid, pt) }) catch {};
+        inputs.append(alloc, .{ .var_id = rid, .name = safe, .type_id = pt, .location = loc, .component = getDecVal(decs, rid, .component), .interp = mslInterpAttr.forVar(m, decs, rid, pt) }) catch {};
     }
     const SortCtx = struct {
         fn lessThan(_: void, a: StageInputDecl, b: StageInputDecl) bool {

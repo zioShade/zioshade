@@ -5264,11 +5264,11 @@ test "#500: MSL recursively flattens struct-typed stage inputs" {
 }
 
 // #500b: component packing (`layout(location=N, component=M)`) lets two inputs
-// share a Location. Metal's [[user(locnN)]] has no component offset (spirv-cross
-// widens to vec4 + swizzle), and the frontend drops Component decs, so the two
-// inputs collide on the same [[user(locnN)]] and Metal rejects main0_in
-// (layout-component.desktop.frag). Honest-error on the same-Location collision.
-test "#500b: MSL honest-errors component packing (shared Location)" {
+// share a Location distinguished by Component. Metal NATIVELY supports a
+// component-qualified location attribute [[user(locnN_M)]] (what spirv-cross
+// emits), so no widening/swizzle is needed -- the frontend emits Component decs
+// and the backend spells locnN_M. (layout-component.desktop.frag.)
+test "#500b: MSL component packing via [[user(locnN_M)]]" {
     const spirv = compileToSpirv("component_pack_msl",
         \\#version 450
         \\layout(location = 0, component = 0) in vec2 v0;
@@ -5277,5 +5277,9 @@ test "#500b: MSL honest-errors component packing (shared Location)" {
         \\void main() { FragColor = v0 + v1; }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedComponentPacking, zioshade.spirvToMSL(alloc, spirv, .{}));
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    // Two inputs at Location 0, distinguished by Component -> locn0_0 / locn0_2.
+    try assertContains(msl, "v0 [[user(locn0_0)]]");
+    try assertContains(msl, "v1 [[user(locn0_2)]]");
 }

@@ -458,6 +458,7 @@ pub const Decoration = enum(u32) {
     non_writable = 24,
     non_readable = 25,
     location = 30,
+    component = 31,
     // Dual-source blending second-output selector (Location=30, Component=31,
     // Index=32, Binding=33). Value 12 is NOT Index — that misvalue emitted SPIR-V
     // spirv-val rejects ("Invalid decoration operand: 12").
