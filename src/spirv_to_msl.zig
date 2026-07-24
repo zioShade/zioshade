@@ -6917,7 +6917,10 @@ fn emitInstruction(
                 // silently returned the base-mip texel for any texelFetch(lod>0). Pass
                 // it as read(uint2(coord), lod). Checking the Lod bit (not just len>6)
                 // avoids passing a lone ConstOffset's value as the lod. Matches spirv-cross.
-                if (inst.words.len > 6 and (inst.words[5] & 0x2) != 0) {
+                // #495: also check the Sample operand (mask 0x40) for multisampled textures
+                // (texture2d_ms::read(uint2, sample)) — texelFetch on sampler2DMS uses Sample,
+                // not Lod. Without this, the sample arg was dropped (read(uint2) wrong arity).
+                if (inst.words.len > 6 and ((inst.words[5] & 0x2) != 0 or (inst.words[5] & 0x40) != 0)) {
                     try w.print("    {s} {s} = {s}.read({s}({s}), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, coord_name, names.get(inst.words[6]) orelse "0" });
                 } else {
                     try w.print("    {s} {s} = {s}.read({s}({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, coord_name });
