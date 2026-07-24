@@ -7386,3 +7386,23 @@ test "OpFMod lowers to the sign-correct floor expansion, not WGSL `%`" {
     try assertNotContains(wgsl, "% 3.0f");
     try nagaValidateOrSkip(wgsl, "fmod-sign");
 }
+
+// #499 (cross-backend): see hlsl_tests #499. WGSL must declare the derived
+// spec-constant-ternary const `f` (was referenced undeclared -> naga "unknown
+// identifier `f`"). WGSL forbids a `const` referencing an `override`, so the
+// derived value is itself an `override`, and OpSelect lowers to
+// select(false, true, cond) (WGSL has no `?:`).
+test "#499: WGSL declares spec-constant ternary (OpSelect) result" {
+    const spirv = compileToSpirv("specconst_tern_wgsl",
+        \\#version 450
+        \\layout(location = 0) out float FragColor;
+        \\layout(constant_id = 0) const uint s = 10u;
+        \\const uint f = s > 20u ? 30u : 50u;
+        \\void main() { FragColor = float(f); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "override f: u32 = select(");
+    try nagaValidateOrSkip(wgsl, "specconst-tern");
+}
