@@ -76,7 +76,7 @@ valid=0 invalid=0 glim=0 incon=0 ocrash=0 herr=0 total=0 regression=0
 # machinery / structural work the 5-voice panel deferred to the canonical DXC gate).
 # An INVALID that is NOT in this set is a NEW regression and the actionable signal.
 # Keep this list in sync with the HLSL section of the zioshade memory.
-KNOWN_INVALID=" false-loop-init.frag partial-write-preserve.frag shader-debug-info-line-directives.line.gV.frag triple-nested-functions.frag "
+KNOWN_INVALID=" false-loop-init.frag partial-write-preserve.frag "
 is_known() { case " $KNOWN_INVALID " in *" $1 "*) return 0;; *) return 1;; esac; }
 
 for f in "$DIR"/*."$EXT"; do

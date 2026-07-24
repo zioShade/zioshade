@@ -2944,6 +2944,25 @@ test "T31.9: HLSL-keyword identifier collision is renamed" {
     try assertContains(hlsl, "float scalar ");
 }
 
+// #170 RC6 over-fire guard: a helper that takes a varying's VALUE as a parameter
+// (never referencing the varying directly) must compile fine. The varying-in-helper
+// honest-error must NOT fire here — an earlier draft matched constant LITERAL words
+// against varying ID numbers and over-fired on exactly this pattern (camo-pattern,
+// fbm-noise, ...). Whether the helper is kept or inlined, this must not honest-error.
+test "T31.10: varying passed as helper param does NOT honest-error (over-fire guard)" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\vec4 helper(vec2 p) { return vec4(p, 0.0, 0.0); }
+        \\void main() { o = helper(uv); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "main");
+    try assertNotContains(hlsl, "UnsupportedVaryingInHelper");
+}
+
 test "T31.5: textureGather maps to Gather" {
     const source =
         \\#version 430

@@ -1162,6 +1162,39 @@ pub fn spirvToHLSL(
         if (sc == .PushConstant) return error.UnsupportedPushConstant;
     }
 
+    // Honest-error pre-check: a USER stage-input varying (not a builtin) loaded or
+    // access-chained DIRECTLY inside a non-entry (helper) function. HLSL passes
+    // varyings as main() params, so a helper that reads one emits an undeclared
+    // identifier (plausible-but-wrong). Builtins are excluded (handled by the builtin
+    // path). To avoid false positives, only the POINTER operand (words[3]) of an
+    // OpLoad/OpAccessChain is tested — scanning every word matches constant LITERAL
+    // values against varying ID numbers (an early ID like %uv collides with
+    // OpConstant %uint 0/1 literals). The proper fix is varying-threading into helper
+    // signatures (MSL #476 analog), deferred to the canonical DXC gate. (#170)
+    {
+        var user_input_ids = std.AutoHashMap(u32, void).init(aa);
+        defer user_input_ids.deinit();
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .Input) continue;
+            if (getDecorationValue(&decorations, inst.words[2], .built_in) != null) continue;
+            user_input_ids.put(inst.words[2], {}) catch {};
+        }
+        if (user_input_ids.count() > 0) {
+            var in_non_entry = false;
+            for (module.instructions) |inst| {
+                if (inst.op == .Function) {
+                    in_non_entry = inst.words.len >= 3 and inst.words[2] != entry_id;
+                } else if (inst.op == .FunctionEnd) {
+                    in_non_entry = false;
+                } else if (in_non_entry and (inst.op == .Load or inst.op == .AccessChain) and inst.words.len >= 4) {
+                    if (user_input_ids.contains(inst.words[3])) return error.UnsupportedVaryingInHelper;
+                }
+            }
+        }
+    }
+
     // Honest-error pre-check: gl_ClipDistance / gl_CullDistance as a stage INPUT is an
     // array builtin emitted scalar-then-indexed (plausible-but-wrong). Vertex-OUTPUT
     // clip/cull is honest-errored elsewhere; this covers the fragment-input case until
