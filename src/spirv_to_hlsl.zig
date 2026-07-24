@@ -6219,6 +6219,22 @@ fn emitInstruction(
                 }
                 return;
             }
+            // #484 (ported from MSL): if this unhandled op produces a result id the
+            // module references, that result would be an undeclared identifier (silent-
+            // wrong at exit 0) -- fail loud instead. If unused (or no result), keep the
+            // visible stub comment (harmless; e.g. block-match filter ops reach here
+            // with an unused result). Closes the HLSL analog of MSL's unhandled-opcode
+            // gap (rq-position-fetch ray-query ops, tensor).
+            if (inst.words.len >= 3) {
+                const rid = inst.words[2];
+                var uses: u32 = 0;
+                for (module.instructions) |u| {
+                    for (u.words) |wd| if (wd == rid) {
+                        uses += 1;
+                    };
+                }
+                if (uses > 1) return error.UnsupportedOpcode;
+            }
             try w.print("    // unhandled op {d}\n", .{@intFromEnum(inst.op)});
         },
     }
