@@ -3401,3 +3401,104 @@ test "#499: GLSL declares spec-constant ternary (OpSelect) result" {
     try assertContains(glsl, "const bool ");
     try assertContains(glsl, "const uint f = ");
 }
+
+// #GLSL-corpus Issue 1: a struct-typed stage input is an interface block. A struct
+// containing an integer member must emit the GLSL block form (`in Tag { ... } inst;`)
+// at #version 450 — the struct-then-input form (`in S inst;`) is rejected by glslang
+// because an integer varying requires `flat`, which that form cannot apply per-member.
+// The block tag is decoupled from the instance name to avoid a redefinition.
+test "#GLSL-corpus: struct input with int member emits block form at #version 450" {
+    const spirv = compileToSpirv("io_block_int",
+        \\#version 450
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) in VertexData {
+        \\    vec4 color;
+        \\    flat int idx;
+        \\} vin;
+        \\void main() { FragColor = vin.color + vec4(float(vin.idx)); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    // Block form with a decoupled tag, and the version bumped 430 -> 450.
+    try assertContains(glsl, "in VertexData_io\n{");
+    try assertContains(glsl, "#version 450");
+    try glslValidateOrSkip("io_block_int", glsl);
+}
+
+// #GLSL-corpus Issue 1: a struct-typed input used as a VALUE (assigned to a local)
+// must use the struct-then-input form (`struct T {...}; in T inst;`), because the
+// block form forbids whole-value use. With no integer member and no name collision,
+// struct-then-input is valid at the default #version 430.
+test "#GLSL-corpus: struct input used as value keeps struct-then-input form" {
+    const spirv = compileToSpirv("io_block_value",
+        \\#version 450
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(location = 0) in VertexOut { vec4 color; vec3 normal; } vin;
+        \\void main() { VertexOut tmp = vin; FragColor = tmp.color + vec4(tmp.normal, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "struct VertexOut");
+    try assertContains(glsl, "in VertexOut vin;");
+    try glslValidateOrSkip("io_block_value", glsl);
+}
+
+// #GLSL-corpus Issue 2: textureLod on a shadow sampler needs the
+// GL_EXT_texture_shadow_lod extension (core GLSL has no Lod on comparison samplers),
+// and the compare coord for an array/cube shadow is vec4 (coord-components + 1), not
+// the hardcoded vec3 that only suits a 2D shadow.
+test "#GLSL-corpus: shadow textureLod splices GL_EXT_texture_shadow_lod + vec4 coord" {
+    const spirv = compileToSpirv("shadow_lod_ext",
+        \\#version 450
+        \\#extension GL_EXT_texture_shadow_lod : require
+        \\layout(binding = 0) uniform sampler2DArrayShadow uS;
+        \\layout(location = 0) in vec4 vUV;
+        \\layout(location = 0) out float FragColor;
+        \\void main() { FragColor = textureLod(uS, vUV, 1.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "#extension GL_EXT_texture_shadow_lod : require");
+    // Array shadow coord is vec4 (vec3 coord + dref), not the old vec3.
+    try assertContains(glsl, "textureLod(uS, vec4(");
+    try glslValidateOrSkip("shadow_lod_ext", glsl);
+}
+
+// #GLSL-corpus Issue 2: gl_HelperInvocation / gl_CullDistance are core only at
+// #version 460; the backend bumps the #version line upward when they are referenced.
+test "#GLSL-corpus: gl_HelperInvocation bumps #version to 460" {
+    const glsl = try compileToGlsl(
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D s;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() {
+        \\    if (gl_HelperInvocation) { FragColor = vec4(0.0); return; }
+        \\    FragColor = texture(s, uv);
+        \\}
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "#version 460");
+    try glslValidateOrSkip("helper_invocation", glsl);
+}
+
+// #GLSL-corpus Issue 2: features the GLSL backend cannot emit correctly honest-error
+// with a named error rather than plausible-but-wrong output. Vulkan separate samplers
+// passed through a function parameter are one such case.
+test "#GLSL-corpus: separate sampler as function param honest-errors" {
+    const spirv = compileToSpirv("sep_sampler_err",
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(set = 0, binding = 0) uniform mediump sampler uSamp;
+        \\layout(set = 0, binding = 1) uniform mediump texture2D uTex;
+        \\layout(location = 0) in vec2 vUV;
+        \\layout(location = 0) out vec4 FragColor;
+        \\vec4 samp(mediump sampler s) { return texture(sampler2D(uTex, s), vUV); }
+        \\void main() { FragColor = samp(uSamp); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedSeparateSamplers, zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }));
+}
