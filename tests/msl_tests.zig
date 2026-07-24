@@ -5240,3 +5240,40 @@ test "#499: MSL declares spec-constant ternary (OpSelect) result" {
     // ...rendered as an MSL ternary over the bool condition.
     try assertContains(msl, "?");
 }
+
+// #500: a struct-typed fragment stage input (a nested interface-block member, or
+// a `in Struct x`) makes main0_in carry a struct-typed field, which Metal's
+// [[stage_in]] rejects ("invalid type 'main0_in' ... stage_in"). zioshade flattens
+// interface blocks ONE level, so a member that is itself a struct still yields a
+// struct-typed field -> silent-wrong (multiple-struct-flattening.legacy.frag).
+// spirv-cross recursively flattens; until that lands, honest-error rather than
+// emit Metal-rejecting MSL.
+test "#500: MSL honest-errors struct-typed stage inputs" {
+    const spirv = compileToSpirv("struct_stage_in_msl",
+        \\#version 450
+        \\struct Foo { vec4 a; vec4 b; };
+        \\struct Baz { Foo foo; Foo bar; };
+        \\layout(location = 0) in Baz baz;
+        \\layout(location = 0) out vec4 FragColor;
+        \\void main() { FragColor = baz.foo.a + baz.bar.b; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedStructStageInput, zioshade.spirvToMSL(alloc, spirv, .{}));
+}
+
+// #500b: component packing (`layout(location=N, component=M)`) lets two inputs
+// share a Location. Metal's [[user(locnN)]] has no component offset (spirv-cross
+// widens to vec4 + swizzle), and the frontend drops Component decs, so the two
+// inputs collide on the same [[user(locnN)]] and Metal rejects main0_in
+// (layout-component.desktop.frag). Honest-error on the same-Location collision.
+test "#500b: MSL honest-errors component packing (shared Location)" {
+    const spirv = compileToSpirv("component_pack_msl",
+        \\#version 450
+        \\layout(location = 0, component = 0) in vec2 v0;
+        \\layout(location = 0, component = 2) in float v1;
+        \\layout(location = 0) out vec2 FragColor;
+        \\void main() { FragColor = v0 + v1; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedComponentPacking, zioshade.spirvToMSL(alloc, spirv, .{}));
+}
