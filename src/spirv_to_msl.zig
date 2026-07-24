@@ -59,6 +59,24 @@ const StageInputDecl = struct { var_id: u32, name: []const u8, type_id: u32, loc
 ///     the per-var rename loop. (#471)
 const StageOutputDecl = struct { var_id: u32, name: []const u8, type_id: u32, location: u32, is_position: bool, is_point_size: bool = false, from_block: bool = false };
 
+/// #472: a FRAGMENT Output, classified into the Metal-representable kinds the
+/// multi-field main0_out path emits. `color` carries the Location (-> [[color(N)]])
+/// and an optional dual-source Index (-> `, index(M)`). The builtin kinds map to
+/// their Metal attributes: frag_depth -> [[depth(...)]], sample_mask ->
+/// [[sample_mask]], stencil_ref (FragStencilRefEXT 5014) -> [[stencil]]. The Metal
+/// type of a builtin output differs from the SPIR-V pointee type in some cases
+/// (gl_SampleMask is int[1] in SPIR-V but a scalar uint [[sample_mask]] in Metal),
+/// so `msl_type` overrides `type_id` for those.
+const FragOutputKind = enum { color, frag_depth, sample_mask, stencil_ref };
+const FragOutput = struct {
+    var_id: u32,
+    name: []const u8,
+    type_id: u32, // SPIR-V pointee type (used to derive the Metal type)
+    kind: FragOutputKind,
+    location: u32 = 0, // color outputs only
+    index: ?u32 = null, // dual-source color only
+};
+
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (id >= m.id_defs.len) return null;
@@ -1413,6 +1431,12 @@ threadlocal var g_has_stage_in: bool = false;
 threadlocal var g_frag_out_type: ?[]const u8 = null;
 threadlocal var g_frag_out_name: ?[]const u8 = null;
 
+// #472: multi-output fragment outputs (MRT/FragDepth/SampleMask/stencil/dual-source).
+// Set ONLY for fragments that take the multi-field main0_out path; null for the single-
+// color common case (which keeps g_frag_out_type/name + the byte-identical legacy path).
+// Consumed by the non-entry helper signature emitter + the OpFunctionCall arg appender.
+threadlocal var g_frag_outputs: ?[]const FragOutput = null;
+
 // #489 (builtin threading): the gl_FragCoord builtin is renamed to `_fragCoord` and
 // threaded into helpers too, so a helper that reads it (raymarch `scene()`) resolves it.
 // Set in spirvToMSL (the rename must precede helper emission); null when no FragCoord.
@@ -2419,16 +2443,38 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
 
     // #481: gl_SampleMaskIn is an int[] in GLSL but [[sample_mask]] is a scalar
     // uint in Metal; record its var so writeAccessExprPlain drops the `[0]` index.
+    // #472: also record an OUTPUT gl_SampleMask — it is int[1] in SPIR-V but a scalar
+    // uint [[sample_mask]] in Metal, so the body's `gl_SampleMask[0] = x` write must
+    // drop the `[0]` index too.
     var scalar_builtins = std.AutoHashMap(u32, void).init(aa);
     for (module.instructions) |sbi| {
         if (sbi.op != .Variable or sbi.words.len < 4) continue;
-        if (@as(spirv.StorageClass, @enumFromInt(sbi.words[3])) != .Input) continue;
+        const sc: spirv.StorageClass = @enumFromInt(sbi.words[3]);
+        if (sc != .Input and sc != .Output) continue;
         if (builtinOf(&decs, sbi.words[2])) |bi| {
             if (bi == @intFromEnum(spirv.BuiltIn.sample_mask)) scalar_builtins.put(sbi.words[2], {}) catch {};
         }
     }
     g_scalar_builtin_vars = &scalar_builtins;
     defer g_scalar_builtin_vars = null;
+
+    // #472: gl_SamplePosition has NO Metal [[attribute]] (spirv-cross computes it
+    // from sample positions). It is a fragment INPUT builtin used by exactly one
+    // corpus shader (sample-parameter.frag); honest-error that niche case rather
+    // than emit a body that uses an undeclared identifier. This deliberately does
+    // NOT touch gl_SampleID ([[sample_id]]): input-attachment-ms.vk.frag uses
+    // gl_SampleID but its subpassLoad lowering ignores the sample id, so it never
+    // reaches this declaration path and stays valid.
+    if (module.execution_model == .Fragment) {
+        for (module.instructions) |sbi| {
+            if (sbi.op != .Variable or sbi.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(sbi.words[3]);
+            if (sc != .Input) continue;
+            if (builtinOf(&decs, sbi.words[2])) |bi| {
+                if (bi == @intFromEnum(spirv.BuiltIn.sample_position)) return error.UnsupportedSamplePosition;
+            }
+        }
+    }
 
     // Pull-model interpolation: the set of Input variable ids queried by
     // interpolateAtCentroid/Sample/Offset. Those inputs are declared
@@ -2456,6 +2502,38 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     const is_compute_like = is_compute or is_mesh or is_task;
     const is_frag = module.execution_model == .Fragment;
     const is_vertex = module.execution_model == .Vertex;
+
+    // #472: fragment outputs (color/MRT/dual-source + FragDepth/SampleMask/stencil).
+    // Collected with ORIGINAL names so `main0_out` fields + body routing match. When
+    // the set is NOT the single-color common case, the multi-field main0_out path is
+    // taken (g_frag_outputs); otherwise the legacy hardcoded path stays byte-identical.
+    var frag_outputs = std.ArrayList(FragOutput).initCapacity(aa, 0) catch return error.OutOfMemory;
+    defer frag_outputs.deinit(aa);
+    if (is_frag) {
+        collectFragmentOutputs(&module, &names, &decs, &frag_outputs, aa);
+    }
+    const frag_multi = is_frag and !isSingleColorFragOutput(frag_outputs.items);
+    if (frag_multi) {
+        // Order outputs for main0_out: colors ascending by Location, then the builtin
+        // kinds after (spirv-cross emits colors by location; builtin field order does
+        // not affect Metal validity).
+        const SortCtx = struct {
+            fn rank(o: FragOutput) u32 {
+                return switch (o.kind) {
+                    .color => o.location,
+                    .frag_depth => 1_000_000,
+                    .sample_mask => 1_000_001,
+                    .stencil_ref => 1_000_002,
+                };
+            }
+            fn lessThan(_: void, a: FragOutput, b: FragOutput) bool {
+                return rank(a) < rank(b);
+            }
+        };
+        std.sort.insertion(FragOutput, frag_outputs.items, {}, SortCtx.lessThan);
+        g_frag_outputs = frag_outputs.items;
+    }
+    defer g_frag_outputs = null;
 
     // MSL header
     try w.writeAll("#include <metal_stdlib>\n#include <simd/simd.h>\n\nusing namespace metal;\n\n");
@@ -2626,13 +2704,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
     }
 
-    // #470: the fragment main0_out below is a SINGLE hardcoded color attachment.
-    // Multi-output fragments -- gl_FragDepth ([[depth(any)]]), MRT (>1 color), or any
-    // other output builtin -- cannot be represented here and previously emitted
-    // silent-wrong / invalid MSL (depth scrambled into the color param, extra colors
-    // dropped). Honest-error instead, per the wedge, until the multi-field main0_out
-    // rework lands. Single-color fragments (the common case) are unaffected.
-    if (is_frag and mslFragmentHasUnsupportedOutput(&module, &decs)) {
+    // #472: a FRAGMENT Output that is GENUINELY Metal-unrepresentable (a struct output,
+    // or an output builtin other than FragDepth/SampleMask/FragStencilRefEXT) cannot
+    // become a valid main0_out field — honest-error it. The representable multi-output
+    // kinds (MRT/dual-source/FragDepth/SampleMask/stencil) now have a real main0_out path.
+    if (is_frag and hasUnsupportedFragOutput(&module, &names, &decs)) {
         return error.UnsupportedFragmentOutput;
     }
     // A multisampled storage image that is both read and written: Metal texture2d_ms
@@ -2641,11 +2717,33 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (mslHasReadWriteMSStorageImage(&module, &img_access)) {
         return error.UnsupportedMultiSampleStorageImage;
     }
-    // Output struct for fragment (single color attachment, TYPED to the Location-0
-    // output's actual type -- not always float4; e.g. `out int`/`out float`/`out vec3`).
+    // Output struct for fragment. The SINGLE-color common case (one Location-0 color,
+    // no builtin) takes the legacy hardcoded path UNCHANGED (byte-identical for 1416+
+    // shaders). The multi-output case (MRT/FragDepth/SampleMask/stencil/dual-source)
+    // emits one main0_out field per output, mirroring spirv-cross --msl.
     if (is_frag) {
-        const oty = fragmentOutputMslType(&module, &names, &decs, aa);
-        try w.print("struct main0_out\n{{\n    {s} _fragColor [[color(0)]];\n}};\n\n", .{oty});
+        if (frag_multi) {
+            try w.writeAll("struct main0_out\n{\n");
+            for (frag_outputs.items) |fo| {
+                const tn = fragOutputMslType(&module, fo, &names, aa);
+                switch (fo.kind) {
+                    .color => {
+                        if (fo.index) |idx| {
+                            try w.print("    {s} {s} [[color({d}), index({d})]];\n", .{ tn, fo.name, fo.location, idx });
+                        } else {
+                            try w.print("    {s} {s} [[color({d})]];\n", .{ tn, fo.name, fo.location });
+                        }
+                    },
+                    .frag_depth => try w.print("    {s} {s} [[{s}]];\n", .{ tn, fo.name, fragmentDepthAttribute(&module, entry_id) }),
+                    .sample_mask => try w.print("    {s} {s} [[sample_mask]];\n", .{ tn, fo.name }),
+                    .stencil_ref => try w.print("    {s} {s} [[stencil]];\n", .{ tn, fo.name }),
+                }
+            }
+            try w.writeAll("};\n\n");
+        } else {
+            const oty = fragmentOutputMslType(&module, &names, &decs, aa);
+            try w.print("struct main0_out\n{{\n    {s} _fragColor [[color(0)]];\n}};\n\n", .{oty});
+        }
     }
 
     // Output struct for vertex (mirrors spirv-cross --msl): user varyings
@@ -3054,14 +3152,16 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     g_has_stage_in = is_frag and stage_inputs.items.len > 0;
     defer g_has_stage_in = false;
     // #489: thread the fragment output into helpers (set type+name; read at the helper
-    // signature + OpFunctionCall). Null when there is no Location-0 color output.
+    // signature + OpFunctionCall). Null when there is no Location-0 color output. The
+    // multi-output path (#472) threads ALL outputs via g_frag_outputs instead, so this
+    // single-output threading is skipped there to avoid a duplicate param.
     g_frag_out_type = null;
     g_frag_out_name = null;
     defer {
         g_frag_out_type = null;
         g_frag_out_name = null;
     }
-    if (is_frag) {
+    if (is_frag and !frag_multi) {
         for (module.instructions) |inst| {
             if (inst.op != .Variable or inst.words.len < 4) continue;
             if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
@@ -3554,7 +3654,7 @@ fn needsForwardDecls(m: *const ParsedModule, func_ids: []const u32, entry_id: u3
 /// `color`/`position` are valid as identifiers.
 /// MSL type of the single fragment color output (Location 0), for typing the
 /// `main0_out` color attachment + the impl's output ref param. Defaults to float4.
-/// mslFragmentHasUnsupportedOutput already gated depth/MRT/multi-output away, so the
+/// Only invoked on the single-color path now (isSingleColorFragOutput), so the
 /// non-default path is a single scalar/vector color (out int/float/vec2/vec3) -- the
 /// hardcoded float4 was silent-wrong (for-loop-init `out int`, matrix-conversion `out vec3`).
 fn fragmentOutputMslType(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), alloc: std.mem.Allocator) []const u8 {
@@ -3779,21 +3879,138 @@ fn perVertexMemberWritten(m: *const ParsedModule, var_id: u32, member_idx: u32) 
     return false;
 }
 
-/// #470: true if a FRAGMENT has an Output the single hardcoded `_fragColor
-/// [[color(0)]]` cannot represent — any output builtin (gl_FragDepth/gl_SampleMask/
-/// gl_FragStencilRef/...) or more than one color attachment (MRT). Such shaders are
-/// honest-errored (the multi-field main0_out rework that would support them is
-/// tracked separately). A single color output returns false (the working common case).
-fn mslFragmentHasUnsupportedOutput(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) bool {
-    var color_count: u32 = 0;
+/// #472: the SPIR-V BuiltIn value for FragStencilRefEXT (SPV_EXT_shader_stencil_export).
+/// Unnamed in the BuiltIn enum (rare extension); builtinOf returns the raw literal.
+const FRAG_STENCIL_REF_EXT: u32 = 5014;
+
+/// #472: gl_FragStencilRefARB is a fragment stencil-ref output. zioshade's GLSL
+/// frontend does NOT decorate it with a BuiltIn (it is an extension builtin), so the
+/// MSL backend detects it by NAME — the same approach the WGSL backend uses. Metal's
+/// `[[stencil]]` output represents it.
+fn isFragStencilRefName(name: []const u8) bool {
+    return std.mem.indexOf(u8, name, "FragStencilRef") != null;
+}
+
+/// #472: collect a FRAGMENT's Output variables, classified into the Metal-
+/// representable kinds (color / frag_depth / sample_mask / stencil_ref). Struct-typed
+/// outputs are skipped here (they remain unrepresentable). The list is NOT sorted:
+/// callers place color outputs in main0_out in Location order, with builtins after,
+/// matching spirv-cross --msl (which emits colors by location, then depth/sample_mask).
+fn collectFragmentOutputs(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    outputs: *std.ArrayList(FragOutput),
+    alloc: std.mem.Allocator,
+) void {
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
-        // An output builtin (FragDepth/SampleMask/...) is unrepresentable here.
-        if (builtinOf(decs, inst.words[2]) != null) return true;
-        color_count += 1; // a location color attachment
+        const rid = inst.words[2];
+        const pi = getDef(m, inst.words[1]) orelse continue;
+        if (pi.op != .TypePointer or pi.words.len < 4) continue;
+        const pt = pi.words[3];
+        const pti = getDef(m, pt) orelse continue;
+        // Struct-typed outputs are out of scope (not representable as one main0_out field).
+        if (pti.op == .TypeStruct) continue;
+        const name = names.get(rid) orelse continue;
+
+        if (builtinOf(decs, rid)) |bi| {
+            const kind: ?FragOutputKind = switch (bi) {
+                @intFromEnum(spirv.BuiltIn.frag_depth) => .frag_depth,
+                @intFromEnum(spirv.BuiltIn.sample_mask) => .sample_mask,
+                FRAG_STENCIL_REF_EXT => .stencil_ref,
+                else => null, // genuinely-unrepresentable output builtin (see hasUnsupportedFragOutput)
+            };
+            if (kind) |k| {
+                outputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .kind = k }) catch {};
+            }
+            continue;
+        }
+        // gl_FragStencilRefARB: an extension builtin the frontend does not decorate, so
+        // detect it by name (mirrors the WGSL backend). It has no Location.
+        if (isFragStencilRefName(name)) {
+            outputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .kind = .stencil_ref }) catch {};
+            continue;
+        }
+        // A color attachment. zioshade's frontend does NOT assign a Location to a single
+        // undecorated output (the common shadertoy/gl_FragColor case) — default it to 0
+        // (Metal's [[color(0)]] default), matching the legacy hardcoded path.
+        const loc = getDecVal(decs, rid, .location) orelse 0;
+        const idx = getDecVal(decs, rid, .index);
+        outputs.append(alloc, .{ .var_id = rid, .name = name, .type_id = pt, .kind = .color, .location = loc, .index = idx }) catch {};
     }
-    return color_count > 1;
+}
+
+/// #472: true if the fragment has a GENUINELY Metal-unrepresentable Output — a struct-
+/// typed output, or an output builtin the multi-field path does not map (anything other
+/// than FragDepth/SampleMask/FragStencilRefEXT). These cannot become a valid main0_out
+/// field, so honest-error them. A location-less non-builtin output is NOT unsupported:
+/// it defaults to [[color(0)]] (the common single-color case), matching the legacy path.
+fn hasUnsupportedFragOutput(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry))) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+        const rid = inst.words[2];
+        if (builtinOf(decs, rid)) |bi| {
+            const supported = (bi == @intFromEnum(spirv.BuiltIn.frag_depth)) or
+                (bi == @intFromEnum(spirv.BuiltIn.sample_mask)) or (bi == FRAG_STENCIL_REF_EXT);
+            if (!supported) return true;
+            continue;
+        }
+        // gl_FragStencilRefARB (by name) is supported ([[stencil]]).
+        if (names.get(rid)) |nm| {
+            if (isFragStencilRefName(nm)) continue;
+        }
+        // A struct-typed output cannot be one main0_out field (not yet flattened).
+        const pi = getDef(m, inst.words[1]) orelse continue;
+        if (pi.op == .TypePointer and pi.words.len >= 4) {
+            if (getDef(m, pi.words[3])) |pti| {
+                if (pti.op == .TypeStruct) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// #472: the MSL `[[depth(...)]]` qualifier for the FragDepth output, derived from the
+/// entry function's ExecutionMode. DepthGreater -> depth(greater), DepthLess ->
+/// depth(less), otherwise depth(any) (incl. DepthUnchanged and the no-layout default).
+fn fragmentDepthAttribute(m: *const ParsedModule, entry_id: u32) []const u8 {
+    for (m.instructions) |inst| {
+        if (inst.op != .ExecutionMode or inst.words.len < 3) continue;
+        if (inst.words[1] != entry_id) continue;
+        const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
+        if (mode == .DepthGreater) return "depth(greater)";
+        if (mode == .DepthLess) return "depth(less)";
+    }
+    return "depth(any)";
+}
+
+/// #472: the Metal type string for a fragment output field. gl_SampleMask is int[1] in
+/// SPIR-V but a scalar uint [[sample_mask]] in Metal; FragStencilRefEXT is int in SPIR-V
+/// and Metal's [[stencil]] takes uint. Color/FragDepth keep the SPIR-V pointee type.
+fn fragOutputMslType(m: *const ParsedModule, o: FragOutput, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) []const u8 {
+    if (o.kind == .sample_mask) return "uint";
+    if (o.kind == .stencil_ref) return "uint";
+    return mslType(m, o.type_id, names, alloc) catch "float4";
+}
+
+/// #472: true if the fragment takes the SINGLE-color hardcoded path (exactly one Location-
+/// 0 color output, no dual-source Index, and NO builtin outputs). This is the common case
+/// (1416+ corpus shaders); it must stay byte-identical, so the existing emission is taken
+/// unchanged. Anything else (MRT, FragDepth, SampleMask, stencil, dual-source) goes through
+/// the new multi-field main0_out path.
+fn isSingleColorFragOutput(outputs: []const FragOutput) bool {
+    // 0 outputs: no color attachment. The legacy path emits a default
+    // `float _fragColor [[color(0)]]` (fragmentOutputMslType defaults float4),
+    // which kept no-output fragments Metal-valid; preserve that rather than
+    // emit an empty main0_out (which regressed demote-to-helper / image-query /
+    // partial-write-preserve).
+    if (outputs.len == 0) return true;
+    if (outputs.len != 1) return false;
+    const o = outputs[0];
+    return o.kind == .color and o.location == 0 and o.index == null;
 }
 
 /// Collect vertex Output variables into `outputs`, ordered to match
@@ -4527,8 +4744,18 @@ fn emitFunction(
 
         var first_param = true;
 
-        // Add output param (thread float4&)
-        if (output_var_id) |ovid| {
+        // Add output param(s). The single-color common case threads one `thread T&`
+        // (byte-identical legacy path); the multi-output case (#472) threads every
+        // fragment output (colors by location, then FragDepth/SampleMask/stencil).
+        const frag_multi_outputs = g_frag_outputs;
+        if (frag_multi_outputs) |list| {
+            for (list, 0..) |fo, i| {
+                if (i > 0) try w.writeAll(", ");
+                const tn = fragOutputMslType(m, fo, names, alloc);
+                try w.print("thread {s}& {s}", .{ tn, fo.name });
+            }
+            first_param = false;
+        } else if (output_var_id) |ovid| {
             const on = names.get(ovid) orelse "_fragColor";
             const oty = fragmentOutputMslType(m, names, decs, alloc);
             try w.print("thread {s}& {s}", .{ oty, on });
@@ -4536,7 +4763,7 @@ fn emitFunction(
         }
 
         // Add frag coord param
-        if (output_var_id != null) {
+        if (output_var_id != null or frag_multi_outputs != null) {
             try w.print(", {s} _fragCoord", .{fc_ty});
         } else {
             try w.print("{s} _fragCoord", .{fc_ty});
@@ -4705,11 +4932,20 @@ fn emitFunction(
             try w.print("constant {s}& {s}_1 = *(constant {s}*)&{s};\n    ", .{ ac.name, ac.name, ac.name, ac.from });
         }
         // Pass the full float4 when the body reads .z/.w, else just .xy (float2).
-        // The `out._fragColor` output argument is gated on output_var_id exactly
-        // like the impl signature's output param: a fragment with NO Output var
-        // (e.g. it only reads inputs / has side effects) omits both, so caller and
-        // callee agree on arity (#479).
-        if (output_var_id != null) {
+        // The output arguments are gated exactly like the impl signature's output
+        // params: a fragment with NO Output var (e.g. it only reads inputs / has side
+        // effects) omits both, so caller and callee agree on arity (#479). The multi-
+        // output path (#472) passes `out.<name>` for every field; the single-color path
+        // passes the legacy `out._fragColor`.
+        if (g_frag_outputs) |list| {
+            try w.writeAll(func_name);
+            try w.writeAll("_impl(");
+            for (list, 0..) |fo, i| {
+                if (i > 0) try w.writeAll(", ");
+                try w.print("out.{s}", .{fo.name});
+            }
+            try w.print(", gl_FragCoord{s}", .{if (frag_coord_full) "" else ".xy"});
+        } else if (output_var_id != null) {
             try w.print("{s}_impl(out._fragColor, gl_FragCoord{s}", .{ func_name, if (frag_coord_full) "" else ".xy" });
         } else {
             try w.print("{s}_impl(gl_FragCoord{s}", .{ func_name, if (frag_coord_full) "" else ".xy" });
@@ -5183,7 +5419,15 @@ fn emitFunction(
         try w.writeAll("main0_in in");
     }
     // #489: thread the fragment output into helpers (a helper that writes it needs it).
-    if (g_frag_out_type) |oty| {
+    // #472: the multi-output path threads EVERY fragment output (one param each).
+    if (g_frag_outputs) |list| {
+        for (list) |fo| {
+            if (!first_param) try w.writeAll(", ");
+            first_param = false;
+            const tn = fragOutputMslType(m, fo, names, alloc);
+            try w.print("thread {s}& {s}", .{ tn, fo.name });
+        }
+    } else if (g_frag_out_type) |oty| {
         if (!first_param) try w.writeAll(", ");
         first_param = false;
         try w.print("thread {s}& {s}", .{ oty, g_frag_out_name orelse "_fragColor" });
@@ -7646,7 +7890,15 @@ fn emitInstruction(
                 try w.writeAll("in");
             }
             // #489: pass the fragment output (matches the helper's threaded output param).
-            if (g_frag_out_name) |oname| {
+            // #472: multi-output passes every output by name (each is in scope as the
+            // caller's own threaded param / the entry's main0_out field).
+            if (g_frag_outputs) |list| {
+                for (list) |fo| {
+                    if (!first_arg) try w.writeAll(", ");
+                    first_arg = false;
+                    try w.writeAll(fo.name);
+                }
+            } else if (g_frag_out_name) |oname| {
                 if (!first_arg) try w.writeAll(", ");
                 first_arg = false;
                 try w.writeAll(oname);
@@ -7835,6 +8087,27 @@ fn emitStd450(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), 
                 return;
             }
         }
+    }
+    // #472: Modf (opcode 35) — the 2-operand pointer form `modf(x, &ip)` (GLSL
+    // `modf(x, out ip)`). Metal's `modf(x, thread T& intval)` cannot bind a non-const
+    // reference to a vector element or any sub-object lvalue ("non-const reference
+    // cannot bind to vector element"); only a whole thread variable binds. When the
+    // resolved pointer operand is not a plain identifier (e.g. `v.x`, `arr[i]`),
+    // lower through a temp scalar and store back — matching spirv-cross. The temp's
+    // type is the result (fract) type, which equals the pointed-to element type.
+    if (instruction == 35 and inst.words.len >= 7) {
+        const rn = names.get(inst.words[2]) orelse "v";
+        const x = names.get(inst.words[5]) orelse "x";
+        const ptr_name = names.get(inst.words[6]) orelse "p";
+        if (std.mem.indexOfAny(u8, ptr_name, ".[") == null) {
+            try w.print("    {s} {s} = modf({s}, {s});\n", .{ rtt, rn, x, ptr_name });
+        } else {
+            const id = inst.words[2];
+            try w.print("    {s} _modf_ip_{d};\n", .{ rtt, id });
+            try w.print("    {s} {s} = modf({s}, _modf_ip_{d});\n", .{ rtt, rn, x, id });
+            try w.print("    {s} = _modf_ip_{d};\n", .{ ptr_name, id });
+        }
+        return;
     }
     const func = std450ToMsl(instruction) orelse {
         try w.print("    // unhandled std450 #{d}\n", .{instruction});
