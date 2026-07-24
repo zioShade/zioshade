@@ -678,6 +678,25 @@ fn crossErr(err: anyerror) noreturn {
             std.process.exit(1);
         }
     }
+    // HLSL: push constants are accessed by instance name in the body but the cbuffer
+    // model flattens members to globals, so a named-instance push constant can't be
+    // emitted faithfully yet.
+    if (err == error.UnsupportedPushConstant) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: push_constant blocks are not yet supported in the HLSL backend (named-instance uniform-buffer access is not modeled). Workaround: use a regular UBO (layout(set, binding) uniform), or move the data into a cbuffer manually.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // HLSL: a struct used as a stage input (e.g. `in MyStruct { ... } v;`) is not
+    // flattened into per-member signature params, so it can't be emitted faithfully yet.
+    if (err == error.UnsupportedStructStageInput) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: struct stage inputs (a struct used directly as an `in` varying) are not yet flattened by the HLSL backend. Workaround: flatten the struct into individual `in` varyings (one location each).\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     std.debug.print("error: cross-compilation failed: {s}\n", .{@errorName(err)});
     std.process.exit(1);
 }

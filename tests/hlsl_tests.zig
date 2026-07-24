@@ -4474,10 +4474,10 @@ test "T79.1: push constant block" {
         \\    fragColor = vec4(pc.scale);
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    // Push constants may appear as cbuffer
-    try assertContains(hlsl, "float");
+    // Push-constant blocks are not yet faithfully emitted by the HLSL backend
+    // (named-instance uniform-buffer access is not modeled) — honest-error rather
+    // than emit plausible-but-wrong HLSL. (#170)
+    try std.testing.expectError(error.UnsupportedPushConstant, compileToHlsl(source));
 }
 
 test "T79.2: integer comparison lessThan/greaterThan" {
@@ -9621,9 +9621,9 @@ test "T376.1: push_constant uniform block" {
         \\    gl_Position = pc.transform * vec4(pos, 1.0);
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .vertex);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    // Push-constant blocks are not yet faithfully emitted (named-instance uniform-buffer
+    // access is not modeled) — honest-error. (#170)
+    try std.testing.expectError(error.UnsupportedPushConstant, compileToHlslStage(source, .vertex));
 }
 
 test "T377.1: sampler1D texture lookup" {
@@ -11132,9 +11132,10 @@ test "T451.1: flat interpolation on struct member" {
         \\    fragColor = v2f.color + vec4(float(v2f.id));
         \\}
     ;
-    const hlsl = try compileToHlsl(source);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    // A struct used directly as a stage input is not yet flattened by the HLSL backend
+    // (the HLSL analog of the MSL #500 recursive-flatten work) — honest-error rather
+    // than emit an undeclared struct type as the main parameter. (#170)
+    try std.testing.expectError(error.UnsupportedStructStageInput, compileToHlsl(source));
 }
 
 test "T452.1: sampler2DShadow comparison" {
@@ -12075,9 +12076,9 @@ test "T503.1: push constant block" {
         \\    gl_Position = transform * (pos * scale);
         \\}
     ;
-    const hlsl = try compileToHlslStage(source, .vertex);
-    defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4");
+    // Push-constant blocks are not yet faithfully emitted (named-instance uniform-buffer
+    // access is not modeled) — honest-error. (#170)
+    try std.testing.expectError(error.UnsupportedPushConstant, compileToHlslStage(source, .vertex));
 }
 
 test "T504.1: coherent and volatile buffer" {
@@ -13858,7 +13859,7 @@ test "T590.1: vertex morph targets" {
         \\layout(location = 1) in vec3 pos1;
         \\layout(location = 2) in vec3 normal0;
         \\layout(location = 3) in vec3 normal1;
-        \\layout(push_constant) uniform PC { float blend; };
+        \\layout(location = 4) in float blend;
         \\void main() {
         \\    vec3 pos = mix(pos0, pos1, blend);
         \\    vec3 norm = normalize(mix(normal0, normal1, blend));
