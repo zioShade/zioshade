@@ -675,13 +675,14 @@ const Parser = struct {
                     _ = self.advance();
                     found = true;
                 },
-                .kw_readonly, .kw_writeonly, .kw_coherent, .kw_restrict, .kw_invariant, .kw_flat, .kw_smooth, .kw_noperspective, .kw_centroid, .kw_mediump, .kw_highp, .kw_lowp => {
+                .kw_readonly, .kw_writeonly, .kw_coherent, .kw_restrict, .kw_invariant, .kw_flat, .kw_smooth, .kw_noperspective, .kw_centroid, .kw_sample, .kw_mediump, .kw_highp, .kw_lowp => {
                     switch (self.current().tag) {
                         .kw_readonly => q.is_readonly = true,
                         .kw_writeonly => q.is_writeonly = true,
                         .kw_flat => q.is_flat = true,
                         .kw_noperspective => q.is_noperspective = true,
                         .kw_centroid => q.is_centroid = true,
+                        .kw_sample => q.is_sample = true,
                         .kw_coherent => q.is_coherent = true,
                         .kw_restrict => q.is_restrict = true,
                         .kw_invariant => q.is_invariant = true,
