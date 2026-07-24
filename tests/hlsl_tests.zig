@@ -880,6 +880,22 @@ test "T7.2: integer constant inlined" {
     try assertContains(hlsl, "42");
 }
 
+// #170: a whole-number float constant too large for int32 (1e10) must still be
+// emitted as a float literal with a decimal point. The old code appended ".0" only
+// for @abs(val) < 1e6 and printed large whole floats point-less ("10000000000"),
+// which HLSL parses as an int and rejects as overflowing — plausible-but-wrong.
+test "T7.2b: large whole-number float literal keeps its decimal point" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out float o;
+        \\void main() { float m = 1e10; o = m; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "10000000000.0");
+    try assertNotContains(hlsl, "= 10000000000;");
+}
+
 test "T7.3: vec2 constant composite inlined" {
     const source =
         \\#version 430

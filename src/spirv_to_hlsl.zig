@@ -1827,12 +1827,24 @@ fn constantLiteral(alloc: std.mem.Allocator, type_inst: Instruction, literal_wor
     }
     if (type_inst.op == .TypeFloat and literal_words.len > 0) {
         const val: f32 = @bitCast(literal_words[0]);
-        // Format float: use 0.5, 1.0 etc but ensure it has a decimal point
-        if (val == @floor(val) and @abs(val) < 1e6) {
-            const ival: i32 = @intFromFloat(val);
-            return std.fmt.allocPrint(alloc, "{d}.0", .{ival});
+        // Emit a literal HLSL always reads as float. `{d}` on a whole-number float
+        // prints "10000000000" (no decimal point); HLSL parses that as an int and
+        // rejects it once it overflows int32 (e.g. 1e10) — plausible-but-wrong. The
+        // old code special-cased only @abs(val) < 1e6 (to dodge an i32 overflow on the
+        // @intFromFloat path) and left large whole floats point-less. Format the value
+        // directly (no i32 detour) and append ".0" when it lacks a point or exponent.
+        if (std.math.isNan(val)) return std.fmt.allocPrint(alloc, "asfloat(2143289344)", .{});
+        if (std.math.isInf(val)) {
+            // 0x7F800000 = +inf, 0xFF800000 = -inf (as signed: -8388608).
+            if (val < 0) return std.fmt.allocPrint(alloc, "asfloat(-8388608)", .{});
+            return std.fmt.allocPrint(alloc, "asfloat(2139095040)", .{});
         }
-        return std.fmt.allocPrint(alloc, "{d}", .{val});
+        const s = try std.fmt.allocPrint(alloc, "{d}", .{val});
+        if (std.mem.indexOfAny(u8, s, ".eE") == null) {
+            defer alloc.free(s);
+            return std.fmt.allocPrint(alloc, "{s}.0", .{s});
+        }
+        return s;
     }
     if (type_inst.op == .TypeInt and literal_words.len > 0) {
         const signed = type_inst.words.len > 3 and type_inst.words[3] != 0;
