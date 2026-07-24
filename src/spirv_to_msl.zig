@@ -543,22 +543,13 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     // the member type as usual.
     var start: usize = 0;
     var cur_type_init: ?u32 = resolvePointee(m, base_id);
-    if (g_block_flat) |bf| {
-        if (indices.len > 0) {
-            if (getDef(m, indices[0])) |idx| {
-                if (idx.op == .Constant and idx.words.len > 3) {
-                    if (bf.get(blockFlatKey(base_id, idx.words[3]))) |flat| {
-                        base_name = std.fmt.bufPrint(&base_buf, "in.{s}", .{flat}) catch base_name;
-                        start = 1;
-                        if (cur_type_init) |tid| {
-                            if (getDef(m, tid)) |ti| {
-                                if (ti.op == .TypeStruct and idx.words[3] + 2 < ti.words.len)
-                                    cur_type_init = ti.words[idx.words[3] + 2];
-                            }
-                        }
-                    }
-                }
-            }
+    // #500 recursive flatten: a flattened Input struct var -- consume ALL leading
+    // constant struct-member indices down to the leaf field `in.<var>_<m0>_...`.
+    if (mslConsumeFlatInputIndices(alloc, m, base_id, indices)) |r| {
+        if (r.consumed > 0) {
+            base_name = std.fmt.bufPrint(&base_buf, "in.{s}", .{r.name}) catch base_name;
+            start = r.consumed;
+            cur_type_init = r.term_type;
         }
     }
     const eff_indices = indices[start..];
@@ -877,20 +868,40 @@ fn writeAccessExprPlain(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     var block_handled = false;
     var block_member_type: ?u32 = null;
     if (g_block_flat) |bf| {
-        if (getDef(m, indices[0])) |idx0| {
-            if (idx0.op == .Constant and idx0.words.len > 3) {
-                if (bf.get(blockFlatKey(base_id, idx0.words[3]))) |flat| {
-                    try w.print("in.{s}", .{flat});
-                    block_handled = true;
-                    eff_indices = indices[1..];
-                    if (resolvePointee(m, base_id)) |tid| {
-                        if (getDef(m, tid)) |ti| {
-                            if (ti.op == .TypeStruct and idx0.words[3] + 2 < ti.words.len)
-                                block_member_type = ti.words[idx0.words[3] + 2];
-                        }
-                    }
-                    if (eff_indices.len == 0) return;
-                }
+        if (bf.get(blockFlatKey(base_id, 0)) != null) { // flattened Input struct var
+            // #500 recursive flatten: consume ALL leading constant struct-member
+            // indices to the leaf field `in.<var>_<m0>_...` (stack buffer; sanitize
+            // is a no-op for non-keyword leaf names, which covers the corpus).
+            var nbuf: [160]u8 = undefined;
+            const vname = bf.get(blockFlatKey(base_id, FLAT_VAR_NAME_MEMBER)) orelse names.get(base_id) orelse "vin";
+            var nlen: usize = @min(vname.len, nbuf.len);
+            @memcpy(nbuf[0..nlen], vname[0..nlen]);
+            var cur_t: ?u32 = resolvePointee(m, base_id);
+            var consumed: usize = 0;
+            var overflow = false;
+            for (indices) |index_id| {
+                const idef = getDef(m, index_id) orelse break;
+                if (idef.op != .Constant or idef.words.len <= 3) break;
+                const val = idef.words[3];
+                const ct = cur_t orelse break;
+                const tdef = getDef(m, ct) orelse break;
+                if (tdef.op != .TypeStruct or val + 2 >= tdef.words.len) break;
+                var mnb: [32]u8 = undefined;
+                const mname = getMemberName(m, ct, val, &mnb);
+                if (nlen + 1 + mname.len > nbuf.len) { overflow = true; break; }
+                nbuf[nlen] = '_';
+                nlen += 1;
+                @memcpy(nbuf[nlen..][0..mname.len], mname);
+                nlen += mname.len;
+                cur_t = tdef.words[val + 2];
+                consumed += 1;
+            }
+            if (!overflow and consumed > 0) {
+                try w.print("in.{s}", .{nbuf[0..nlen]});
+                block_handled = true;
+                eff_indices = indices[consumed..];
+                block_member_type = cur_t;
+                if (eff_indices.len == 0) return;
             }
         }
     }
@@ -1262,6 +1273,120 @@ threadlocal var g_depth_tex_types: ?*const std.AutoHashMap(u32, void) = null;
 fn blockFlatKey(var_id: u32, member: u32) u64 {
     return (@as(u64, var_id) << 20) | @as(u64, member);
 }
+
+// Sentinel member index under which collectStageInputs stores the flattened
+// Input var's ORIGINAL source name. Needed because the body-emit rename
+// (spirvToMSL ~line 3043) overwrites names[var_id] = "in.<last-leaf>" -- with
+// recursive flatten several leaves share one var_id, so names[var] is clobbered.
+// Reconstruction / access-expr sites must read the original name via this key.
+const FLAT_VAR_NAME_MEMBER: u32 = 0xFFFFF;
+
+// #500 recursive flatten: for a flattened Input struct var, consume the LEADING
+// constant struct-member index ids and return the deterministic leaf-field name
+// (`<var>_<m0>_<m1>...`, no `in.` prefix), how many were consumed, and the
+// terminal type id. Stops at the first index that does not descend a struct
+// (vector component / array / non-constant) or at end-of-indices. Returns null
+// if `base_id` is not a flattened Input struct var. If the chain ends on a
+// struct (a sub-struct value), term_type is a TypeStruct and the name is the
+// deepest prefix -- the OpLoad handler reconstructs sub-structs; leaf
+// expressions only result when term_type is scalar/vector.
+const FlatConsume = struct { name: []const u8, consumed: usize, term_type: u32 };
+fn mslConsumeFlatInputIndices(alloc: std.mem.Allocator, m: *const ParsedModule, base_id: u32, indices: []const u32) ?FlatConsume {
+    const bf = g_block_flat orelse return null;
+    const var_name = bf.get(blockFlatKey(base_id, FLAT_VAR_NAME_MEMBER)) orelse return null; // not a flattened struct var
+    var cur_type = resolvePointee(m, base_id) orelse return null;
+    var name: []const u8 = std.fmt.allocPrint(alloc, "{s}", .{var_name}) catch return null;
+    var consumed: usize = 0;
+    for (indices) |index_id| {
+        const idef = getDef(m, index_id) orelse break;
+        if (idef.op != .Constant or idef.words.len <= 3) break;
+        const val = idef.words[3];
+        const tdef = getDef(m, cur_type) orelse break;
+        if (tdef.op != .TypeStruct or val + 2 >= tdef.words.len) break;
+        var nbuf: [32]u8 = undefined;
+        const mname = getMemberName(m, cur_type, val, &nbuf);
+        name = std.fmt.allocPrint(alloc, "{s}_{s}", .{ name, mname }) catch break;
+        cur_type = tdef.words[val + 2];
+        consumed += 1;
+    }
+    const safe = mslSanitizeName(alloc, name) catch name;
+    return .{ .name = safe, .consumed = consumed, .term_type = cur_type };
+}
+
+// #500 recursive flatten: emit a nested brace initializer reconstructing
+// `struct_type_id` from flattened Input leaves. `prefix` is the accumulated
+// `<var>_<...>`` path TO this struct (already includes var + ancestors). Emits
+// `{ in.<prefix>_<leaf0>, {substruct...}, ... }`.
+fn mslEmitFlatStructInit(m: *const ParsedModule, w: anytype, alloc: std.mem.Allocator, prefix: []const u8, struct_type_id: u32) !void {
+    try w.writeAll("{ ");
+    const sdef = getDef(m, struct_type_id) orelse { try w.writeAll("}"); return; };
+    if (sdef.op != .TypeStruct) {
+        try w.print("in.{s} }}", .{prefix});
+        return;
+    }
+    const nms: u32 = @intCast(sdef.words.len - 2);
+    var mi: u32 = 0;
+    var first = true;
+    while (mi < nms) : (mi += 1) {
+        const mtype = sdef.words[mi + 2];
+        var nbuf: [32]u8 = undefined;
+        const mname = getMemberName(m, struct_type_id, mi, &nbuf);
+        const child_prefix = try std.fmt.allocPrint(alloc, "{s}_{s}", .{ prefix, mname });
+        if (!first) try w.writeAll(", ");
+        first = false;
+        if (getDef(m, mtype)) |mt| {
+            if (mt.op == .TypeStruct) {
+                try mslEmitFlatStructInit(m, w, alloc, child_prefix, mtype);
+                continue;
+            }
+        }
+        try w.print("in.{s}", .{child_prefix});
+    }
+    try w.writeAll(" }");
+}
+
+// #500 recursive flatten: if `inst` is an OpLoad of a whole- or sub-struct
+// flattened Input, reconstruct it from leaf fields (nested brace init) and
+// return true. Whole: pid is the flat var. Sub-struct: pid is an OpAccessChain
+// into a flat var whose index chain terminates at a struct. Called at the TOP
+// of the .Load handler (before is_special) so sub-struct loads (pid not a
+// Variable) are caught.
+fn tryReconstructFlatStructLoad(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), w: anytype, alloc: std.mem.Allocator, inst: common.Instruction) !bool {
+    const rt = getDef(m, inst.words[1]);
+    if (rt == null or rt.?.op != .TypeStruct or rt.?.words.len <= 2) return false;
+    const bf = g_block_flat orelse return false;
+    const pid = inst.words[3];
+    const rn = names.get(inst.words[2]) orelse "v";
+    // Whole-struct load: pid is the flattened Input var (sentinel -> its name).
+    if (bf.get(blockFlatKey(pid, FLAT_VAR_NAME_MEMBER))) |vname| {
+        const rtt = try mslValueType(m, inst.words[1], names, alloc);
+        try w.print("    {s} {s} = ", .{ rtt, rn });
+        try mslEmitFlatStructInit(m, w, alloc, vname, inst.words[1]);
+        try w.writeAll(";\n");
+        return true;
+    }
+    // Sub-struct load: pid is an OpAccessChain into a flattened Input var.
+    if (getDef(m, pid)) |ac| {
+        if (ac.op == .AccessChain and ac.words.len >= 5) {
+            const ac_base = ac.words[3];
+            if (bf.get(blockFlatKey(ac_base, FLAT_VAR_NAME_MEMBER)) != null) {
+                if (mslConsumeFlatInputIndices(alloc, m, ac_base, ac.words[4..])) |r| {
+                    if (getDef(m, r.term_type)) |tt| {
+                        if (tt.op == .TypeStruct) {
+                            const rtt = try mslValueType(m, inst.words[1], names, alloc);
+                            try w.print("    {s} {s} = ", .{ rtt, rn });
+                            try mslEmitFlatStructInit(m, w, alloc, r.name, inst.words[1]);
+                            try w.writeAll(";\n");
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 
 // Input builtin variables whose GLSL array indexing must be dropped because the
 // Metal builtin is a SCALAR: gl_SampleMaskIn[0] -> gl_SampleMaskIn, since
@@ -2564,13 +2689,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // subsystem covering struct-flatten AND component-packing, gated on a full-
     // corpus Metal regression sweep (tools/msl_validity_sweep.sh must stay green
     // or improve) so the flatten cannot silently regress the valid shaders.
-    if (is_frag or is_vertex) {
-        for (stage_inputs.items) |si| {
-            if (getDef(&module, si.type_id)) |t| {
-                if (t.op == .TypeStruct) return error.UnsupportedStructStageInput;
-            }
-        }
-    }
+    // (#500 struct-typed stage inputs are now RECURSIVELY FLATTENED to scalar/
+    // vector leaves in collectStageInputs, so no struct-typed main0_in fields
+    // remain to reject here. The UnsupportedStructStageInput honest-error is
+    // retired; the recursive flatten + nested-brace load reconstruction handle
+    // them. Component packing below is a SEPARATE, still-unsupported feature.)
     // Component packing: GLSL/Vulkan lets two stage inputs share one Location,
     // distinguished by `component` (e.g. `layout(location=0, component=0) in
     // vec2 v0; layout(location=0, component=2) in float v1;`). Metal's
@@ -3485,6 +3608,38 @@ fn typeLocFootprint(m: *const ParsedModule, type_id: u32) u32 {
 }
 
 fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), inputs: *std.ArrayList(StageInputDecl), block_flat: *std.AutoHashMap(u64, []const u8), alloc: std.mem.Allocator) void {
+    // #500 recursive flatten: walk a flattened Input struct's members to scalar/
+    // vector LEAVES, emitting one StageInputDecl per leaf with a deterministic
+    // dotted name `<prefix>_<member>` (so a leaf at path [m0,m1,...] of block
+    // var V is `V_m0_m1_...`). Metal's [[stage_in]] rejects struct-typed fields,
+    // so nested struct members must be flattened to leaves. `prefix` already
+    // carries the var name + the ancestor member names; `loc` is the accumulated
+    // Location for this member.
+    const recurse = struct {
+        fn run(mod: *const ParsedModule, ins: *std.ArrayList(StageInputDecl), al: std.mem.Allocator, var_id: u32, prefix: []const u8, type_id: u32, loc: u32) void {
+            const td = getDef(mod, type_id) orelse {
+                ins.append(al, .{ .var_id = var_id, .name = mslSanitizeName(al, prefix) catch prefix, .type_id = type_id, .location = loc }) catch {};
+                return;
+            };
+            if (td.op == .TypeStruct and td.words.len > 2) {
+                const nmembers: u32 = @intCast(td.words.len - 2);
+                var mi: u32 = 0;
+                var offset = loc;
+                while (mi < nmembers) : (mi += 1) {
+                    const cmtype = td.words[mi + 2];
+                    var nbuf: [32]u8 = undefined;
+                    const cmname = getMemberName(mod, type_id, mi, &nbuf);
+                    const cprefix = std.fmt.allocPrint(al, "{s}_{s}", .{ prefix, cmname }) catch continue;
+                    const cmloc = memberDecVal(mod, type_id, mi, .location) orelse offset;
+                    run(mod, ins, al, var_id, cprefix, cmtype, cmloc);
+                    offset = cmloc + typeLocFootprint(mod, cmtype);
+                }
+                return;
+            }
+            ins.append(al, .{ .var_id = var_id, .name = mslSanitizeName(al, prefix) catch prefix, .type_id = type_id, .location = loc }) catch {};
+        }
+    };
+
     // #475: MSL interpolation attribute appended to the fragment stage-in `[[user(locnN)]]`.
     // Flat-on-FLOAT needs `[[flat]]` (Metal auto-flats only INTEGERS — so glslang's Flat
     // decoration on an integer varying is OMITTED, matching spirv-cross; emitting it broke
@@ -3525,6 +3680,10 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
             // interpolation. buildAccessExpr rewrites `vin.member` to
             // `in.<inst>_<member>` via block_flat.
             const inst_name = names.get(rid) orelse "vin";
+            // Stash the ORIGINAL var name under the sentinel key so the access
+            // emitters / load reconstruction can recover it after the body-emit
+            // rename clobbers names[rid] = "in.<last-leaf>" (#500 recursive).
+            block_flat.put(blockFlatKey(rid, FLAT_VAR_NAME_MEMBER), inst_name) catch {};
             const nmembers: u32 = @intCast(pti.words.len - 2);
             var mi: u32 = 0;
             var offset = block_loc; // cumulative location: a struct-typed member occupies its footprint
@@ -3532,16 +3691,14 @@ fn collectStageInputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []con
                 const mtype = pti.words[mi + 2];
                 var nbuf: [32]u8 = undefined;
                 const mname = getMemberName(m, pt, mi, &nbuf);
-                const flat = std.fmt.allocPrint(alloc, "{s}_{s}", .{ inst_name, mname }) catch continue;
-                const safe_flat = mslSanitizeName(alloc, flat) catch flat;
+                const child_prefix = std.fmt.allocPrint(alloc, "{s}_{s}", .{ inst_name, mname }) catch continue;
                 const mloc = memberDecVal(m, pt, mi, .location) orelse offset;
-                const memb_interp: []const u8 = blk: {
-                    if (memberHasDec(m, pt, mi, .flat) and !mslElementIsInt(m, mtype)) break :blk ", flat";
-                    if (memberHasDec(m, pt, mi, .no_perspective)) break :blk ", center_no_perspective";
-                    break :blk "";
-                };
-                inputs.append(alloc, .{ .var_id = rid, .name = safe_flat, .type_id = mtype, .location = mloc, .interp = memb_interp }) catch {};
-                block_flat.put(blockFlatKey(rid, mi), safe_flat) catch {};
+                // Mark this top-level member as flattened (detection for
+                // buildAccessExpr / load reconstruction). The value is unused for
+                // naming now -- readers build leaf names deterministically.
+                block_flat.put(blockFlatKey(rid, mi), child_prefix) catch {};
+                // Recurse to scalar/vector leaves (handles nested structs).
+                recurse.run(m, inputs, alloc, rid, child_prefix, mtype, mloc);
                 offset = mloc + typeLocFootprint(m, mtype);
             }
             continue;
@@ -6168,6 +6325,10 @@ fn emitInstruction(
             try w.print("    {s} {s}{s};\n", .{ tn, names.get(ri) orelse "var", arr });
         },
         .Load => {
+            // #500 recursive flatten: reconstruct a whole-/sub-struct load of a
+            // flattened Input BEFORE the is_special branch (sub-struct loads have
+            // pid = OpAccessChain, not a Variable, so is_special is false).
+            if (try tryReconstructFlatStructLoad(m, names, w, alloc, inst)) return;
             const rn = names.get(inst.words[2]) orelse "v";
             const pid = inst.words[3];
             const pn = names.get(pid) orelse "var";
@@ -6193,33 +6354,6 @@ fn emitInstruction(
                     bi == @intFromEnum(spirv.BuiltIn.helper_invocation)
                 else
                     false;
-                // #490: a whole-struct load of a FLATTENED stage input -- #476 overwrote
-                // names[pid] to the last member, so reconstruct the struct from its
-                // flattened fields (`Baz rn = { in.<inst>_<m0>, in.<inst>_<m1>, ... };`).
-                // multiple-struct-flattening `Baz bazzy = baz`.
-                if (!is_helper) {
-                    const rt = getDef(m, inst.words[1]);
-                    if (rt != null and rt.?.op == .TypeStruct and rt.?.words.len > 2) {
-                        if (g_block_flat) |bf| {
-                            if (bf.get(blockFlatKey(pid, 0)) != null) {
-                                const rtt = try mslValueType(m, inst.words[1], names, alloc);
-                                try w.print("    {s} {s} = {{", .{ rtt, rn });
-                                const nms: u32 = @intCast(rt.?.words.len - 2);
-                                var mi: u32 = 0;
-                                var firstm = true;
-                                while (mi < nms) : (mi += 1) {
-                                    if (bf.get(blockFlatKey(pid, mi))) |fname| {
-                                        if (!firstm) try w.writeAll(", ");
-                                        firstm = false;
-                                        try w.print("in.{s}", .{fname});
-                                    }
-                                }
-                                try w.writeAll("};\n");
-                                return;
-                            }
-                        }
-                    }
-                }
                 const a = try alloc.dupe(u8, if (is_helper) "simd_is_helper_thread()" else pn);
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
             } else {
