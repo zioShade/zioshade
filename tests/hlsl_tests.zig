@@ -2903,6 +2903,25 @@ test "T31.8: mixed shadow + regular textures get per-texture sampler types" {
     try assertContains(hlsl, "SamplerState colorTex_sampler");
 }
 
+// #170: a GLSL identifier that collides with an HLSL keyword (e.g. `in vec4 vector;` —
+// `vector` is a reserved HLSL type keyword) must be renamed, not emitted bare, or the
+// HLSL param list fails to parse (plausible-but-wrong).
+test "T31.9: HLSL-keyword identifier collision is renamed" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in float scalar;
+        \\layout(location = 1) in vec4 vector;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vector * scalar; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "vector_");
+    try assertNotContains(hlsl, " vector ");
+    // `scalar` is NOT an HLSL keyword and must be left untouched.
+    try assertContains(hlsl, "float scalar ");
+}
+
 test "T31.5: textureGather maps to Gather" {
     const source =
         \\#version 430

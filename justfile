@@ -61,6 +61,17 @@ test-cross-compare:
 test-realworld:
     {{zig}} build test-realworld --summary all
 
+# INTERIM tier-1 HLSL validity gate: cross-compile the SPIR-V corpus to HLSL and
+# parse/semantic-check it with glslangValidator's HLSL frontend (-D, -V). Needs no
+# Docker/DXC, so it is the always-on analog of wgsl-nana / msl-metal / glsl-glslang
+# and catches the silent-wrong class on SM5-era shaders (wintty's profile).
+# NON-CANONICAL: glslang's HLSL frontend is a deprecation-track parser (glslang #4210),
+# not DXC/fxc — pin the glslang version; the gold standard stays `hlsl-dxc`. Exits
+# nonzero on any INVALID (glslang-rejected) emission; oracle segfaults and frontend
+# honest-errors are counted separately. See tools/hlsl_glslang_sweep.sh.
+hlsl-glslang:
+    tools/hlsl_glslang_sweep.sh
+
 # validate zioshade HLSL output against DXC over the SPIR-V corpus (stage-aware:
 # vs/ps/cs/ms profiles auto-selected from each module's execution model). This
 # is the HLSL analog of `wgsl-naga` / `msl-lint` — dxc is the real HLSL oracle.
