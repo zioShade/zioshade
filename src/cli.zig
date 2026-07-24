@@ -610,16 +610,9 @@ fn compileWithDiagsOrExit(
 }
 
 fn crossErr(err: anyerror) noreturn {
-    // MSL: struct-typed stage inputs (interface blocks / struct `in` vars) are
-    // not yet recursively flattened, and Metal's [[stage_in]] rejects struct-
-    // typed fields. Surface the actionable workaround instead of a bare name.
-    if (err == error.UnsupportedStructStageInput) {
-        std.debug.print(
-            "error: cross-compilation failed: {s}: struct-typed stage inputs are not yet supported in the MSL backend (Metal rejects struct-typed [[stage_in]] fields). Workaround: flatten the struct into scalar varyings manually.\n",
-            .{@errorName(err)},
-        );
-        std.process.exit(1);
-    }
+    // MSL: component packing (`layout(location=N, component=M)`) is not yet
+    // supported (Metal's [[user(locnN)]] has no component offset; spirv-cross
+    // widens to vec4 + swizzle). Surface the actionable workaround.
     if (err == error.UnsupportedComponentPacking) {
         std.debug.print(
             "error: cross-compilation failed: {s}: component packing (`layout(location=N, component=M)`) is not yet supported in the MSL backend. Workaround: pack the components into a single varying manually.\n",
