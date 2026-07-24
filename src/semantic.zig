@@ -946,11 +946,17 @@ const Analyzer = struct {
             .binary_op => {
                 if (node.data.children.len != 2) return null;
                 const op = node.data.op orelse return null;
-                const op_kind: enum { add, sub, mul, div } = switch (op) {
+                const op_kind: enum { add, sub, mul, div, gt, lt, gte, lte, eq, neq } = switch (op) {
                     .add => .add,
                     .sub => .sub,
                     .mul => .mul,
                     .div => .div,
+                    .gt => .gt,
+                    .lt => .lt,
+                    .gte => .gte,
+                    .lte => .lte,
+                    .eq => .eq,
+                    .neq => .neq,
                     else => return null,
                 };
                 const left = try self.tryBuildSpecConstOp(node.data.children[0]) orelse return null;
@@ -959,26 +965,30 @@ const Analyzer = struct {
                 if (!is_spec) return null; // Pure-literal expressions stay on the normal fold path.
                 // v1: both operands must share a scalar arithmetic type.
                 if (!std.meta.eql(left.ty, right.ty)) return null;
-                const result_ty = left.ty;
-                const is_int_family = result_ty == .int or result_ty == .uint;
-                const is_float_family = result_ty == .float;
-                if (!is_int_family and !is_float_family) return null;
-                // Map (op, family) -> SPIR-V opcode.
-                // IAdd=128, FAdd=129, ISub=130, FSub=131, IMul=132, FMul=133,
-                // SDiv=135, FDiv=136.
-                const spirv_opcode: u32 = if (is_float_family) switch (op_kind) {
-                    .add => @as(u32, 129),
-                    .sub => @as(u32, 131),
-                    .mul => @as(u32, 133),
-                    .div => @as(u32, 136),
+                const is_comparison = switch (op_kind) { .gt, .lt, .gte, .lte, .eq, .neq => true, else => false };
+                const result_ty: ast.Type = if (is_comparison) .bool else left.ty;
+                const is_sint = left.ty == .int;
+                const is_uint = left.ty == .uint;
+                const is_float = left.ty == .float;
+                if (!is_sint and !is_uint and !is_float) return null;
+                // Map (op, family) -> SPIR-V opcode for OpSpecConstantOp. Opcode
+                // numbers are the SPIR-V canonical values (see spirv.zig):
+                //   IAdd=128 FAdd=129 ISub=130 FSub=131 IMul=132 FMul=133
+                //   UDiv=134 SDiv=135 FDiv=136
+                //   IEqual=170 INotEqual=171
+                //   UGreaterThan=172 SGreaterThan=173 UGreaterThanEqual=174 SGreaterThanEqual=175
+                //   ULessThan=176 SLessThan=177 ULessThanEqual=178 SLessThanEqual=179
+                //   FOrdEqual=180 FOrdNotEqual=182 FOrdLessThan=184 FOrdGreaterThan=186
+                //   FOrdLessThanEqual=188 FOrdGreaterThanEqual=190
+                const spirv_opcode: u32 = if (is_float) switch (op_kind) {
+                    .add => 129, .sub => 131, .mul => 133, .div => 136,
+                    .gt => 186, .lt => 184, .gte => 190, .lte => 188, .eq => 180, .neq => 182,
+                } else if (is_sint) switch (op_kind) {
+                    .add => 128, .sub => 130, .mul => 132, .div => 135,
+                    .gt => 173, .lt => 177, .gte => 175, .lte => 179, .eq => 170, .neq => 171,
                 } else switch (op_kind) {
-                    .add => @as(u32, 128),
-                    .sub => @as(u32, 130),
-                    .mul => @as(u32, 132),
-                    // SDiv works for both int and uint (the result is identical
-                    // for non-negative operands; we keep the codegen single-
-                    // sourced here per the M3.5 v1 plan).
-                    .div => @as(u32, 135),
+                    .add => 128, .sub => 130, .mul => 132, .div => 134,
+                    .gt => 172, .lt => 176, .gte => 174, .lte => 178, .eq => 170, .neq => 171,
                 };
                 const result_id = self.allocId();
                 const operand_ids = try self.alloc.alloc(u32, 2);
@@ -997,6 +1007,29 @@ const Analyzer = struct {
                 });
                 try self.spec_const_ids.put(self.alloc, result_id, {});
                 return .{ .id = result_id, .ty = result_ty, .is_spec_derived = true };
+            },
+            .ternary_op => {
+                if (node.data.children.len != 3) return null;
+                const cond = try self.tryBuildSpecConstOp(node.data.children[0]) orelse return null;
+                const true_val = try self.tryBuildSpecConstOp(node.data.children[1]) orelse return null;
+                const false_val = try self.tryBuildSpecConstOp(node.data.children[2]) orelse return null;
+                if (!cond.is_spec_derived) return null;
+                // OpSelect = SPIR-V opcode 169. Result type = the value (true)
+                // type; operands = [condition, true, false] (matches glslang).
+                const result_id = self.allocId();
+                const operand_ids = try self.alloc.alloc(u32, 3);
+                operand_ids[0] = cond.id;
+                operand_ids[1] = true_val.id;
+                operand_ids[2] = false_val.id;
+                const key_name = try std.fmt.allocPrint(self.alloc, ".specop.{d}", .{result_id});
+                try self.spec_constant_ops.put(self.alloc, key_name, .{
+                    .result_id = result_id,
+                    .type_tag = @intFromEnum(true_val.ty),
+                    .spirv_opcode = 169,
+                    .operand_ids = operand_ids,
+                });
+                try self.spec_const_ids.put(self.alloc, result_id, {});
+                return .{ .id = result_id, .ty = true_val.ty, .is_spec_derived = true };
             },
             else => return null,
         }
