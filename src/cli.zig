@@ -620,6 +620,15 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // MSL: gl_SamplePosition is a fragment input builtin with no Metal [[attribute]]
+    // (spirv-cross computes it from sample positions). Surface the workaround.
+    if (err == error.UnsupportedSamplePosition) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: gl_SamplePosition is not yet supported in the MSL backend (no direct Metal attribute). Workaround: compute the sample position from [[sample_id]] via get_sample_position(), or avoid gl_SamplePosition.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL records an actionable detail for some honest errors (errors carry no
     // payload) — surface it so the message is more than just the error name.
     if (err == error.UnsupportedExtInst or err == error.UnsupportedEarlyReturn) {

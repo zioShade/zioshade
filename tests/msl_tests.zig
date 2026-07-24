@@ -178,24 +178,27 @@ test "#471: glslang gl_PerVertex block promotes gl_PointSize to [[point_size]] (
     try assertContains(msl, "out.gl_PointSize");
 }
 
-// #470: the MSL FRAGMENT output is a hardcoded single `float4 _fragColor [[color(0)]]`
-// (spirv_to_msl.zig). Multi-output fragments -- gl_FragDepth ([[depth(any)]]) and MRT
-// (multiple color attachments) -- cannot be represented and previously emitted
-// SILENT-WRONG / invalid MSL (depth scrambled into the color param, second color
-// dropped). Per the wedge ("honest-error, never plausible-but-wrong"), reject them
-// loudly until the proper multi-field main0_out rework lands (tracked separately).
-// Single-color fragments are unaffected.
-test "#470: MSL fragment writing gl_FragDepth honest-errors (not silent-invalid)" {
+// #470 -> #472: the MSL fragment output was a hardcoded single `float4 _fragColor
+// [[color(0)]]`, so multi-output fragments (gl_FragDepth / MRT) used to honest-error
+// (#470 wedge: "never plausible-but-wrong"). #472 adds the multi-field main0_out path,
+// so these now emit VALID per-output MSL fields (color + depth, or multiple colors),
+// matching spirv-cross --msl. The honest-error is retained only for genuinely
+// Metal-unrepresentable outputs (struct output / non-standard builtin).
+test "#472: MSL fragment writing gl_FragDepth emits a depth(any) output field" {
     const spirv = compileToSpirv("fragdepth_out",
         \\#version 450
         \\layout(location=0) out vec4 o;
         \\void main(){ o = vec4(1.0); gl_FragDepth = 0.25; }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedFragmentOutput, zioshade.spirvToMSL(alloc, spirv, .{}));
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "struct main0_out");
+    try assertContains(msl, "o [[color(0)]]");
+    try assertContains(msl, "gl_FragDepth [[depth(any)]]");
 }
 
-test "#470: MSL multiple color attachments (MRT) honest-error (not silent single-color)" {
+test "#472: MSL multiple color attachments (MRT) emit per-color output fields" {
     const spirv = compileToSpirv("mrt_two",
         \\#version 450
         \\layout(location=0) out vec4 a;
@@ -203,7 +206,11 @@ test "#470: MSL multiple color attachments (MRT) honest-error (not silent single
         \\void main(){ a = vec4(1.0); b = vec4(0.5); }
     ) catch return error.SkipZigTest;
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedFragmentOutput, zioshade.spirvToMSL(alloc, spirv, .{}));
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "struct main0_out");
+    try assertContains(msl, "a [[color(0)]]");
+    try assertContains(msl, "b [[color(1)]]");
 }
 
 // #472-audit: SPIR-V OpSwitch cases do NOT fall through, but C++/Metal `switch` does
