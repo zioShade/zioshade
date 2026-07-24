@@ -4392,6 +4392,13 @@ fn emitFunction(
         // descriptor set. `binding_shift` is applied to the outer
         // [[buffer(N)]] (the slot of the set struct itself), NOT to the
         // inner [[id(K)]] fields of the struct.
+        // #497: track buffer-binding collisions (resource aliasing at the same set+binding).
+        // For colliding resources, only the FIRST gets [[buffer(N)]]; the rest are aliased
+        // from it in the entry body (spirv-cross's pattern). types.flatten (3 UBOs @ binding=0).
+        var aliased_cbs = std.ArrayList(struct { name: []const u8, from: []const u8 }).initCapacity(alloc, 0) catch return error.OutOfMemory;
+        defer aliased_cbs.deinit(alloc);
+        var used_cb_slots = std.AutoHashMap(u32, []const u8).init(alloc);
+        defer used_cb_slots.deinit();
         const has_argbuf = argument_buffers and (cbuffers.items.len > 0 or textures.items.len > 0);
         var argbuf_sets = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
         defer argbuf_sets.deinit(alloc);
@@ -4407,10 +4414,16 @@ fn emitFunction(
             }
         } else {
             for (cbuffers.items) |cb| {
-                if (!first_param) try w.writeAll(", ");
                 const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
-                try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{ cb.name, cb.name, cb_b });
-                first_param = false;
+                if (used_cb_slots.get(cb_b)) |first_param_name| {
+                    aliased_cbs.append(alloc, .{ .name = cb.name, .from = first_param_name }) catch {};
+                } else {
+                    if (!first_param) try w.writeAll(", ");
+                    try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{ cb.name, cb.name, cb_b });
+                    first_param = false;
+                    const pn = std.fmt.allocPrint(alloc, "{s}_1", .{cb.name}) catch continue;
+                    used_cb_slots.put(cb_b, pn) catch {};
+                }
             }
             for (storage_buffers.items) |sb| {
                 if (!first_param) try w.writeAll(", ");
@@ -4441,6 +4454,10 @@ fn emitFunction(
         try w.writeAll("float4 gl_FragCoord [[position]])");
 
         try w.writeAll("\n{\n    main0_out out = {};\n    ");
+        // #497: Alias declarations for colliding buffer bindings (resource aliasing).
+        for (aliased_cbs.items) |ac| {
+            try w.print("constant {s}& {s}_1 = *(constant {s}*)&{s};\n    ", .{ ac.name, ac.name, ac.name, ac.from });
+        }
         // Pass the full float4 when the body reads .z/.w, else just .xy (float2).
         // The `out._fragColor` output argument is gated on output_var_id exactly
         // like the impl signature's output param: a fragment with NO Output var
