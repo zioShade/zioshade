@@ -5500,6 +5500,27 @@ fn emitWhileLoopMSL(
         try w.writeAll("    while (true)\n    {\n");
     }
 
+    // #496: Pre-declare selection-merge phi vars inside this loop. A loop-carried phi
+    // set in an if/else is read in the continue block (next iteration), but #474 declares
+    // it at the if/else merge (inside the body) -- too late. Scan the loop body for OpPhi
+    // (skip loop-header phis) + declare + rename here, before the continue block.
+    {
+        const mend = if (label_map.get(merge_lbl)) |mi| mi else m.instructions.len;
+        var si: usize = loop_idx + 2;
+        while (si < mend and si < m.instructions.len) : (si += 1) {
+            const sinst = m.instructions[si];
+            if (sinst.op != .Phi or sinst.words.len < 4) continue;
+            const phi_result = sinst.words[2];
+            if (g_phi_hdr) |ph| if (ph.get(phi_result) != null) continue;
+            const vn = names.get(phi_result) orelse continue;
+            const t = mslValueType(m, sinst.words[1], names, alloc) catch continue;
+            try w.print("    {s} {s}_phi;\n", .{ t, vn });
+            const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+            _ = names.fetchPut(phi_result, pn) catch {};
+            if (g_materialized_phis) |mp| mp.put(phi_result, {}) catch {};
+        }
+    }
+
     if (has_phis) {
         try w.print("        if (!{s})\n        {{\n", .{first_flag});
         const cont_idx0 = label_map.get(cont_lbl) orelse m.instructions.len;
@@ -5681,7 +5702,9 @@ fn emitWhileLoopMSL(
                         var mphis: std.ArrayList(MslMergePhi) = .empty;
                         defer mphis.deinit(alloc);
                         collectMergePhis(m, label_map, nmv, &mphis, alloc);
+                        // Declaration: skip phis already pre-declared by the loop pre-scan (#496).
                         for (mphis.items) |pv| {
+                            if (g_materialized_phis) |mp| if (mp.contains(pv.result_id)) continue;
                             const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
                             const vn = names.get(pv.result_id) orelse "pv";
                             if (nhe) {
@@ -5693,22 +5716,30 @@ fn emitWhileLoopMSL(
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        // Assignments: use the pre-declared name (vn, already renamed to _phi
+                        // by the pre-scan) for pre-declared phis; {vn}_phi for new ones.
                         for (mphis.items) |pv| {
                             const vn = names.get(pv.result_id) orelse "pv";
+                            const pre_decl = if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false;
+                            const phi_name: []const u8 = if (pre_decl) vn else std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch vn;
                             const true_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
-                            try w.print("            {s}_phi = {s};\n", .{ vn, mslExprName(m, names, true_val, alloc) });
+                            try w.print("            {s} = {s};\n", .{ phi_name, mslExprName(m, names, true_val, alloc) });
                         }
                         if (nhe) {
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
                             for (mphis.items) |pv| {
                                 const vn = names.get(pv.result_id) orelse "pv";
+                                const pre_decl = if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false;
+                                const phi_name: []const u8 = if (pre_decl) vn else std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch vn;
                                 const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-                                try w.print("            {s}_phi = {s};\n", .{ vn, mslExprName(m, names, false_val, alloc) });
+                                try w.print("            {s} = {s};\n", .{ phi_name, mslExprName(m, names, false_val, alloc) });
                             }
                         }
                         try w.writeAll("        }\n");
+                        // Rename: skip phis already pre-renamed by the loop pre-scan (#496).
                         for (mphis.items) |pv| {
+                            if (g_materialized_phis) |mp| if (mp.contains(pv.result_id)) continue;
                             const vn = names.get(pv.result_id) orelse "pv";
                             const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                             if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
