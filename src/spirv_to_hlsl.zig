@@ -674,6 +674,33 @@ fn sampledImageDim(module: *const ParsedModule, image_value_id: u32) u32 {
     return tinst.words[3];
 }
 
+/// Trace a sampling op's image operand back to its underlying uniform texture
+/// Variable id, for per-texture comparison-sampler detection. The operand (words[3]
+/// of an ImageSampleDref*/ImageDrefGather op) may be:
+///   - an OpLoad of a combined image-sampler uniform (sampler2DShadow etc.) — the
+///     common Vulkan-GLSL case, where the variable is already an OpTypeSampledImage,
+///   - an OpSampledImage result (separate image + sampler combined at the use site),
+///   - an OpImage result, an OpAccessChain into a binding-array, or the variable itself.
+/// Returns null if the chain can't be resolved — the texture then stays a plain
+/// SamplerState (safe default; worst case is a compile error, not silent-wrong).
+fn imageOperandToTextureVar(module: *const ParsedModule, id: u32) ?u32 {
+    const d = getDef(module, id) orelse return null;
+    return switch (d.op) {
+        .Variable => id,
+        // OpSampledImage words[2] = Image; OpImage words[2] = base image.
+        .SampledImage, .OpImage => blk: {
+            if (d.words.len < 3) break :blk null;
+            break :blk imageOperandToTextureVar(module, d.words[2]);
+        },
+        // OpLoad words[3] = pointer; OpAccessChain words[3] = base pointer.
+        .Load, .AccessChain => blk: {
+            if (d.words.len < 4) break :blk null;
+            break :blk imageOperandToTextureVar(module, d.words[3]);
+        },
+        else => null,
+    };
+}
+
 /// Number of SPATIAL out-params HLSL GetDimensions takes for the texture behind
 /// `image_value_id` (1D=1, 2D/cube=2, 2DArray/cubeArray=2+1, 3D=3). OpTypeImage layout:
 /// [.., Dim=words[3], Depth, Arrayed=words[5], MS, ..]. Used by QueryLevels/Samples,
@@ -1226,13 +1253,29 @@ pub fn spirvToHLSL(
     }
 
     // Emit textures
-    // Detect textures used with Dref operations (need SamplerComparisonState)
-    var has_dref_gather = false;
+    // Detect textures used with Dref (depth-comparison) operations. Each such texture
+    // needs a SamplerComparisonState (not SamplerState) — tracked per-texture by
+    // resolving the op's image operand back to the uniform texture variable. (#170)
+    var comparison_vars = std.AutoHashMap(u32, void).init(aa);
+    defer comparison_vars.deinit();
     for (module.instructions) |inst| {
-        if (inst.op == .ImageDrefGather) {
-            has_dref_gather = true;
-            break;
+        const is_dref = switch (inst.op) {
+            .ImageSampleDrefImplicitLod,
+            .ImageSampleDrefExplicitLod,
+            .ImageSampleProjDrefImplicitLod,
+            .ImageSampleProjDrefExplicitLod,
+            .ImageDrefGather,
+            => true,
+            else => false,
+        };
+        if (!is_dref) continue;
+        if (inst.words.len < 4) continue;
+        if (imageOperandToTextureVar(&module, inst.words[3])) |var_id| {
+            comparison_vars.put(var_id, {}) catch {};
         }
+    }
+    for (textures.items) |*tex| {
+        if (comparison_vars.contains(tex.var_id)) tex.is_comparison = true;
     }
 
     for (textures.items) |tex| {
@@ -1257,7 +1300,7 @@ pub fn spirvToHLSL(
             }
         } else {
             try w.print("{s} {s} : register(t{d});\n", .{ tex.hlsl_type, tex.name, reg });
-            if (has_dref_gather) {
+            if (tex.is_comparison) {
                 try w.print("SamplerComparisonState {s}_sampler : register(s{d});\n", .{ tex.name, reg });
             } else {
                 try w.print("SamplerState {s}_sampler : register(s{d});\n", .{ tex.name, reg });
@@ -1595,6 +1638,13 @@ const TextureDecl = struct {
     descriptor_set: u32 = 0,
     hlsl_type: []const u8,
     is_storage: bool = false,
+    var_id: u32 = 0,
+    // True when this texture is sampled with a Dref (depth-comparison) operation
+    // (SampleCmp / SampleCmpLevelZero / GatherCmp). HLSL requires those to pair the
+    // texture with a SamplerComparisonState, not a SamplerState — emitting the wrong
+    // sampler type is a plausible-but-wrong compile failure. Tracked per-texture so a
+    // shader mixing shadow and regular textures gets the right sampler for each. (#170)
+    is_comparison: bool = false,
 };
 
 // ---------------------------------------------------------------------------
@@ -1954,6 +2004,7 @@ fn collectResources(
                     .descriptor_set = dset,
                     .hlsl_type = hlsl_type,
                     .is_storage = is_storage,
+                    .var_id = result_id,
                 }) catch {};
             },
             else => {},
