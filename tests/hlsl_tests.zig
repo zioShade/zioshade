@@ -1512,6 +1512,28 @@ test "T18.4: reflect maps to reflect" {
     try assertContains(hlsl, "reflect(");
 }
 
+// #488 (HLSL port): HLSL's reflect/refract are VECTOR-only -- a SCALAR call is
+// ambiguous under implicit conversion (glslang rejects it). Lower scalar forms to the
+// formula; vector forms (T18.4) stay as the intrinsic.
+test "T18.4b: scalar reflect/refract lowered to formula" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 0) out float o;
+        \\void main() {
+        \\    o = refract(v.x, v.y, v.z);
+        \\    o += reflect(v.x, v.y);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Scalar reflect = I - (2.0 * (N * I) * N); scalar refract uses the k>=0 ternary.
+    try assertContains(hlsl, "2.0 *");
+    try assertContains(hlsl, ">= 0.0) ?");
+    try assertNotContains(hlsl, "refract(");
+    try assertNotContains(hlsl, "reflect(");
+}
+
 test "T18.5: int-to-float conversion" {
     const source =
         \\#version 430
