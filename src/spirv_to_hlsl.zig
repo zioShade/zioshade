@@ -1150,6 +1150,18 @@ pub fn spirvToHLSL(
 
     collectResources(&module, &names, &decorations, &cbuffers, &textures, &loose_uniforms, aa);
 
+    // Honest-error pre-check for push constants. zioshade's HLSL cbuffer model flattens
+    // UBO members to globals (Block_member), but a named-instance push constant
+    // (`uniform PushConstants { ... } push;`) is accessed as `push.member` in the body,
+    // so collecting it as a cbuffer leaves the instance-qualified access dangling —
+    // plausible-but-wrong. Honest-error until the named-instance-block access model
+    // lands. (#170)
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc == .PushConstant) return error.UnsupportedPushConstant;
+    }
+
     // Phase 3: emit HLSL
     var output = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     var output_owned = true;
@@ -3200,6 +3212,19 @@ fn emitFunction(
                     // float (wrong values). The qualifier was previously dropped here -- a
                     // plausible-but-wrong / compile-error miscompile. (#170, #470)
                     // #475: centroid/sample are prefixed before the interp qualifier.
+                    //
+                    // A STRUCT stage input (e.g. `in VertexOut { ... } vin;`) is not flattened
+                    // into per-member signature params here. Emitting the struct type as the main
+                    // parameter (`VertexOut vin : TEXCOORD1`) yields an undeclared type with a
+                    // single semantic on the struct -- plausible-but-wrong. Honest-error until HLSL
+                    // gets struct stage-input flattening (the HLSL analog of the MSL #500 work).
+                    // gl_PerVertex has already been handled by the builtin branch above, so a
+                    // TypeStruct reaching here is a plain user struct varying.
+                    if (resolvePointeeType(module, ivid)) |pt| {
+                        if (getDef(module, pt)) |pi| {
+                            if (pi.op == .TypeStruct) return error.UnsupportedStructStageInput;
+                        }
+                    }
                     const centroid_pfx: []const u8 = if (hasDecoration(decorations, ivid, .sample))
                         "sample "
                     else if (hasDecoration(decorations, ivid, .centroid))
