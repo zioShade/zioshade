@@ -149,6 +149,27 @@ fn parseLitStr(alloc: std.mem.Allocator, words: []const u32) ![]const u8 {
 /// the KHR and NV barycentric variants (whose SPIR-V capability/BuiltIn coincide).
 /// The directives must precede the first use, so they are inserted right after the
 /// `#version` line once the body is known.
+/// Rewrite the `#version` line upward when the emitted GLSL references features
+/// that need a higher core version than `options.version` (the default 430):
+///   * interface blocks (in/out blocks with location qualifiers) → 450, raised
+///     during emission via `needs_version`
+///   * gl_HelperInvocation / gl_CullDistance → 460 core
+///   * textureSamples() (multisample image query) → 450 core
+/// This is the version counterpart of `spliceRequiredExtensions` (which splices
+/// `#extension` pragmas). Both run as a post-pass once the body is known. The
+/// `#version` line is always first, so the rewrite replaces line 1 only.
+fn spliceRequiredVersion(output: *std.ArrayList(u8), alloc: std.mem.Allocator, base_version: u32, needs_version: u32) !void {
+    var required: u32 = needs_version;
+    if (std.mem.indexOf(u8, output.items, "gl_HelperInvocation") != null) required = @max(required, 460);
+    if (std.mem.indexOf(u8, output.items, "gl_CullDistance") != null) required = @max(required, 460);
+    if (std.mem.indexOf(u8, output.items, "textureSamples(") != null) required = @max(required, 450);
+    if (required <= base_version) return;
+    const nl = std.mem.indexOfScalar(u8, output.items, '\n') orelse return;
+    const new_line = std.fmt.allocPrint(alloc, "#version {d}", .{required}) catch return;
+    defer alloc.free(new_line);
+    try output.replaceRange(alloc, 0, nl, new_line);
+}
+
 fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
     // Only builtins whose extension request ALONE makes the output valid are
     // listed. gl_DrawID (a vertex-only builtin misused in fragment) and the
@@ -175,6 +196,15 @@ fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator
         if (seen.contains(m.ext)) continue;
         seen.put(m.ext, {}) catch {};
         block.print(alloc, "#extension {s} : require\n", .{m.ext}) catch {};
+    }
+    // textureLod on a shadow sampler (sampler*Shadow) needs GL_EXT_texture_shadow_lod
+    // (core GLSL has no Lod on comparison samplers). Gate on the co-occurrence of a
+    // shadow-sampler type and a textureLod call. (#GLSL-corpus)
+    if (std.mem.indexOf(u8, output.items, "textureLod(") != null and std.mem.indexOf(u8, output.items, "Shadow") != null) {
+        if (!seen.contains("GL_EXT_texture_shadow_lod")) {
+            seen.put("GL_EXT_texture_shadow_lod", {}) catch {};
+            block.print(alloc, "#extension GL_EXT_texture_shadow_lod : require\n", .{}) catch {};
+        }
     }
     if (block.items.len == 0) return;
     const nl = std.mem.indexOfScalar(u8, output.items, '\n') orelse return;
@@ -900,6 +930,34 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 /// else "" for the default `smooth`). Flat (no interpolation) and NoPerspective (linear)
 /// are mutually exclusive; Flat wins if both are set. Matches spirv-cross. (#475)
 /// Centroid/Sample are orthogonal auxiliary qualifiers — handled separately if added.
+/// GLSL shadow-compare coord constructor + coord swizzle for an OpImageSampleDref*
+/// `coord` operand. The compare coordinate packs the texture coordinate plus the
+/// depth-reference scalar, so it is `vecN(coord.<first N-1>, dref)`. The coord's
+/// first (N-1) components are the texture coordinate regardless of whether the SPIR-V
+/// producer appended the dref to the coord (glslang: vec4 with dref in .w) or kept it
+/// separate (zioshade frontend: vec3) — swizzling `.xyz`/`.xy` takes the texture
+/// coords in both encodings, so `vecN(coord.swizzle, dref)` is producer-independent.
+/// A 2D shadow (vec2 coord) -> vec3(coord.xy, dref); a 2D-array/cube shadow (vec3 or
+/// vec4 coord) -> vec4(coord.xyz, dref).
+const ShadowCoord = struct { ctor: []const u8, swizzle: []const u8 };
+fn glslShadowCoordCtor(m: *const ParsedModule, coord_id: u32) ShadowCoord {
+    const def = getDef(m, coord_id) orelse return .{ .ctor = "vec3", .swizzle = ".xy" };
+    if (def.words.len < 2) return .{ .ctor = "vec3", .swizzle = ".xy" };
+    const t = getDef(m, def.words[1]) orelse return .{ .ctor = "vec3", .swizzle = ".xy" };
+    if (t.op == .TypeFloat) return .{ .ctor = "vec2", .swizzle = "" }; // scalar coord (1D shadow)
+    if (t.op == .TypeVector and t.words.len > 3) {
+        // Take up to 3 leading components (a shadow coord never needs more than 3:
+        // 2D-array/cube = xyz); a 4th, if present, is a producer-appended dref to drop.
+        return switch (if (t.words[3] >= 3) @as(u32, 3) else t.words[3]) {
+            1 => .{ .ctor = "vec2", .swizzle = ".x" },
+            2 => .{ .ctor = "vec3", .swizzle = ".xy" },
+            3 => .{ .ctor = "vec4", .swizzle = ".xyz" },
+            else => .{ .ctor = "vec3", .swizzle = ".xy" },
+        };
+    }
+    return .{ .ctor = "vec3", .swizzle = ".xy" };
+}
+
 fn glslInterpQual(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) []const u8 {
     // #475: Centroid/Sample are orthogonal auxiliary qualifiers prefixed before the
     // interp type. GLSL: `centroid noperspective`, `sample flat`, etc. Compose both.
@@ -942,6 +1000,83 @@ fn isSupportedGlslVersion(v: u32) bool {
         if (v == sv) return true;
     }
     return false;
+}
+
+/// True if `type_id` is a pure-sampler (OpTypeSampler) or pure-texture
+/// (OpTypeImage, the `texture2D` half of a Vulkan separate sampler) — NOT a
+/// combined OpTypeSampledImage. Unwraps a TypePointer first.
+fn isPureSamplerOrTextureType(m: *const ParsedModule, type_id: u32) bool {
+    var t = getDef(m, type_id) orelse return false;
+    if (t.op == .TypePointer and t.words.len >= 4) {
+        t = getDef(m, t.words[3]) orelse return false;
+    }
+    return t.op == .TypeSampler or t.op == .TypeImage;
+}
+
+/// Pre-scan a parsed SPIR-V module for features the GLSL backend cannot emit
+/// correctly, and return a named error (honest-error) instead of emitting
+/// plausible-but-wrong GLSL. Each guard is narrowly scoped so it never refuses a
+/// shader the backend actually handles:
+///   * `layout(location=N, component=M)` — no desktop-GLSL component qualifier; the
+///     emitted locations overlap. Reuses the MSL backend's error name.
+///   * subpassInput (OpTypeImage Dim=SubpassData) — Vulkan-only construct with no
+///     desktop-GLSL form (subpassInput/subpassLoad need Vulkan GLSL semantics).
+///   * gl_DrawID (BuiltIn draw_index) in a fragment shader — DrawID is a
+///     vertex-stage-only builtin; no fragment GLSL declares it under any version.
+///   * barycentric coords (BuiltIn BaryCoord*/BaryCoordNoPersp*) — require
+///     `pervertexEXT` input arrays the backend does not lower; emitting a scalar
+///     `in vec2 vUV;` for a 3-element per-vertex array is plausible-but-wrong.
+///   * multisample image + a multisample query (textureSamples/imageSamples) — the
+///     MS flag is dropped (sampler2D for sampler2DMS), so the query has no
+///     matching overload. An MS image used without such a query still emits valid
+///     GLSL, so BOTH must be present.
+///   * separate samplers passed through a function parameter, or an array of pure
+///     sampler/texture resources — the backend does not combine Vulkan separate
+///     sampler+texture, so these produce non-sampler operands to texture() /
+///     assignments. A global pure sampler it happens to emit acceptably is NOT
+///     refused (e.g. separate-sampler-texture.vk still compiles).
+fn checkUnsupportedGlslFeatures(m: *const ParsedModule) !void {
+    const is_fragment = m.execution_model == .Fragment;
+    var has_ms_image = false;
+    var has_query_samples = false;
+    for (m.instructions) |inst| {
+        if ((inst.op == .Decorate or inst.op == .MemberDecorate) and inst.words.len >= 4) {
+            const dec_idx: usize = if (inst.op == .Decorate) 2 else 3;
+            if (inst.words[dec_idx] == @intFromEnum(spirv.Decoration.component)) {
+                return error.UnsupportedComponentPacking;
+            }
+        }
+        if (inst.op == .TypeImage) {
+            if (inst.words.len > 3 and inst.words[3] == 6) return error.UnsupportedSubpassInput; // SubpassData
+            if (inst.words.len > 6 and inst.words[6] == 1) has_ms_image = true; // MS
+        }
+        if (inst.op == .ImageQuerySamples) has_query_samples = true;
+        if (inst.op == .Decorate and inst.words.len >= 4 and inst.words[2] == @intFromEnum(spirv.Decoration.built_in)) {
+            const bi: spirv.BuiltIn = @enumFromInt(inst.words[3]);
+            switch (bi) {
+                .draw_index => if (is_fragment) return error.UnsupportedFragmentDrawId,
+                .bary_coord_khr, .bary_coord_no_persp_khr => return error.UnsupportedBarycentric,
+                else => {},
+            }
+        }
+    }
+    if (has_ms_image and has_query_samples) return error.UnsupportedMultisampleImage;
+    // Separate samplers: precise failure modes (function param / resource array).
+    for (m.instructions) |inst| {
+        if (inst.op == .FunctionParameter and inst.words.len >= 2) {
+            if (isPureSamplerOrTextureType(m, inst.words[1])) return error.UnsupportedSeparateSamplers;
+        }
+        if (inst.op == .Variable and inst.words.len >= 4) {
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .UniformConstant) continue;
+            const ptr = getDef(m, inst.words[1]) orelse continue;
+            if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
+            const pointee = getDef(m, ptr.words[3]) orelse continue;
+            if (pointee.op == .TypeArray and pointee.words.len > 2) {
+                if (isPureSamplerOrTextureType(m, pointee.words[2])) return error.UnsupportedSeparateSamplers;
+            }
+        }
+    }
 }
 
 /// `layout(location=)` on a *varying* (fragment input / vertex output) is rejected
@@ -994,6 +1129,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     }
 
     const entry_id = module.entry_point_id orelse return error.NoEntryPoint;
+
+    // Honest-error pre-scan: features the GLSL backend cannot emit correctly
+    // (see checkUnsupportedGlslFeatures) fail here with a named error rather than
+    // producing plausible-but-wrong output glslangValidator rejects.
+    try checkUnsupportedGlslFeatures(&module);
 
     // Arena allocator for all backend internals — eliminates individual free() overhead
     var arena = std.heap.ArenaAllocator.init(alloc);
@@ -1436,7 +1576,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // Declare stage in/out varyings and mutable Private globals at file scope BEFORE
     // any function body — a helper may reference a stage input or a global, and the
     // entry point (which used to emit these) is written last. (triple-nested-functions)
-    try emitModuleGlobals(&module, &decs, &names, options.version, w, aa);
+    // `needs_version` is raised by emitModuleGlobals when it emits constructs that
+    // require a higher #version (interface blocks need 450); the post-pass below
+    // rewrites the #version line upward once the body is known.
+    var needs_version: u32 = options.version;
+    try emitModuleGlobals(&module, &decs, &names, options.version, w, aa, &emitted_structs, &emitted_names, &needs_version);
 
     // Forward-declare every non-entry function before any body, so a call to a
     // function defined LATER resolves — mutual recursion (helperA <-> helperB) and
@@ -1455,6 +1599,7 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         try emitFunction(&module, &names, &decs, fid, w, aa, false, &out_param_info);
     }
     try emitFunction(&module, &names, &decs, entry_id, w, aa, true, &out_param_info);
+    try spliceRequiredVersion(&output, alloc, options.version, needs_version);
     try spliceRequiredExtensions(&output, alloc);
     output_owned = false;
     return output.toOwnedSlice(alloc);
@@ -2016,7 +2161,150 @@ fn std450ToGlsl(val: u32) ?[]const u8 {
 /// entry point (main) is emitted last, so declaring them there left helpers using
 /// undeclared identifiers. Built-ins (gl_FragCoord, gl_Position, …) are predefined
 /// and never declared here.
-fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), names: *std.AutoHashMap(u32, []const u8), version: u32, w: anytype, alloc: std.mem.Allocator) !void {
+/// Per-member interpolation qualifier for a stage IO interface block, read from
+/// `OpMemberDecorate` (Flat/Centroid/NoPerspective/Sample on `<struct, member>`).
+/// Variable-level `glslInterpQual` reads `OpDecorate` (the `decs` map), which does
+/// not cover per-member qualifiers — a block member `flat int h` needs `flat`
+/// emitted on the member, not (only) the instance. Mirrors `glslInterpQual`'s
+/// centroid/sample composition.
+fn glslMemberInterpQual(m: *const ParsedModule, struct_id: u32, member_idx: u32) []const u8 {
+    var aux: []const u8 = "";
+    var has_flat = false;
+    var has_nopersp = false;
+    for (m.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 4) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+        switch (dec) {
+            .flat => has_flat = true,
+            .no_perspective => has_nopersp = true,
+            .sample => aux = "sample ",
+            .centroid => if (aux.len == 0) {
+                aux = "centroid ";
+            },
+            else => {},
+        }
+    }
+    if (has_flat) {
+        if (std.mem.eql(u8, aux, "sample ")) return "sample flat ";
+        if (std.mem.eql(u8, aux, "centroid ")) return "centroid flat ";
+        return "flat ";
+    }
+    if (has_nopersp) {
+        if (std.mem.eql(u8, aux, "sample ")) return "sample noperspective ";
+        if (std.mem.eql(u8, aux, "centroid ")) return "centroid noperspective ";
+        return "noperspective ";
+    }
+    return aux;
+}
+
+/// Emit an interface block's members with per-member interpolation qualifiers
+/// (the IO-block analog of `emitStructMembers`, which omits them for UBO/SSBOs).
+fn emitIoBlockMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, w: anytype, alloc: std.mem.Allocator) !void {
+    const inst = getDef(m, struct_id) orelse return;
+    if (inst.op != .TypeStruct) return;
+    for (inst.words[2..], 0..) |mt_id, mi| {
+        const idx: u32 = @intCast(mi);
+        const q: []const u8 = glslMemberInterpQual(m, struct_id, idx);
+        var mbuf: [32]u8 = undefined;
+        const mname = getMemberName(m, struct_id, idx, &mbuf);
+        const mti = getDef(m, mt_id);
+        if (mti) |mi2| {
+            if (mi2.op == .TypeArray and mi2.words.len > 3) {
+                const et = try glslType(m, mi2.words[2], names, alloc);
+                const li = getDef(m, mi2.words[3]);
+                const lv: u32 = if (li) |l| (if (l.words.len > 3) l.words[3] else 1) else 1;
+                try w.print("    {s}{s} {s}[{d}];\n", .{ q, et, mname, lv });
+                continue;
+            }
+        }
+        const mt = try glslType(m, mt_id, names, alloc);
+        try w.print("    {s}{s} {s};\n", .{ q, mt, mname });
+    }
+}
+
+/// True if any member of struct `sid` carries an interpolation decoration
+/// (Flat/Centroid/NoPerspective/Sample). Such per-member qualifiers cannot be
+/// expressed on a plain `struct T { ... }` declaration (GLSL rejects qualifiers on
+/// struct members) — only the interface-block form `in T { flat int h; } inst;`
+/// carries them, so their presence forces the block form.
+/// True if a value of `type_id` requires `flat` interpolation when used as a
+/// stage varying: any integer (or double) scalar/vector/matrix, or a struct that
+/// transitively contains one. GLSL mandates integer/double varyings be `flat`;
+/// a struct-typed varying (`in S vin;`) carrying such a member is rejected by
+/// glslang ("structure must be qualified as flat in") because the plain form
+/// cannot apply `flat` to individual members — only the interface-block form can.
+fn typeRequiresFlat(m: *const ParsedModule, type_id: u32) bool {
+    const inst = getDef(m, type_id) orelse return false;
+    return switch (inst.op) {
+        .TypeInt => true,
+        .TypeVector, .TypeMatrix => if (inst.words.len > 2) typeRequiresFlat(m, inst.words[2]) else false,
+        .TypeArray => if (inst.words.len > 2) typeRequiresFlat(m, inst.words[2]) else false,
+        .TypeStruct => blk: {
+            for (inst.words[2..]) |mt| {
+                if (typeRequiresFlat(m, mt)) break :blk true;
+            }
+            break :blk false;
+        },
+        else => false,
+    };
+}
+
+/// True if any (transitive) member of struct `sid` requires `flat` interpolation.
+fn structHasFlatRequiredMember(m: *const ParsedModule, sid: u32) bool {
+    const inst = getDef(m, sid) orelse return false;
+    if (inst.op != .TypeStruct) return false;
+    for (inst.words[2..]) |mt| {
+        if (typeRequiresFlat(m, mt)) return true;
+    }
+    return false;
+}
+
+/// True if any member of struct `sid` carries an interpolation decoration
+/// (Flat/Centroid/NoPerspective/Sample). Such per-member qualifiers cannot be
+/// expressed on a plain `struct T { ... }` declaration (GLSL rejects qualifiers on
+/// struct members) — only the interface-block form `in T { flat int h; } inst;`
+/// carries them, so their presence forces the block form.
+fn structHasMemberInterpQual(m: *const ParsedModule, sid: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 4) continue;
+        if (inst.words[1] != sid) continue;
+        const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
+        switch (dec) {
+            .flat, .no_perspective, .centroid, .sample => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+/// True if struct `sid`'s name collides with instance `instance_name` — e.g. the
+/// source `in VertexIn { ... } VertexIn;` where the block tag and instance share a
+/// name. The struct-then-input form (`struct VertexIn {...}; in VertexIn VertexIn;`)
+/// is then a redefinition (GLSL shares one identifier namespace for struct tags and
+/// variables), so the block form (decoupled tag) is required instead.
+fn ioNameCollides(names: *std.AutoHashMap(u32, []const u8), sid: u32, instance_name: []const u8) bool {
+    const tn = names.get(sid) orelse return false;
+    return std.mem.eql(u8, tn, instance_name);
+}
+
+/// Resolve the struct type behind a stage IO variable's pointer type, unwrapping
+/// array layers (e.g. `in Foo foo[3];`). Returns the TypeStruct id, or null if the
+/// varying is not struct-typed.
+fn ioVarStructTypeId(m: *const ParsedModule, ptr_type_id: u32) ?u32 {
+    const ptr = getDef(m, ptr_type_id) orelse return null;
+    if (ptr.op != .TypePointer or ptr.words.len < 4) return null;
+    var pointee_id = ptr.words[3];
+    var pt = getDef(m, pointee_id) orelse return null;
+    while (pt.op == .TypeArray and pt.words.len > 2) {
+        pointee_id = pt.words[2];
+        pt = getDef(m, pointee_id) orelse return null;
+    }
+    if (pt.op != .TypeStruct) return null;
+    return pointee_id;
+}
+
+fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), names: *std.AutoHashMap(u32, []const u8), version: u32, w: anytype, alloc: std.mem.Allocator, emitted_structs: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), needs_version: *u32) !void {
     var emitted_any_io = false;
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
@@ -2025,10 +2313,48 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         const ivid = inst.words[2];
         if (getDecVal(decs, ivid, .built_in) != null) continue;
         if (isBuiltinBlockVar(m, ivid)) continue;
-        const it = try glslType(m, inst.words[1], names, alloc);
         const in_name = names.get(ivid) orelse continue;
-        const flat_q: []const u8 = glslInterpQual(decs, ivid);
         const drop_loc = dropVaryingLocation(version, m.execution_model, .in);
+        // A struct-typed stage input is an interface block. Two emission forms,
+        // chosen per variable:
+        //   * struct-then-input (`struct T {...}; in T inst;`) — the default; lets
+        //     the body treat the varying as a plain struct VALUE (assign it to a
+        //     local, pass it, return it), which the block form forbids. Works at
+        //     #version 430. Used unless it would be invalid.
+        //   * interface-block form (`in Tag {[qual] type m; ...} inst;`) — needed
+        //     when struct-then-input would be rejected: a name collision (block
+        //     tag == instance, e.g. `VertexIn VertexIn`) or per-member
+        //     interpolation qualifiers (flat/centroid — struct members cannot
+        //     carry qualifiers). Requires #version 450. The body must access the
+        //     varying only by member (no whole-value use); spirv-cross makes the
+        //     same call. (#GLSL-corpus Issue 1)
+        if (ioVarStructTypeId(m, inst.words[1])) |sid| {
+            const use_block = ioNameCollides(names, sid, in_name) or structHasMemberInterpQual(m, sid) or structHasFlatRequiredMember(m, sid);
+            if (use_block) {
+                const type_name = names.get(sid) orelse "IOBlock";
+                emitStructForwardDecls(m, names, sid, w, alloc, emitted_structs, emitted_names) catch {};
+                const tag = std.fmt.allocPrint(alloc, "{s}_io", .{type_name}) catch return error.OutOfMemory;
+                if (!drop_loc) if (getDecVal(decs, ivid, .location)) |l| {
+                    try w.print("layout(location = {d}) in {s}\n{{\n", .{ l, tag });
+                    try emitIoBlockMembers(m, names, sid, w, alloc);
+                    try w.print("}} {s};\n", .{in_name});
+                    needs_version.* = @max(needs_version.*, 450);
+                    emitted_any_io = true;
+                    continue;
+                };
+                try w.print("in {s}\n{{\n", .{tag});
+                try emitIoBlockMembers(m, names, sid, w, alloc);
+                try w.print("}} {s};\n", .{in_name});
+                needs_version.* = @max(needs_version.*, 450);
+                emitted_any_io = true;
+                continue;
+            }
+            // struct-then-input: declare the struct, then fall through to the
+            // generic `in Type name;` emitter below (Type is the struct name).
+            emitOneStructForwardDecl(m, names, sid, w, alloc, emitted_structs, emitted_names) catch {};
+        }
+        const it = try glslType(m, inst.words[1], names, alloc);
+        const flat_q: []const u8 = glslInterpQual(decs, ivid);
         if (!drop_loc) if (getDecVal(decs, ivid, .location)) |l| {
             try w.print("layout(location = {d}) {s}in {s} {s};\n", .{ l, flat_q, it, in_name });
             emitted_any_io = true;
@@ -2044,10 +2370,38 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         const ovid = inst.words[2];
         if (getDecVal(decs, ovid, .built_in) != null) continue;
         if (isBuiltinBlockVar(m, ovid)) continue;
-        const ot = try glslType(m, inst.words[1], names, alloc);
         const on = names.get(ovid) orelse "_out";
-        const flat_q: []const u8 = glslInterpQual(decs, ovid);
         const drop_loc = dropVaryingLocation(version, m.execution_model, .out);
+        if (ioVarStructTypeId(m, inst.words[1])) |sid| {
+            const use_block = ioNameCollides(names, sid, on) or structHasMemberInterpQual(m, sid) or structHasFlatRequiredMember(m, sid);
+            if (use_block) {
+                const type_name = names.get(sid) orelse "IOBlock";
+                emitStructForwardDecls(m, names, sid, w, alloc, emitted_structs, emitted_names) catch {};
+                const tag = std.fmt.allocPrint(alloc, "{s}_io", .{type_name}) catch return error.OutOfMemory;
+                if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
+                    if (getDecVal(decs, ovid, .index)) |idx| {
+                        try w.print("layout(location = {d}, index = {d}) out {s}\n{{\n", .{ l, idx, tag });
+                    } else {
+                        try w.print("layout(location = {d}) out {s}\n{{\n", .{ l, tag });
+                    }
+                    try emitIoBlockMembers(m, names, sid, w, alloc);
+                    try w.print("}} {s};\n", .{on});
+                    needs_version.* = @max(needs_version.*, 450);
+                    emitted_any_io = true;
+                    continue;
+                };
+                try w.print("out {s}\n{{\n", .{tag});
+                try emitIoBlockMembers(m, names, sid, w, alloc);
+                try w.print("}} {s};\n", .{on});
+                needs_version.* = @max(needs_version.*, 450);
+                emitted_any_io = true;
+                continue;
+            }
+            // struct-then-input: declare the struct, then fall through.
+            emitOneStructForwardDecl(m, names, sid, w, alloc, emitted_structs, emitted_names) catch {};
+        }
+        const ot = try glslType(m, inst.words[1], names, alloc);
+        const flat_q: []const u8 = glslInterpQual(decs, ovid);
         if (!drop_loc) if (getDecVal(decs, ovid, .location)) |l| {
             // Dual-source blending: two outputs share location 0, distinguished by
             // the Index decoration (index 0 = src color, index 1 = src1). Dropping
@@ -4001,19 +4355,23 @@ fn emitInstruction(
             }
         },
         .ImageSampleDrefImplicitLod => {
-            // Shadow texture: texture(sampler2DShadow, vec3(uv, depth))
+            // Shadow texture: texture(sampler2DShadow, vec3(uv.xy, depth)). The
+            // compare-coord ctor swizzles the coord's leading components (producer-
+            // independent: glslang appends dref to the coord, zioshade keeps it
+            // separate), so vecN(coord.swizzle, dref) is correct for both. The old
+            // hardcoded vec3 was wrong-arity for array/cube shadow. (#GLSL-corpus)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = texture({s}, vec3({s}, {s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref });
+            const sc = glslShadowCoordCtor(m, inst.words[4]);
+            try w.print("    {s} {s} = texture({s}, {s}({s}{s}, {s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, sc.ctor, coord, sc.swizzle, dref });
         },
         .ImageSampleDrefExplicitLod => {
-            // Shadow texture with explicit LOD: `textureLod(sampler2DShadow, vec3(uv, dref), lod)`.
-            // The compare coord for a 2D shadow is vec3 (uv + dref) -- the old `vec4(uv, dref, 0.0)`
-            // was wrong-arity (a likely compile error) -- and the LOD must be the real operand, not
-            // a hardcoded 0. Operand layout: words[5]=Dref, words[6]=image-operands mask, and the
-            // Lod value (bit 0x2) at words[7]. (#170)
+            // Shadow texture with explicit LOD: `textureLod(sampler*Shadow, ctor(coord.swizzle, dref), lod)`.
+            // The compare coord ctor is producer-independent (see ImageSampleDrefImplicitLod); the
+            // LOD must be the real operand, not a hardcoded 0. Operand layout: words[5]=Dref,
+            // words[6]=image-operands mask, and the Lod value (bit 0x2) at words[7]. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
@@ -4022,7 +4380,8 @@ fn emitInstruction(
                 names.get(inst.words[7]) orelse "0.0"
             else
                 "0.0";
-            try w.print("    {s} {s} = textureLod({s}, vec3({s}, {s}), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, lod });
+            const sc = glslShadowCoordCtor(m, inst.words[4]);
+            try w.print("    {s} {s} = textureLod({s}, {s}({s}{s}, {s}), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, sc.ctor, coord, sc.swizzle, dref, lod });
         },
         .ImageSampleProjImplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
