@@ -1933,6 +1933,7 @@ fn imageAtomicInNonEntryFn(m: *const ParsedModule, entry_id: u32) bool {
 /// function-constant + the 2D coord-linearization macro), reproduced from
 /// `spirv-cross --msl`. Emitted once when the module contains image atomics.
 const spv_image2d_atomic_template =
+    \\#include <metal_atomic>
     \\constant uint spvLinearTextureAlignmentOverride [[function_constant(65535)]];
     \\constant uint spvLinearTextureAlignment = is_function_constant_defined(spvLinearTextureAlignmentOverride) ? spvLinearTextureAlignmentOverride : 4;
     \\#define spvImage2DAtomicCoord(tc, tex) (((((tex).get_width() + spvLinearTextureAlignment / 4 - 1) & ~(spvLinearTextureAlignment / 4 - 1)) * (tc).y) + (tc).x)
@@ -2545,14 +2546,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // arrays that are only INDEXED keep the simpler valid `constant T[N]` path
     // (intentional divergence from spirv-cross — see the module-array block).
     // textureQueryLod (OpImageQueryLod) lowers to calculate_clamped_lod /
-    // calculate_unclamped_lod, which exist only on MSL 2.2+. Below that, honest-error
-    // rather than emit non-compiling MSL — matching spirv-cross, which refuses
-    // ImageQueryLod when metal_version < 22.
-    if (options.metal_version < 22) {
-        for (module.instructions) |inst| {
-            if (inst.op == .ImageQueryLod) return error.UnsupportedOp;
-        }
-    }
+    // calculate_unclamped_lod, which exist only on MSL 2.2+. These ARE Metal-
+    // representable, so emit the lowering unconditionally (the runtime accepts it —
+    // MslCompileCheck compiles with the device's latest language version, and Metal 2.2
+    // ships on all modern macOS). spirv-cross makes this opt-in via --msl-version 22;
+    // zioshade auto-bumps by emitting the lowering rather than honest-erroring. The
+    // ImageQueryLod arm (emitBody) is therefore reached for every shader.
 
     // Pull-model interpolation (interpolant<> + .interpolate_at_*() methods) is an
     // MSL 2.3+ feature. Below 2.3, honest-error rather than emit non-compiling MSL —
@@ -2560,14 +2559,17 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (options.metal_version < 23 and pull_model.count() > 0) return error.UnsupportedOp;
 
     // Storage-image atomics → buffer-backed linear-texture emulation (spirv-cross's
-    // spvImage2DAtomicCoord scheme). Implemented for the COMPUTE path only. Honest-error
-    // the cases this slice does not cover, rather than emit the old non-compiling
-    // `&img[coord]`:
+    // spvImage2DAtomicCoord scheme). Implemented for the COMPUTE and FRAGMENT paths.
+    // Honest-error the cases this slice does not cover, rather than emit the old
+    // non-compiling `&img[coord]`:
     //   - argument-buffer layout for the backing buffer (out of scope);
-    //   - fragment/vertex image atomics (would need impl-helper backing-buffer threading);
+    //   - vertex/mesh/task image atomics (would need impl-helper backing-buffer threading);
     //   - non-2D / arrayed / float-component images (need 2D-array/3D macros or atomic_float).
+    // Fragment works because imageAtomicInNonEntryFn guarantees atomics live only in the
+    // entry body, so the backing buffer is threaded solely through the entry signature
+    // (the same single-function discipline as the compute path).
     if (atomic_images.count() > 0) {
-        if (options.argument_buffers or module.execution_model != .GLCompute) return error.UnsupportedOp;
+        if (options.argument_buffers or (module.execution_model != .GLCompute and module.execution_model != .Fragment)) return error.UnsupportedOp;
         if (imageAtomicInNonEntryFn(&module, entry_id)) return error.UnsupportedOp;
         var ai = atomic_images.keyIterator();
         while (ai.next()) |vid| {
@@ -3987,6 +3989,30 @@ fn fragmentDepthAttribute(m: *const ParsedModule, entry_id: u32) []const u8 {
     return "depth(any)";
 }
 
+/// Fragment shader interlock (GL_ARB_fragment_shader_interlock / SPV_EXT_fragment_shader_interlock):
+/// true when the entry point declares one of the pixel/sample interlock execution modes.
+/// Metal has no explicit begin/end interlock ops — it models interlock by annotating the
+/// storage resources the fragment writes with `[[raster_order_group(0)]]` (the rasterizer
+/// then serializes accesses). The Op{Begin,End}InvocationInterlockEXT ops become no-ops.
+/// Matches spirv-cross, which emits raster_order_group(0) on device buffers / writable
+/// textures and drops the ops entirely.
+fn fragmentHasInterlock(m: *const ParsedModule, entry_id: u32) bool {
+    for (m.instructions) |inst| {
+        if (inst.op != .ExecutionMode or inst.words.len < 3) continue;
+        if (inst.words[1] != entry_id) continue;
+        const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
+        switch (mode) {
+            .PixelInterlockOrderedEXT,
+            .PixelInterlockUnorderedEXT,
+            .SampleInterlockOrderedEXT,
+            .SampleInterlockUnorderedEXT,
+            => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 /// #472: the Metal type string for a fragment output field. gl_SampleMask is int[1] in
 /// SPIR-V but a scalar uint [[sample_mask]] in Metal; FragStencilRefEXT is int in SPIR-V
 /// and Metal's [[stencil]] takes uint. Color/FragDepth keep the SPIR-V pointee type.
@@ -4655,6 +4681,11 @@ fn emitFunction(
     const rt = try mslType(m, rtid, names, alloc);
     const is_frag = is_entry and m.execution_model == .Fragment;
     const is_vertex = is_entry and m.execution_model == .Vertex;
+    // Fragment shader interlock (SPV_EXT_fragment_shader_interlock): when present, the
+    // storage resources the fragment writes get `[[raster_order_group(0)]]` in the entry
+    // wrapper signature (Metal's interlock mechanism). Dead for every non-interlock
+    // fragment, so existing shaders are byte-identical.
+    const has_frag_interlock = is_frag and fragmentHasInterlock(m, func_id);
 
     const func_idx = if (func_id < m.id_defs.len) m.id_defs[func_id] orelse return else return;
     const func_name = if (is_entry) "main0" else (names.get(func_id) orelse "func");
@@ -4783,12 +4814,29 @@ fn emitFunction(
             first_param = false;
         }
 
-        // Add texture + sampler params (storage images take no sampler, #284 follow-up)
+        // Add texture + sampler params (storage images take no sampler, #284 follow-up).
+        // Atomic-accessed storage images are skipped here and bound (texture + backing
+        // buffer) in the block below — mirrors the compute path.
         for (textures.items) |tex| {
+            if (atomic_images.contains(tex.var_id)) continue;
             if (!first_param) try w.writeAll(", ");
             try w.print("{s} {s}", .{ tex.msl_type, tex.name });
             if (!tex.is_storage) try w.print(", sampler {s}Smplr", .{tex.name});
             first_param = false;
+        }
+
+        // Storage-image atomics in fragment (#267, mirror of the compute path): bind each
+        // atomic-accessed image as a texture AND a separate `device atomic_T*` backing
+        // buffer (the spvImage2DAtomicCoord scheme). Threaded into the entry _impl so the
+        // body's `<img>_atomic` references resolve. Unreachable for non-atomic fragments.
+        if (atomic_images.count() > 0) {
+            for (textures.items) |tex| {
+                if (!atomic_images.contains(tex.var_id)) continue;
+                const scalar = mslAtomicImageScalar(m, tex.var_id) orelse "uint";
+                if (!first_param) try w.writeAll(", ");
+                try w.print("{s} {s}, device {s}* {s}_atomic", .{ tex.msl_type, tex.name, mslAtomicTypeName(scalar), tex.name });
+                first_param = false;
+            }
         }
 
         // Add stage-in struct param (by value) so the body's `in.<name>`
@@ -4901,20 +4949,58 @@ fn emitFunction(
             for (storage_buffers.items) |sb| {
                 if (!first_param) try w.writeAll(", ");
                 const sb_b = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
-                try w.print("device {s}& {s} [[buffer({d})]]", .{ sb.name, sb.name, sb_b });
+                try w.print("device {s}& {s} [[buffer({d}){s}]]", .{ sb.name, sb.name, sb_b, if (has_frag_interlock) ", raster_order_group(0)" else "" });
                 first_param = false;
             }
             for (textures.items) |tex| {
+                if (atomic_images.contains(tex.var_id)) continue; // bound with backing buffer below
                 if (!first_param) try w.writeAll(", ");
                 const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
                 // A bare sampler (msl_type=="sampler") binds to [[sampler(N)]], not [[texture(N)]].
                 if (std.mem.eql(u8, tex.msl_type, "sampler")) {
                     try w.print("sampler {s} [[sampler({d})]]", .{ tex.name, tex_b });
                 } else {
-                    try w.print("{s} {s} [[texture({d})]]", .{ tex.msl_type, tex.name, tex_b });
+                    // Writable (storage) textures get raster_order_group(0) under fragment
+                    // interlock — Metal's interlock mechanism (spirv-cross parity).
+                    const rog = if (tex.is_storage and has_frag_interlock) ", raster_order_group(0)" else "";
+                    try w.print("{s} {s} [[texture({d}){s}]]", .{ tex.msl_type, tex.name, tex_b, rog });
                     if (!tex.is_storage) try w.print(", sampler {s}Smplr [[sampler({d})]]", .{ tex.name, tex_b });
                 }
                 first_param = false;
+            }
+            // Storage-image atomics in fragment (#267): bind each atomic-accessed image as a
+            // texture AND a separate `device atomic_T*` backing buffer at the next free
+            // [[buffer]] slot (the spvImage2DAtomicCoord scheme). Under interlock both carry
+            // raster_order_group(0). Unreachable for non-atomic fragments (gate in spirvToMSL).
+            if (atomic_images.count() > 0) {
+                var max_buf_slot: u32 = 0;
+                var have_buf = false;
+                for (storage_buffers.items) |sb| {
+                    const s = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
+                    if (!have_buf or s > max_buf_slot) {
+                        max_buf_slot = s;
+                        have_buf = true;
+                    }
+                }
+                for (cbuffers.items) |cb| {
+                    const s = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
+                    if (!have_buf or s > max_buf_slot) {
+                        max_buf_slot = s;
+                        have_buf = true;
+                    }
+                }
+                var next_atomic_buf: u32 = if (have_buf) max_buf_slot + 1 else 0;
+                const arog = if (has_frag_interlock) ", raster_order_group(0)" else "";
+                for (textures.items) |tex| {
+                    if (!atomic_images.contains(tex.var_id)) continue;
+                    const scalar = mslAtomicImageScalar(m, tex.var_id) orelse "uint";
+                    const tex_b = resolveMslSlot(resource_bindings, binding_shift, tex.descriptor_set, tex.binding);
+                    if (!first_param) try w.writeAll(", ");
+                    try w.print("{s} {s} [[texture({d}){s}]]", .{ tex.msl_type, tex.name, tex_b, arog });
+                    try w.print(", device {s}* {s}_atomic [[buffer({d}){s}]]", .{ mslAtomicTypeName(scalar), tex.name, next_atomic_buf, arog });
+                    first_param = false;
+                    next_atomic_buf += 1;
+                }
             }
         }
         // Fragment input built-ins as MSL entry-point attributes (front_facing).
@@ -4966,8 +5052,17 @@ fn emitFunction(
                 try w.print(", {s}", .{sb.name});
             }
             for (textures.items) |tex| {
+                if (atomic_images.contains(tex.var_id)) continue; // passed with backing buffer below
                 try w.print(", {s}", .{tex.name});
                 if (!tex.is_storage) try w.print(", {s}Smplr", .{tex.name});
+            }
+            // Pass atomic-accessed images with their backing buffers (order matches the
+            // _impl signature: texture, then device atomic_T*).
+            if (atomic_images.count() > 0) {
+                for (textures.items) |tex| {
+                    if (!atomic_images.contains(tex.var_id)) continue;
+                    try w.print(", {s}, {s}_atomic", .{ tex.name, tex.name });
+                }
             }
         }
         // Pass the stage-in struct last, matching the `_impl` signature order.
@@ -7228,8 +7323,9 @@ fn emitInstruction(
             }
         },
         // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.
-        // MSL calculate_clamped_lod (.x) + calculate_unclamped_lod (.y) — both MSL 2.2+
-        // (guarded by the metal_version check in spirvToMSL, so this is only reached at 2.2+).
+        // MSL calculate_clamped_lod (.x) + calculate_unclamped_lod (.y) — both MSL 2.2+.
+        // Emitted unconditionally (spirvToMSL no longer honest-errors this; Metal 2.2 ships
+        // on all modern macOS and MslCompileCheck uses the device's latest language version).
         // Arrayed textures need no layer split here — the LOD query is layer-agnostic
         // (unlike .sample, which passes the array layer as a separate argument).
         .ImageQueryLod => {
@@ -7575,8 +7671,13 @@ fn emitInstruction(
         },
         .Kill => try w.writeAll("    discard_fragment();\n"),
         .Unreachable => {}, // no-op
-        .BeginInvocationInterlockEXT => try w.writeAll("    simd_barrier();\n"),
-        .EndInvocationInterlockEXT => try w.writeAll("    simd_barrier();\n"),
+        // Fragment shader interlock (SPV_EXT_fragment_shader_interlock): Metal has no
+        // explicit begin/end — interlock is expressed by `[[raster_order_group(0)]]` on
+        // the storage resources the fragment writes (see emitFunction's fragment path),
+        // and the rasterizer serializes accesses. These ops are therefore no-ops, matching
+        // spirv-cross, which emits raster_order_group and drops the ops entirely.
+        .BeginInvocationInterlockEXT => {},
+        .EndInvocationInterlockEXT => {},
         .ReadClockKHR => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = clock();\n", .{ rtt, names.get(inst.words[2]) orelse "t" });

@@ -3834,17 +3834,92 @@ test "T-imgatomic.4: MSL image atomics honest-error under argument buffers (#267
     try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToMSL(alloc, spirv, .{ .argument_buffers = true }));
 }
 
-test "T-imgatomic.5: MSL image atomics in a FRAGMENT shader honest-error (#267)" {
-    // The buffer-backed scheme is implemented for the compute path only; a fragment
-    // image atomic would need impl-helper backing-buffer threading. Fail loud rather
-    // than emit the old non-compiling &img[coord].
+test "T-imgatomic.5: MSL fragment image atomics thread the backing buffer through _impl (#267)" {
+    // Fragment image atomics ARE Metal-representable: the buffer-backed linear-texture
+    // scheme (compute path) extends to fragments because imageAtomicInNonEntryFn
+    // guarantees atomics live only in the entry body, so the backing buffer threads
+    // solely through the entry _impl signature. The texture + `device atomic_T*` backing
+    // buffer appear in BOTH the _impl params and the fragment wrapper bindings, and the
+    // atomic targets the backing buffer at the linearized coord (spirv-cross parity).
     const source: [:0]const u8 =
         \\#version 450
         \\layout(r32ui, binding = 0) uniform uimage2D img;
         \\layout(location = 0) out vec4 o;
         \\void main() { o = vec4(float(imageAtomicAdd(img, ivec2(0), 7u))); }
     ;
-    try std.testing.expectError(error.UnsupportedOp, compileToMslStage(source, .fragment));
+    const msl = try compileToMslStage(source, .fragment);
+    defer alloc.free(msl);
+    // The image is bound as a texture in the fragment wrapper.
+    try assertContains(msl, "texture2d<uint> img [[texture(0)]]");
+    // A separate atomic backing buffer is bound in the fragment wrapper.
+    try assertContains(msl, "device atomic_uint* img_atomic [[buffer(");
+    // The backing buffer is threaded into the entry _impl signature.
+    try assertContains(msl, "device atomic_uint* img_atomic)\n");
+    // The atomic targets the backing buffer at the linearized coord.
+    try assertContains(msl, "atomic_fetch_add_explicit((device atomic_uint*)&img_atomic[spvImage2DAtomicCoord(int2(0), img)], 7u,");
+    // The wrapper call forwards both the texture and its backing buffer.
+    try assertContains(msl, "main0_impl(out._fragColor, gl_FragCoord.xy, img, img_atomic);");
+}
+
+// SPV_EXT_fragment_shader_interlock (GL_ARB_fragment_shader_interlock). Metal has no
+// explicit begin/end interlock ops; it models interlock via [[raster_order_group(0)]] on
+// the storage resources the fragment writes (the rasterizer serializes accesses), and
+// Op{Begin,End}InvocationInterlockEXT become no-ops. Matches spirv-cross. The old
+// zioshade lowering emitted simd_barrier() with no raster_order_group and honest-errored
+// the fragment image-atomic case; both are now correct.
+test "T-interlock.1: fragment shader interlock emits raster_order_group on storage resources" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_ARB_fragment_shader_interlock : require
+        \\layout(pixel_interlock_ordered) in;
+        \\layout(binding = 0, rgba8) uniform writeonly image2D img;
+        \\layout(binding = 1, r32ui) uniform uimage2D img2;
+        \\layout(binding = 2) coherent buffer B { uint bar; } b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    beginInvocationInterlockARB();
+        \\    imageStore(img, ivec2(0), vec4(1.0));
+        \\    imageAtomicAdd(img2, ivec2(0), 1u);
+        \\    b.bar += 1u;
+        \\    endInvocationInterlockARB();
+        \\    o = vec4(1.0);
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The write-only storage image carries raster_order_group(0) (interlock mechanism).
+    try assertContains(msl, "img [[texture(0), raster_order_group(0)]]");
+    // The SSBO carries raster_order_group(0).
+    try assertContains(msl, "[[buffer(2), raster_order_group(0)]]");
+    // The atomic image + its backing buffer carry raster_order_group(0).
+    try assertContains(msl, "img2 [[texture(1), raster_order_group(0)]]");
+    try assertContains(msl, "img2_atomic [[buffer(3), raster_order_group(0)]]");
+    // The begin/end interlock ops are no-ops — NO simd_barrier (the old wrong lowering).
+    try assertNotContains(msl, "simd_barrier");
+}
+
+test "T-interlock.2: fragment shader interlock without image atomics still gets raster_order_group" {
+    // An interlock shader that writes only an SSBO (no storage-image atomics) still
+    // annotates the SSBO with raster_order_group(0); no backing-buffer path is taken.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_ARB_fragment_shader_interlock : require
+        \\layout(pixel_interlock_unordered) in;
+        \\layout(binding = 0) coherent buffer B { uint bar; } b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    beginInvocationInterlockARB();
+        \\    b.bar += 1u;
+        \\    endInvocationInterlockARB();
+        \\    o = vec4(float(b.bar));
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "raster_order_group(0)");
+    try assertNotContains(msl, "simd_barrier");
+    // No atomic backing buffer is emitted when there are no image atomics.
+    try assertNotContains(msl, "_atomic [[buffer");
 }
 
 // ---------------------------------------------------------------------------
@@ -4307,16 +4382,22 @@ test "T-qlod.1: MSL textureQueryLod emits calculate_clamped/unclamped_lod on MSL
     try assertNotContains(msl, "// unhandled");
 }
 
-test "T-qlod.2: MSL textureQueryLod honest-errors below MSL 2.2 (#278)" {
-    // calculate_*_lod don't exist before MSL 2.2, so zioshade must fail loud (matching
-    // spirv-cross, which refuses ImageQueryLod when metal_version < 22) rather than emit
-    // non-compiling MSL.
-    try std.testing.expectError(error.UnsupportedOp, compileToMslStageVer(querylod_src, .fragment, 21));
+test "T-qlod.2: MSL textureQueryLod emits the lowering at every metal_version (#278)" {
+    // textureQueryLod IS Metal-representable (calculate_clamped/unclamped_lod, MSL 2.2+).
+    // Metal 2.2 ships on all modern macOS and MslCompileCheck compiles with the device's
+    // latest language version, so zioshade emits the lowering unconditionally rather than
+    // honest-erroring — spirv-cross makes this opt-in via --msl-version 22; zioshade
+    // auto-bumps. The default metal_version (21) now produces the same lowering as 22.
+    const msl = try compileToMslStageVer(querylod_src, .fragment, 21);
+    defer alloc.free(msl);
+    try assertContains(msl, ".calculate_clamped_lod(");
+    try assertContains(msl, ".calculate_unclamped_lod(");
+    try assertNotContains(msl, "// unhandled");
 }
 
-test "T-qlod.3: the MSL 2.2 query guard does not trip a plain-sampling shader (#278)" {
-    // A shader WITHOUT textureQueryLod must still compile at metal_version 21 — the guard
-    // is scoped to OpImageQueryLod only.
+test "T-qlod.3: a plain-sampling shader is unaffected by the textureQueryLod lowering (#278)" {
+    // A shader WITHOUT textureQueryLod still compiles at metal_version 21 — the
+    // calculate_*_lod lowering fires only for OpImageQueryLod.
     const source =
         \\#version 450
         \\layout(location = 0) out vec4 o;
