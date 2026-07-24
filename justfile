@@ -119,6 +119,17 @@ msl-lint:
 msl-metal dir="tests/spirv-cross" stage="fragment" ext="frag":
     @bash tools/msl_validity_sweep.sh {{dir}} {{stage}} {{ext}}
 
+# large-corpus GLSL backend-validity sweep — the GLSL analog of msl-metal /
+# wgsl-naga. Cross-compiles every shader to GLSL and compile-checks the output with
+# glslangValidator (the real GLSL oracle), trying Vulkan (-V) then desktop mode. A
+# shader is VALID if EITHER mode compiles; INVALID (both reject) = a backend bug (the
+# plausible-but-wrong class); honest-error = the zioshade frontend refused. Exits
+# non-zero on any INVALID. Requires glslangValidator on PATH; run on demand.
+#   just glsl-glslang                                  # tests/spirv-cross fragments
+#   just glsl-glslang tests/glslang-430 fragment frag
+glsl-glslang dir="tests/spirv-cross" stage="fragment" ext="frag":
+    @bash tools/glsl_glslang_sweep.sh {{dir}} {{stage}} {{ext}}
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
