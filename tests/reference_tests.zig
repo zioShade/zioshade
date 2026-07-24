@@ -63,7 +63,7 @@ fn testShader(name: []const u8, source: [:0]const u8) !void {
     // here and still validate the other backends. e.g. ground.frag is a 4-attachment
     // G-buffer shader HLSL/GLSL handle but MSL declines until the main0_out rework.
     const msl: ?[]const u8 = zioshade.spirvToMSL(alloc, spirv, .{}) catch |err| blk: {
-        if (err == error.UnsupportedFragmentOutput or err == error.UnsupportedOpcode or err == error.UnsupportedMultiSampleStorageImage) break :blk null;
+        if (err == error.UnsupportedFragmentOutput or err == error.UnsupportedOpcode or err == error.UnsupportedMultiSampleStorageImage or err == error.UnsupportedStructStageInput or err == error.UnsupportedComponentPacking) break :blk null;
         std.debug.print("FAIL [{s}]: spirvToMSL failed: {}\n", .{ name, err });
         return err;
     };

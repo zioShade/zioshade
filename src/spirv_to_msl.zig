@@ -2541,6 +2541,57 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         try w.writeAll("};\n\n");
     }
 
+    // #500: Metal's [[stage_in]] accepts only scalar/vector/matrix fields, NOT
+    // struct-typed ones. collectStageInputs flattens interface blocks ONE level,
+    // so a block member (or a direct `in` variable) that is itself a struct --
+    // e.g. `in VertexIn { Foo a; Bar b; }` or `in Baz baz` where Foo/Bar/Baz are
+    // structs -- still yields a struct-typed main0_in field (`Foo VertexIn_a
+    // [[user(locn0)]]`), which Metal rejects ("invalid type 'main0_in' ...
+    // stage_in"). spirv-cross handles this by RECURSIVELY flattening to
+    // scalar/vector leaves and reconstructing the struct at use sites.
+    //
+    // Honest-error until the recursive flatten lands. That is a 3-site change on
+    // hot paths shared by every valid shader: (1) collectStageInputs recursive
+    // leaf walk, (2) access-chain rewrite consuming a run of constant struct-
+    // member indices to the leaf (today it eats one), (3) whole-struct-load
+    // reconstruction emitting nested brace literals (today one-level), plus a
+    // richer block_flat key for nested access (baz.foo.b). layout-component
+    // additionally needs component-packing and is tracked with this same follow-up.
+    //
+    // Follow-up ENTRY CRITERIA (do not let this rot -- struct-typed stage inputs
+    // are rare in THIS corpus (2/1453) but common in production GLSL, so this is
+    // a correctness floor, not an achievement): land the flatten as one cohesive
+    // subsystem covering struct-flatten AND component-packing, gated on a full-
+    // corpus Metal regression sweep (tools/msl_validity_sweep.sh must stay green
+    // or improve) so the flatten cannot silently regress the valid shaders.
+    if (is_frag or is_vertex) {
+        for (stage_inputs.items) |si| {
+            if (getDef(&module, si.type_id)) |t| {
+                if (t.op == .TypeStruct) return error.UnsupportedStructStageInput;
+            }
+        }
+    }
+    // Component packing: GLSL/Vulkan lets two stage inputs share one Location,
+    // distinguished by `component` (e.g. `layout(location=0, component=0) in
+    // vec2 v0; layout(location=0, component=2) in float v1;`). Metal's
+    // [[user(locnN)]] has no component offset; spirv-cross widens to a vec4 and
+    // swizzles, which zioshade doesn't do. Worse, the frontend currently DROPS
+    // Component decorations, so same-Location inputs collide on the same
+    // [[user(locnN)]] and Metal rejects main0_in. Two inputs at the same Location
+    // is the exact signal that component packing is in play (it's the only valid
+    // Vulkan way to share a Location) -- detect it and honest-error.
+    // (layout-component.desktop.frag.) Same follow-up / entry criteria as #500.
+    // collectStageInputs sorts stage_inputs ascending by Location, so equal
+    // Locations are adjacent.
+    if (stage_inputs.items.len > 1) {
+        var si_prev = stage_inputs.items[0];
+        var si_i: usize = 1;
+        while (si_i < stage_inputs.items.len) : (si_i += 1) {
+            const si_cur = stage_inputs.items[si_i];
+            if (si_cur.location == si_prev.location) return error.UnsupportedComponentPacking;
+            si_prev = si_cur;
+        }
+    }
     // Stage-in struct for location inputs (mirrors spirv-cross --msl
     // `struct main0_in { T name [[attr]]; }`). Emitted only when there is at
     // least one location input. Built-ins (gl_FragCoord etc.) are excluded by
