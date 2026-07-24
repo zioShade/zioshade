@@ -50,11 +50,17 @@ fn testShader(name: []const u8, source: [:0]const u8) !void {
     defer alloc.free(hlsl);
 
     // Step 3: SPIR-V → GLSL
-    const glsl = zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| {
+    // #GLSL-corpus: the GLSL backend honest-errors on features it cannot emit
+    // correctly (subpassInput, component packing, fragment-stage gl_DrawID,
+    // barycentric per-vertex arrays, Vulkan separate samplers). These are
+    // DELIBERATE refusals (not crashes), so tolerate them like the MSL honest-errors
+    // below and still validate the other backends.
+    const glsl: ?[]const u8 = zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }) catch |err| blk: {
+        if (err == error.UnsupportedSubpassInput or err == error.UnsupportedComponentPacking or err == error.UnsupportedFragmentDrawId or err == error.UnsupportedBarycentric or err == error.UnsupportedSeparateSamplers or err == error.UnsupportedMultisampleImage) break :blk null;
         std.debug.print("FAIL [{s}]: spirvToGLSL failed: {}\n", .{ name, err });
         return err;
     };
-    defer alloc.free(glsl);
+    defer if (glsl) |g| alloc.free(g);
 
     // Step 4: SPIR-V → MSL
     // #470: MSL honest-errors on a fragment output config it cannot yet represent
@@ -73,9 +79,11 @@ fn testShader(name: []const u8, source: [:0]const u8) !void {
     try assertNotContains(hlsl, "unhandled");
     if (hlsl.len == 0) return error.EmptyHLSLOutput;
 
-    // Validate GLSL
-    try assertNotContains(glsl, "unhandled");
-    if (glsl.len == 0) return error.EmptyGLSLOutput;
+    // Validate GLSL (skipped when GLSL deliberately honest-errored above)
+    if (glsl) |g| {
+        try assertNotContains(g, "unhandled");
+        if (g.len == 0) return error.EmptyGLSLOutput;
+    }
 
     // Validate MSL (skipped when MSL deliberately honest-errored above)
     if (msl) |m| {

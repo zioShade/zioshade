@@ -610,12 +610,53 @@ fn compileWithDiagsOrExit(
 }
 
 fn crossErr(err: anyerror) noreturn {
-    // MSL: component packing (`layout(location=N, component=M)`) is not yet
-    // supported (Metal's [[user(locnN)]] has no component offset; spirv-cross
-    // widens to vec4 + swizzle). Surface the actionable workaround.
+    // MSL/GLSL: component packing (`layout(location=N, component=M)`) is not yet
+    // supported. Metal's [[user(locnN)]] has no component offset (spirv-cross widens
+    // to vec4 + swizzle); desktop GLSL has no component qualifier. Surface the
+    // actionable workaround. Shared by the MSL and GLSL backends.
     if (err == error.UnsupportedComponentPacking) {
         std.debug.print(
-            "error: cross-compilation failed: {s}: component packing (`layout(location=N, component=M)`) is not yet supported in the MSL backend. Workaround: pack the components into a single varying manually.\n",
+            "error: cross-compilation failed: {s}: component packing (`layout(location=N, component=M)`) is not yet supported. Workaround: pack the components into a single varying manually.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // GLSL: subpassInput (Vulkan input attachments) have no desktop-GLSL form.
+    if (err == error.UnsupportedSubpassInput) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: subpassInput / input attachments are Vulkan-only and have no desktop-GLSL equivalent (subpassInput/subpassLoad require Vulkan GLSL semantics). Workaround: target Vulkan GLSL, or replace the input attachment with a regular texture sample.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // GLSL: multisample image/sampler types (sampler2DMS / image2DMS) are not lowered.
+    if (err == error.UnsupportedMultisampleImage) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: multisample sampler/image types (sampler2DMS, image2DMS, textureSamples/imageSamples) are not yet lowered by the GLSL backend. Workaround: emit the MS types and queries manually, or avoid multisample resources.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // GLSL: gl_DrawID is a vertex-stage-only builtin; no fragment GLSL declares it.
+    if (err == error.UnsupportedFragmentDrawId) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: gl_DrawID is a vertex-stage-only builtin and is not declared in fragment GLSL under any version. Workaround: move the gl_DrawID read to the vertex stage and pass it down as a varying.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // GLSL: barycentric coords need pervertexEXT input arrays (not yet lowered).
+    if (err == error.UnsupportedBarycentric) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: barycentric coordinates (gl_BaryCoord*) require pervertexEXT per-vertex input arrays, which the GLSL backend does not yet lower. Workaround: emit the per-vertex arrays and the GL_EXT_fragment_shader_barycentric (or GL_NV_fragment_shader_barycentric) extension manually.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // GLSL: Vulkan separate sampler+texture are not combined into a sampler2D.
+    if (err == error.UnsupportedSeparateSamplers) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: Vulkan separate samplers (`uniform sampler` + `uniform texture2D` combined via `sampler2D(tex, samp)`) are not yet supported. Workaround: use a single combined `uniform sampler2D`, or combine the separate resources manually.\n",
             .{@errorName(err)},
         );
         std.process.exit(1);
