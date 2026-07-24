@@ -5851,9 +5851,37 @@ fn emitInstruction(
                     rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, sample_idx,
                 });
             } else {
-                try w.print("    {s} {s} = {s}.Load(int3({s}, {s}));\n", .{
-                    rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, lod_val,
-                });
+                // ConstOffset (texelFetchOffset): HLSL Load has no offset arg, so apply
+                // the offset to the coordinate via int math (`coord + offset`) — this is
+                // the unambiguous form (spirv-cross's `.Load(int3, int2)` 2-arg shape
+                // compiles in glslang but its offset semantics are unclear, so don't mirror
+                // it). Dropping the offset fetches the wrong texel (silent-wrong, #170).
+                var has_off = false;
+                var off_id: u32 = 0;
+                if (inst.words.len > 5) {
+                    const om = inst.words[5];
+                    if ((om & 0x8) != 0) {
+                        var ow: usize = 6;
+                        if (om & 0x1 != 0) ow += 1; // Bias
+                        if (om & 0x2 != 0) ow += 1; // Lod
+                        if (om & 0x4 != 0) ow += 2; // Grad
+                        if (ow < inst.words.len) {
+                            off_id = inst.words[ow];
+                            has_off = true;
+                        }
+                    }
+                }
+                if (has_off) {
+                    try w.print("    {s} {s} = {s}.Load(int3({s} + ", .{
+                        rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name,
+                    });
+                    _ = writeHlslConstOffset(module, w, off_id);
+                    try w.print(", {s}));\n", .{lod_val});
+                } else {
+                    try w.print("    {s} {s} = {s}.Load(int3({s}, {s}));\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, lod_val,
+                    });
+                }
             }
         },
         .ImageGather => {
