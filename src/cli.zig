@@ -697,16 +697,6 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
-    // HLSL: a stage-input varying referenced inside a non-main (helper) function is
-    // undeclared there (varyings are passed as main() params). Honest-error until
-    // varying-threading into helper signatures lands (MSL #476 analog).
-    if (err == error.UnsupportedVaryingInHelper) {
-        std.debug.print(
-            "error: cross-compilation failed: {s}: a stage-input varying is used inside a helper (non-main) function, which the HLSL backend does not yet support (varyings are scoped to main). Workaround: pass the varying into the helper as a parameter, or move its use into main.\n",
-            .{@errorName(err)},
-        );
-        std.process.exit(1);
-    }
     // HLSL: an array stage input (e.g. gl_ClipDistance[N]) is emitted scalar-then-indexed.
     if (err == error.UnsupportedArrayStageInput) {
         std.debug.print(
