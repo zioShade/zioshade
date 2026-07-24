@@ -697,6 +697,40 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // HLSL: a stage-input varying referenced inside a non-main (helper) function is
+    // undeclared there (varyings are passed as main() params). Honest-error until
+    // varying-threading into helper signatures lands (MSL #476 analog).
+    if (err == error.UnsupportedVaryingInHelper) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: a stage-input varying is used inside a helper (non-main) function, which the HLSL backend does not yet support (varyings are scoped to main). Workaround: pass the varying into the helper as a parameter, or move its use into main.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // HLSL: an array stage input (e.g. gl_ClipDistance[N]) is emitted scalar-then-indexed.
+    if (err == error.UnsupportedArrayStageInput) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: array stage inputs (an `in` varying of array type, e.g. gl_ClipDistance) are not yet lowered by the HLSL backend. Workaround: avoid array stage inputs, or pass the elements as individual varyings.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // HLSL: gl_ClipDistance / gl_CullDistance as a stage input (array builtin).
+    if (err == error.UnsupportedBuiltinStageInput) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: gl_ClipDistance / gl_CullDistance as a stage input are not yet lowered by the HLSL backend (array builtin emitted scalar-then-indexed). Workaround: avoid clip/cull distance in this stage, or pass the needed element as a scalar varying.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // HLSL: a Vulkan separate sampler (standalone `uniform sampler`) is never declared.
+    if (err == error.UnsupportedSeparateSampler) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: Vulkan separate samplers (a standalone `uniform sampler` combined with `uniform texture2D` via sampler2D(tex, samp)) are not yet supported by the HLSL backend. Workaround: use a single combined `uniform sampler2D`.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     std.debug.print("error: cross-compilation failed: {s}\n", .{@errorName(err)});
     std.process.exit(1);
 }
