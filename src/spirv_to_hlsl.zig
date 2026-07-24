@@ -701,6 +701,30 @@ fn imageOperandToTextureVar(module: *const ParsedModule, id: u32) ?u32 {
     };
 }
 
+/// Render a ConstOffset image operand (an OpConstantComposite of int constants) INLINE
+/// as `intN(c0, c1, ...)` for an HLSL `.Sample`/`.SampleBias` offset arg. HLSL requires
+/// the offset to be an immediate constant, so it can't reference a module-scope name.
+/// Returns true if rendered (the caller has already printed `, ` before it). (#170)
+fn writeHlslConstOffset(module: *const ParsedModule, w: anytype, offset_id: u32) bool {
+    const cc = getDef(module, offset_id) orelse return false;
+    if (cc.op != .ConstantComposite or cc.words.len < 4) return false;
+    const n = cc.words.len - 3;
+    w.print("int{d}(", .{n}) catch return false;
+    for (cc.words[3..], 0..) |cid, i| {
+        if (i > 0) w.writeAll(", ") catch return false;
+        if (getDef(module, cid)) |c| {
+            if (c.op == .Constant and c.words.len > 3) {
+                const v: i32 = @bitCast(c.words[3]);
+                w.print("{d}", .{v}) catch return false;
+                continue;
+            }
+        }
+        w.writeAll("0") catch return false;
+    }
+    w.writeAll(")") catch return false;
+    return true;
+}
+
 /// Number of SPATIAL out-params HLSL GetDimensions takes for the texture behind
 /// `image_value_id` (1D=1, 2D/cube=2, 2DArray/cubeArray=2+1, 3D=3). OpTypeImage layout:
 /// [.., Dim=words[3], Depth, Arrayed=words[5], MS, ..]. Used by QueryLevels/Samples,
@@ -5494,18 +5518,39 @@ fn emitInstruction(
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const parts = splitPair(si);
-            // A Bias image operand (mask bit 0, value at words[6]) → HLSL
-            // `.SampleBias(sampler, coord, bias)`. Dropping it samples the wrong mip
-            // level (silent-wrong, #170).
-            if (inst.words.len > 6 and (inst.words[5] & 0x1) != 0) {
-                try w.print("    {s} {s} = {s}.SampleBias({s}, {s}, {s});\n", .{
+            // Image operands (optional, after Coordinate): words[5] = mask. Bias = bit 0
+            // (1 word), Lod = bit 1, Grad = bit 2 (2 words), ConstOffset = bit 3 (1 word,
+            // an int-vector constant). Dropping Bias samples the wrong mip; dropping
+            // ConstOffset samples the wrong texel — both silent-wrong (#170).
+            const mask: u32 = if (inst.words.len > 5) inst.words[5] else 0;
+            const has_bias = (mask & 0x1) != 0;
+            var has_offset = false;
+            var offset_id: u32 = 0;
+            if ((mask & 0x8) != 0) {
+                // ConstOffset operand position: skip Bias/Lod/Grad operands before it.
+                var ow: usize = 6;
+                if (mask & 0x1 != 0) ow += 1; // Bias
+                if (mask & 0x2 != 0) ow += 1; // Lod
+                if (mask & 0x4 != 0) ow += 2; // Grad
+                if (ow < inst.words.len) {
+                    offset_id = inst.words[ow];
+                    has_offset = true;
+                }
+            }
+            if (has_bias) {
+                try w.print("    {s} {s} = {s}.SampleBias({s}, {s}, {s}", .{
                     rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, names.get(inst.words[6]) orelse "0.0",
                 });
             } else {
-                try w.print("    {s} {s} = {s}.Sample({s}, {s});\n", .{
+                try w.print("    {s} {s} = {s}.Sample({s}, {s}", .{
                     rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord,
                 });
             }
+            if (has_offset) {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, offset_id);
+            }
+            try w.writeAll(");\n");
         },
         // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.
         // HLSL Texture.CalculateLevelOfDetail(sampler, coord) returns the clamped LOD as a

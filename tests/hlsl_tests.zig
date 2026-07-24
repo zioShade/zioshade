@@ -2963,6 +2963,23 @@ test "T31.10: varying passed as helper param does NOT honest-error (over-fire gu
     try assertNotContains(hlsl, "UnsupportedVaryingInHelper");
 }
 
+// #170: textureOffset's ConstOffset image operand must be carried into HLSL
+// `.Sample(sampler, coord, intN(...))` — dropping it samples the wrong texel
+// (compile-valid but semantically wrong = plausible-but-wrong). spirv-cross carries it.
+test "T31.11: textureOffset ConstOffset carried into .Sample" {
+    const source =
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = textureOffset(tex, uv, ivec2(1, 2)); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, ".Sample(");
+    try assertContains(hlsl, "int2(1, 2)");
+}
+
 test "T31.5: textureGather maps to Gather" {
     const source =
         \\#version 430
