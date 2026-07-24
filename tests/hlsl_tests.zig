@@ -15869,6 +15869,10 @@ test "#499: HLSL declares spec-constant ternary (OpSelect) result" {
     defer alloc.free(spirv);
     const hlsl = try zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 });
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "static const bool ");
-    try assertContains(hlsl, "static const uint f = ");
+    // The derived bool and the Select result both reference the leaf spec constant `s`,
+    // so they are NOT compile-time constants -- HLSL rejects `static const` initialized
+    // from a spec value. Emit them as runtime `static` (also correct under specialization;
+    // `static const` would wrongly fold with the default). (#499)
+    try assertContains(hlsl, "static bool ");
+    try assertContains(hlsl, "static uint f = ");
 }

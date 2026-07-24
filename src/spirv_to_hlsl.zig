@@ -1437,6 +1437,25 @@ pub fn spirvToHLSL(
         const opcode_lit = inst.words[3];
         const name = names.get(result_id) orelse continue;
         const type_str = try hlslType(&module, type_id, &names, aa);
+        // An OpSpecConstantOp whose operands reference a (leaf or derived) spec
+        // constant is NOT a compile-time constant -- HLSL rejects `static const`
+        // initialized from a spec value ("non-convertible constant type"). Emit it as
+        // a runtime `static` instead: correct under specialization (a `static const`
+        // would fold with the DEFAULT leaf values, wrong once a spec constant is
+        // overridden), and DXC's SPIR-V path re-materialises it from the
+        // OpSpecConstantOp regardless of the text qualifier. (#499)
+        const scq: []const u8 = blk: {
+            for (inst.words[4..]) |op_id| {
+                if (getDef(&module, op_id)) |od| {
+                    switch (od.op) {
+                        .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
+                        .SpecConstantComposite, .SpecConstantOp => break :blk "static",
+                        else => {},
+                    }
+                }
+            }
+            break :blk "static const";
+        };
         if (inst.words.len == 5) {
             const op0 = names.get(inst.words[4]) orelse continue;
             const uop: ?[]const u8 = switch (opcode_lit) {
@@ -1444,7 +1463,7 @@ pub fn spirvToHLSL(
                 200 => "~",
                 else => null,
             };
-            if (uop) |u| try w.print("static const {s} {s} = {s}({s});\n", .{ type_str, name, u, op0 });
+            if (uop) |u| try w.print("{s} {s} {s} = {s}({s});\n", .{ scq, type_str, name, u, op0 });
             continue;
         }
         // OpSelect (ternary): static const T name = cond ? tv : fv;
@@ -1453,7 +1472,7 @@ pub fn spirvToHLSL(
             const cond = names.get(inst.words[4]) orelse continue;
             const tv = names.get(inst.words[5]) orelse continue;
             const fv = names.get(inst.words[6]) orelse continue;
-            try w.print("static const {s} {s} = ({s}) ? ({s}) : ({s});\n", .{ type_str, name, cond, tv, fv });
+            try w.print("{s} {s} {s} = ({s}) ? ({s}) : ({s});\n", .{ scq, type_str, name, cond, tv, fv });
             continue;
         }
         const op_str: ?[]const u8 = switch (opcode_lit) {
@@ -1480,7 +1499,7 @@ pub fn spirvToHLSL(
         if (inst.words.len != 6) continue;
         const op0 = names.get(inst.words[4]) orelse continue;
         const op1 = names.get(inst.words[5]) orelse continue;
-        try w.print("static const {s} {s} = {s} {s} {s};\n", .{ type_str, name, op0, op, op1 });
+        try w.print("{s} {s} {s} = {s} {s} {s};\n", .{ scq, type_str, name, op0, op, op1 });
     }
     try w.writeAll("\n");
 
