@@ -7320,6 +7320,30 @@ fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32
 
 fn emitStd450(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {
     const rt = try hlslType(module, inst.words[1], names, alloc);
+    // #488 (HLSL port of the MSL fix): HLSL's reflect/refract are VECTOR-only -- a
+    // SCALAR call is ambiguous under implicit type conversion (glslang rejects it).
+    // Lower scalar reflect/refract to the closed-form formula; vector forms stay as
+    // reflect(...)/refract(...). scalar-refract-reflect in the spirv-cross corpus.
+    if (instruction == 71 or instruction == 72) {
+        if (getDef(module, inst.words[1])) |rty| {
+            if (rty.op == .TypeFloat) {
+                const I = names.get(inst.words[5]) orelse "x";
+                const N = names.get(inst.words[6]) orelse "y";
+                const rn = names.get(inst.words[2]) orelse "v";
+                if (instruction == 71) {
+                    // reflect(I,N) = I - 2*dot(N,I)*N  (scalar dot = N*I)
+                    try w.print("    {s} {s} = {s} - (2.0 * ({s} * {s}) * {s});\n", .{ rt, rn, I, N, I, N });
+                } else if (inst.words.len >= 8) {
+                    // refract(I,N,eta): k=1-eta²(1-(N·I)²); k>=0 ? eta*I-(eta*(N·I)+sqrt(k))*N : 0
+                    const e = names.get(inst.words[7]) orelse "z";
+                    const d = try std.fmt.allocPrint(alloc, "({s} * {s})", .{ N, I });
+                    const k = try std.fmt.allocPrint(alloc, "(1.0 - ({s} * {s}) * (1.0 - ({s}) * ({s})))", .{ e, e, d, d });
+                    try w.print("    {s} {s} = (({s}) >= 0.0) ? (({s} * {s}) - ((({s} * ({s})) + sqrt({s})) * {s})) : 0.0;\n", .{ rt, rn, k, e, I, e, d, k, N });
+                }
+                return;
+            }
+        }
+    }
     const func: spirv.GLSLstd450 = @enumFromInt(instruction);
     const hlsl_func: []const u8 = std450ToHlsl(func) orelse {
         try w.print("    // unhandled std450 #{d}\n", .{instruction});
