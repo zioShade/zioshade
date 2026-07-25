@@ -149,6 +149,20 @@ msl-metal dir="tests/spirv-cross" stage="fragment" ext="frag":
 glsl-glslang dir="tests/spirv-cross" stage="fragment" ext="frag":
     @bash tools/glsl_glslang_sweep.sh {{dir}} {{stage}} {{ext}}
 
+# All three stages of the GLSL gate. Same fragment-only blind spot as HLSL (the gates
+# default to fragment); this runs vertex+compute too. Found 29 unchecked GLSL vertex+
+# compute compile-INVALID (2026-07-25).
+glsl-glslang-all:
+    @bash tools/glsl_glslang_sweep.sh tests/spirv-cross fragment frag
+    @bash tools/glsl_glslang_sweep.sh tests/spirv-cross vertex vert
+    @bash tools/glsl_glslang_sweep.sh tests/spirv-cross compute comp
+
+# All three stages of the MSL gate. Found 39 unchecked MSL vertex+compute compile-INVALID.
+msl-metal-all:
+    @bash tools/msl_validity_sweep.sh tests/spirv-cross fragment frag
+    @bash tools/msl_validity_sweep.sh tests/spirv-cross vertex vert
+    @bash tools/msl_validity_sweep.sh tests/spirv-cross compute comp
+
 # run tests with verbose output
 test-verbose:
     {{zig}} build test --summary all 2>&1 | grep -E "passed|failed|leaked|error:"
