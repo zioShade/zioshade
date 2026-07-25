@@ -1269,6 +1269,21 @@ pub fn spirvToHLSL(
         }
     }
 
+    // Honest-error: gl_NumWorkGroups (compute dispatch dimensions) is a RUNTIME value
+    // the app provides at dispatch time. HLSL has no built-in for it (spirv-cross emits
+    // an app-filled cbuffer SPIRV_Cross_NumWorkgroups). zioshade doesn't model that app
+    // contract, so refuse rather than emit an undeclared identifier (plausible-but-wrong).
+    // (#170)
+    if (module.execution_model == .GLCompute) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Input) continue;
+            if (std.mem.eql(u8, names.get(inst.words[2]) orelse "", "gl_NumWorkGroups")) {
+                return error.UnsupportedNumWorkGroups;
+            }
+        }
+    }
+
     // Phase 3: emit HLSL
     var output = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     var output_owned = true;

@@ -704,6 +704,13 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    if (err == error.UnsupportedNumWorkGroups) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: gl_NumWorkGroups (compute dispatch dimensions) is a runtime app-provided value with no HLSL built-in equivalent; the HLSL backend does not model the app-filled cbuffer contract. Workaround: pass the dispatch size via your own cbuffer.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // HLSL: a stage-input varying referenced inside a non-main (helper) function is
     // undeclared there (varyings are passed as main() params). Honest-error until
     // varying-threading into helper signatures lands (MSL #476 analog).
