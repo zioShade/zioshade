@@ -2603,10 +2603,12 @@ fn hlslMemberBuiltin(module: *const ParsedModule, struct_id: u32, member_idx: u3
     return null;
 }
 
-/// If `var_id` is an Output variable whose pointee is a struct whose member 0 is
-/// decorated `BuiltIn Position`, returns that struct type id — glslang's gl_PerVertex
-/// Block. Otherwise null.
-fn perVertexBlockStructType(module: *const ParsedModule, var_id: u32) ?u32 {
+/// If `var_id` is an Output variable whose pointee is a struct that is the
+/// gl_PerVertex Block — member 0 decorated `BuiltIn Position`, OR (name fallback)
+/// the struct is named "gl_PerVertex" (the frontend omits MemberDecorate BuiltIn
+/// on its members in interface-block form) — returns that struct type id. Else
+/// null. `names` supplies struct OpNames. Mirrors MSL commit 71fe0c6.
+fn perVertexBlockStructType(module: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), var_id: u32) ?u32 {
     const vdef = getDef(module, var_id) orelse return null;
     if (vdef.op != .Variable or vdef.words.len < 4) return null;
     if (@as(spirv.StorageClass, @enumFromInt(vdef.words[3])) != .Output) return null;
@@ -2615,8 +2617,29 @@ fn perVertexBlockStructType(module: *const ParsedModule, var_id: u32) ?u32 {
     const sty = ptr.words[3];
     const sdef = getDef(module, sty) orelse return null;
     if (sdef.op != .TypeStruct) return null;
-    if ((hlslMemberBuiltin(module, sty, 0) orelse return null) != .position) return null;
-    return sty;
+    if (hlslMemberBuiltin(module, sty, 0)) |mbi| {
+        if (mbi == .position) return sty;
+    }
+    // Name fallback: the frontend does not decorate gl_PerVertex members BuiltIn
+    // (interface-block form), so detect the block by its reserved struct name.
+    if (names.get(sty)) |sname| {
+        if (std.mem.eql(u8, sname, "gl_PerVertex")) return sty;
+    }
+    return null;
+}
+
+/// A struct member's `Location` (OpMemberDecorate), if any. Used to place a
+/// flattened user-block member when the block variable itself carries no
+/// Location (some blocks put Location on the member, not the var). Mirrors MSL
+/// commit 71fe0c6 part 4.
+fn hlslMemberLocation(module: *const ParsedModule, struct_id: u32, member_idx: u32) ?u32 {
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 5) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .location) continue;
+        return inst.words[4];
+    }
+    return null;
 }
 
 /// True if member `member_idx` of gl_PerVertex block var `var_id` is WRITTEN, i.e.
@@ -2805,7 +2828,7 @@ fn emitFunction(
             if (pt_inst) |pi| {
                 if (pi.op == .TypeStruct) {
                     if (sc == .Output) {
-                        if (perVertexBlockStructType(module, vid)) |sty| {
+                        if (perVertexBlockStructType(module, names, vid)) |sty| {
                             // gl_PerVertex block: representable members promoted
                             // into VS_OUTPUT below (#471).
                             pv_var_id = vid;
@@ -2830,7 +2853,7 @@ fn emitFunction(
                                 user_out_blocks.append(alloc, .{
                                     .var_id = vid,
                                     .struct_id = pointee,
-                                    .block_loc = loc orelse 0,
+                                    .block_loc = loc orelse (hlslMemberLocation(module, pointee, 0) orelse 0),
                                 }) catch {};
                             }
                         }
@@ -2957,18 +2980,27 @@ fn emitFunction(
             var mi: u32 = 0;
             while (mi < nmembers) : (mi += 1) {
                 if (!perVertexMemberWritten(module, pvid, mi)) continue;
-                const mbi = hlslMemberBuiltin(module, pv_struct, mi) orelse continue;
-                switch (mbi) {
-                    .position => {
-                        var mname_buf: [32]u8 = undefined;
-                        const mname = hlslGetMemberName(module, pv_struct, mi, &mname_buf);
-                        const mtype_id = sdef.?.words[2 + mi];
-                        const tn = try hlslType(module, mtype_id, names, alloc);
-                        try w.print("    {s} {s} : {s};\n", .{ tn, mname, posSemantic(shader_model) });
-                    },
-                    .point_size => {}, // dropped: no HLSL point-size semantic
-                    else => return error.UnsupportedOp, // written ClipDistance/CullDistance
+                var mname_buf: [32]u8 = undefined;
+                const mname = hlslGetMemberName(module, pv_struct, mi, &mname_buf);
+                const mbi = hlslMemberBuiltin(module, pv_struct, mi);
+                // Member-name fallback: the frontend doesn't decorate gl_PerVertex
+                // members BuiltIn (interface-block form), so detect position /
+                // point_size by name when no decoration is present (MSL 71fe0c6).
+                const is_pos = if (mbi) |b| b == .position else std.mem.eql(u8, mname, "gl_Position");
+                const is_ps = if (mbi) |b| b == .point_size else std.mem.eql(u8, mname, "gl_PointSize");
+                if (is_pos) {
+                    const mtype_id = sdef.?.words[2 + mi];
+                    const tn = try hlslType(module, mtype_id, names, alloc);
+                    try w.print("    {s} {s} : {s};\n", .{ tn, mname, posSemantic(shader_model) });
+                } else if (is_ps) {
+                    // dropped: no HLSL point-size semantic
+                } else if (mbi) |b| {
+                    switch (b) {
+                        .clip_distance, .cull_distance => return error.UnsupportedOp,
+                        else => {}, // not a representable vertex-output builtin; skip
+                    }
                 }
+                // mbi == null and not a gl_Position/gl_PointSize name: unknown member, skip
             }
         }
         // User output interface blocks: flatten each member into VS_OUTPUT at
@@ -3021,8 +3053,15 @@ fn emitFunction(
                 if (inst.op != .AccessChain or inst.words.len < 5 or inst.words[3] != pvid) continue;
                 const idx_def = getDef(module, inst.words[4]) orelse continue;
                 if (idx_def.op != .Constant or idx_def.words.len < 4) continue;
-                const mbi = hlslMemberBuiltin(module, pv_struct, idx_def.words[3]) orelse continue;
-                if (mbi == .point_size) pv_dropped.put(inst.words[2], {}) catch {};
+                const mi = idx_def.words[3];
+                const mbi = hlslMemberBuiltin(module, pv_struct, mi);
+                // Member-name fallback (frontend omits MemberDecorate BuiltIn on
+                // gl_PerVertex in interface-block form); mirrors MSL 71fe0c6.
+                const is_ps = if (mbi) |b| b == .point_size else blk: {
+                    var nb: [32]u8 = undefined;
+                    break :blk std.mem.eql(u8, hlslGetMemberName(module, pv_struct, mi, &nb), "gl_PointSize");
+                };
+                if (is_ps) pv_dropped.put(inst.words[2], {}) catch {};
             }
         }
         // User output interface blocks: route each block var -> "output" so
