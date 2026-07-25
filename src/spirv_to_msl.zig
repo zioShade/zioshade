@@ -3252,7 +3252,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // is_frag + non-empty stage inputs, so wintty (no varyings) is byte-identical.
     // The stage-in struct was already emitted above from the captured decl names,
     // so this body-only rename does not affect field spellings.
-    g_has_stage_in = is_frag and stage_inputs.items.len > 0;
+    g_has_stage_in = stage_inputs.items.len > 0;
     defer g_has_stage_in = false;
     // #489: thread the fragment output into helpers (set type+name; read at the helper
     // signature + OpFunctionCall). Null when there is no Location-0 color output. The
@@ -4819,7 +4819,7 @@ fn emitFunction(
     if (fi.op != .Function or fi.words.len < 5) return;
     const fti = getDef(m, fi.words[4]) orelse return;
     const rtid = fti.words[2];
-    const rt = try mslType(m, rtid, names, alloc);
+    const rt = mslValueType(m, rtid, names, alloc) catch try mslType(m, rtid, names, alloc);
     const is_frag = is_entry and m.execution_model == .Fragment;
     const is_vertex = is_entry and m.execution_model == .Vertex;
     // Fragment shader interlock (SPV_EXT_fragment_shader_interlock): when present, the
@@ -5696,10 +5696,10 @@ fn emitFunction(
         try w.print("{s} {s}", .{ tex.msl_type, tex.name });
         if (!tex.is_storage) try w.print(", sampler {s}Smplr", .{tex.name});
     }
-    // #476: a fragment helper that reads a location varying (aliased to `in.<name>`)
-    // needs the stage-in struct in scope. Thread `main0_in in` uniformly, matching
-    // the call-site append gated on g_has_stage_in (is_frag + non-empty inputs).
-    if (m.execution_model == .Fragment and stage_inputs.items.len > 0) {
+    // #476: a non-entry helper that reads a location varying (aliased to `in.<name>`)
+    // needs the stage-in struct in scope. Thread `main0_in in` uniformly (fragment OR
+    // vertex with varyings), matching the call-site append gated on g_has_stage_in.
+    if (stage_inputs.items.len > 0) {
         if (!first_param) try w.writeAll(", ");
         first_param = false;
         try w.writeAll("main0_in in");
@@ -6978,7 +6978,7 @@ fn emitInstruction(
         .Undef => {
             // OpUndef: declare with default initialization
             if (inst.words.len >= 3) {
-                const rtt = try mslType(m, inst.words[1], names, alloc);
+                const rtt = mslValueType(m, inst.words[1], names, alloc) catch try mslType(m, inst.words[1], names, alloc);
                 const rn = names.get(inst.words[2]) orelse "v";
                 try w.print("    {s} {s} = {{}};\n", .{ rtt, rn });
             }
@@ -8173,7 +8173,7 @@ fn emitInstruction(
             if (is_void) {
                 try w.print("    {s}(", .{cfn});
             } else {
-                const rtt = try mslType(m, inst.words[1], names, alloc);
+                const rtt = mslValueType(m, inst.words[1], names, alloc) catch try mslType(m, inst.words[1], names, alloc);
                 try w.print("    {s} {s} = {s}(", .{ rtt, rn, cfn });
             }
             var first_arg = true;
