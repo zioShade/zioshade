@@ -2361,6 +2361,20 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
         }
     }
+    // Honest-error: clip/cull distance as a vertex OUTPUT builtin isn't promoted by #471
+    // for the direct-Output-variable form. (#170)
+    if (module.execution_model == .Vertex) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+            if (getDecVal(&decs, inst.words[2], .built_in)) |bi| {
+                const ebi: spirv.BuiltIn = @enumFromInt(bi);
+                if (ebi == .clip_distance or ebi == .cull_distance) {
+                    return error.UnsupportedBuiltinStageOutput;
+                }
+            }
+        }
+    }
 
     // Promote read-only const arrays so a runtime index resolves to a declared
     // module-scope `constant` (emitted below): alias each const-initialized
