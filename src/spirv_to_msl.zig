@@ -5273,9 +5273,16 @@ fn emitFunction(
             }
         } else {
             // Legacy per-resource binding: storage buffers + uniform buffers.
+            // Collision resolution: two resources at the same (set, binding) would
+            // share a Metal [[buffer(N)]] slot — Metal rejects that. Bump the
+            // second to a free slot (spirv-cross also assigns unique slots).
+            var used_buf_slots = std.AutoHashMap(u32, void).init(alloc);
+            defer used_buf_slots.deinit();
             for (storage_buffers.items) |sb| {
                 if (!first_param) try w.writeAll(", ");
-                const sb_b = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
+                var sb_b = resolveMslSlot(resource_bindings, binding_shift, sb.descriptor_set, sb.binding);
+                while (used_buf_slots.contains(sb_b)) sb_b += 1;
+                try used_buf_slots.put(sb_b, {});
                 // Reference (`device T&`), NOT pointer (`device T*`): the body's
                 // access-chain emitter uses `.member` (dot), which is only valid
                 // on a reference — a pointer needs `->`. This mirrors the working
@@ -5287,7 +5294,9 @@ fn emitFunction(
             }
             for (cbuffers.items) |cb| {
                 if (!first_param) try w.writeAll(", ");
-                const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
+                var cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
+                while (used_buf_slots.contains(cb_b)) cb_b += 1;
+                try used_buf_slots.put(cb_b, {});
                 try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{ cb.name, cb.name, cb_b });
                 first_param = false;
             }
