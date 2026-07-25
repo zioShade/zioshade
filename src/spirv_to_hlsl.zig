@@ -7517,6 +7517,19 @@ fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32
 
 fn emitStd450(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {
     const rt = try hlslType(module, inst.words[1], names, alloc);
+    // #488 (HLSL): Normalize is vector-only — a SCALAR normalize is ambiguous
+    // (glslang rejects it). Lower to `v / abs(v)` (= sign(v)); vector forms stay
+    // normalize(). scalar-std450-distance-length-normalize in the spirv-cross corpus.
+    if (instruction == 69) {
+        if (getDef(module, inst.words[1])) |rty| {
+            if (rty.op == .TypeFloat) {
+                const v = names.get(inst.words[5]) orelse "x";
+                const rn = names.get(inst.words[2]) orelse "v";
+                try w.print("    {s} {s} = {s} / abs({s});\n", .{ rt, rn, v, v });
+                return;
+            }
+        }
+    }
     // #488 (HLSL port of the MSL fix): HLSL's reflect/refract are VECTOR-only -- a
     // SCALAR call is ambiguous under implicit type conversion (glslang rejects it).
     // Lower scalar reflect/refract to the closed-form formula; vector forms stay as
