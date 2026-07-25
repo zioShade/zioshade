@@ -273,6 +273,24 @@ test "HLSL: user output interface block flattens into VS_OUTPUT" {
     try assertContains(hlsl, "SV_Position");
 }
 
+// A user output block whose variable carries no Location but whose member does
+// (layout(location=N) on the member) must place the member at TEXCOORD<N>, not
+// TEXCOORD0 — the flatten falls back to the first member's OpMemberDecorate
+// Location. (Mirrors MSL 71fe0c6 part 4.)
+test "HLSL: user output block member Location used when block var lacks one" {
+    const spirv = compileVertToSpirv("block_member_loc",
+        \\#version 450
+        \\layout(location=0) in vec4 pos;
+        \\out VertOut { layout(location=3) vec4 vBar; } vo;
+        \\void main(){ gl_Position = pos; vo.vBar = vec4(5.0); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "vBar : TEXCOORD3");
+    try assertContains(hlsl, "output.vBar");
+}
+
 // #472-audit: SPIR-V OpSwitch cases do NOT fall through (each terminates in
 // OpBranch %merge), but C-family `switch` falls through without `break;`. HLSL was
 // emitting braced case bodies with NO break -> `case 0` fell into `case 1` (and since
@@ -9360,8 +9378,10 @@ test "T358.1: conditional discard" {
     try assertContains(hlsl, "float4");
 }
 
-test "T359.1: gl_PointSize vertex output" {
-    // Tests gl_PointSize output in vertex shader
+test "T359.1: gl_PerVertex vertex output (gl_Position -> SV_Position, gl_PointSize dropped)" {
+    // gl_PerVertex output block. The frontend emits the block without
+    // MemberDecorate BuiltIn, so it is detected by struct name and its members
+    // by name (gl_Position -> position -> SV_Position, gl_PointSize dropped).
     const source =
         \\#version 450
         \\layout(location = 0) in vec4 pos;
@@ -9373,7 +9393,9 @@ test "T359.1: gl_PointSize vertex output" {
     ;
     const hlsl = try compileToHlslStage(source, .vertex);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "gl_PerVertex");
+    try assertContains(hlsl, "SV_Position");
+    // gl_PointSize is unrepresentable in HLSL and dropped entirely.
+    try assertNotContains(hlsl, "gl_PointSize");
 }
 
 test "T360.1: integer texture sampling" {
