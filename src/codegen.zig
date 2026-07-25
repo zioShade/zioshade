@@ -426,9 +426,18 @@ fn generateInternal(
 /// non-block arrays keep their previous dedup behavior unchanged. Both
 /// `ensureType`'s `.array` branch and `emitArrayStrideRecursive` MUST agree on
 /// this formula, or the stride lookup misses the type it decorated.
-fn arrayCacheKey(base_id: u32, size: u32, layout: ?LayoutKind) u64 {
+fn arrayCacheKey(base_id: u32, size: u32, layout: ?LayoutKind, size_name: ?[]const u8) u64 {
     const base = (@as(u64, base_id) << 32) | @as(u64, size);
-    const disc: u64 = if (layout) |k| @as(u64, @intFromEnum(k)) + 1 else 0;
+    var disc: u64 = if (layout) |k| @as(u64, @intFromEnum(k)) + 1 else 0;
+    // Spec-constant arrays all have size=0; fold the size_name into the key so
+    // int[a] and int[b] are distinct cached types (each its own length/ArrayStride).
+    // Without this they collide on (base, 0, layout) and the second reuses the first's
+    // type -- e.g. w[b] silently becomes int[a].
+    if (size_name) |sn| {
+        var h: u64 = 0xcbf29ce484222325;
+        for (sn) |c| h = (h ^ c) *% 0x100000001b3;
+        disc = disc *% 31 +% h;
+    }
     return base ^ (disc *% 0x9E3779B97F4A7C15);
 }
 
@@ -1679,7 +1688,7 @@ const Codegen = struct {
                 const elem_id = try self.ensureStorageImageBaseType(arr.base.*, fmt);
                 // Key the array on the format-aware element id so two arrays of
                 // distinct-format images stay distinct.
-                const cache_key = arrayCacheKey(elem_id, arr.size, self.array_layout_ctx);
+                const cache_key = arrayCacheKey(elem_id, arr.size, self.array_layout_ctx, arr.size_name);
                 if (self.emitted_array_types.get(cache_key)) |cached| return cached;
                 const id = self.allocId();
                 if (arr.size == 0) {
@@ -3091,7 +3100,7 @@ const Codegen = struct {
                 // an std140 block and of an std430 block become DISTINCT array
                 // types — each gets its own ArrayStride. Outside a Block the
                 // context is null and this reduces to the original (base, size) key.
-                const cache_key = arrayCacheKey(base_id, arr.size, self.array_layout_ctx);
+                const cache_key = arrayCacheKey(base_id, arr.size, self.array_layout_ctx, arr.size_name);
                 if (self.emitted_array_types.get(cache_key)) |cached_id| {
                     return cached_id;
                 }
@@ -4106,7 +4115,7 @@ const Codegen = struct {
         // shared (unsplit) and the emitted_array_stride guard below keeps only the
         // first layout's stride — the documented cross-layout nested-struct
         // follow-up, not a per-level bug.
-        const cache_key = arrayCacheKey(base_type_id, arr.size, self.array_layout_ctx);
+        const cache_key = arrayCacheKey(base_type_id, arr.size, self.array_layout_ctx, arr.size_name);
         if (self.emitted_array_types.get(cache_key)) |array_type_id| {
             if (!self.emitted_array_stride.contains(array_type_id)) {
                 const stride = self.layoutArrayStride(ty, kind);
