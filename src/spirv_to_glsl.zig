@@ -210,6 +210,13 @@ fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator
             block.print(alloc, "#extension GL_EXT_texture_shadow_lod : require\n", .{}) catch {};
         }
     }
+    // OpSelect over INTEGER operands lowers to mix(); core GLSL mix is genType=float
+    // only, so integer mix needs GL_EXT_shader_integer_mix. (Flag set in the Select
+    // handler when the result type is int/uint scalar/vector.)
+    if (g_int_mix_needed and !seen.contains("GL_EXT_shader_integer_mix")) {
+        seen.put("GL_EXT_shader_integer_mix", {}) catch {};
+        block.print(alloc, "#extension GL_EXT_shader_integer_mix : require\n", .{}) catch {};
+    }
     if (block.items.len == 0) return;
     const nl = std.mem.indexOfScalar(u8, output.items, '\n') orelse return;
     try output.insertSlice(alloc, nl + 1, block.items);
@@ -815,6 +822,11 @@ threadlocal var g_hoisted_ids: ?*const std.AutoHashMap(u32, void) = null;
 /// Re-entrancy guard for the strip-the-type re-render in emitInstruction.
 threadlocal var g_hoist_stripping: bool = false;
 
+// Set when an OpSelect lowers to integer mix() (bvec selector over int/uint
+// operands) — needs GL_EXT_shader_integer_mix (core GLSL mix is genType=float
+// only). Read by spliceRequiredExtensions.
+threadlocal var g_int_mix_needed: bool = false;
+
 /// GLSL type name for a loop-phi variable declaration — STATIC strings only (no
 /// allocation), for the scalar/vector types loop phis realistically carry.
 fn phiTypeNameGLSL(m: *const ParsedModule, type_id: u32) []const u8 {
@@ -1140,6 +1152,7 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // accepted — anything else is a hard error rather than an invalid #version.
     if (options.es) return error.EsslUnsupported;
     if (!isSupportedGlslVersion(options.version)) return error.UnsupportedGlslVersion;
+    g_int_mix_needed = false; // per-invocation reset (threadlocal)
 
     // Honest-error: PhysicalStorageBufferAddresses (buffer_reference / physical pointers)
     // has no desktop-GLSL equivalent — the physical-pointer syntax is unrepresentable.
@@ -4182,7 +4195,19 @@ fn emitInstruction(
                 break :blk false;
             };
             if (is_bvec) {
-                // mix(false_val, true_val, bvec_condition) — GLSL mix with bvec selector
+                // mix(false_val, true_val, bvec_condition) — GLSL mix with bvec selector.
+                // For INTEGER operands this needs GL_EXT_shader_integer_mix (core mix is
+                // genType=float only); flag it so the post-pass emits the extension.
+                const result_is_int = blk: {
+                    const rd = getDef(m, inst.words[1]) orelse break :blk false;
+                    if (rd.op == .TypeInt) break :blk true;
+                    if (rd.op == .TypeVector) {
+                        const ed = getDef(m, rd.words[2]) orelse break :blk false;
+                        break :blk ed.op == .TypeInt;
+                    }
+                    break :blk false;
+                };
+                if (result_is_int) g_int_mix_needed = true;
                 try w.print("    {s} {s} = mix({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", false_name, true_name, cond_name });
             } else {
                 try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", cond_name, true_name, false_name });
