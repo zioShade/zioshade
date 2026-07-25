@@ -3132,6 +3132,29 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                 if (arrayLoadedAsValue(&module, inst.words[2])) value_copied_consts.put(init_id, {}) catch {};
             }
         }
+        // An OpConstantComposite array referenced BY NAME in a function body
+        // (Load/AccessChain/CompositeExtract/… operand) but not caught by the
+        // local/Private analysis above (e.g. a const array indexed directly without
+        // a promoting local) still needs a module-scope declaration, or the body
+        // reference is an undeclared identifier. GLSL emits these unconditionally;
+        // surface them here. Default to the spvUnsafeArray spelling, which supports
+        // both [] indexing and whole-array copy, so it is valid however it is used.
+        for (module.instructions) |inst| {
+            switch (inst.op) {
+                .Load, .AccessChain, .CompositeExtract, .CompositeInsert, .VectorShuffle, .CompositeConstruct, .Select, .CopyObject => {
+                    for (inst.words[3..]) |op| {
+                        if (named_consts.contains(op)) continue;
+                        const cdef = getDef(&module, op) orelse continue;
+                        if (cdef.op != .ConstantComposite or cdef.words.len <= 3) continue;
+                        const tdef = getDef(&module, cdef.words[1]) orelse continue;
+                        if (tdef.op != .TypeArray) continue;
+                        named_consts.put(op, {}) catch {};
+                        value_copied_consts.put(op, {}) catch {};
+                    }
+                },
+                else => {},
+            }
+        }
         var emitted_const_array = false;
         for (module.instructions) |inst| {
             if (inst.op != .ConstantComposite or inst.words.len <= 3) continue;
