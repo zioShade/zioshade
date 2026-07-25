@@ -8302,6 +8302,30 @@ fn emitStd450(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), 
             }
         }
     }
+    // #488: Metal's length/distance are VECTOR-only -- a SCALAR call is ambiguous.
+    // Lower scalar length(v) -> abs(v), distance(a,b) -> abs(a-b). length/distance
+    // return float for BOTH scalar and vector operands, so the RESULT type can't
+    // distinguish them -- check the OPERAND type instead. Vector forms stay as the
+    // intrinsics.
+    if (instruction == 66 or instruction == 67) {
+        const operand_is_scalar = blk: {
+            const oty = common.getTypeOf(m, inst.words[5]) orelse break :blk false;
+            const oi = getDef(m, oty) orelse break :blk false;
+            break :blk oi.op == .TypeFloat;
+        };
+        if (operand_is_scalar) {
+            const rn = names.get(inst.words[2]) orelse "v";
+            if (instruction == 66) {
+                const v = names.get(inst.words[5]) orelse "x";
+                try w.print("    {s} {s} = abs({s});\n", .{ rtt, rn, v });
+            } else {
+                const a = names.get(inst.words[5]) orelse "x";
+                const b = names.get(inst.words[6]) orelse "y";
+                try w.print("    {s} {s} = abs({s} - {s});\n", .{ rtt, rn, a, b });
+            }
+            return;
+        }
+    }
     if (instruction == 71 or instruction == 72) {
         if (getDef(m, inst.words[1])) |rty| {
             if (rty.op == .TypeFloat) {
