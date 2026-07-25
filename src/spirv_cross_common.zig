@@ -1162,7 +1162,11 @@ pub fn commonGetArraySuffix(instructions: anytype, id_defs: anytype, ptr_type_id
             const len_id = pt_inst.words[3];
             const len_def = localGetDef(instructions, id_defs, len_id);
             if (len_def) |ld| {
-                if (ld.op == .Constant and ld.words.len > 3) {
+                // OpSpecConstant has the same word layout as OpConstant (words[3] = the
+                // literal default), so a spec-constant-length array specializes to its
+                // default size — a valid compile-time dimension. (OpSpecConstantOp is
+                // excluded: words[3] is an opcode, not a literal.) #475
+                if ((ld.op == .Constant or ld.op == .SpecConstant) and ld.words.len > 3) {
                     var buf: [32]u8 = undefined;
                     const s = std.fmt.bufPrint(&buf, "[{d}]", .{ld.words[3]}) catch return "";
                     return try std.heap.page_allocator.dupe(u8, s);
@@ -1182,7 +1186,7 @@ pub fn commonGetArraySuffix(instructions: anytype, id_defs: anytype, ptr_type_id
         const len_id = pt_inst.words[3];
         const len_def = localGetDef(instructions, id_defs, len_id);
         if (len_def) |ld| {
-            if (ld.op == .Constant and ld.words.len > 3) {
+            if ((ld.op == .Constant or ld.op == .SpecConstant) and ld.words.len > 3) {
                 dims[dim_count] = ld.words[3];
                 dim_count += 1;
             } else break;
