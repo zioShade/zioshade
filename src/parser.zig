@@ -1741,12 +1741,21 @@ const Parser = struct {
                 var member_ty_final = member_ty;
                 var member_arr_dims: std.ArrayListUnmanaged(u32) = .empty;
                 defer member_arr_dims.deinit(self.alloc);
+                var member_arr_size_name: ?[]const u8 = null;
                 while (self.current().tag == .l_bracket) {
                     _ = self.advance();
                     const size_tok = self.current();
                     var arr_size: u32 = 0;
                     if (size_tok.tag == .int_literal) {
                         arr_size = std.fmt.parseInt(u32, self.text(size_tok), 0) catch 0;
+                        _ = self.advance();
+                    } else if (size_tok.tag == .identifier) {
+                        // Spec-constant array size (e.g. `int m[a];` where a is a
+                        // SpecId const) -- capture the name; codegen resolves it to the
+                        // OpSpecConstant length. Without this the size stays 0 and the
+                        // member is dropped. Block members already handle this; struct
+                        // members did not.
+                        member_arr_size_name = self.text(size_tok);
                         _ = self.advance();
                     }
                     _ = self.expect(.r_bracket) catch break;
@@ -1757,7 +1766,7 @@ const Parser = struct {
                     while (i > 0) {
                         i -= 1;
                         const arr_base = try self.createType(member_ty_final);
-                        member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i] } };
+                        member_ty_final = .{ .array = .{ .base = arr_base, .size = member_arr_dims.items[i], .size_name = member_arr_size_name } };
                     }
                 }
                 try members.append(self.alloc, .{
