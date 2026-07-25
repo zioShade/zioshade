@@ -1226,10 +1226,13 @@ pub fn spirvToHLSL(
     for (module.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-        if (sc != .Input) continue;
+        if (sc != .Input and sc != .Output) continue;
         const bi = getDecorationValue(&decorations, inst.words[2], .built_in) orelse continue;
         const ebi: spirv.BuiltIn = @enumFromInt(bi);
-        if (ebi == .clip_distance or ebi == .cull_distance) return error.UnsupportedBuiltinStageInput;
+        if (ebi == .clip_distance or ebi == .cull_distance) {
+            if (sc == .Output) return error.UnsupportedBuiltinStageOutput;
+            return error.UnsupportedBuiltinStageInput;
+        }
     }
 
     // Honest-error pre-check: a Vulkan SEPARATE sampler (`uniform sampler s;` used with
