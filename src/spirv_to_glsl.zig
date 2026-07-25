@@ -411,12 +411,20 @@ fn structMemberBuiltin(m: *const ParsedModule, struct_id: u32, member_idx: u32) 
 
 /// True when `struct_id` is a built-in interface block (e.g. gl_PerVertex): a
 /// struct with at least one member carrying a BuiltIn decoration.
-fn isBuiltinBlockType(m: *const ParsedModule, struct_id: u32) bool {
+fn isBuiltinBlockType(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), struct_id: u32) bool {
     for (m.instructions) |inst| {
         if (inst.op == .MemberDecorate and inst.words.len >= 5 and inst.words[1] == struct_id) {
             const dec: spirv.Decoration = @enumFromInt(inst.words[3]);
             if (dec == .built_in) return true;
         }
+    }
+    // Name fallback: the gl_PerVertex builtin block, whose members the frontend
+    // does not decorate BuiltIn. Detected by the reserved struct name. Without
+    // this the block is declared as a tagged `out` varying and member access keeps
+    // the instance prefix, which glslang rejects (it must be the canonical
+    // `out gl_PerVertex { … };` redeclaration with bare gl_* member access).
+    if (names.get(struct_id)) |sname| {
+        if (std.mem.eql(u8, sname, "gl_PerVertex")) return true;
     }
     return false;
 }
@@ -425,9 +433,9 @@ fn isBuiltinBlockType(m: *const ParsedModule, struct_id: u32) bool {
 /// block (gl_PerVertex). Such variables must NOT be declared as `out`/`in`
 /// varyings — their members (gl_Position, …) are predefined in GLSL — and member
 /// access through them must lower to the bare gl_* name (no block instance prefix).
-fn isBuiltinBlockVar(m: *const ParsedModule, var_id: u32) bool {
+fn isBuiltinBlockVar(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), var_id: u32) bool {
     const pointee = resolvePointee(m, var_id) orelse return false;
-    return isBuiltinBlockType(m, pointee);
+    return isBuiltinBlockType(m, names, pointee);
 }
 
 /// Map a gl_PerVertex-style BuiltIn member to its predefined GLSL name. Returns
@@ -452,7 +460,7 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
     // A gl_PerVertex-style built-in block: emit no base instance — its members
     // lower to bare gl_* names (handled per-index below), matching spirv-cross.
-    const base_is_builtin_block = isBuiltinBlockVar(m, base_id);
+    const base_is_builtin_block = isBuiltinBlockVar(m, names, base_id);
     // An anonymous SSBO block: suppress the (empty) instance base and emit the first
     // member level bare (`a`), never `.a` — glslang rejects the leading dot. (#304 follow-up)
     const base_is_anon = isAnonymousSSBOVar(m, names, base_id);
@@ -492,7 +500,9 @@ fn buildAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                         // Use struct member name for nested struct access
                         var mname_buf: [32]u8 = undefined;
                         const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                        if (anon_level) {
+                        if (base_is_builtin_block) {
+                            writer.writeAll(mname);
+                        } else if (anon_level) {
                             writer.writeAll(mname);
                             anon_level = false;
                         } else writer.print(".{s}", .{mname});
@@ -614,7 +624,7 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     // Bare-array Uniform vars are not blocks — index directly (`w[2]`), #289.
     const base_is_cb = isUniformBlockVar(m, base_id);
     const cb_prefix = if (base_is_cb) names.get(base_id) orelse "Globals" else "";
-    const base_is_builtin_block = isBuiltinBlockVar(m, base_id);
+    const base_is_builtin_block = isBuiltinBlockVar(m, names, base_id);
     const base_is_anon = isAnonymousSSBOVar(m, names, base_id);
     if (!base_is_cb and !base_is_builtin_block and !base_is_anon) try w.writeAll(base_name);
     var cur_type: ?u32 = resolvePointee(m, base_id);
@@ -650,7 +660,12 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
                     } else {
                         var mname_buf: [32]u8 = undefined;
                         const mname = getMemberName(m, cur_type.?, val, &mname_buf);
-                        if (anon_level) {
+                        if (base_is_builtin_block) {
+                            // gl_PerVertex member with no BuiltIn decoration (frontend
+                            // gap): emit the bare member name (gl_Position), no dot --
+                            // the block instance base was suppressed above.
+                            try w.writeAll(mname);
+                        } else if (anon_level) {
                             try w.writeAll(mname);
                             anon_level = false;
                         } else try w.print(".{s}", .{mname});
@@ -2399,7 +2414,7 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         if (sc != .Input) continue;
         const ivid = inst.words[2];
         if (getDecVal(decs, ivid, .built_in) != null) continue;
-        if (isBuiltinBlockVar(m, ivid)) continue;
+        if (isBuiltinBlockVar(m, names, ivid)) continue;
         const in_name = names.get(ivid) orelse continue;
         // gl_WorkGroupSize is a predefined GLSL compute built-in, implicitly available
         // from `layout(local_size_x = …)`. Redeclaring it as an Input is doubly illegal
@@ -2463,7 +2478,7 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         if (sc != .Output) continue;
         const ovid = inst.words[2];
         if (getDecVal(decs, ovid, .built_in) != null) continue;
-        if (isBuiltinBlockVar(m, ovid)) continue;
+        if (isBuiltinBlockVar(m, names, ovid)) continue;
         const on = names.get(ovid) orelse "_out";
         const drop_loc = dropVaryingLocation(version, m.execution_model, .out);
         if (ioVarStructTypeId(m, inst.words[1])) |sid| {
