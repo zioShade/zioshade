@@ -3956,7 +3956,7 @@ fn mslMemberBuiltin(m: *const ParsedModule, struct_id: u32, member_idx: u32) ?sp
 
 /// If `var_id` is an Output var whose pointee struct has member 0 decorated
 /// BuiltIn Position, returns that struct type id — glslang's gl_PerVertex Block.
-fn perVertexBlockStructType(m: *const ParsedModule, var_id: u32) ?u32 {
+fn perVertexBlockStructType(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []const u8), var_id: u32) ?u32 {
     const vdef = getDef(m, var_id) orelse return null;
     if (vdef.op != .Variable or vdef.words.len < 4) return null;
     if (@as(spirv.StorageClass, @enumFromInt(vdef.words[3])) != .Output) return null;
@@ -3965,8 +3965,15 @@ fn perVertexBlockStructType(m: *const ParsedModule, var_id: u32) ?u32 {
     const sty = ptr.words[3];
     const sdef = getDef(m, sty) orelse return null;
     if (sdef.op != .TypeStruct) return null;
-    if ((mslMemberBuiltin(m, sty, 0) orelse return null) != .position) return null;
-    return sty;
+    if (mslMemberBuiltin(m, sty, 0)) |mbi| {
+        if (mbi == .position) return sty;
+    }
+    // Name fallback: the frontend does not decorate gl_PerVertex members BuiltIn,
+    // so detect the block by its reserved struct name (mirrors the GLSL #471 fix).
+    if (names.get(sty)) |sname| {
+        if (std.mem.eql(u8, sname, "gl_PerVertex")) return sty;
+    }
+    return null;
 }
 
 /// True if member `member_idx` of block var `var_id` is written (an
@@ -4206,18 +4213,20 @@ fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
         if (inst.op != .Variable or inst.words.len < 4) continue;
         if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
         const bvar = inst.words[2];
-        const sty = perVertexBlockStructType(m, bvar) orelse continue;
+        const sty = perVertexBlockStructType(m, names, bvar) orelse continue;
         const sdef = getDef(m, sty) orelse continue;
         const nmem: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
         var mi: u32 = 0;
         while (mi < nmem) : (mi += 1) {
             if (!perVertexMemberWritten(m, bvar, mi)) continue;
-            const mbi = mslMemberBuiltin(m, sty, mi) orelse continue;
-            const is_pos = mbi == .position;
-            const is_ps = mbi == .point_size;
-            if (!is_pos and !is_ps) continue; // Clip/Cull handled in the entry
             var nbuf: [32]u8 = undefined;
             const mname = getMemberName(m, sty, mi, &nbuf);
+            // Member decoration first; fallback to member NAME for the frontend gap
+            // (the frontend doesn't emit MemberDecorate BuiltIn on gl_PerVertex).
+            const mbi = mslMemberBuiltin(m, sty, mi);
+            const is_pos = if (mbi) |b| b == .position else std.mem.eql(u8, mname, "gl_Position");
+            const is_ps = if (mbi) |b| b == .point_size else std.mem.eql(u8, mname, "gl_PointSize");
+            if (!is_pos and !is_ps) continue; // Clip/Cull handled in the entry
             outputs.append(alloc, .{
                 .var_id = bvar,
                 .name = alloc.dupe(u8, mname) catch continue,
@@ -4243,14 +4252,28 @@ fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
         if (inst.op != .Variable or inst.words.len < 4) continue;
         if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
         const bvar = inst.words[2];
-        if (perVertexBlockStructType(m, bvar) != null) continue; // gl_PerVertex, above
+        if (perVertexBlockStructType(m, names, bvar) != null) continue; // gl_PerVertex, above
         const ptr = getDef(m, inst.words[1]) orelse continue;
         if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
         const sty = ptr.words[3];
         const sdef = getDef(m, sty) orelse continue;
         if (sdef.op != .TypeStruct) continue;
-        const block_loc = getDecVal(decs, bvar, .location) orelse continue;
         const nmem: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
+        // Block var Location first; if absent, check the first member's Location
+        // (some blocks put Location on members, not the block var).
+        var block_loc: ?u32 = getDecVal(decs, bvar, .location);
+        if (block_loc == null and nmem > 0) {
+            for (m.instructions) |inst2| {
+                if (inst2.op != .MemberDecorate or inst2.words.len < 5) continue;
+                if (inst2.words[1] != sty or inst2.words[2] != 0) continue;
+                if (@as(spirv.Decoration, @enumFromInt(inst2.words[3])) == .location) {
+                    block_loc = inst2.words[4];
+                    break;
+                }
+            }
+        }
+        if (block_loc == null) continue;
+        const bl: u32 = block_loc.?;
         var mi: u32 = 0;
         while (mi < nmem) : (mi += 1) {
             var nbuf: [32]u8 = undefined;
@@ -4259,7 +4282,7 @@ fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
                 .var_id = bvar,
                 .name = alloc.dupe(u8, mname) catch continue,
                 .type_id = sdef.words[2 + mi],
-                .location = block_loc + mi,
+                .location = bl + mi,
                 .is_position = false,
                 .from_block = true,
             }) catch {};
@@ -5477,33 +5500,32 @@ fn emitFunction(
             const aliased = std.fmt.allocPrint(alloc, "out.{s}", .{so.name}) catch continue;
             if (names.fetchPut(so.var_id, aliased) catch null) |old| alloc.free(old.value);
         }
-        // #471: route the gl_PerVertex block var to the `out` instance so
-        // OpAccessChain <block> <member> resolves to `out.gl_Position` /
-        // `out.gl_PointSize` (both promoted as main0_out fields above). Written
-        // ClipDistance/CullDistance affect rasterization and have no field yet, so
-        // honest-error rather than emit a dangling store (promotion is a follow-up).
+        // Route ALL from_block block vars (gl_PerVertex, user io-blocks) to the
+        // `out` instance so OpAccessChain <block> <member> resolves to
+        // out.<member>. Previously only the FIRST from_block var was routed —
+        // a shader with TWO output blocks (gl_PerVertex + VertOut) left the second
+        // undeclared.
         {
-            var pv_block_var: ?u32 = null;
+            var seen_block_vars = std.AutoHashMap(u32, void).init(alloc);
+            defer seen_block_vars.deinit();
             for (stage_outputs.items) |so| {
-                if (so.from_block) {
-                    pv_block_var = so.var_id;
-                    break;
-                }
-            }
-            if (pv_block_var) |bv| {
-                if (perVertexBlockStructType(m, bv)) |sty| {
+                if (!so.from_block) continue;
+                if (seen_block_vars.contains(so.var_id)) continue;
+                seen_block_vars.put(so.var_id, {}) catch {};
+                // Clip/cull honest-error for gl_PerVertex blocks.
+                if (perVertexBlockStructType(m, names, so.var_id)) |sty| {
                     const sdef = getDef(m, sty).?;
                     const nmem: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
                     var mi: u32 = 0;
                     while (mi < nmem) : (mi += 1) {
                         const mbi = mslMemberBuiltin(m, sty, mi) orelse continue;
-                        if ((mbi == .clip_distance or mbi == .cull_distance) and perVertexMemberWritten(m, bv, mi)) {
+                        if ((mbi == .clip_distance or mbi == .cull_distance) and perVertexMemberWritten(m, so.var_id, mi)) {
                             return error.UnsupportedBuiltin;
                         }
                     }
                 }
                 const routed = try alloc.dupe(u8, "out");
-                if (names.fetchPut(bv, routed) catch null) |old| alloc.free(old.value);
+                if (names.fetchPut(so.var_id, routed) catch null) |old| alloc.free(old.value);
             }
         }
 
