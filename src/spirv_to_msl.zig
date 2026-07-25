@@ -2815,7 +2815,21 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             } else if (so.is_point_size) {
                 try w.print("    {s} {s} [[point_size]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name });
             } else {
-                try w.print("    {s} {s} [[user(locn{d})]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name, so.location });
+                // Matrix-typed vertex output: Metal rejects matrix main0_out
+                // fields ('field of illegal type vec<T,R>[C]'); flatten to per-column
+                // vectors (spirv-cross idiom: m22_0, m22_1, ...). The store is
+                // scattered to columns in the Store handler.
+                const mty = getDef(&module, so.type_id);
+                if (mty != null and mty.?.op == .TypeMatrix and mty.?.words.len >= 4) {
+                    const cols = mty.?.words[3];
+                    const vt = try mslType(&module, mty.?.words[2], &names, aa);
+                    var ci: u32 = 0;
+                    while (ci < cols) : (ci += 1) {
+                        try w.print("    {s} {s}_{d} [[user(locn{d})]];\n", .{ vt, so.name, ci, so.location + ci });
+                    }
+                } else {
+                    try w.print("    {s} {s} [[user(locn{d})]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name, so.location });
+                }
             }
         }
         // Metal requires every vertex function's return struct to carry a
@@ -6913,6 +6927,29 @@ fn emitInstruction(
                 if (ptr.op == .AccessChain and ptr.words.len >= 4 and
                     findRowMajorMatrix(m, ptr.words[3], ptr.words[4..]) != null)
                     return error.UnsupportedRowMajorMatrixStore;
+            }
+            // Matrix-typed vertex output: the main0_out field is flattened to
+            // per-column vectors; scatter the store (out.m22_0 = v[0]; out.m22_1
+            // = v[1]; ...), the spirv-cross idiom.
+            if (getDef(m, inst.words[1])) |dst| {
+                if (dst.op == .Variable and dst.words.len >= 4 and
+                    @as(spirv.StorageClass, @enumFromInt(dst.words[3])) == .Output)
+                {
+                    const pptr = getDef(m, dst.words[1]);
+                    if (pptr != null and pptr.?.op == .TypePointer and pptr.?.words.len >= 4) {
+                        const pty = getDef(m, pptr.?.words[3]);
+                        if (pty != null and pty.?.op == .TypeMatrix and pty.?.words.len >= 4) {
+                            const cols = pty.?.words[3];
+                            const tgt = names.get(inst.words[1]) orelse "out";
+                            const val = names.get(inst.words[2]) orelse "0";
+                            var ci: u32 = 0;
+                            while (ci < cols) : (ci += 1) {
+                                try w.print("    {s}_{d} = {s}[{d}];\n", .{ tgt, ci, val, ci });
+                            }
+                            return;
+                        }
+                    }
+                }
             }
             const on = names.get(inst.words[2]) orelse "0";
             try w.writeAll("    ");
