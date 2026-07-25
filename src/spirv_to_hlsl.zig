@@ -5340,24 +5340,39 @@ fn emitInstruction(
 
         .Select => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
+            const rname = names.get(inst.words[2]) orelse "v";
+            const cond = names.get(inst.words[3]) orelse "c";
+            const tname = names.get(inst.words[4]) orelse "t";
+            const fname = names.get(inst.words[5]) orelse "f";
             const cond_type = getTypeOf(module, inst.words[3]);
             const is_vec_cond = if (cond_type) |ct| blk: {
                 const ct_inst = getDef(module, ct);
                 break :blk ct_inst != null and ct_inst.?.op == .TypeVector;
             } else false;
             if (is_vec_cond) {
-                // DXC requires select() for vector conditions
-                try w.print("    {s} {s} = select({s}, {s}, {s});\n", .{
-                    rt,                                  names.get(inst.words[2]) orelse "v",
-                    names.get(inst.words[3]) orelse "c", names.get(inst.words[4]) orelse "t",
-                    names.get(inst.words[5]) orelse "f",
-                });
+                // HLSL has no vector-bool ternary and no select() intrinsic, so
+                // emit component-wise scalar ternaries assembled in a vector
+                // constructor (mirrors spirv-cross --hlsl). The old `select(c,t,f)`
+                // was an undefined function (glslang: "no matching overloaded
+                // function found"). OpSelect: result = cond ? Object1 : Object2.
+                const ct_inst = getDef(module, cond_type.?);
+                const ncomp: u32 = if (ct_inst != null and ct_inst.?.words.len > 3) ct_inst.?.words[3] else 4;
+                try w.print("    {s} {s} = {s}(", .{ rt, rname, rt });
+                var ci: u32 = 0;
+                while (ci < ncomp) : (ci += 1) {
+                    if (ci > 0) try w.writeAll(", ");
+                    const sw: []const u8 = switch (ci) {
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => ".x",
+                    };
+                    try w.print("{s}{s} ? {s}{s} : {s}{s}", .{ cond, sw, tname, sw, fname, sw });
+                }
+                try w.writeAll(");\n");
             } else {
-                try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{
-                    rt,                                  names.get(inst.words[2]) orelse "v",
-                    names.get(inst.words[3]) orelse "c", names.get(inst.words[4]) orelse "t",
-                    names.get(inst.words[5]) orelse "f",
-                });
+                try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{ rt, rname, cond, tname, fname });
             }
         },
 
@@ -5708,6 +5723,22 @@ fn emitInstruction(
                 const rt = try hlslType(module, inst.words[1], names, alloc);
                 const arg = names.get(inst.words[5]) orelse "m";
                 try w.print("    {s} {s} = spvInverse{d}x{d}({s});\n", .{ rt, names.get(inst.words[2]) orelse "v", d, d, arg });
+                return;
+            }
+            // PackHalf2x16 (58) / UnpackHalf2x16 (62): HLSL has no pack_half2x16
+            // function (the generic table maps these to the fabricated GLSL name,
+            // an undefined HLSL function). Inline via f32tof16 / f16tof32 — one
+            // statement, no temp/helper (mirrors spirv-cross's spvPack/UnpackHalf2x16).
+            if (instruction == 58 or instruction == 62) {
+                if (inst.words.len < 6) return;
+                const rt = try hlslType(module, inst.words[1], names, alloc);
+                const rname = names.get(inst.words[2]) orelse "v";
+                const arg = names.get(inst.words[5]) orelse "x";
+                if (instruction == 58) {
+                    try w.print("    {s} {s} = f32tof16({s}).x | (f32tof16({s}).y << 16);\n", .{ rt, rname, arg, arg });
+                } else {
+                    try w.print("    {s} {s} = f16tof32(uint2({s} & 0xffff, {s} >> 16));\n", .{ rt, rname, arg, arg });
+                }
                 return;
             }
             // FrexpStruct (52) and ModfStruct (36) return structs — decompose to two-arg form
