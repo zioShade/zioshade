@@ -1117,6 +1117,32 @@ fn checkUnsupportedGlslFeatures(m: *const ParsedModule) !void {
         }
     }
     if (has_ms_image and has_query_samples) return error.UnsupportedMultisampleImage;
+    // Honest-error: 16-bit/8-bit types in stage I/O. The frontend drops 16-bit
+    // INPUTS entirely (uint16_t, float16_t) → trivial body → silent-wrong. And
+    // 16-bit OUTPUTS (f16vec4) need GL_AMD_gpu_shader_half_float which isn't
+    // emitted. Refuse rather than emit plausible-but-wrong output.
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+        if (sc != .Input and sc != .Output) continue;
+        const ptr_def = getDef(m, inst.words[1]) orelse continue;
+        if (ptr_def.op != .TypePointer or ptr_def.words.len < 4) continue;
+        var ty_id = ptr_def.words[3];
+        // Unwrap vectors/arrays to the scalar
+        while (true) {
+            const td = getDef(m, ty_id) orelse break;
+            if (td.op == .TypeVector or td.op == .TypeArray) {
+                ty_id = td.words[2];
+            } else break;
+        }
+        const td = getDef(m, ty_id) orelse continue;
+        if (td.op == .TypeFloat and td.words.len > 2 and td.words[2] == 16) {
+            return error.Unsupported16BitIO;
+        }
+        if (td.op == .TypeInt and td.words.len > 2 and td.words[2] <= 16) {
+            return error.Unsupported16BitIO;
+        }
+    }
     // Separate samplers: precise failure modes (function param / resource array).
     for (m.instructions) |inst| {
         if (inst.op == .FunctionParameter and inst.words.len >= 2) {
