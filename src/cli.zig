@@ -220,6 +220,15 @@ fn run() !void {
             defer alloc.free(source);
             try doGlslToWgsl(alloc, source, output_path, stage, include_paths.items, defines.items, entry_point);
         }
+    } else if (std.mem.eql(u8, command, "spirv")) {
+        // Dump zioshade's OWN frontend SPIR-V (GLSL -> SPIR-V, no backend). Writes
+        // the binary little-endian u32 words; pipe through `spirv-dis` to read. Used
+        // to inspect what the frontend generates when a backend bug is suspected to
+        // originate upstream (frontend) -- e.g. spec-const struct members, integer
+        // arithmetic builtin lowering.
+        const source = try readInput(alloc, input_path, use_stdin);
+        defer alloc.free(source);
+        try doGlslToSpvDump(alloc, source, output_path, stage, include_paths.items, defines.items);
     } else if (std.mem.eql(u8, command, "reflect")) {
         try doReflect(alloc, input, json_output);
     } else if (std.mem.eql(u8, command, "validate")) {
@@ -408,6 +417,25 @@ fn doGlslToMsl(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const 
     }) catch |e| crossErr(e);
     defer alloc.free(result);
     try writeOutput(output, result);
+}
+
+// ── GLSL → SPIR-V dump (frontend output, no backend) ───────────────
+
+fn doGlslToSpvDump(alloc: std.mem.Allocator, source: [:0]const u8, output: ?[]const u8, stage: zioshade.Stage, include_paths: []const []const u8, defines: []const zioshade.DefineOverride) !void {
+    const spv = compileWithDiagsOrExit(alloc, source, .{
+        .stage = stage,
+        .include_paths = include_paths,
+        .defines = defines,
+    });
+    defer alloc.free(spv);
+    // Write the SPIR-V binary (little-endian u32 words -> bytes). Pipe through
+    // `spirv-dis` to read it.
+    const bytes = std.mem.sliceAsBytes(spv);
+    if (output) |path| {
+        try compat.writeFileByPath(std.heap.page_allocator, path, bytes);
+    } else {
+        try compat.writeStdout(bytes);
+    }
 }
 
 // ── SPIR-V → WGSL ──────────────────────────────────────────────────
