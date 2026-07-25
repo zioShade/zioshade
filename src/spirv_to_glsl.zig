@@ -1105,8 +1105,10 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
         while (ci + 1 < spirv_words.len) {
             const wc = spirv_words[ci] >> 16;
             if (wc == 0) break;
-            if ((spirv_words[ci] & 0xFFFF) == 17 and spirv_words[ci + 1] == 5347) {
-                return error.UnsupportedPhysicalStorageBuffer;
+            if ((spirv_words[ci] & 0xFFFF) == 17) {
+                const cap = spirv_words[ci + 1];
+                if (cap == 5347) return error.UnsupportedPhysicalStorageBuffer;
+                if (cap == 4428 or cap == 4439 or cap == 4437) return error.UnsupportedExtensionCapability;
             }
             ci += wc;
         }
