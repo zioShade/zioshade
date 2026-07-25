@@ -451,6 +451,9 @@ fn mslTextureFamily(is_depth: bool, dim: u32, arrayed: bool, ms: bool) []const u
         0 => if (arrayed) "texture1d_array" else "texture1d",
         2 => "texture3d", // 3D textures are never arrayed.
         3 => if (arrayed) "texturecube_array" else "texturecube",
+        5 => "texture_buffer", // Dim=Buffer: samplerBuffer/imageBuffer. texture2d
+        // makes .read(uint) ambiguous (vs uint2); texture_buffer is the 1D buffer
+        // family whose .read(uint) is unambiguous.
         // 1 (2D) and any unmodelled dim → 2D family.
         else => if (arrayed) "texture2d_array" else "texture2d",
     };
