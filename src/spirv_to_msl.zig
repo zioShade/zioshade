@@ -5035,7 +5035,7 @@ fn emitFunction(
                 try w.print("    {s} {s};\n", .{ gtn, gname });
             }
         }
-        try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures, arraylen_buf_index);
+        try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures, storage_buffers, arraylen_buf_index);
         try w.writeAll("}\n\n");
 
         // Now emit the entry wrapper
@@ -5449,7 +5449,7 @@ fn emitFunction(
             try w.print("    {s} {s}{s} = {{}};\n", .{ tn, vn, arr });
         }
 
-        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
+        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, storage_buffers, arraylen_buf_index);
         try w.writeAll("}\n");
         return;
     }
@@ -5553,7 +5553,7 @@ fn emitFunction(
             first_param = false;
         }
         try w.writeAll(")\n{\n");
-        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
+        try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, storage_buffers, arraylen_buf_index);
         try w.writeAll("}\n\n");
 
         // ---- Wrapper: vertex main0_out main0(main0_in in [[stage_in]], ...) ----
@@ -5688,6 +5688,13 @@ fn emitFunction(
         first_param = false;
         try w.print("constant {s}& {s}_1", .{ cb.name, cb.name });
     }
+    // Add SSBO params to non-entry functions (a helper that reads/writes a
+    // storage buffer needs it in scope — mirrors the cbuffer threading).
+    for (storage_buffers.items) |sb| {
+        if (!first_param) try w.writeAll(", ");
+        first_param = false;
+        try w.print("device {s}& {s}", .{ sb.name, sb.name });
+    }
     // Add texture + sampler params to non-entry functions
     // (storage images take no sampler, #284 follow-up).
     for (textures.items) |tex| {
@@ -5731,7 +5738,7 @@ fn emitFunction(
         return;
     }
     try w.writeAll(")\n{\n");
-    try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
+    try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, storage_buffers, arraylen_buf_index);
     try w.writeAll("}\n");
 }
 
@@ -5748,6 +5755,7 @@ fn emitBody(
     output_var_id: ?u32,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    storage_buffers: *const std.ArrayList(CbufferDecl),
     arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !void {
     var label_map = std.AutoHashMap(u32, usize).init(alloc);
@@ -5905,7 +5913,7 @@ fn emitBody(
         if (inst.op == .LoopMerge and inst.words.len >= 3) {
             const merge_lbl = inst.words[1];
             const cont_lbl = inst.words[2];
-            idx = try emitWhileLoopMSL(m, names, decs, idx, merge_lbl, cont_lbl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, cbuffers, textures, arraylen_buf_index);
+            idx = try emitWhileLoopMSL(m, names, decs, idx, merge_lbl, cont_lbl, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, cbuffers, textures, storage_buffers, arraylen_buf_index);
             continue;
         }
 
@@ -5942,7 +5950,7 @@ fn emitBody(
                     }
                 }
                 try w.print("    if ({s})\n    {{\n", .{cn});
-                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                 for (mphis.items) |pv| {
                     const vn = names.get(pv.result_id) orelse "pv";
                     const true_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
@@ -5950,7 +5958,7 @@ fn emitBody(
                 }
                 if (he) {
                     try w.writeAll("    } else {\n");
-                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     for (mphis.items) |pv| {
                         const vn = names.get(pv.result_id) orelse "pv";
                         const false_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
@@ -5992,7 +6000,7 @@ fn emitBody(
                 try w.print("    switch ({s}) {{\n", .{sn});
                 if (dl != mval) {
                     try w.writeAll("    default: {\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
                     try w.writeAll("    break;\n    }\n");
                 }
@@ -6002,7 +6010,7 @@ fn emitBody(
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
                     try w.print("    case {d}: {{\n", .{cv});
-                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, arraylen_buf_index);
+                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                     try w.writeAll("    break;\n    }\n");
                 }
@@ -6021,7 +6029,7 @@ fn emitBody(
             continue;
         }
 
-        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id, cbuffers, textures, arraylen_buf_index);
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, output_var_id, cbuffers, textures, storage_buffers, arraylen_buf_index);
     }
 }
 
@@ -6154,6 +6162,7 @@ fn emitWhileLoopMSL(
     ovid: ?u32,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    storage_buffers: *const std.ArrayList(CbufferDecl),
     arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !usize {
     // #413: declare loop-carried phi update temps ABOVE the loop. The top-of-
@@ -6323,7 +6332,7 @@ fn emitWhileLoopMSL(
                 const cinst = m.instructions[ci0];
                 if (cinst.op == .FunctionEnd or cinst.op == .Label or cinst.op == .Branch) break;
                 if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
-                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
             }
         }
         if (g_loop_phis) |lp| {
@@ -6349,7 +6358,7 @@ fn emitWhileLoopMSL(
             while (ci < cond_end) : (ci += 1) {
                 const cinst = m.instructions[ci];
                 if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .SelectionMerge or cinst.op == .LoopMerge) continue;
-                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
             }
         }
     } else {
@@ -6363,7 +6372,7 @@ fn emitWhileLoopMSL(
         while (hp < loop_idx) : (hp += 1) {
             const hinst = m.instructions[hp];
             if (hinst.op == .Phi or hinst.op == .Label or hinst.op == .SelectionMerge or hinst.op == .LoopMerge or hinst.op == .Branch or hinst.op == .BranchConditional) continue;
-            try emitInstruction(m, names, decs, hinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+            try emitInstruction(m, names, decs, hinst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
         }
         cond_name = names.get(bc.words[1]) orelse cond_name;
     }
@@ -6388,7 +6397,7 @@ fn emitWhileLoopMSL(
                 if (binst.words.len >= 3) {
                     const nmerge = binst.words[1];
                     const ncont = binst.words[2];
-                    bi = try emitWhileLoopMSL(m, names, decs, bi, nmerge, ncont, label_map, bc_merge, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                    bi = try emitWhileLoopMSL(m, names, decs, bi, nmerge, ncont, label_map, bc_merge, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
                     bi -= 1;
                 }
                 continue;
@@ -6407,7 +6416,7 @@ fn emitWhileLoopMSL(
                     try w.print("        switch ({s}) {{\n", .{sn});
                     if (dl != sml) {
                         try w.writeAll("        default: {\n");
-                        _ = try emitBlock(m, names, decs, dl, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        _ = try emitBlock(m, names, decs, dl, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
                         try w.writeAll("        break;\n        }\n");
                     }
@@ -6417,7 +6426,7 @@ fn emitWhileLoopMSL(
                         const target = binst.words[swi + 1];
                         if (target == sml) continue;
                         try w.print("        case {d}: {{\n", .{cv});
-                        _ = try emitBlock(m, names, decs, target, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        _ = try emitBlock(m, names, decs, target, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                         try w.writeAll("        break;\n        }\n");
                     }
@@ -6471,19 +6480,19 @@ fn emitWhileLoopMSL(
                         try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
                         try w.print("        if ({s}) continue;\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     } else if (tl_is_trivial_break) {
                         try w.print("        if ({s}) break;\n", .{ncn});
                         if (nhe) {
-                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         }
                     } else if (fl_is_trivial_continue) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         try w.writeAll("        } continue;\n");
                     } else if (fl_is_trivial_break and !nhe) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         try w.writeAll("        }\n");
                     } else {
                         // #474: materialize selection-merge phis of a loop-body if/else
@@ -6508,7 +6517,7 @@ fn emitWhileLoopMSL(
                             }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
-                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                        bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         // Assignments: use the pre-declared name (vn, already renamed to _phi
                         // by the pre-scan) for pre-declared phis; {vn}_phi for new ones.
                         for (mphis.items) |pv| {
@@ -6520,7 +6529,7 @@ fn emitWhileLoopMSL(
                         }
                         if (nhe) {
                             try w.writeAll("        } else {\n");
-                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, arraylen_buf_index);
+                            bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                             for (mphis.items) |pv| {
                                 const vn = names.get(pv.result_id) orelse "pv";
                                 const pre_decl = if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false;
@@ -6545,7 +6554,7 @@ fn emitWhileLoopMSL(
                 }
                 continue;
             }
-            try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+            try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
         }
     }
     // Emit continue block (e.g., i++ in for-loops). For phi-counter loops the
@@ -6576,7 +6585,7 @@ fn emitWhileLoopMSL(
                     if (!is_do_while) return error.UnstructuredControlFlow;
                     continue;
                 }
-                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
             }
         }
     }
@@ -6636,6 +6645,7 @@ fn emitBlock(
     indent: []const u8,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    storage_buffers: *const std.ArrayList(CbufferDecl),
     arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) anyerror!usize { // explicit set breaks the emitBlock<->emitWhileLoopMSL inferred-error cycle
     const si = lm.get(label) orelse return error.InvalidSpirv;
@@ -6658,7 +6668,7 @@ fn emitBlock(
                 try w.print("{s}    switch ({s}) {{\n", .{ indent, sn });
                 if (dl != sml) {
                     try w.print("{s}    default: {{\n", .{indent});
-                    _ = try emitBlock(m, names, decs, dl, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                    _ = try emitBlock(m, names, decs, dl, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
                     try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
                 }
@@ -6668,7 +6678,7 @@ fn emitBlock(
                     const target = inst.words[swi + 1];
                     if (target == sml) continue;
                     try w.print("{s}    case {d}: {{\n", .{ indent, cv });
-                    _ = try emitBlock(m, names, decs, target, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                    _ = try emitBlock(m, names, decs, target, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                     try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
                 }
@@ -6685,7 +6695,7 @@ fn emitBlock(
         // jump over the header). emitWhileLoopMSL returns the merge-label index.
         if (inst.op == .LoopMerge) {
             if (inst.words.len >= 3) {
-                i = try emitWhileLoopMSL(m, names, decs, i, inst.words[1], inst.words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                i = try emitWhileLoopMSL(m, names, decs, i, inst.words[1], inst.words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
                 i -= 1;
             }
             continue;
@@ -6698,7 +6708,7 @@ fn emitBlock(
                     _ = tryEmitLoopPhiDeclMSL(m, names, m.instructions[li], w, alloc, indent) catch {};
                 }
                 if (li >= m.instructions.len or m.instructions[li].words.len < 3) return error.InvalidSpirv;
-                i = try emitWhileLoopMSL(m, names, decs, li, m.instructions[li].words[1], m.instructions[li].words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                i = try emitWhileLoopMSL(m, names, decs, li, m.instructions[li].words[1], m.instructions[li].words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
                 i -= 1;
                 continue;
             }
@@ -6729,7 +6739,7 @@ fn emitBlock(
                     }
                 }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
-                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
                 for (mphis.items) |pv| {
                     const vn = names.get(pv.result_id) orelse "pv";
                     const true_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
@@ -6737,7 +6747,7 @@ fn emitBlock(
                 }
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
-                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, arraylen_buf_index);
+                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
                     for (mphis.items) |pv| {
                         const vn = names.get(pv.result_id) orelse "pv";
                         const false_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
@@ -6759,7 +6769,7 @@ fn emitBlock(
             }
             continue;
         }
-        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
     }
     return i;
 }
@@ -6784,6 +6794,7 @@ fn emitInstruction(
     ovid: ?u32,
     cbuffers: *const std.ArrayList(CbufferDecl),
     textures: *const std.ArrayList(TextureDecl),
+    storage_buffers: *const std.ArrayList(CbufferDecl),
     arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !void {
     // #413: this instruction defines a loop-carried phi update temp whose
@@ -6798,7 +6809,7 @@ fn emitInstruction(
                     defer g_hoist_stripping = false;
                     var hbuf: std.ArrayList(u8) = .empty;
                     defer hbuf.deinit(alloc);
-                    try emitInstruction(m, names, decs, inst, compat.listWriter(&hbuf, alloc), alloc, is_frag, ovid, cbuffers, textures, arraylen_buf_index);
+                    try emitInstruction(m, names, decs, inst, compat.listWriter(&hbuf, alloc), alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try common.writeHoistedAssign(w, hbuf.items, names.get(rid) orelse "");
                     return;
                 }
@@ -8188,6 +8199,12 @@ fn emitInstruction(
                 if (!first_arg) try w.writeAll(", ");
                 first_arg = false;
                 try w.print("{s}_1", .{cb.name});
+            }
+            // Pass SSBO args to function calls (all non-entry functions now have these)
+            for (storage_buffers.items) |sb| {
+                if (!first_arg) try w.writeAll(", ");
+                first_arg = false;
+                try w.print("{s}", .{sb.name});
             }
             for (textures.items) |tex| {
                 if (!first_arg) try w.writeAll(", ");
