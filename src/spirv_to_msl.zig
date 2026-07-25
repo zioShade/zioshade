@@ -5566,9 +5566,16 @@ fn emitFunction(
         // Uniform buffers bound via [[buffer(N)]] (with binding shift), matching
         // the fragment path. (Argument-buffer mode is fragment/compute only for
         // now; vertex uses the legacy per-resource binding.)
+        // Collision resolution: two resources at the same (set, binding) would
+        // share a Metal [[buffer(N)]] slot — Metal rejects that. Bump the second
+        // to a free slot (same fix as the compute kernel signature).
+        var used_buf_slots = std.AutoHashMap(u32, void).init(alloc);
+        defer used_buf_slots.deinit();
         for (cbuffers.items) |cb| {
             if (!first_param) try w.writeAll(", ");
-            const cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
+            var cb_b = resolveMslSlot(resource_bindings, binding_shift, cb.descriptor_set, cb.binding);
+            while (used_buf_slots.contains(cb_b)) cb_b += 1;
+            try used_buf_slots.put(cb_b, {});
             try w.print("constant {s}& {s}_1 [[buffer({d})]]", .{ cb.name, cb.name, cb_b });
             first_param = false;
         }
