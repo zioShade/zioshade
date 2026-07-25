@@ -4,14 +4,34 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
-- Cross-stage compile-validity campaign closed out the fragment-only blind spot in the
-  glslang/Metal validity gates (vertex + compute were unchecked). Shared-root fixes:
-  `gl_WorkGroupSize` is no longer redeclared as an illegal `in` Input in GLSL compute
-  (it is a predefined built-in derived from `layout(local_size_x=)`); MSL now emits it as
-  a module `constant` (Metal has no equivalent attribute); and `commonGetArraySuffix` now
-  accepts an `OpSpecConstant` default value as an array length, so spec-constant-sized
-  local arrays declare their dimension instead of silently becoming scalars. Shared helper,
-  cleared real-bug INVALID across GLSL, MSL, and HLSL.
+- **ZERO REAL BUGS across all non-deferred backends and stages.** Cross-stage compile-validity
+  campaign (spirv-cross-discriminated gates) drove GLSL 0/0/0, MSL 0/0/0 (fragment/compute/vertex).
+  HLSL gates GREEN at regression=0 (7 known-deferred structural bugs). From ~30 real bugs at
+  campaign start to 0.
+- Frontend fixes (diagnosed via `zioshade spirv` dump tool):
+  - SSBO (`buffer`) blocks default to std430 layout (GLSL/Vulkan spec), not std140 -- was
+    producing wrong ArrayStride (silent-wrong).
+  - Spec-constant array `size_name` captured for struct members (was dropped, making the struct
+    empty); array-type dedup cache key folds `size_name` (was collapsing `int[a]` and `int[b]`
+    to one type -- silent-wrong).
+- GLSL backend fixes:
+  - Array return types (`glslTypeWithDims`); array CompositeConstruct constructor; descriptor-array
+    SSBO member + `[N]` dimension; `#version 460` for shader_draw_parameters; `GL_EXT_shader_integer_mix`
+    for OpSelect over integer operands; `GL_ARB_shader_draw_parameters` for ARB-spelling builtins;
+    multi-dim array struct members (#473 was multi-dim, not row-major); 16/8-bit I/O honest-error.
+- MSL backend fixes:
+  - gl_PerVertex name-detect + member-name fallback + multi-block from_block routing;
+  - Buffer-slot collision resolution (compute kernel + vertex wrapper);
+  - Stage-in threading (vertex helpers); SSBO helper threading; array return types;
+  - Atomic image `access::write` (Metal get_width() works on write textures);
+  - Buffer Dim -> `texture_buffer`; default `[[position]]` for position-less vertex;
+  - gl_BaseVertex/gl_BaseInstance as `[[base_vertex]]`/`[[base_instance]]` params;
+  - Scalar length/distance -> `abs()` lowering; module-scope const-array referenced-by-name;
+  - Matrix vertex output flattened to per-column vectors; user output io-block flatten;
+  - Descriptor-array SSBO honest-error; duplicate output field-name honest-error.
+- `zioshade spirv` CLI command: dumps the frontend's internal SPIR-V binary (pipe through
+  `spirv-dis` to read). Used to diagnose 4+ frontend bugs that were invisible to the backend
+  gates (the gates feed GLSL to zioshade's own frontend, so backend bugs can originate upstream).
 - Full-corpus render differential (`PROVE_FULL=1`): **1315 shaders verified, 0 divergences**
   across fragment, vertex, and compute on the Metal GPU vs an independent glslang -> SPIRV-Cross
   reference. Documented in `docs/DIFFERENTIAL_PROOF.md` as the canonical silent-wrong proof,
