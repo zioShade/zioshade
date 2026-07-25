@@ -72,6 +72,14 @@ test-realworld:
 hlsl-glslang:
     tools/hlsl_glslang_sweep.sh
 
+# All three stages (fragment + vertex + compute) of the interim HLSL gate. Each stage
+# has its own known-deferred baseline; exits nonzero on any NEW regression in any stage.
+# Vertex/compute were a blind spot (the gate used to run fragment-only) — this runs them.
+hlsl-glslang-all:
+    tools/hlsl_glslang_sweep.sh tests/spirv-cross fragment frag
+    tools/hlsl_glslang_sweep.sh tests/spirv-cross vertex vert
+    tools/hlsl_glslang_sweep.sh tests/spirv-cross compute comp
+
 # validate zioshade HLSL output against DXC over the SPIR-V corpus (stage-aware:
 # vs/ps/cs/ms profiles auto-selected from each module's execution model). This
 # is the HLSL analog of `wgsl-naga` / `msl-lint` — dxc is the real HLSL oracle.
