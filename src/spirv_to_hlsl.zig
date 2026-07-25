@@ -1331,19 +1331,22 @@ pub fn spirvToHLSL(
                     try w.print("RWStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ elem_name, clean_name, uav_binding });
                 }
             } else {
-                // Emit struct forward declaration for the SSBO struct type
+                // Struct type name (the SSBO element struct). Avoid a struct-TYPE /
+                // buffer-VARIABLE name collision: an unnamed-instance SSBO block
+                // (`buffer SSBO3 { ... };`) gives BOTH the type and the variable the
+                // block name → `RWStructuredBuffer<SSBO3> SSBO3` = "block instance name
+                // redefinition". Rename the TYPE with a `_type` suffix. The body accesses
+                // the buffer VARIABLE (clean_name), never the type, so this is safe and
+                // consistent (forward decl + buffer ref both pick up the rename). (#170)
+                var struct_name: []const u8 = names.get(cb.type_id) orelse "Struct";
+                if (std.mem.eql(u8, struct_name, clean_name)) {
+                    struct_name = std.fmt.allocPrint(aa, "{s}_type", .{struct_name}) catch struct_name;
+                    names.put(cb.type_id, struct_name) catch {};
+                }
                 hlslEmitOneStructForwardDecl(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
                 if (has_interlock) {
-                    const struct_name = blk2: {
-                        const struct_inst = getDef(&module, cb.type_id);
-                        break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) hlslSafeName(names.get(struct_inst.?.words[1]) orelse "Struct") else "Struct";
-                    };
                     try w.print("RasterizerOrderedStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
                 } else {
-                    const struct_name = blk2: {
-                        const struct_inst = getDef(&module, cb.type_id);
-                        break :blk2 if (struct_inst != null and struct_inst.?.op == .TypeStruct) names.get(struct_inst.?.words[1]) orelse "Struct" else "Struct";
-                    };
                     try w.print("RWStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
                 }
             }
