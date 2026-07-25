@@ -2810,6 +2810,14 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     if (is_vertex and stage_outputs.items.len > 0) {
         try w.writeAll("struct main0_out\n{\n");
         var has_position = false;
+        // Metal requires unique field names in a struct. A shader with both a
+        // block output AND a standalone output sharing member names (e.g.
+        // out-block-qualifiers.vert: 'out VertexData { float f; } vout;' +
+        // 'out flat float f;') would produce duplicate main0_out fields.
+        // The correct Metal translation requires local-struct reconstruction
+        // (spirv-cross's approach); honest-error until that lands.
+        var seen_field_names = std.StringHashMap(void).init(aa);
+        defer seen_field_names.deinit();
         for (stage_outputs.items) |so| {
             if (so.is_position) {
                 has_position = true;
@@ -2830,6 +2838,9 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                         try w.print("    {s} {s}_{d} [[user(locn{d})]];\n", .{ vt, so.name, ci, so.location + ci });
                     }
                 } else {
+                    // Check for duplicate field name (block + standalone collision).
+                    if (seen_field_names.contains(so.name)) return error.DuplicateOutputFieldName;
+                    seen_field_names.put(so.name, {}) catch {};
                     try w.print("    {s} {s} [[user(locn{d})]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name, so.location });
                 }
             }
