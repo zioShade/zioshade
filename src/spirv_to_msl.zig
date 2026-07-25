@@ -5128,6 +5128,25 @@ fn emitFunction(
 
     // Compute kernel entry point
     if (is_entry and is_compute) {
+        // gl_WorkGroupSize (compute builtin) has no Metal attribute equivalent — the
+        // threadgroup size is set at dispatch, not in source. Without a definition the
+        // body reference leaks as an undeclared identifier. Emit it as a module-level
+        // const (= local_size) so body references resolve, matching spirv-cross --msl.
+        // (#170)
+        var has_wgs = false;
+        for (m.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Input) continue;
+            if (std.mem.eql(u8, names.get(inst.words[2]) orelse "", "gl_WorkGroupSize")) {
+                has_wgs = true;
+                break;
+            }
+        }
+        if (has_wgs) {
+            try w.print("constant uint3 gl_WorkGroupSize [[maybe_unused]] = uint3({d}u, {d}u, {d}u);\n", .{
+                m.local_size[0], m.local_size[1], m.local_size[2],
+            });
+        }
         try w.writeAll("kernel void ");
         try w.writeAll(func_name);
         try w.writeAll("(");
