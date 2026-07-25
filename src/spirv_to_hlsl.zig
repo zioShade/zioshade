@@ -2913,6 +2913,26 @@ fn emitFunction(
         }
     }
 
+    // gl_WorkGroupSize (compute builtin) is an Input variable in SPIR-V, but HLSL has no
+    // such input — the workgroup size IS the compile-time numthreads. Emit it as a module
+    // constant (= local_size) so body references resolve. (#170)
+    if (is_compute) {
+        var has_wgs = false;
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Input) continue;
+            if (std.mem.eql(u8, names.get(inst.words[2]) orelse "", "gl_WorkGroupSize")) {
+                has_wgs = true;
+                break;
+            }
+        }
+        if (has_wgs) {
+            try w.print("static const uint3 gl_WorkGroupSize = uint3({d}, {d}, {d});\n", .{
+                module.local_size[0], module.local_size[1], module.local_size[2],
+            });
+        }
+    }
+
     if (is_compute or is_task) {
         try w.print("[numthreads({d}, {d}, {d})]\n", .{
             module.local_size[0],
