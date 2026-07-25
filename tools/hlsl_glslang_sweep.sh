@@ -75,8 +75,18 @@ valid=0 invalid=0 glim=0 incon=0 ocrash=0 herr=0 total=0 regression=0
 # KNOWN-DEFERRED real bugs: triaged, root-caused, and explicitly deferred (core
 # machinery / structural work the 5-voice panel deferred to the canonical DXC gate).
 # An INVALID that is NOT in this set is a NEW regression and the actionable signal.
-# Keep this list in sync with the HLSL section of the zioshade memory.
-KNOWN_INVALID=" false-loop-init.frag partial-write-preserve.frag "
+# Stage-aware: each stage has its own deferred baseline. Keep in sync with the zioshade
+# memory HLSL section. Run all stages: `just hlsl-glslang-all`.
+case "$STAGE" in
+  fragment)
+    KNOWN_INVALID=" false-loop-init.frag partial-write-preserve.frag ";;
+  vertex)
+    KNOWN_INVALID=" clip-cull-distance.desktop.sso.vert clip-cull-distance.desktop.vert io-block.legacy.vert out-block-qualifiers.vert read-from-row-major-array.vert transform-feedback-decorations.vert ";;
+  compute)
+    KNOWN_INVALID=" basic.comp cfg.comp coherent-block.comp coherent-image.comp composite-construct.comp culling.comp defer-parens.comp dowhile.comp generate_height.comp outer-product.comp read-write-only.comp rmw-matrix.comp rmw-opt.comp scalar-std450-distance-length-normalize.comp shared.comp spec-constant-op-member-array.vk.comp spec-constant-work-group-size.vk.comp torture-loop.comp ";;
+  *)
+    KNOWN_INVALID=" ";;
+esac
 is_known() { case " $KNOWN_INVALID " in *" $1 "*) return 0;; *) return 1;; esac; }
 
 for f in "$DIR"/*."$EXT"; do
