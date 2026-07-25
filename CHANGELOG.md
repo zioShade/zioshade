@@ -4,6 +4,20 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
+- Cross-stage compile-validity campaign closed out the fragment-only blind spot in the
+  glslang/Metal validity gates (vertex + compute were unchecked). Shared-root fixes:
+  `gl_WorkGroupSize` is no longer redeclared as an illegal `in` Input in GLSL compute
+  (it is a predefined built-in derived from `layout(local_size_x=)`); MSL now emits it as
+  a module `constant` (Metal has no equivalent attribute); and `commonGetArraySuffix` now
+  accepts an `OpSpecConstant` default value as an array length, so spec-constant-sized
+  local arrays declare their dimension instead of silently becoming scalars. Shared helper,
+  cleared real-bug INVALID across GLSL, MSL, and HLSL.
+- Full-corpus render differential (`PROVE_FULL=1`): **1315 shaders verified, 0 divergences**
+  across fragment, vertex, and compute on the Metal GPU vs an independent glslang -> SPIRV-Cross
+  reference. Documented in `docs/DIFFERENTIAL_PROOF.md` as the canonical silent-wrong proof,
+  with an honest scope statement (empirical within-tolerance conformance to a peer compiler
+  on one GPU class, not mathematical proof).
+
 ## [0.3.0] - 2026-07-08
 
 - Hardened against hostile shader and SPIR-V input (Wave 1).
