@@ -83,7 +83,7 @@ case "$STAGE" in
   vertex)
     KNOWN_INVALID=" out-block-qualifiers.vert read-from-row-major-array.vert ";;
   compute)
-    KNOWN_INVALID=" cfg.comp composite-construct.comp generate_height.comp spec-constant-op-member-array.vk.comp ";;
+    KNOWN_INVALID=" cfg.comp generate_height.comp spec-constant-op-member-array.vk.comp ";;
   *)
     KNOWN_INVALID=" ";;
 esac
