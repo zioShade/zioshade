@@ -1285,13 +1285,33 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 // the type gets a distinct `{name}_block` tag (the tag is never referenced).
                 const block_tag = std.fmt.allocPrint(aa, "{s}_block", .{name}) catch return error.OutOfMemory;
                 const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
-                const has_block_struct = ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4;
+                if (ptr_inst.op != .TypePointer or ptr_inst.words.len < 4) continue;
+                // The pointee may be an array of the block struct (a descriptor array,
+                // source `buffer B { ... } name[N];`). Unwrap nested TypeArrays to the
+                // block struct for member emission and collect the [N][M] suffix for the
+                // instance, so the body's `name[i].member` resolves (#473).
+                var pointee_id: u32 = ptr_inst.words[3];
+                var dims = std.ArrayList(u8).initCapacity(aa, 16) catch return error.OutOfMemory;
+                defer dims.deinit(aa);
+                {
+                    var pt = getDef(&module, pointee_id);
+                    while (pt) |p| {
+                        if (p.op != .TypeArray or p.words.len < 4) break;
+                        const len_def = getDef(&module, p.words[3]);
+                        const n: u32 = if (len_def) |ld| (if ((ld.op == .Constant or ld.op == .SpecConstant) and ld.words.len > 3) ld.words[3] else 0) else 0;
+                        dims.print(aa, "[{d}]", .{n}) catch break;
+                        pointee_id = p.words[2];
+                        pt = getDef(&module, pointee_id);
+                    }
+                }
+                const member_struct = getDef(&module, pointee_id);
+                const has_block_struct = member_struct != null and member_struct.?.op == .TypeStruct;
                 // Declare any struct types referenced by this block's members (e.g. the
                 // element struct of a runtime array `T elems[]`) BEFORE the block, so the
                 // struct is not used before it is declared (#418). SSBOs are excluded from
                 // the UBO forward-decl pass above, so run it here over the same maps.
                 if (has_block_struct) {
-                    emitStructForwardDecls(&module, &names, ptr_inst.words[3], w, aa, &emitted_structs, &emitted_names) catch {};
+                    emitStructForwardDecls(&module, &names, pointee_id, w, aa, &emitted_structs, &emitted_names) catch {};
                 }
                 try w.print("layout(std430, binding = {d}) buffer {s}\n{{\n", .{ shifted_binding, block_tag });
                 // Emit struct members by their ORIGINAL names (`b.lock`) for BOTH SSBO
@@ -1300,9 +1320,9 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                 // accesses members as `{instance}.{member}` — declare them to match. (#296)
                 const use_original = true;
                 if (has_block_struct) {
-                    try emitStructMembers(&module, &names, ptr_inst.words[3], name, w, aa, use_original);
+                    try emitStructMembers(&module, &names, pointee_id, name, w, aa, use_original);
                 }
-                try w.print("}} {s};\n\n", .{name});
+                try w.print("}} {s}{s};\n\n", .{ name, dims.items });
             }
         }
     }
