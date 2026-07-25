@@ -8202,9 +8202,19 @@ fn mslAtomicObject(m: *const ParsedModule, names: *const std.AutoHashMap(u32, []
 
 fn emitStd450(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, instruction: u32, w: anytype, alloc: std.mem.Allocator) !void {
     const rtt = try mslType(m, inst.words[1], names, alloc);
-    // #488: Metal's reflect/refract are VECTOR-only -- a SCALAR call is ambiguous. Lower
-    // scalar reflect/refract to the formula (vector forms stay as reflect(...)/refract(...)).
-    // scalar-refract-reflect in the spirv-cross corpus.
+    // #488: Metal's reflect/refract/normalize are VECTOR-only -- a SCALAR call is
+    // ambiguous. Lower scalar reflect/refract to the formula, scalar normalize to
+    // v/abs(v); vector forms stay as the intrinsics.
+    if (instruction == 69) {
+        if (getDef(m, inst.words[1])) |rty| {
+            if (rty.op == .TypeFloat) {
+                const v = names.get(inst.words[5]) orelse "x";
+                const rn = names.get(inst.words[2]) orelse "v";
+                try w.print("    {s} {s} = {s} / abs({s});\n", .{ rtt, rn, v, v });
+                return;
+            }
+        }
+    }
     if (instruction == 71 or instruction == 72) {
         if (getDef(m, inst.words[1])) |rty| {
             if (rty.op == .TypeFloat) {
