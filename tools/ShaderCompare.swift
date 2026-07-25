@@ -1,22 +1,39 @@
 import Metal
 import Foundation
 
-// Simple fullscreen triangle vertex shader - embedded as MSL string
-let vertexMSL = """
+// Generate a fullscreen-triangle vertex shader that WRITES every stage-input varying
+// the fragment declares (zero-initialised), so fragments that read [[user(locnN)]]
+// varyings render instead of failing "not written by vertex shader". The fragment's
+// `main0_in` struct (spirv-cross's stage_in type) is copied verbatim into VertexOut --
+// same [[user(locnN)]] attributes + types -- so the vertex output matches the fragment
+// input exactly. Both zioshade + spirv-cross fragments get the SAME (zero) varyings, so
+// the pixel differential stays a valid frontend check. (#render-coverage)
+func makeVertexLibrary(device: MTLDevice, fragmentMSL: String) -> MTLLibrary {
+    var members = ""
+    if let r = fragmentMSL.range(of: "struct main0_in") {
+        let after = fragmentMSL[r.upperBound...]
+        if let openBrace = after.firstIndex(of: "{"),
+           let closeBrace = after[after.index(after: openBrace)...].firstIndex(of: "}") {
+            members = String(after[after.index(after: openBrace)..<closeBrace])
+        }
+    }
+    let vertMSL = """
 #include <metal_stdlib>
 using namespace metal;
-struct VertexOut { float4 position [[position]]; };
+struct VertexOut { float4 position [[position]];
+\(members)
+};
 vertex VertexOut full_screen_vertex(uint vid [[vertex_id]]) {
     float4 pos;
     pos.x = (vid == 2) ? 3.0 : -1.0;
     pos.y = (vid == 0) ? -3.0 : 1.0;
     pos.zw = 1.0;
-    VertexOut out; out.position = pos; return out;
+    VertexOut out = {};
+    out.position = pos;
+    return out;
 }
 """
-
-func makeVertexLibrary(device: MTLDevice) -> MTLLibrary {
-    return try! device.makeLibrary(source: vertexMSL, options: nil)
+    return try! device.makeLibrary(source: vertMSL, options: nil)
 }
 
 // Read MSL source from file
@@ -192,7 +209,7 @@ let compileOpts: MTLCompileOptions? = {
 }()
 if compileOpts != nil { print("Precise-fp mode: Metal fast-math disabled (mathMode=.safe)") }
 
-let vertLib = makeVertexLibrary(device: device)
+let vertLib = makeVertexLibrary(device: device, fragmentMSL: msl1)
 
 print("Compiling zioshade MSL (\(msl1.count) bytes)...")
 let lib1 = try device.makeLibrary(source: msl1, options: compileOpts)
