@@ -1247,6 +1247,28 @@ pub fn spirvToHLSL(
         if (pointee.op == .TypeSampler) return error.UnsupportedSeparateSampler;
     }
 
+    // Honest-error: a plain (non-Block) STRUCT vertex output isn't routed into VS_OUTPUT
+    // (only scalar/vector outputs are) — the body's write would hit an undeclared
+    // identifier (plausible-but-wrong). gl_PerVertex (Block-decorated, or members with
+    // BuiltIn) is handled by #471's promotion, so exclude those. Honest-error until HLSL
+    // gets struct-output flattening (vertex-OUTPUT analog of the fragment struct-input
+    // gap). (#170)
+    if (module.execution_model == .Vertex) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+            if (sc != .Output) continue;
+            const vid = inst.words[2];
+            if (getDecorationValue(&decorations, vid, .built_in) != null) continue;
+            const pinst = getDef(&module, inst.words[1]) orelse continue;
+            if (pinst.op != .TypePointer or pinst.words.len < 4) continue;
+            const pt = getDef(&module, pinst.words[3]) orelse continue;
+            if (pt.op == .TypeStruct and !hasDecoration(&decorations, pinst.words[3], .block)) {
+                return error.UnsupportedStructStageOutput;
+            }
+        }
+    }
+
     // Phase 3: emit HLSL
     var output = std.ArrayList(u8).initCapacity(alloc, 256) catch return error.OutOfMemory;
     var output_owned = true;

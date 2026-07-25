@@ -697,6 +697,13 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    if (err == error.UnsupportedStructStageOutput) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: struct stage outputs (a struct used directly as a vertex `out` varying) are not yet flattened into the VS_OUTPUT by the HLSL backend. Workaround: flatten the struct into individual `out` varyings (one location each).\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // HLSL: a stage-input varying referenced inside a non-main (helper) function is
     // undeclared there (varyings are passed as main() params). Honest-error until
     // varying-threading into helper signatures lands (MSL #476 analog).
