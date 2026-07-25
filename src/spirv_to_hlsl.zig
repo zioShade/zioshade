@@ -1373,6 +1373,30 @@ pub fn spirvToHLSL(
         }
         try w.writeAll("};\n\n");
     }
+    // gl_NumWorkGroups (compute dispatch dimensions) — a RUNTIME value the app provides at
+    // dispatch time; HLSL has no built-in for it. Emit an app-filled cbuffer (mirrors
+    // spirv-cross's SPIRV_Cross_NumWorkgroups). The body already references gl_NumWorkGroups;
+    // as a cbuffer member (HLSL cbuffer members are global) the reference resolves. Register:
+    // above all user cbuffers + _Globals to avoid a collision. (#170)
+    if (module.execution_model == .GLCompute) {
+        var has_nwg = false;
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Input) continue;
+            if (std.mem.eql(u8, names.get(inst.words[2]) orelse "", "gl_NumWorkGroups")) {
+                has_nwg = true;
+                break;
+            }
+        }
+        if (has_nwg) {
+            var nb: u32 = 0;
+            for (cbuffers.items) |cb| {
+                if (!cb.is_ssbo and cb.binding >= nb) nb = cb.binding + 1;
+            }
+            if (loose_uniforms.items.len > 0) nb += 1; // _Globals occupies the slot above user cbuffers
+            try w.print("cbuffer _zioshade_NumWorkgroups : register(b{d})\n{{\n    uint3 gl_NumWorkGroups;\n}};\n\n", .{nb});
+        }
+    }
 
     // Emit textures
     // Detect textures used with Dref (depth-comparison) operations. Each such texture
