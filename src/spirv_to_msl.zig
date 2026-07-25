@@ -2448,10 +2448,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // Per-storage-image read/write usage → picks the MSL access:: qualifier.
     var img_access = try collectImageAccess(&module, aa);
     defer img_access.deinit();
-    // Storage-image atomics: image var-ids backed by a `device atomic_T*` buffer. These
-    // must NOT take an access:: qualifier (their texture is used only for .get_width(),
-    // which needs read/sample access; the actual read/write goes through the backing
-    // buffer). Collected here so collectResources can suppress the suffix for them.
+    // Storage-image atomics: image var-ids backed by a `device atomic_T*` buffer.
+    // Collected so collectResources + emitFunction know to bind the backing buffer
+    // alongside the texture. The texture itself takes an access:: qualifier from its
+    // actual OpImageRead/OpImageWrite usage (img_access) — Metal's get_width() (used
+    // by spvImage2DAtomicCoord) is valid on any access qualifier, so a written atomic
+    // image correctly takes access::write; a coord-only one stays default (sample).
     var atomic_images = try collectAtomicImages(&module, aa);
     defer atomic_images.deinit();
     // #493: depth-from-usage -- MUST run before collectResources so depth-typed-from-
@@ -2472,7 +2474,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         if (img_op.words.len < 2) continue;
         depth_tex_types.put(img_op.words[1], {}) catch {};
     }
-    collectResources(&module, &names, &decs, &cbuffers, &textures, &loose_uniforms, &img_access, &atomic_images, aa);
+    collectResources(&module, &names, &decs, &cbuffers, &textures, &loose_uniforms, &img_access, aa);
 
     // Stage inputs (layout(location) in ...). Collected with their ORIGINAL
     // names BEFORE any body-emit rename, so the `main0_in` struct fields use
@@ -3581,7 +3583,7 @@ fn collectMemberOffsets(m: *const ParsedModule, offsets: *std.AutoHashMap(Member
     }
 }
 
-fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), loose: *std.ArrayList(LooseUniform), img_access: *const std.AutoHashMap(u32, ImageAccess), atomic_images: *const std.AutoHashMap(u32, void), alloc: std.mem.Allocator) void {
+fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), cb: *std.ArrayList(CbufferDecl), tex: *std.ArrayList(TextureDecl), loose: *std.ArrayList(LooseUniform), img_access: *const std.AutoHashMap(u32, ImageAccess), alloc: std.mem.Allocator) void {
     // In MSL, UBOs and SSBOs share the single [[buffer(N)]] index space, so the
     // synthesized _Globals block must be placed above the max binding over BOTH
     // (a loose uniform colliding with an SSBO at the same slot would alias the
@@ -3649,11 +3651,12 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                 // no combined sampler). It takes an MSL `access::` qualifier driven by its
                 // actual OpImageRead/OpImageWrite usage; sampled images keep default access.
                 const is_storage = img.op == .TypeImage and img.words.len > 7 and img.words[7] == 2;
-                // Atomic images take NO access:: qualifier — their texture is used only for
-                // .get_width() in spvImage2DAtomicCoord (which needs read/sample access; the
-                // read/write goes through the backing buffer), so a co-occurring imageStore
-                // must not push it to access::write (which forbids .get_width()).
-                const access_suffix = if (is_storage and !atomic_images.contains(rid)) mslStorageAccessSuffix(img_access.get(rid) orelse .{}) else "";
+                // Access qualifier from actual OpImageRead/OpImageWrite usage. Metal's
+                // get_width() (used by spvImage2DAtomicCoord) is a size query valid on ANY
+                // access qualifier — so an atomic image that is ALSO directly written takes
+                // access::write (matching spirv-cross); a coord-only atomic image has no
+                // read/write usage -> empty suffix -> default sample (get_width still works).
+                const access_suffix = if (is_storage) mslStorageAccessSuffix(img_access.get(rid) orelse .{}) else "";
                 const comp = mslSampledComponent(m, img);
                 const msl_type = buildMslTextureType(alloc, is_depth, dim, arrayed, ms, comp, access_suffix);
                 switch (pei.op) {
