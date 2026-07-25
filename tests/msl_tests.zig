@@ -4003,10 +4003,11 @@ test "T-imgrw.5: MSL compute binds a sampled texture + sampler (#284)" {
     try assertContains(msl, "samp.sample(");
 }
 
-test "T-imgrw.6: MSL image used for BOTH atomic and imageStore keeps default texture access (#284/#267)" {
-    // The image is in atomic_images, so the #267 path binds it. A co-occurring imageStore
-    // must NOT push the texture to access::write (which would forbid the .get_width() the
-    // spvImage2DAtomicCoord macro needs) — the texture stays unqualified.
+test "T-imgrw.6: MSL image used for BOTH atomic and imageStore takes access::write (#284/#267)" {
+    // The image is in atomic_images (bound with a backing buffer for the atomic ops),
+    // AND it is imageStore'd. Metal's get_width() (used by spvImage2DAtomicCoord) is a
+    // size query valid on access::write textures, so a co-occurring imageStore correctly
+    // takes access::write (matching spirv-cross); the atomic coord path still works.
     const source =
         \\#version 450
         \\layout(local_size_x = 1) in;
@@ -4018,9 +4019,8 @@ test "T-imgrw.6: MSL image used for BOTH atomic and imageStore keeps default tex
     ;
     const msl = try compileToMslStage(source, .compute);
     defer alloc.free(msl);
-    try assertContains(msl, "texture2d<uint> img [[texture(0)]]"); // no access::write
-    try assertNotContains(msl, "access::write");
-    try assertContains(msl, "spvImage2DAtomicCoord("); // the atomic path still works
+    try assertContains(msl, "texture2d<uint, access::write> img [[texture(0)]]");
+    try assertContains(msl, "spvImage2DAtomicCoord("); // the atomic coord path still works
 }
 
 // #284 follow-up: the fragment, vertex, non-entry, and argument-buffer
