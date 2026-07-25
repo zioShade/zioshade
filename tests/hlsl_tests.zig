@@ -309,6 +309,41 @@ test "HLSL: array CompositeConstruct declares C-style array, CompositeExtract in
     try assertNotContains(hlsl, "._m0"); // array index, not a member/swizzle
 }
 
+// OpSelect on a vector-bool condition: HLSL has no vector-bool ternary and no
+// select() intrinsic (both rejected by glslang), so emit component-wise scalar
+// ternaries in a vector constructor (mirrors spirv-cross --hlsl). The old
+// `select(c, t, f)` was an undefined function. GLSL mix(x, y, bvec) -> OpSelect.
+test "HLSL: vector OpSelect emits component-wise ternaries (no select() intrinsic)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out float c;
+        \\layout(location=0) in vec2 a;
+        \\void main(){ vec2 r = mix(a, a + vec2(1.0), greaterThan(a, vec2(0.5))); c = r.x + r.y; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, ".x ?"); // component-wise scalar ternary
+    try assertNotContains(hlsl, "select("); // not the undefined intrinsic
+}
+
+// GLSL.std.450 PackHalf2x16 (58) / UnpackHalf2x16 (62): HLSL has no
+// pack_half2x16 function (the generic table maps them to a fabricated GLSL name,
+// an undefined HLSL function). Inline via f32tof16 / f16tof32 — one statement
+// each (mirrors spirv-cross's spvPack/UnpackHalf2x16 helper, inlined).
+test "HLSL: pack/unpack_half2x16 via f32tof16/f16tof32 (no fabricated intrinsic)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out float c;
+        \\layout(location=0) in vec2 a;
+        \\void main(){ uint p = packHalf2x16(a); vec2 u = unpackHalf2x16(p); c = u.x; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "f32tof16");
+    try assertContains(hlsl, "f16tof32");
+    try assertNotContains(hlsl, "pack_half2x16(");
+}
+
 // #472-audit: SPIR-V OpSwitch cases do NOT fall through (each terminates in
 // OpBranch %merge), but C-family `switch` falls through without `break;`. HLSL was
 // emitting braced case bodies with NO break -> `case 0` fell into `case 1` (and since
