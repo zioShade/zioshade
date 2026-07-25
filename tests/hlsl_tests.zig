@@ -248,6 +248,31 @@ test "#471: glslang gl_PerVertex block drops gl_PointSize (unrepresentable in HL
     try assertNotContains(hlsl, "gl_PointSize");
 }
 
+// A user (non-gl_PerVertex) output interface block ('out Block { ... } inst;')
+// was skipped entirely, leaving 'inst' undeclared and its members out of
+// VS_OUTPUT. Now each member is flattened into VS_OUTPUT at TEXCOORD{block_loc+
+// member} and the block var is routed to 'output' so 'inst.member' resolves to
+// 'output.member' (mirrors MSL commit 4595bf9 / the #471 gl_PerVertex path).
+test "HLSL: user output interface block flattens into VS_OUTPUT" {
+    const spirv = compileVertToSpirv("user_out_block",
+        \\#version 450
+        \\layout(location=0) in vec4 pos;
+        \\out VertexOut { vec4 color; vec3 normal; } vout;
+        \\void main(){ gl_Position = pos; vout.color = vec4(1.0); vout.normal = vec3(0.5); }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    // Members flattened into VS_OUTPUT (not left as an undeclared `vout`).
+    try assertContains(hlsl, "color : TEXCOORD");
+    try assertContains(hlsl, "normal : TEXCOORD");
+    // Body writes routed through `output.<member>`.
+    try assertContains(hlsl, "output.color");
+    try assertContains(hlsl, "output.normal");
+    // gl_Position is still promoted to SV_Position.
+    try assertContains(hlsl, "SV_Position");
+}
+
 // #472-audit: SPIR-V OpSwitch cases do NOT fall through (each terminates in
 // OpBranch %merge), but C-family `switch` falls through without `break;`. HLSL was
 // emitting braced case bodies with NO break -> `case 0` fell into `case 1` (and since

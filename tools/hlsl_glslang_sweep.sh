@@ -81,7 +81,7 @@ case "$STAGE" in
   fragment)
     KNOWN_INVALID=" false-loop-init.frag partial-write-preserve.frag ";;
   vertex)
-    KNOWN_INVALID=" io-block.legacy.vert out-block-qualifiers.vert read-from-row-major-array.vert transform-feedback-decorations.vert ";;
+    KNOWN_INVALID=" out-block-qualifiers.vert read-from-row-major-array.vert transform-feedback-decorations.vert ";;
   compute)
     KNOWN_INVALID=" cfg.comp composite-construct.comp generate_height.comp spec-constant-op-member-array.vk.comp ";;
   *)
