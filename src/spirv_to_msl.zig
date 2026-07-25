@@ -2698,6 +2698,17 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         }
     }
 
+    // Honest-error: descriptor-array storage buffers ('buffer B { ... } name[N]')
+    // have a TypeArray pointee. Metal can't express descriptor arrays without
+    // argument buffers or the spirv-cross unrolled-parameter approach (which
+    // requires pointer `->` access the emitter doesn't support). Refuse.
+    for (storage_buffers.items) |sb| {
+        const sb_type = getDef(&module, sb.type_id);
+        if (sb_type != null and sb_type.?.op == .TypeArray) {
+            return error.UnsupportedDescriptorArray;
+        }
+    }
+
     // Emit storage buffer structs for compute
     if (storage_buffers.items.len > 0) {
         for (storage_buffers.items) |sb| {
