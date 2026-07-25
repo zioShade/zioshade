@@ -743,6 +743,31 @@ fn glslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, [
     };
 }
 
+/// Full GLSL type spelling for a (non-pointer) type id, INCLUDING array dimensions
+/// ('vec4[2]', 'float[2][3]'). glslType alone returns the ELEMENT type for an array,
+/// so a function that returns an array ('vec4[2] func()') was declared 'vec4 func()'
+/// and the body's array return was a type mismatch. Used for return types; glslType
+/// stays the default elsewhere. Spec-constant-length aware.
+fn glslTypeWithDims(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
+    const elem = try glslType(m, type_id, names, alloc);
+    var dims = std.ArrayList(u8).initCapacity(alloc, 16) catch return error.OutOfMemory;
+    var cur = getDef(m, type_id);
+    while (cur) |c| {
+        if (c.op != .TypeArray or c.words.len < 4) break;
+        const len_def = getDef(m, c.words[3]);
+        const n: u32 = if (len_def) |ld| (if ((ld.op == .Constant or ld.op == .SpecConstant) and ld.words.len > 3) ld.words[3] else 0) else 0;
+        try dims.print(alloc, "[{d}]", .{n});
+        cur = getDef(m, c.words[2]);
+    }
+    if (dims.items.len == 0) {
+        dims.deinit(alloc);
+        return elem;
+    }
+    const result = try std.fmt.allocPrint(alloc, "{s}{s}", .{ elem, dims.items });
+    dims.deinit(alloc);
+    return result;
+}
+
 /// Loop-header OpPhi (the loop counter): materialized as a mutable variable so
 /// the counter is not frozen at its constant init value (#phi-loop). Mirrors the
 /// HLSL backend's fix (src/spirv_to_hlsl.zig).
@@ -2534,7 +2559,7 @@ fn emitFunctionPrototype(m: *const ParsedModule, names: *std.AutoHashMap(u32, []
     if (fi.op != .Function or fi.words.len < 5) return;
     const fti = getDef(m, fi.words[4]) orelse return;
     if (fti.words.len < 3) return;
-    const rt = try glslType(m, fti.words[2], names, alloc);
+    const rt = try glslTypeWithDims(m, fti.words[2], names, alloc);
     const func_name = names.get(func_id) orelse "func";
     const func_idx = if (func_id < m.id_defs.len) m.id_defs[func_id] orelse return else return;
     try w.print("{s} {s}(", .{ rt, func_name });
@@ -2584,7 +2609,7 @@ fn emitFunction(
     if (fi.op != .Function or fi.words.len < 5) return;
     const fti = getDef(m, fi.words[4]) orelse return;
     const rtid = fti.words[2];
-    const rt = try glslType(m, rtid, names, alloc);
+    const rt = try glslTypeWithDims(m, rtid, names, alloc);
     const is_frag = is_entry and m.execution_model == .Fragment;
 
     var output_var_id: ?u32 = null;
@@ -4947,7 +4972,7 @@ fn emitInstruction(
             if (is_void) {
                 try w.print("    {s}(", .{cfn});
             } else {
-                const rtt = try glslType(m, inst.words[1], names, alloc);
+                const rtt = try glslTypeWithDims(m, inst.words[1], names, alloc);
                 try w.print("    {s} {s} = {s}(", .{ rtt, rn, cfn });
             }
             for (inst.words[4..], 0..) |aid, i| {
