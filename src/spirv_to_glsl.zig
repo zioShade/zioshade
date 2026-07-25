@@ -1097,6 +1097,21 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     if (options.es) return error.EsslUnsupported;
     if (!isSupportedGlslVersion(options.version)) return error.UnsupportedGlslVersion;
 
+    // Honest-error: PhysicalStorageBufferAddresses (buffer_reference / physical pointers)
+    // has no desktop-GLSL equivalent — the physical-pointer syntax is unrepresentable.
+    // Honest-error rather than emit invalid output. (#170)
+    {
+        var ci: usize = 5; // skip 5-word SPIR-V header
+        while (ci + 1 < spirv_words.len) {
+            const wc = spirv_words[ci] >> 16;
+            if (wc == 0) break;
+            if ((spirv_words[ci] & 0xFFFF) == 17 and spirv_words[ci + 1] == 5347) {
+                return error.UnsupportedPhysicalStorageBuffer;
+            }
+            ci += wc;
+        }
+    }
+
     // G2: recover OpSelectionMerge for unstructured-but-reducible SPIR-V. No-op
     // (byte-identical copy) on already-structured input; on failure fall back to
     // the original words so the backend's own honest-error path is unchanged.
