@@ -2841,8 +2841,9 @@ const Codegen = struct {
                 // Layout resolution:
                 //   explicit layout(std430)         -> .std430
                 //   explicit layout(std140)         -> .std140
-                //   no explicit qualifier           -> self.default_layout (.std140 by default,
-                //                                      or .scalar if GL_EXT_scalar_block_layout is enabled)
+                //   no explicit qualifier, SSBO     -> .std430 (GLSL/Vulkan: 'buffer' blocks
+                //                                      default to std430 — tight array stride)
+                //   no explicit qualifier, UBO/PC   -> self.default_layout (.std140 by default)
                 var block_layout: LayoutKind = self.default_layout;
                 var block_row_major = false;
                 for (self.module.globals) |global| {
@@ -2855,6 +2856,9 @@ const Codegen = struct {
                     if (global.ty != .named) continue;
                     if (!std.mem.eql(u8, global.ty.named, name)) continue;
                     needs_block = true;
+                    // SSBO ('buffer') blocks default to std430 (GLSL/Vulkan); a scalar
+                    // default (GL_EXT_scalar_block_layout) stays scalar. Explicit overrides.
+                    if (global.storage_class == .storage_buffer) block_layout = if (self.default_layout == .scalar) .scalar else .std430;
                     if (global.layout) |l| {
                         if (l.std430) block_layout = .std430 else if (l.std140) block_layout = .std140;
                         block_row_major = l.row_major;
