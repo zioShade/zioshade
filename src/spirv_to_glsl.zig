@@ -2331,6 +2331,13 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         if (getDecVal(decs, ivid, .built_in) != null) continue;
         if (isBuiltinBlockVar(m, ivid)) continue;
         const in_name = names.get(ivid) orelse continue;
+        // gl_WorkGroupSize is a predefined GLSL compute built-in, implicitly available
+        // from `layout(local_size_x = …)`. Redeclaring it as an Input is doubly illegal
+        // — a reserved gl_ name and an `in` qualifier at compute global scope — so skip
+        // it; the body reference resolves to the implicit built-in. (The compute
+        // WorkgroupSize builtin surfaces here as a synthetic Input var without a BuiltIn
+        // decoration, hence the name check rather than the built_in skip above.) (#170)
+        if (m.execution_model == .GLCompute and std.mem.eql(u8, in_name, "gl_WorkGroupSize")) continue;
         const drop_loc = dropVaryingLocation(version, m.execution_model, .in);
         // A struct-typed stage input is an interface block. Two emission forms,
         // chosen per variable:
