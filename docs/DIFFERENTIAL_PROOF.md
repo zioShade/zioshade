@@ -14,7 +14,7 @@ on any real divergence (so it is also a regression gate). Fragment is sampled fo
 plus a fixed regression set; `PROVE_FULL=1` runs the whole fragment corpus. Requires only
 glslang, spirv-cross, and swiftc/Metal (no Docker; the DXC → D3D12 HLSL path lives in
 `tools/hlsl_render_check.sh` + `tools/warp/`). A representative run: **1315 shaders verified,
-0 divergences** (`PROVE_FULL=1`, full corpus — see the table below) — spanning both SPIRV-Cross's own test suite AND a **hand-written real-world
+0 divergences** (`PROVE_FULL=1`, full corpus; see the table below), spanning both SPIRV-Cross's own test suite AND a **hand-written real-world
 corpus** (`tests/render_compare/` + `tests/shadertoy_style/`: mandelbrot, julia, plasma,
 phong, hash-noise, terrain, etc., written for zioshade and NOT derived from the reference's
 tests, so they answer the "is this only a synthetic self-selected corpus?" objection).
@@ -30,13 +30,13 @@ counted as a pass.
 | frag/realworld     |       83 |       0 |          0 |       2 |
 | vertex             |       33 |       0 |          0 |      12 |
 | compute            |       13 |       0 |          0 |       0 |
-| **total**          |    **1315** |  **0** |          8 |     —   |
+| **total**          |    **1315** |  **0** |          8 |     -   |
 
 Every covered shader renders/executes identically to the independent glslang →
 SPIRV-Cross reference on the Metal GPU; the 8 honest-errors are zioshade's own
 GLSL-frontend refusals (it declines rather than risk a wrong translation), and the
 skipped shaders are reference-unbuildable or need inputs the generic harness cannot
-supply — each is listed in the run output, none ever counted as a pass. Honest
+supply; each is listed in the run output, none ever counted as a pass. Honest
 limit (this is empirical, not mathematical proof): it is within-tolerance
 conformance to a peer compiler (SPIRV-Cross) on one Metal GPU class; outputs where
 zioshade and the reference share the same spec misreading are structurally invisible
