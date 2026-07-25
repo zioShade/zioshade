@@ -2143,10 +2143,24 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
         const mti = getDef(m, mt_id);
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
-                const et = try glslType(m, mi2.words[2], names, alloc);
-                const li = getDef(m, mi2.words[3]);
-                const lv: u32 = if (li) |l| (if (l.words.len > 3) l.words[3] else 1) else 1;
-                if (original_names) try w.print("    {s}{s} {s}[{d}];\n", .{ rm, et, mname, lv }) else try w.print("    {s}{s} {s}_m{d}[{d}];\n", .{ rm, et, cb_name, mi, lv });
+                // Multi-dim array member (e.g. mat2x3 var[3][4]): walk nested
+                // TypeArrays, emit ALL dimensions [N][M]..., element type = the leaf.
+                // (glslType alone unwraps to the leaf, dropping every dimension.)
+                var dims = std.ArrayList(u8).initCapacity(alloc, 16) catch return error.OutOfMemory;
+                defer dims.deinit(alloc);
+                var cur_id = mt_id;
+                var elem_id = mi2.words[2];
+                while (true) {
+                    const cur = getDef(m, cur_id) orelse break;
+                    if (cur.op != .TypeArray or cur.words.len <= 3) break;
+                    const li = getDef(m, cur.words[3]);
+                    const lv: u32 = if (li) |l| (if ((l.op == .Constant or l.op == .SpecConstant) and l.words.len > 3) l.words[3] else 1) else 1;
+                    dims.print(alloc, "[{d}]", .{lv}) catch break;
+                    elem_id = cur.words[2];
+                    cur_id = cur.words[2];
+                }
+                const et = try glslType(m, elem_id, names, alloc);
+                if (original_names) try w.print("    {s}{s} {s}{s};\n", .{ rm, et, mname, dims.items }) else try w.print("    {s}{s} {s}_m{d}{s};\n", .{ rm, et, cb_name, mi, dims.items });
                 continue;
             }
             if (mi2.op == .TypeRuntimeArray and mi2.words.len > 2) {
