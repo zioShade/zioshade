@@ -83,7 +83,7 @@ case "$STAGE" in
   vertex)
     KNOWN_INVALID=" clip-cull-distance.desktop.sso.vert clip-cull-distance.desktop.vert io-block.legacy.vert out-block-qualifiers.vert read-from-row-major-array.vert transform-feedback-decorations.vert ";;
   compute)
-    KNOWN_INVALID=" basic.comp cfg.comp coherent-block.comp coherent-image.comp composite-construct.comp culling.comp defer-parens.comp dowhile.comp generate_height.comp outer-product.comp read-write-only.comp rmw-matrix.comp rmw-opt.comp scalar-std450-distance-length-normalize.comp shared.comp spec-constant-op-member-array.vk.comp spec-constant-work-group-size.vk.comp torture-loop.comp ";;
+    KNOWN_INVALID=" cfg.comp composite-construct.comp generate_height.comp scalar-std450-distance-length-normalize.comp shared.comp spec-constant-work-group-size.vk.comp ";;
   *)
     KNOWN_INVALID=" ";;
 esac
