@@ -4166,7 +4166,22 @@ fn emitInstruction(
         },
         .CompositeConstruct => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = {s}(", .{ rtt, names.get(inst.words[2]) orelse "v", rtt });
+            // glslType returns the ELEMENT type for an array result, so an array
+            // composite ('vec4[2](a, b)') would wrongly emit 'vec4 name = vec4(a, b)'.
+            // Build the full '[N][M]' dimension suffix (multi-dim, spec-const-aware)
+            // and use the GLSL array-constructor form 'elem name[N] = elem[N](...)'.
+            var dims = std.ArrayList(u8).initCapacity(alloc, 16) catch return error.OutOfMemory;
+            defer dims.deinit(alloc);
+            var cur = getDef(m, inst.words[1]);
+            while (cur) |c| {
+                if (c.op != .TypeArray or c.words.len < 4) break;
+                const len_def = getDef(m, c.words[3]);
+                const n: u32 = if (len_def) |ld| (if ((ld.op == .Constant or ld.op == .SpecConstant) and ld.words.len > 3) ld.words[3] else 0) else 0;
+                dims.print(alloc, "[{d}]", .{n}) catch break;
+                cur = getDef(m, c.words[2]);
+            }
+            const ds = dims.items;
+            try w.print("    {s} {s}{s} = {s}{s}(", .{ rtt, names.get(inst.words[2]) orelse "v", ds, rtt, ds });
             for (inst.words[3..], 0..) |cid, i| {
                 if (i > 0) try w.writeAll(", ");
                 try w.writeAll(names.get(cid) orelse "0");
