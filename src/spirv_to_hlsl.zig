@@ -2768,6 +2768,13 @@ fn emitFunction(
     defer vtx_inputs.deinit(alloc);
     var vtx_outputs = std.ArrayList(VtxField).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer vtx_outputs.deinit(alloc);
+    // User (non-gl_PerVertex) output interface blocks ('out Block { ... } inst;'):
+    // each member is flattened into VS_OUTPUT and the block var is routed to the
+    // VS_OUTPUT instance so 'inst.member' resolves to 'output.member'. Mirrors the
+    // gl_PerVertex path (#471) and MSL commit 4595bf9.
+    const UserOutBlock = struct { var_id: u32, struct_id: u32, block_loc: u32 };
+    var user_out_blocks = std.ArrayList(UserOutBlock).initCapacity(alloc, 2) catch return error.OutOfMemory;
+    defer user_out_blocks.deinit(alloc);
     // #471: the gl_PerVertex block Output var (glslang/shaderc form), if present, plus
     // the set of stores into its dropped members (gl_PointSize). Live for the whole
     // function so the body's OpStore handler can consult g_pv_dropped_stores.
@@ -2799,8 +2806,33 @@ fn emitFunction(
                 if (pi.op == .TypeStruct) {
                     if (sc == .Output) {
                         if (perVertexBlockStructType(module, vid)) |sty| {
+                            // gl_PerVertex block: representable members promoted
+                            // into VS_OUTPUT below (#471).
                             pv_var_id = vid;
                             pv_struct = sty;
+                        } else if (hasDecoration(decorations, pointee, .block)) {
+                            // User (non-gl_PerVertex) output interface block
+                            // ('out Block { ... } inst;'): flatten its members into
+                            // VS_OUTPUT and route the block var -> "output". Mirrors
+                            // the gl_PerVertex path + MSL commit 4595bf9.
+                            //
+                            // Exclude the reserved gl_PerVertex block: the frontend
+                            // does not decorate its members BuiltIn, so the
+                            // perVertexBlockStructType check above misses it and it
+                            // would land here — but its members are gl_ builtins, not
+                            // user varyings, so detect it by its reserved struct name
+                            // (MSL's perVertexBlockStructType does the same).
+                            const is_per_vertex = if (names.get(pointee)) |sname|
+                                std.mem.eql(u8, sname, "gl_PerVertex")
+                            else
+                                false;
+                            if (!is_per_vertex) {
+                                user_out_blocks.append(alloc, .{
+                                    .var_id = vid,
+                                    .struct_id = pointee,
+                                    .block_loc = loc orelse 0,
+                                }) catch {};
+                            }
                         }
                     }
                     continue;
@@ -2829,6 +2861,44 @@ fn emitFunction(
         };
         std.sort.insertion(VtxField, vtx_inputs.items, {}, SortCtx.lessThan);
         std.sort.insertion(VtxField, vtx_outputs.items, {}, SortCtx.lessThan);
+
+        // Collision guard: drop user output blocks whose member names collide
+        // with standalone outputs or another kept block's members. The flatten
+        // path emits members under their raw OpMemberName, so a collision would
+        // produce duplicate VS_OUTPUT field names — invalid HLSL that glslang's
+        // frontend false-passes (DXC rejects), i.e. the plausible-wrong the wedge
+        // forbids. Such blocks need member-name prefixing (spirv-cross
+        // reconstructs a local block struct), a separate follow-up; leave them a
+        // loud INVALID for now. Distinct-member blocks (io-block-style) pass.
+        {
+            var keep: usize = 0;
+            outer: for (user_out_blocks.items) |blk| {
+                const sdef = getDef(module, blk.struct_id) orelse continue;
+                const nmembers: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
+                var mi: u32 = 0;
+                while (mi < nmembers) : (mi += 1) {
+                    var buf_a: [32]u8 = undefined;
+                    const mname = hlslGetMemberName(module, blk.struct_id, mi, &buf_a);
+                    for (vtx_outputs.items) |fld| {
+                        if (std.mem.eql(u8, mname, fld.orig_name)) continue :outer;
+                    }
+                    var kj: usize = 0;
+                    while (kj < keep) : (kj += 1) {
+                        const oblk = user_out_blocks.items[kj];
+                        const osdef = getDef(module, oblk.struct_id) orelse continue;
+                        const onmem: usize = if (osdef.words.len > 2) osdef.words.len - 2 else 0;
+                        var omi: u32 = 0;
+                        while (omi < onmem) : (omi += 1) {
+                            var buf_b: [32]u8 = undefined;
+                            if (std.mem.eql(u8, mname, hlslGetMemberName(module, oblk.struct_id, omi, &buf_b))) continue :outer;
+                        }
+                    }
+                }
+                user_out_blocks.items[keep] = blk;
+                keep += 1;
+            }
+            user_out_blocks.items.len = keep;
+        }
 
         // Emit VS_INPUT struct.
         try w.writeAll("struct VS_INPUT\n{\n");
@@ -2901,6 +2971,23 @@ fn emitFunction(
                 }
             }
         }
+        // User output interface blocks: flatten each member into VS_OUTPUT at
+        // TEXCOORD{block_loc + member_idx} (Vulkan lays block members out at
+        // consecutive locations starting from the block's Location). The member
+        // name comes from OpMemberName; routing below turns 'inst.member' into
+        // 'output.member'. Mirrors MSL commit 4595bf9.
+        for (user_out_blocks.items) |blk| {
+            const sdef = getDef(module, blk.struct_id) orelse continue;
+            const nmembers: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
+            var mi: u32 = 0;
+            while (mi < nmembers) : (mi += 1) {
+                var mname_buf: [32]u8 = undefined;
+                const mname = hlslGetMemberName(module, blk.struct_id, mi, &mname_buf);
+                const mtype_id = sdef.words[2 + mi];
+                const tn = try hlslType(module, mtype_id, names, alloc);
+                try w.print("    {s} {s} : TEXCOORD{d};\n", .{ tn, mname, blk.block_loc + mi });
+            }
+        }
         try w.writeAll("};\n\n");
 
         // Rewrite Input/Output names to `input.<orig>` / `output.<orig>` so
@@ -2937,6 +3024,13 @@ fn emitFunction(
                 const mbi = hlslMemberBuiltin(module, pv_struct, idx_def.words[3]) orelse continue;
                 if (mbi == .point_size) pv_dropped.put(inst.words[2], {}) catch {};
             }
+        }
+        // User output interface blocks: route each block var -> "output" so
+        // OpAccessChain <block> <member> resolves to "output.<member>" (e.g.
+        // vout.color -> output.color). Mirrors the gl_PerVertex routing above.
+        for (user_out_blocks.items) |blk| {
+            const routed = try alloc.dupe(u8, "output");
+            if (try names.fetchPut(blk.var_id, routed)) |old| alloc.free(old.value);
         }
     }
 
