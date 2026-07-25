@@ -5371,3 +5371,96 @@ test "#500b: MSL component packing via [[user(locnN_M)]]" {
     try assertContains(msl, "v0 [[user(locn0_0)]]");
     try assertContains(msl, "v1 [[user(locn0_2)]]");
 }
+
+// ── Regression tests for the cross-stage compile-validity campaign (2026-07-25) ──
+// These pin the specific behaviors that drove real-bug INVALID -> valid (or
+// honest-error). They guard against re-introducing the silent-wrong + compile-bug
+// classes that the campaign cleared.
+
+test "regression: spec-const arrays int[a] vs int[b] are DISTINCT types (cache key)" {
+    // Without size_name in the cache key, int[a] and int[b] (both OpSpecConstant,
+    // size=0) collapsed to ONE cached type — w[b] silently became int[a] (wrong
+    // array length = silent-wrong). Now each spec-const-length array is distinct.
+    const source =
+        \\#version 450
+        \\layout(constant_id = 0) const int a = 100;
+        \\layout(constant_id = 1) const int b = 200;
+        \\layout(std430, binding = 0) buffer SSBO { int v[a]; int w[b]; };
+        \\void main() { w[0] = v[0]; }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // Both arrays should appear with their OWN default lengths (100 and 200).
+    try assertContains(msl, "v[100]");
+    try assertContains(msl, "w[200]");
+}
+
+test "regression: SSBO buffer blocks default to std430 (not std140) stride" {
+    // Without explicit layout(std430), 'buffer' blocks used to default to std140
+    // -> ArrayStride 16 for int arrays -> the MSL backend widened int to int4
+    // (silent-wrong). Now 'buffer' defaults to std430 (tight stride = 4).
+    const source =
+        \\#version 450
+        \\layout(binding = 0) buffer SSBO { int v[4]; };
+        \\void main() { v[0] = 1; }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // Should be 'int v[4]' (tight), NOT 'int4 v[4]' (std140 widened).
+    try assertContains(msl, "int v[4]");
+    try assertNotContains(msl, "int4 v[4]");
+}
+
+test "regression: buffer-slot collision resolution (two same-binding resources)" {
+    // Two SSBOs at the same binding (binding = 0) used to collide at the same
+    // Metal [[buffer(0)]] slot -> Metal rejects. Now the second gets bumped.
+    const source =
+        \\#version 450
+        \\layout(std430, binding = 0) buffer A { float x; } a;
+        \\layout(std430, binding = 0) buffer B { float y; } b;
+        \\void main() { b.y = a.x; }
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    // The two buffers must be at distinct slots (0 and 1).
+    try assertContains(msl, "[[buffer(0)]]");
+    try assertContains(msl, "[[buffer(1)]]");
+}
+
+test "regression: atomic image that is also written takes access::write" {
+    // An atomic image (backed by device atomic_T*) that is ALSO imageStore'd
+    // used to be declared with default access::sample -> .write() rejected.
+    // Now it takes access::write (Metal get_width() works on write textures).
+    const source =
+        \\#version 450
+        \\layout(local_size_x = 1) in;
+        \\layout(r32ui, binding = 0) uniform uimage2D img;
+        \\void main() {
+        \\    imageAtomicAdd(img, ivec2(0), 1u);
+        \\    imageStore(img, ivec2(1), uvec4(5u));
+        \\}
+    ;
+    const msl = try compileToMslStage(source, .compute);
+    defer alloc.free(msl);
+    try assertContains(msl, "access::write");
+    try assertContains(msl, "spvImage2DAtomicCoord(");
+}
+
+test "regression: stage-in struct threaded into vertex helpers" {
+    // A vertex helper that reads a stage input (renamed to in.<name>) needs
+    // the main0_in struct in scope. g_has_stage_in was fragment-only; now it
+    // covers vertex too.
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 pos;
+        \\vec4 helper() { return pos; }
+        \\void main() { gl_Position = helper(); }
+    ;
+    const msl = try compileToMslStage(source, .vertex);
+    defer alloc.free(msl);
+    try assertContains(msl, "main0_in in");
+}
+
+// NOTE: multi-dim array struct member regression (mat2x3 var[3][4]) is verified
+// by the GLSL gate (read-from-row-major-array.vert). The MSL backend has a separate
+// mslWidenedElementType limitation for multi-dim arrays in blocks; not tested here.
