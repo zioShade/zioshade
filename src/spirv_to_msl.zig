@@ -4213,6 +4213,41 @@ fn collectStageOutputs(m: *const ParsedModule, names: *std.AutoHashMap(u32, []co
         }
         break; // one gl_PerVertex block per stage
     }
+
+    // User interface-block outputs (e.g. `out VertexOut { vec4 color; vec3
+    // normal; } vout;`) -- struct-typed Output vars skipped at the top of this
+    // pass that are NOT the gl_PerVertex builtin block. Flatten their members
+    // into main0_out as [[user(locnN)]] fields (location = block location +
+    // member index), flagged from_block so the entry renames the block var ->
+    // `out` and the body's `vout.member` resolves. Matches spirv-cross --msl.
+    // (Simple slot accounting: one location per member; matrix/struct members
+    // spanning multiple slots are a known approximation.)
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+        const bvar = inst.words[2];
+        if (perVertexBlockStructType(m, bvar) != null) continue; // gl_PerVertex, above
+        const ptr = getDef(m, inst.words[1]) orelse continue;
+        if (ptr.op != .TypePointer or ptr.words.len < 4) continue;
+        const sty = ptr.words[3];
+        const sdef = getDef(m, sty) orelse continue;
+        if (sdef.op != .TypeStruct) continue;
+        const block_loc = getDecVal(decs, bvar, .location) orelse continue;
+        const nmem: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
+        var mi: u32 = 0;
+        while (mi < nmem) : (mi += 1) {
+            var nbuf: [32]u8 = undefined;
+            const mname = getMemberName(m, sty, mi, &nbuf);
+            outputs.append(alloc, .{
+                .var_id = bvar,
+                .name = alloc.dupe(u8, mname) catch continue,
+                .type_id = sdef.words[2 + mi],
+                .location = block_loc + mi,
+                .is_position = false,
+                .from_block = true,
+            }) catch {};
+        }
+    }
 }
 
 /// Return the BuiltIn enum value (as a u32) decorated on `id`, or null if `id`
