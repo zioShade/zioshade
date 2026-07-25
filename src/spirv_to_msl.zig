@@ -2340,6 +2340,26 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     collectNames(aa, &module, &names);
     try collectDecorations(aa, &module, &decs);
 
+    // Honest-error: a plain (non-Block, non-builtin) STRUCT vertex output isn't flattened
+    // by the MSL backend (#500 covers fragment INPUTS, not vertex outputs) — the body's
+    // write would reference an undeclared identifier (plausible-but-wrong). gl_PerVertex
+    // (Block-decorated) is handled by #471. (#170)
+    if (module.execution_model == .Vertex) {
+        for (module.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Output) continue;
+            const vid = inst.words[2];
+            if (getDecVal(&decs, vid, .built_in) != null) continue;
+            const ptr_def = getDef(&module, inst.words[1]) orelse continue;
+            if (ptr_def.op != .TypePointer or ptr_def.words.len < 4) continue;
+            const pt = ptr_def.words[3];
+            const struct_def = getDef(&module, pt) orelse continue;
+            if (struct_def.op == .TypeStruct and !hasDec(&decs, pt, .block)) {
+                return error.UnsupportedStructStageOutput;
+            }
+        }
+    }
+
     // Promote read-only const arrays so a runtime index resolves to a declared
     // module-scope `constant` (emitted below): alias each const-initialized
     // Private global (Design A) AND each read-only function-local const array to
