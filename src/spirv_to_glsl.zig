@@ -2377,6 +2377,22 @@ fn ioVarStructTypeId(m: *const ParsedModule, ptr_type_id: u32) ?u32 {
 
 fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), names: *std.AutoHashMap(u32, []const u8), version: u32, w: anytype, alloc: std.mem.Allocator, emitted_structs: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void), needs_version: *u32) !void {
     var emitted_any_io = false;
+    // gl_BaseVertex / gl_BaseInstance / gl_DrawID (shader_draw_parameters) are core
+    // only at #version 460; zioshade emits them at 430 by default, where they are
+    // undeclared identifiers. Raise the version when any is a stage input so the
+    // renamed builtin resolves. (#170)
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Input) continue;
+        const bi = getDecVal(decs, inst.words[2], .built_in) orelse continue;
+        if (bi == @intFromEnum(spirv.BuiltIn.base_vertex) or
+            bi == @intFromEnum(spirv.BuiltIn.base_instance) or
+            bi == @intFromEnum(spirv.BuiltIn.draw_index))
+        {
+            needs_version.* = @max(needs_version.*, 460);
+            break;
+        }
+    }
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
