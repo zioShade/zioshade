@@ -4242,6 +4242,10 @@ fn collectInputBuiltins(
         const ib: ?InBuiltin = if (is_vertex) switch (bi) {
             @intFromEnum(spirv.BuiltIn.vertex_index) => .{ .var_id = vid, .name = "", .attr = "vertex_id", .entry_ty = "uint", .impl_ty = "int", .cast_to_int = true },
             @intFromEnum(spirv.BuiltIn.instance_index) => .{ .var_id = vid, .name = "", .attr = "instance_id", .entry_ty = "uint", .impl_ty = "int", .cast_to_int = true },
+            // gl_BaseVertex / gl_BaseInstance -> Metal [[base_vertex]] / [[base_instance]]
+            // (uint at the boundary, cast to the signed int the body expects). #170
+            @intFromEnum(spirv.BuiltIn.base_vertex) => .{ .var_id = vid, .name = "", .attr = "base_vertex", .entry_ty = "uint", .impl_ty = "int", .cast_to_int = true },
+            @intFromEnum(spirv.BuiltIn.base_instance) => .{ .var_id = vid, .name = "", .attr = "base_instance", .entry_ty = "uint", .impl_ty = "int", .cast_to_int = true },
             else => null,
         } else switch (bi) {
             @intFromEnum(spirv.BuiltIn.front_facing) => .{ .var_id = vid, .name = "", .attr = "front_facing", .entry_ty = "bool", .impl_ty = "bool", .cast_to_int = false },
