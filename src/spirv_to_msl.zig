@@ -5333,6 +5333,21 @@ fn emitFunction(
                 }
             }
         }
+        // #170: Metal kernels cannot have mutable file-scope variables, so a
+        // non-const Private global (source `int i;` assigned in the body) is
+        // promoted to a function-local declaration here, matching spirv-cross
+        // (`int i = 0;` inside main0). Without it the body reference is an
+        // undeclared identifier. Const-initialized Private globals are already
+        // materialized at module scope and skipped.
+        for (m.instructions) |inst| {
+            if (inst.op != .Variable or inst.words.len < 4) continue;
+            if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Private) continue;
+            if (common.constInitializedPrivateVar(m, inst) != null) continue;
+            const tn = mslType(m, inst.words[1], names, alloc) catch continue;
+            const arr = mslGetArraySuffix(m, inst.words[1]) catch continue;
+            const vn = names.get(inst.words[2]) orelse continue;
+            try w.print("    {s} {s}{s} = {{}};\n", .{ tn, vn, arr });
+        }
 
         try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, arraylen_buf_index);
         try w.writeAll("}\n");
