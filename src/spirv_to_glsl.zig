@@ -177,6 +177,10 @@ fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator
     // more than a pragma, so they are left to refuse/deeper work, not half-fixed.
     const map = [_]struct { token: []const u8, ext: []const u8 }{
         .{ .token = "gl_FragStencilRefARB", .ext = "GL_ARB_shader_stencil_export" },
+        // #170: ARB-spelling draw_parameters builtins need GL_ARB_shader_draw_parameters.
+        .{ .token = "gl_BaseVertexARB", .ext = "GL_ARB_shader_draw_parameters" },
+        .{ .token = "gl_BaseInstanceARB", .ext = "GL_ARB_shader_draw_parameters" },
+        .{ .token = "gl_DrawIDARB", .ext = "GL_ARB_shader_draw_parameters" },
         // #474: coarse/fine derivatives are 4.5 core but need this ARB extension on
         // the older #version zioshade targets by default. All six spellings gate on
         // the same extension; requiring it is harmless (satisfied) when already core.
@@ -2408,6 +2412,22 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
             break;
         }
     }
+    // The ARB-spelling draw_parameters builtins (gl_BaseVertexARB etc.) need
+    // #version 450 + GL_ARB_shader_draw_parameters (the extension is written
+    // against 4.50). The frontend surfaces them as plain Inputs (not BuiltIn),
+    // so check by name.
+    for (m.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Input) continue;
+        const nm = names.get(inst.words[2]) orelse continue;
+        if (std.mem.eql(u8, nm, "gl_BaseVertexARB") or
+            std.mem.eql(u8, nm, "gl_BaseInstanceARB") or
+            std.mem.eql(u8, nm, "gl_DrawIDARB"))
+        {
+            needs_version.* = @max(needs_version.*, 450);
+            break;
+        }
+    }
     for (m.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
@@ -2423,6 +2443,15 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         // WorkgroupSize builtin surfaces here as a synthetic Input var without a BuiltIn
         // decoration, hence the name check rather than the built_in skip above.) (#170)
         if (m.execution_model == .GLCompute and std.mem.eql(u8, in_name, "gl_WorkGroupSize")) continue;
+        // gl_BaseVertexARB/gl_BaseInstanceARB/gl_DrawIDARB are the ARB-spelling
+        // draw_parameters builtins (GL_ARB_shader_draw_parameters). The frontend
+        // surfaces them as plain Inputs (not BuiltIn-decorated), so without this
+        // they'd be declared as user varyings -- a reserved gl_ name with no
+        // location, which glslang rejects. Skip the declaration; the body reference
+        // resolves to the ARB builtin once the extension is emitted (#170).
+        if (std.mem.eql(u8, in_name, "gl_BaseVertexARB") or
+            std.mem.eql(u8, in_name, "gl_BaseInstanceARB") or
+            std.mem.eql(u8, in_name, "gl_DrawIDARB")) continue;
         const drop_loc = dropVaryingLocation(version, m.execution_model, .in);
         // A struct-typed stage input is an interface block. Two emission forms,
         // chosen per variable:
