@@ -5316,6 +5316,18 @@ fn emitInstruction(
                 try w.writeAll(" };\n");
                 return;
             }
+            if (rtd != null and rtd.?.op == .TypeArray) {
+                // Array composite: emit as aggregate initializer `{ a, b, ... }`
+                // — hlslType drops the [N] dimension, so `float4(args)` is a
+                // wrong ctor call. (Mirrors the GLSL array-ctor fix.)
+                try w.print("    {s} {s} = {{ ", .{ rt, names.get(inst.words[2]) orelse "v" });
+                for (inst.words[3..], 0..) |cid, i| {
+                    if (i > 0) try w.writeAll(", ");
+                    try w.writeAll(names.get(cid) orelse "0");
+                }
+                try w.writeAll(" };\n");
+                return;
+            }
             try w.print("    {s} {s} = {s}(", .{ rt, names.get(inst.words[2]) orelse "v", rt });
             for (inst.words[3..], 0..) |cid, i| {
                 if (i > 0) try w.writeAll(", ");
