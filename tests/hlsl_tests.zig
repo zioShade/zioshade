@@ -291,6 +291,24 @@ test "HLSL: user output block member Location used when block var lacks one" {
     try assertContains(hlsl, "output.vBar");
 }
 
+// OpCompositeConstruct of an array must declare a C-style array
+// (`T name[N] = { ... }`; HLSL rejects GLSL-style `T[N] name`, and hlslType drops
+// the dims entirely so the old `T name = {...}` truncated the array to one
+// element = plausible-wrong). OpCompositeExtract/Insert on the array must index
+// with [n], not ._mN (which reads as an unknown swizzle on an array).
+test "HLSL: array CompositeConstruct declares C-style array, CompositeExtract indexes with [n]" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 c;
+        \\layout(location=0) in vec4 a;
+        \\void main(){ vec4 values[2] = vec4[](a, a); c = values[0] + values[1]; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "[2] ="); // C-style array declaration (dims after name)
+    try assertNotContains(hlsl, "._m0"); // array index, not a member/swizzle
+}
+
 // #472-audit: SPIR-V OpSwitch cases do NOT fall through (each terminates in
 // OpBranch %merge), but C-family `switch` falls through without `break;`. HLSL was
 // emitting braced case bodies with NO break -> `case 0` fell into `case 1` (and since

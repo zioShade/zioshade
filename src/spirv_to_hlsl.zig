@@ -5450,10 +5450,26 @@ fn emitInstruction(
                 return;
             }
             if (rtd != null and rtd.?.op == .TypeArray) {
-                // Array composite: emit as aggregate initializer `{ a, b, ... }`
-                // — hlslType drops the [N] dimension, so `float4(args)` is a
-                // wrong ctor call. (Mirrors the GLSL array-ctor fix.)
-                try w.print("    {s} {s} = {{ ", .{ rt, names.get(inst.words[2]) orelse "v" });
+                // Array composite: C-style `<elem> <name>[N][M]... = { ... }`.
+                // HLSL rejects the GLSL-style `T[N] name`, and hlslType drops the
+                // dims entirely — so the old `float4 v = {a, b}` truncated the
+                // array to one element (plausible-wrong). Walk the TypeArray chain
+                // for the element type + dimensions (mirrors GLSL glslTypeWithDims
+                // but places dims after the name for HLSL's C-style array syntax).
+                var dims = std.ArrayList(u8).initCapacity(alloc, 16) catch return error.OutOfMemory;
+                defer dims.deinit(alloc);
+                var elem_id: u32 = inst.words[1];
+                var cur = rtd;
+                while (cur) |c| {
+                    if (c.op != .TypeArray or c.words.len < 4) break;
+                    const len_def = getDef(module, c.words[3]);
+                    const n: u32 = if (len_def) |ld| (if ((ld.op == .Constant or ld.op == .SpecConstant) and ld.words.len > 3) ld.words[3] else 0) else 0;
+                    dims.print(alloc, "[{d}]", .{n}) catch return error.OutOfMemory;
+                    elem_id = c.words[2];
+                    cur = getDef(module, elem_id);
+                }
+                const elem_rt = try hlslType(module, elem_id, names, alloc);
+                try w.print("    {s} {s}{s} = {{ ", .{ elem_rt, names.get(inst.words[2]) orelse "v", dims.items });
                 for (inst.words[3..], 0..) |cid, i| {
                     if (i > 0) try w.writeAll(", ");
                     try w.writeAll(names.get(cid) orelse "0");
@@ -5502,7 +5518,8 @@ fn emitInstruction(
                         else => ".x",
                     });
                 } else {
-                    // Use named member for structs; matrices index a column via [n].
+                    // Use named member for structs; matrices index a column via
+                    // [n]; arrays index an element via [n].
                     var used_name = false;
                     if (current_parent) |pt| {
                         const pt_inst = getDef(module, pt);
@@ -5518,6 +5535,12 @@ fn emitInstruction(
                                 // matrices column-by-column, so HLSL `m[n]` yields
                                 // that same stored column vector. `._mN` is invalid
                                 // HLSL matrix syntax and DXC rejects it.
+                                try w.print("[{d}]", .{index});
+                                used_name = true;
+                            } else if (pi.op == .TypeArray) {
+                                // SPIR-V OpCompositeExtract/Insert on an array
+                                // selects an element. HLSL arrays index with [n];
+                                // `._mN` is invalid on an array (unknown swizzle).
                                 try w.print("[{d}]", .{index});
                                 used_name = true;
                             }
@@ -5569,7 +5592,8 @@ fn emitInstruction(
                         else => ".x",
                     });
                 } else {
-                    // Use named member for structs; matrices index a column via [n].
+                    // Use named member for structs; matrices index a column via
+                    // [n]; arrays index an element via [n].
                     var used_name = false;
                     if (current_parent) |pt| {
                         const pt_inst = getDef(module, pt);
@@ -5585,6 +5609,12 @@ fn emitInstruction(
                                 // matrices column-by-column, so HLSL `m[n]` yields
                                 // that same stored column vector. `._mN` is invalid
                                 // HLSL matrix syntax and DXC rejects it.
+                                try w.print("[{d}]", .{index});
+                                used_name = true;
+                            } else if (pi.op == .TypeArray) {
+                                // SPIR-V OpCompositeExtract/Insert on an array
+                                // selects an element. HLSL arrays index with [n];
+                                // `._mN` is invalid on an array (unknown swizzle).
                                 try w.print("[{d}]", .{index});
                                 used_name = true;
                             }
@@ -7436,20 +7466,30 @@ fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                     if (!used_name) try buf.print(alloc, "{s}_m{d}", .{ cbuffer_prefix, val });
                     first_member = false;
                 } else {
-                    // Use member name for structs, ._mN for arrays/vectors
-                    var used_name = false;
+                    // Struct -> member name; array/matrix -> [idx]. HLSL arrays
+                    // and matrices index with [i]; the old `._mN` fallback read as
+                    // an unknown swizzle on an array (e.g. `v._m0`), the exact
+                    // failure on constant-index array access.
+                    var emitted = false;
                     if (current_type_id) |tid| {
                         const ti = getDef(module, tid);
                         if (ti) |tinst| {
-                            if (tinst.op == .TypeStruct) {
-                                var mname_buf: [32]u8 = undefined;
-                                const mname = hlslGetMemberName(module, tid, val, &mname_buf);
-                                try buf.print(alloc, ".{s}", .{mname});
-                                used_name = true;
+                            switch (tinst.op) {
+                                .TypeStruct => {
+                                    var mname_buf: [32]u8 = undefined;
+                                    const mname = hlslGetMemberName(module, tid, val, &mname_buf);
+                                    try buf.print(alloc, ".{s}", .{mname});
+                                    emitted = true;
+                                },
+                                .TypeArray, .TypeMatrix => {
+                                    try buf.print(alloc, "[{d}]", .{val});
+                                    emitted = true;
+                                },
+                                else => {},
                             }
                         }
                     }
-                    if (!used_name) try buf.print(alloc, "._m{d}", .{val});
+                    if (!emitted) try buf.print(alloc, "._m{d}", .{val});
                 }
 
                 // Advance type: struct member type, or vector element type
