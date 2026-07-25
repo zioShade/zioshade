@@ -2804,14 +2804,23 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // (varyings sorted by location, gl_Position appended last).
     if (is_vertex and stage_outputs.items.len > 0) {
         try w.writeAll("struct main0_out\n{\n");
+        var has_position = false;
         for (stage_outputs.items) |so| {
             if (so.is_position) {
+                has_position = true;
                 try w.print("    {s} {s} [[position]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name });
             } else if (so.is_point_size) {
                 try w.print("    {s} {s} [[point_size]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name });
             } else {
                 try w.print("    {s} {s} [[user(locn{d})]];\n", .{ try mslType(&module, so.type_id, &names, aa), so.name, so.location });
             }
+        }
+        // Metal requires every vertex function's return struct to carry a
+        // [[position]] output. A vertex shader that writes no gl_Position (e.g. a
+        // fragment-class shader cross-compiled under the vertex stage) would
+        // otherwise be rejected; add a default position member, matching spirv-cross.
+        if (!has_position) {
+            try w.writeAll("    float4 gl_Position [[position]];\n");
         }
         try w.writeAll("};\n\n");
     }
