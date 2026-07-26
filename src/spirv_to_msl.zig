@@ -6545,11 +6545,63 @@ fn emitWhileLoopMSL(
         }
         if (g_loop_phis) |lp| {
             if (lp.get(loop_idx)) |plist| {
+                // #loop-carry-ordering: emit the carry copies in DEPENDENCY ORDER. A
+                // phi whose update value is another carry phi's result (parallel
+                // assignment, e.g. `c=a+b; a=b; b=c`) must be assigned FIRST, while
+                // the source still holds the OLD value — else `a=b` reads the already-
+                // updated `b` and the loop computes wrong (fibonacci_mod, maxdiff 179).
+                // Topo rule: pair i before j when vname[i]==rname[j] (i reads j's
+                // result, so i must run before j overwrites it).
+                var rbuf: [16][]const u8 = undefined;
+                var vbuf: [16][]const u8 = undefined;
+                var cn: usize = 0;
                 for (plist.items) |pi| {
+                    if (cn >= 16) break;
                     const rname = names.get(pi.result_id) orelse continue;
                     const vname = names.get(pi.update_id) orelse continue;
                     if (std.mem.eql(u8, rname, vname)) continue;
-                    try w.print("        {s} = {s};\n", .{ rname, vname });
+                    rbuf[cn] = rname;
+                    vbuf[cn] = vname;
+                    cn += 1;
+                }
+                var emitted = [_]bool{false} ** 16;
+                var emitted_cnt: usize = 0;
+                while (emitted_cnt < cn) {
+                    var progressed = false;
+                    var idx: usize = 0;
+                    while (idx < cn) : (idx += 1) {
+                        if (emitted[idx]) continue;
+                        // idx is ready when every k with vname[k]==rname[idx] is
+                        // already emitted (those read idx's result → must run first).
+                        var ready = true;
+                        var k: usize = 0;
+                        while (k < cn) : (k += 1) {
+                            if (k == idx or emitted[k]) continue;
+                            if (std.mem.eql(u8, vbuf[k], rbuf[idx])) {
+                                ready = false;
+                                break;
+                            }
+                        }
+                        if (ready) {
+                            try w.print("        {s} = {s};\n", .{ rbuf[idx], vbuf[idx] });
+                            emitted[idx] = true;
+                            emitted_cnt += 1;
+                            progressed = true;
+                            break;
+                        }
+                    }
+                    if (!progressed) {
+                        // Dependency cycle (shouldn't occur for structured SSA) — emit
+                        // the rest in original order as a safe fallback.
+                        var j: usize = 0;
+                        while (j < cn) : (j += 1) {
+                            if (!emitted[j]) {
+                                try w.print("        {s} = {s};\n", .{ rbuf[j], vbuf[j] });
+                                emitted[j] = true;
+                                emitted_cnt += 1;
+                            }
+                        }
+                    }
                 }
             }
         }
