@@ -41,8 +41,15 @@ check_one() {
   local o rc; o=$("$NC" "$zm" "$nm" "$SHARE/${name}_n" 2>&1); rc=$?
   [ "$rc" -ne 0 ] && { echo "skip-render"; return; }
   printf '%s' "$o" | grep -q 'MATCH' && { echo "MATCH"; return; }
-  printf '%s' "$o" | grep -q 'DIFFER' && { echo "DIFFER(naga-2nd-oracle,FLAG-no-ground-truth)"; return; }
-  echo "skip-render"
+  printf '%s' "$o" | grep -q 'DIFFER' || { echo "skip-render"; return; }
+  # Triage the DIFFER: re-render with precise FP. MATCH => benign FP-contraction at a
+  # boundary (EDGE). Still DIFFER => persists precise-FP — but that does NOT mean a bug:
+  # it also covers chaotic whole-image FP divergence (two correct compilers emit different
+  # FP orderings for a fractal's escape iteration, amplified to total disagreement, e.g.
+  # mandelbox). So label it "persistent" (flagged, spans benign-chaotic to control-flow),
+  # never "structural" (which would over-claim). No ground truth → never auto-fixed.
+  local os; os=$(SHADERCOMPARE_SAFE_MATH=1 "$NC" "$zm" "$nm" "$SHARE/${name}_ns" 2>&1)
+  if printf '%s' "$os" | grep -q 'MATCH'; then echo "EDGE(naga-fp)"; else echo "DIFFER(naga-persistent,FLAG)"; fi
 }
 
 # Tally counters
@@ -70,6 +77,6 @@ fi
 
 echo ""
 echo "=== naga 2nd-oracle coverage ==="
-for k in MATCH "DIFFER(naga-2nd-oracle,FLAG-no-ground-truth)" skip-glslang skip-naga skip-zioshade-msl skip-render; do
+for k in MATCH "EDGE(naga-fp)" "DIFFER(naga-persistent,FLAG)" skip-glslang skip-naga skip-zioshade-msl skip-render; do
   echo "  $k: ${C[$k]:-0}"
 done

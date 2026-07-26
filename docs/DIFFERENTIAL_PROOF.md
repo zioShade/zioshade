@@ -95,7 +95,7 @@ and naga-MSL rendered on Metal and pixel-diffed). Latest full-corpus run:
 | verdict | count | meaning |
 |---------|------:|---------|
 | MATCH (render-proven-2-oracle) | 1090 | zioshade and naga agree pixel-for-pixel — correlated-error blind spot **closed** |
-| DIFFER (flagged) | 46 | no ground truth — flagged for investigation, **never** auto-"fixed" |
+| DIFFER (flagged; 0 are boundary-FP) | 46 | no ground truth — flagged, **never** auto-"fixed"; a precise-FP pass classified all 46 as persistent (none are measure-zero FP edges) |
 | skip-render | 21 | naga MSL needs buffer/texture bindings not yet wired |
 | skip-glslang / skip-naga / skip-zioshade-msl | 296 | non-Vulkan source / naga can't cross / zioshade can't emit |
 
@@ -107,6 +107,15 @@ they are **flagged for human investigation, not silently "fixed"** — manufactu
 against an unverified oracle would be the precise sin this project exists to prevent. The
 flagged set clusters in chaotic/iterative shaders (FP-amplification) and loop-control
 shaders (the known-hard surface), which are the worthwhile investigation targets.
+
+A precise-FP pass (re-rendering each DIFFER with Metal fast-math disabled, like
+`prove_opt`'s EDGE classifier) classified **0 of the 46 as boundary-FP** — all persist.
+That is the honest ceiling of auto-classification: it rules out measure-zero FP rounding
+edges, but chaotic shaders legitimately diverge between two correct compilers by FP
+ordering (whole-image disagreement, e.g. mandelbox), which precise-FP cannot resolve
+since the two MSL programs are structurally different. So the persistent set is a mix of
+benign chaotic-FP divergence and genuine control-flow differences; separating them needs
+manual analysis with ground truth, not more automation — the disciplined stopping point.
 
 Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 
