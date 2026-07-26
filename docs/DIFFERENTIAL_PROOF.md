@@ -56,7 +56,7 @@ render-proven," here is the honest per-backend confidence level:
 | **MSL on `spirv-opt -O`** | **render-proven** | `prove_opt` runs the SPIR-V optimizer's output through both zioshade-MSL and SPIRV-Cross-MSL and render-diffs on Metal; a focused campaign closed 39 structural miscompiles to 0, and wintty's own `crt_output`/`focus_output` shaders verify MATCH on optimized SPIR-V | `just prove-opt` |
 | **GLSL** | **compile-verified only** | glslang accepts the emitted GLSL across the corpus (0 INVALID) | `just glsl-glslang-all` |
 | **WGSL** | **parse/compile-verified only** | naga accepts the emitted WGSL across the conformance corpus (0 REJECT) | `just wgsl-naga` |
-| **HLSL** | **compile-verified only** | glslang's HLSL frontend accepts the emitted HLSL (0 INVALID); DXC/D3D12 render-diff is **not yet provisioned** | `just hlsl-glslang-all` |
+| **HLSL** | **compile-verified** (glslang + DXC) | glslang accepts the emitted HLSL (0 INVALID); DXC canonical SM6.x compile-verify now provisioned in Docker — 51 PASS / 3 honest-error / 2 SKIP; the D3D12 *render*-diff (semantic truth) is still founder-gated | `just hlsl-glslang-all`, `just hlsl-dxc` |
 
 **What "compile-verified only" means, honestly.** A compiler can emit output a
 downstream validator accepts yet still compute the wrong thing — precisely the
@@ -68,13 +68,13 @@ correct*. Two consequences, by design:
 - Where zioshade cannot translate a construct safely, it **declines loudly**
   (a named honest-error) rather than emit a best-effort translation that might be
   wrong. Every "honest-err" / XFAIL above is such a refusal, never a silent pass.
-- The DXC → D3D12 HLSL render oracle (`tools/hlsl_render_check.sh` + `tools/warp/`)
-  is the path to lift HLSL from compile-verified to render-proven. It is
-  **deliberately deferred**: wintty ships on MSL today, so the macOS render-proven
-  path is the one that matters for the actual consumer, and gold-plating an
-  unconfirmed Windows path would manufacture a partial receipt (DXC compile is
-  itself not a semantic oracle). Docker is now available locally, so the DXC path
-  is unblocked infrastructure for the day a Windows target is confirmed.
+- The DXC **compile**-verify tier is now provisioned (`just hlsl-dxc`, DXC in Docker —
+  51 PASS / 3 honest-error / 2 SKIP), giving HLSL a canonical SM6.x compile oracle on
+  top of the glslang frontend gate. The DXC → D3D12 **render** oracle
+  (`tools/hlsl_render_check.sh` + `tools/warp/`) — which would lift HLSL from
+  compile-verified to render-proven — is the remaining founder-gated tier: it needs a
+  D3D execution rig, and DXC compile is itself not a semantic oracle. wintty ships on
+  MSL today, so the macOS render-proven path remains the one that matters for the consumer.
 
 **Bottom line:** trust the MSL path as render-verified; treat GLSL/WGSL/HLSL as
 compile-checked and honest-error-bounded — not as semantically proven.
