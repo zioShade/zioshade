@@ -42,6 +42,42 @@ conformance to a peer compiler (SPIRV-Cross) on one Metal GPU class; outputs whe
 zioshade and the reference share the same spec misreading are structurally invisible
 to any differential.
 
+## Per-backend confidence at a glance
+
+zioshade emits four backends, and they are **not** equally proven. The headline
+number above (1315 shaders, 0 divergences) is the **MSL backend run on a real
+Metal GPU**. To keep the conformance badge from being read as "every backend is
+render-proven," here is the honest per-backend confidence level:
+
+| Backend | Confidence | Evidence | Regenerate |
+|---------|------------|----------|------------|
+| **MSL** | **render-proven** (strongest) | full-corpus Metal GPU pixel/exec differential vs glslang→SPIRV-Cross: 1315 shaders, **0 divergences** (table above) | `PROVE_FULL=1 just prove` |
+| **MSL on `spirv-opt -O`** | **render-proven** | `prove_opt` runs the SPIR-V optimizer's output through both zioshade-MSL and SPIRV-Cross-MSL and render-diffs on Metal; a focused campaign closed 39 structural miscompiles to 0, and wintty's own `crt_output`/`focus_output` shaders verify MATCH on optimized SPIR-V | `just prove-opt` |
+| **GLSL** | **compile-verified only** | glslang accepts the emitted GLSL across the corpus (0 INVALID) | `just glsl-glslang-all` |
+| **WGSL** | **parse/compile-verified only** | naga accepts the emitted WGSL across the conformance corpus (0 REJECT) | `just wgsl-naga` |
+| **HLSL** | **compile-verified only** | glslang's HLSL frontend accepts the emitted HLSL (0 INVALID); DXC/D3D12 render-diff is **not yet provisioned** | `just hlsl-glslang-all` |
+
+**What "compile-verified only" means, honestly.** A compiler can emit output a
+downstream validator accepts yet still compute the wrong thing — precisely the
+"plausible-but-wrong" failure zioshade exists to eliminate. Only the MSL backend
+has a *render/exec* oracle (run it on the GPU, compare pixels); for GLSL/WGSL/HLSL
+we currently prove the output is *well-formed*, not that it is *semantically
+correct*. Two consequences, by design:
+
+- Where zioshade cannot translate a construct safely, it **declines loudly**
+  (a named honest-error) rather than emit a best-effort translation that might be
+  wrong. Every "honest-err" / XFAIL above is such a refusal, never a silent pass.
+- The DXC → D3D12 HLSL render oracle (`tools/hlsl_render_check.sh` + `tools/warp/`)
+  is the path to lift HLSL from compile-verified to render-proven. It is
+  **deliberately deferred**: wintty ships on MSL today, so the macOS render-proven
+  path is the one that matters for the actual consumer, and gold-plating an
+  unconfirmed Windows path would manufacture a partial receipt (DXC compile is
+  itself not a semantic oracle). Docker is now available locally, so the DXC path
+  is unblocked infrastructure for the day a Windows target is confirmed.
+
+**Bottom line:** trust the MSL path as render-verified; treat GLSL/WGSL/HLSL as
+compile-checked and honest-error-bounded — not as semantically proven.
+
 Three independent kinds of evidence, weakest to strongest:
 
 1. **Validity + robustness at scale** — every shader either produces SPIR-V the
