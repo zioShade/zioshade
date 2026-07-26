@@ -837,6 +837,28 @@ test "T4.1: .sample() not texture()" {
     try assertNotContains(msl, "Sample(");
 }
 
+// OpImageSampleImplicitLod/ExplicitLod with a ConstOffset must pass the int2
+// offset as a trailing `.sample(...)` arg (spirv-cross: `tex.sample(s, uv,
+// int2(1,2))` / `..., level(L), int2(3,4)`). The MSL backend previously DROPPED
+// it (sampled the wrong texel) — silent plausible-wrong (#170, same class as the
+// HLSL ConstOffset fix 8d5c972). Found via a cross-backend differential audit.
+test "MSL: textureOffset/textureLodOffset carry the ConstOffset (int2 arg)" {
+    const source =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2D tex;
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\  o  = textureOffset(tex, uv, ivec2(1, 2));
+        \\  o += textureLodOffset(tex, uv, 1.0, ivec2(3, 4));
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, "int2(1, 2)"); // textureOffset (ImplicitLod)
+    try assertContains(msl, "int2(3, 4)"); // textureLodOffset (ExplicitLod)
+}
+
 // ---------------------------------------------------------------------------
 // T5: MSL built-in functions
 // ---------------------------------------------------------------------------

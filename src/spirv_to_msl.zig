@@ -379,6 +379,31 @@ fn mslArrayedSampleArgs(alloc: std.mem.Allocator, coord: []const u8, dim: u32) !
     };
 }
 
+/// Render a ConstOffset image operand (an OpConstantComposite of int constants)
+/// INLINE as `intN(c0, c1, ...)` for an MSL `.sample(...)` trailing offset arg
+/// (spirv-cross: `tex.sample(samp, uv, int2(1,2))`). Returns "" if `offset_id`
+/// is not a renderable constant composite. Mirrors writeHlslConstOffset.
+fn mslConstOffset(m: *const ParsedModule, alloc: std.mem.Allocator, offset_id: u32) []const u8 {
+    const cc = getDef(m, offset_id) orelse return "";
+    if (cc.op != .ConstantComposite or cc.words.len < 4) return "";
+    const n = cc.words.len - 3;
+    var buf = std.ArrayList(u8).initCapacity(alloc, 24) catch return "";
+    buf.print(alloc, "int{d}(", .{n}) catch return "";
+    for (cc.words[3..], 0..) |cid, i| {
+        if (i > 0) buf.appendSlice(alloc, ", ") catch return "";
+        if (getDef(m, cid)) |c| {
+            if (c.op == .Constant and c.words.len > 3) {
+                const v: i32 = @bitCast(c.words[3]);
+                buf.print(alloc, "{d}", .{v}) catch return "";
+                continue;
+            }
+        }
+        buf.appendSlice(alloc, "0") catch return "";
+    }
+    buf.appendSlice(alloc, ")") catch return "";
+    return buf.toOwnedSlice(alloc) catch "";
+}
+
 /// Integer-coordinate analogue of `mslArrayedSampleArgs` for `texture.read`
 /// (OpImageFetch). `texelFetch` carries an already-integer coordinate, so the
 /// spatial components are wrapped in `uintN(...)` and the array layer is split
@@ -7582,13 +7607,28 @@ fn emitInstruction(
             if (inst.words.len > 6 and (inst.words[5] & 0x1) != 0) {
                 bias_suffix = try std.fmt.allocPrint(alloc, ", bias({s})", .{names.get(inst.words[6]) orelse "0.0"});
             }
+            // ConstOffset image operand (mask bit 3): MSL `.sample` takes it as a
+            // trailing int2 arg (spirv-cross: `tex.sample(samp, uv, int2(1,2))`).
+            // Position: skip Bias(1)/Lod(1)/Grad(2) words. Dropping it samples the
+            // wrong texel — silent plausible-wrong (#170, same class as HLSL 8d5c972).
+            var off_suffix: []const u8 = "";
+            if (inst.words.len > 5 and (inst.words[5] & 0x8) != 0) {
+                var off: usize = 6;
+                if ((inst.words[5] & 0x1) != 0) off += 1; // Bias
+                if ((inst.words[5] & 0x2) != 0) off += 1; // Lod
+                if ((inst.words[5] & 0x4) != 0) off += 2; // Grad
+                if (off < inst.words.len) {
+                    const o = mslConstOffset(m, alloc, inst.words[off]);
+                    if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+                }
+            }
             // MSL: tex.sample(samp, coord). Arrayed textures pass the array layer
             // as a SEPARATE argument (coord.xy, uint(rint(coord.z)) for 2d_array).
             if (imageValueIsArrayed(m, inst.words[3])) {
                 const args = try mslArrayedSampleArgs(alloc, coord, imageValueDim(m, inst.words[3]));
-                try w.print("    {s} {s} = {s}.sample({s}, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, args, bias_suffix });
+                try w.print("    {s} {s} = {s}.sample({s}, {s}{s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, args, bias_suffix, off_suffix });
             } else {
-                try w.print("    {s} {s} = {s}.sample({s}, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, bias_suffix });
+                try w.print("    {s} {s} = {s}.sample({s}, {s}{s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, bias_suffix, off_suffix });
             }
         },
         // OpImageQueryLod (textureQueryLod): SampledImage, Coordinate → result vec2.
@@ -7734,7 +7774,15 @@ fn emitInstruction(
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}, level({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, names.get(inst.words[off]) orelse "0" });
+                    // Lod (0x2) at words[off]; a trailing ConstOffset (0x8) at
+                    // words[off+1] becomes the int2 offset arg. Dropping it samples
+                    // the wrong texel (silent plausible-wrong, #170).
+                    var lod_off: []const u8 = "";
+                    if (mask & 0x8 != 0 and off + 1 < inst.words.len) {
+                        const o = mslConstOffset(m, alloc, inst.words[off + 1]);
+                        if (o.len > 0) lod_off = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+                    }
+                    try w.print("    {s} {s} = {s}.sample({s}Smplr, {s}, level({s}){s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, names.get(inst.words[off]) orelse "0", lod_off });
                 } else if (mask & 0x4 != 0) {
                     // Grad (0x4): explicit gradients → MSL gradientNd(dPdx, dPdy).
                     // This arm previously had NO Grad case, so textureGrad fell
