@@ -2642,6 +2642,58 @@ fn hlslMemberLocation(module: *const ParsedModule, struct_id: u32, member_idx: u
     return null;
 }
 
+/// Interpolation-qualifier prefix for a vertex OUTPUT variable (Flat/Centroid/
+/// NoPerspective/Sample decorations), matching spirv-cross --hlsl. Vertex outputs
+/// carry these so the rasterizer interpolates them correctly for the fragment
+/// stage; dropping them is silent plausible-wrong (a `flat int` gets interpolated,
+/// a `noperspective` float gets perspective-interpolated). Mirrors the fragment-
+/// input qualifier logic (~line 3575) but decoration-driven.
+fn hlslInterpPrefix(decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), var_id: u32) []const u8 {
+    const centroid_pfx: []const u8 = if (hasDecoration(decorations, var_id, .sample))
+        "sample "
+    else if (hasDecoration(decorations, var_id, .centroid))
+        "centroid "
+    else
+        "";
+    if (hasDecoration(decorations, var_id, .flat)) return if (centroid_pfx.len > 0)
+        (if (std.mem.eql(u8, centroid_pfx, "sample ")) "sample nointerpolation " else "centroid nointerpolation ")
+    else
+        "nointerpolation ";
+    if (hasDecoration(decorations, var_id, .no_perspective)) return if (centroid_pfx.len > 0)
+        (if (std.mem.eql(u8, centroid_pfx, "sample ")) "sample noperspective " else "centroid noperspective ")
+    else
+        "noperspective ";
+    return centroid_pfx;
+}
+
+/// Same as hlslInterpPrefix but for a STRUCT MEMBER (OpMemberDecorate on
+/// `struct_id`/`member_idx`), used for flattened user output-block members.
+fn hlslMemberInterpPrefix(module: *const ParsedModule, struct_id: u32, member_idx: u32) []const u8 {
+    // Order matters: centroid/sample before nointerpolation/noperspective.
+    const has_sample = hasMemberDecoration(module, struct_id, member_idx, .sample);
+    const has_centroid = hasMemberDecoration(module, struct_id, member_idx, .centroid);
+    const centroid_pfx: []const u8 = if (has_sample) "sample " else if (has_centroid) "centroid " else "";
+    if (hasMemberDecoration(module, struct_id, member_idx, .flat)) return if (centroid_pfx.len > 0)
+        (if (std.mem.eql(u8, centroid_pfx, "sample ")) "sample nointerpolation " else "centroid nointerpolation ")
+    else
+        "nointerpolation ";
+    if (hasMemberDecoration(module, struct_id, member_idx, .no_perspective)) return if (centroid_pfx.len > 0)
+        (if (std.mem.eql(u8, centroid_pfx, "sample ")) "sample noperspective " else "centroid noperspective ")
+    else
+        "noperspective ";
+    return centroid_pfx;
+}
+
+/// True if `struct_id`/`member_idx` carries the given OpMemberDecorate.
+fn hasMemberDecoration(module: *const ParsedModule, struct_id: u32, member_idx: u32, dec: spirv.Decoration) bool {
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 4) continue;
+        if (inst.words[1] != struct_id or inst.words[2] != member_idx) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) == dec) return true;
+    }
+    return false;
+}
+
 /// True if member `member_idx` of gl_PerVertex block var `var_id` is WRITTEN, i.e.
 /// some `OpAccessChain <var_id> <const member_idx>` result is an OpStore target.
 /// (glslang declares all four members but only writes the ones the shader assigns.)
@@ -2966,7 +3018,8 @@ fn emitFunction(
                 };
                 try w.print("    {s} {s} : {s};\n", .{ tname, fld.orig_name, semantic });
             } else {
-                try w.print("    {s} {s} : TEXCOORD{d};\n", .{ tname, fld.orig_name, fld.location orelse 0 });
+                const interp = hlslInterpPrefix(decorations, fld.id);
+                try w.print("    {s}{s} {s} : TEXCOORD{d};\n", .{ interp, tname, fld.orig_name, fld.location orelse 0 });
             }
         }
         // #471: promote representable, WRITTEN gl_PerVertex block members into
@@ -3017,7 +3070,8 @@ fn emitFunction(
                 const mname = hlslGetMemberName(module, blk.struct_id, mi, &mname_buf);
                 const mtype_id = sdef.words[2 + mi];
                 const tn = try hlslType(module, mtype_id, names, alloc);
-                try w.print("    {s} {s} : TEXCOORD{d};\n", .{ tn, mname, blk.block_loc + mi });
+                const interp = hlslMemberInterpPrefix(module, blk.struct_id, mi);
+                try w.print("    {s}{s} {s} : TEXCOORD{d};\n", .{ interp, tn, mname, blk.block_loc + mi });
             }
         }
         try w.writeAll("};\n\n");
