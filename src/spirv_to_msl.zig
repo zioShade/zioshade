@@ -7000,10 +7000,14 @@ fn emitBlock(
                 };
             }
             // #multi-return: branch to the enclosing switch merge past this block's
-            // immediate merge (early return) — assign the switch-merge phi(s).
+            // immediate merge (early return) — assign the switch-merge phi(s) and
+            // `break;` out of the switch case so the lowered if-chain is EXCLUSIVE
+            // (each early return exits; without the break the sequential ifs all fire
+            // and overwrite the return value -> wrong render, early_return_func).
             if (inst.words.len > 1) {
                 if (g_switch_ctx) |ctx| if (ctx.merge_label == inst.words[1]) {
                     for (ctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
+                    try w.print("{s}    break;\n", .{indent});
                 };
             }
             break;
