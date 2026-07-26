@@ -6456,6 +6456,17 @@ fn emitWhileLoopMSL(
         }
     }
 
+    // #continue/latch: divergent phis at the loop's CONTINUE/latch block. The latch
+    // is reached from BOTH the continue path(s) AND the body fall-through, so a
+    // latch phi's value depends on which path took it — it must be assigned at each
+    // (continue + fall-through), or the loop-carried var it feeds stays stale
+    // (loop-continue-break: count/sum read via uninitialized latch-phi temps,
+    // maxdiff 255). i's back-edge is a plain computation in the latch (not a phi),
+    // so it is unaffected. Mirrors loop_mphis (merge) via the same mechanism.
+    var latch_mphis: std.ArrayList(Instruction) = .empty;
+    defer latch_mphis.deinit(alloc);
+    if (!is_do_while) collectLoopMergePhis(m, label_map, cont_lbl, &latch_mphis, alloc);
+
     // #237: run the SSA phi counter update at the TOP of the loop (first-iteration
     // flag) so a `continue` still advances the counter (matching a real `for`).
     var fbuf: [40]u8 = undefined;
@@ -6636,6 +6647,14 @@ fn emitWhileLoopMSL(
                 continue;
             }
             if (binst.op == .Branch) {
+                // #continue/latch fall-through: an unconditional OpBranch to the
+                // latch is the body's natural end — assign the latch phi(s) for this
+                // fall-through predecessor (blockLabelOf resolves it; cur_body_lbl is
+                // stale here, same Label-skip staleness as emitBlock).
+                if (binst.words.len > 1 and binst.words[1] == cont_lbl and latch_mphis.items.len > 0) {
+                    const fp = blockLabelOf(m, bi);
+                    for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, fp, "        ", w, alloc);
+                }
                 if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
                 continue;
             }
@@ -6673,6 +6692,10 @@ fn emitWhileLoopMSL(
                 if (nml) |nmv| {
                     const nhe = nfl != null and nfl.? != nmv;
                     if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
+                        if (latch_mphis.items.len > 0) {
+                            const cp = if (ntl == cont_lbl) cur_body_lbl else ntl;
+                            for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, cp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) continue;\n", .{ncn});
                     } else if (tl_is_trivial_break and fl_is_trivial_continue) {
                         if (loop_mphis.items.len > 0) {
@@ -6682,6 +6705,10 @@ fn emitWhileLoopMSL(
                         try w.print("        if ({s}) break;\n", .{ncn});
                         try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
+                        if (latch_mphis.items.len > 0) {
+                            const cp = if (ntl == cont_lbl) cur_body_lbl else ntl;
+                            for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, cp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) continue;\n", .{ncn});
                         bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     } else if (tl_is_trivial_break) {
