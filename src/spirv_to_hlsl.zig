@@ -1860,7 +1860,7 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
         // OpConstantNull = zero value for the type (spirv-opt -O produces these).
         if (inst.op == .ConstantNull and inst.words.len > 2) {
             const tn = hlslType(module, inst.words[1], names, alloc) catch "float";
-            const lit = std.fmt.allocPrint(alloc, "({s})0", .{tn}) catch continue;
+            const lit = std.fmt.allocPrint(alloc, "(({s})0)", .{tn}) catch continue;
             if (names.fetchPut(inst.words[2], lit) catch null) |old| alloc.free(old.value);
             continue;
         }
