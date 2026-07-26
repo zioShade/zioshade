@@ -130,12 +130,21 @@ let H: Int = W
 let zMSL = try readMSL(zPath)
 let nMSL = try readMSL(nPath)
 
+// Opt-in precise-fp mode (SHADERCOMPARE_SAFE_MATH=1): compile both with Metal fast-math
+// disabled, so only a genuine structural difference (not FP-contraction rounding at a
+// discontinuity) can diverge. Used to triage a default-fast-math DIFFER as benign FP
+// (becomes MATCH) vs structural (persists) — mirrors ShaderCompare / prove_opt.
+let compileOpts: MTLCompileOptions? = {
+    guard ProcessInfo.processInfo.environment["SHADERCOMPARE_SAFE_MATH"] == "1" else { return nil }
+    let o = MTLCompileOptions(); o.mathMode = .safe; return o
+}()
+
 guard let device = MTLCreateSystemDefaultDevice() else { print("ERROR: No Metal device"); exit(1) }
 let vertLibZ = makeVertexLibrary(device: device, stageInStructName: stageInStruct(zMSL), fragmentMSL: zMSL)
 let vertLibN = makeVertexLibrary(device: device, stageInStructName: stageInStruct(nMSL), fragmentMSL: nMSL)
 
-let libZ = try device.makeLibrary(source: zMSL, options: nil)
-let libN = try device.makeLibrary(source: nMSL, options: nil)
+let libZ = try device.makeLibrary(source: zMSL, options: compileOpts)
+let libN = try device.makeLibrary(source: nMSL, options: compileOpts)
 
 let pz = renderFrame(device: device, vertLib: vertLibZ, fragLib: libZ, w: W, h: H)
 let pn = renderFrame(device: device, vertLib: vertLibN, fragLib: libN, w: W, h: H)
