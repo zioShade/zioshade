@@ -166,6 +166,69 @@ fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHash
         list.append(alloc, minst) catch {};
     }
 }
+// True if `lbl` is a case target (default or a case literal target) of switch_inst.
+fn isSwitchCaseTarget(switch_inst: Instruction, lbl: u32) bool {
+    if (switch_inst.words.len >= 3 and switch_inst.words[2] == lbl) return true; // default
+    var i: usize = 3;
+    while (i + 1 < switch_inst.words.len) : (i += 2) {
+        if (switch_inst.words[i + 1] == lbl) return true;
+    }
+    return false;
+}
+// True if any case body OpBranches to another case target (fallthrough). Used to
+// detect spirv-opt's fallthrough lowering (cross-case phi chain) that needs the
+// chain-materialization emission path.
+fn switchIsFallthrough(m: *const ParsedModule, switch_inst: Instruction, merge_lbl: u32, label_map: *const std.AutoHashMap(u32, usize)) bool {
+    var wi: usize = 3;
+    while (wi + 1 < switch_inst.words.len) : (wi += 2) {
+        const target = switch_inst.words[wi + 1];
+        if (target == merge_lbl) continue;
+        const tidx = label_map.get(target) orelse continue;
+        var ri: usize = tidx + 1;
+        while (ri < m.instructions.len) : (ri += 1) {
+            const rinst = m.instructions[ri];
+            if (rinst.op == .Label or rinst.op == .FunctionEnd or rinst.op == .BranchConditional) break;
+            if (rinst.op == .Branch and rinst.words.len > 1) {
+                const bt = rinst.words[1];
+                if (bt != merge_lbl and bt != target and isSwitchCaseTarget(switch_inst, bt)) return true;
+                break;
+            }
+        }
+    }
+    return false;
+}
+// Collect cross-case chain phis for a fallthrough switch: for each case-target
+// block, the OpPhis at its top are the chain phis (each = phi(initial, prev-case-
+// value)). Record the block, the entry incoming (from a non-case pred), and the
+// OpSwitch literal (for the entry-init `if(sel==literal) chain_phi=initial`).
+fn collectSwitchChainPhis(m: *const ParsedModule, switch_inst: Instruction, merge_lbl: u32, label_map: *const std.AutoHashMap(u32, usize), list: *std.ArrayList(ChainPhiEntry), alloc: std.mem.Allocator) void {
+    var wi: usize = 3;
+    while (wi + 1 < switch_inst.words.len) : (wi += 2) {
+        const literal = switch_inst.words[wi];
+        const target = switch_inst.words[wi + 1];
+        if (target == merge_lbl) continue;
+        const bidx = label_map.get(target) orelse continue;
+        var pi: usize = bidx + 1;
+        while (pi < m.instructions.len) : (pi += 1) {
+            const pinst = m.instructions[pi];
+            if (pinst.op != .Phi or pinst.words.len < 5) break;
+            // Find the entry incoming (pred is NOT a case target).
+            var entry_value: u32 = 0;
+            var found_entry = false;
+            var pp: usize = 3;
+            while (pp + 1 < pinst.words.len) : (pp += 2) {
+                if (!isSwitchCaseTarget(switch_inst, pinst.words[pp + 1])) {
+                    entry_value = pinst.words[pp];
+                    found_entry = true;
+                    break;
+                }
+            }
+            if (found_entry) {
+                list.append(alloc, .{ .phi = pinst, .block = target, .entry_value = entry_value, .literal = @intCast(literal) }) catch {};
+            }
+        }
+    }
+}
 fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
         const t = mslValueType(m, phi.words[1], names, alloc) catch "float";
@@ -1369,6 +1432,13 @@ threadlocal var g_hoist_stripping: bool = false;
 // inside the case body. Mirrors the loop-merge-phi carry-on-break pattern.
 const SwitchPhiCtx = struct { merge_label: u32, phis: []const Instruction };
 threadlocal var g_switch_ctx: ?SwitchPhiCtx = null;
+
+// #switch-fallthrough: a case-target block's cross-case chain phi (spirv-opt's
+// fallthrough lowering). `block` = the case-target block the phi lives at;
+// `entry_value` = the incoming from before the switch (the "initial"); `literal`
+// = the OpSwitch literal for `block` (for the entry-init `if(sel==literal)`).
+const ChainPhiEntry = struct { phi: Instruction, block: u32, entry_value: u32, literal: i64 };
+threadlocal var g_switch_chain: ?[]const ChainPhiEntry = null;
 
 // #early-return-in-loop: a return inside a loop (spirv-opt) stores the return
 // value then branches to the LOOP merge from a NON-TRIVIAL block (it carries the
@@ -6175,10 +6245,36 @@ fn emitBody(
                 var sphis: std.ArrayList(Instruction) = .empty;
                 defer sphis.deinit(alloc);
                 collectSwitchMergePhis(m, &label_map, mval, &sphis, alloc);
-                finalizeSwitchPhis(names, sphis.items, alloc); // rename FIRST (unify with loop-merge-phi) so emitSwitchPhiDecls/CaseCopy + emitMergePhiCopyForPred all read the final name via names.get
+                const is_ft = switchIsFallthrough(m, inst, mval, &label_map);
+                // #switch-fallthrough: collect cross-case chain phis.
+                var chain_entries: std.ArrayList(ChainPhiEntry) = .empty;
+                defer chain_entries.deinit(alloc);
+                if (is_ft) collectSwitchChainPhis(m, inst, mval, &label_map, &chain_entries, alloc);
+                // Rename + declare merge phis AND chain phis (both use _phi naming).
+                finalizeSwitchPhis(names, sphis.items, alloc);
+                for (chain_entries.items) |ce| {
+                    const vn = names.get(ce.phi.words[2]) orelse "pv";
+                    const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                    if (names.fetchPut(ce.phi.words[2], pn) catch null) |old| alloc.free(old.value);
+                    if (g_materialized_phis) |mp| mp.put(ce.phi.words[2], {}) catch {};
+                }
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                for (chain_entries.items) |ce| {
+                    const t = mslValueType(m, ce.phi.words[1], names, alloc) catch "float";
+                    const vn = names.get(ce.phi.words[2]) orelse "pv";
+                    try w.print("    {s} {s};\n", .{ t, vn });
+                }
+                // Entry inits: for each chain phi at case C, if(sel==C) chain_phi=initial.
+                if (chain_entries.items.len > 0) {
+                    for (chain_entries.items) |ce| {
+                        const vn = names.get(ce.phi.words[2]) orelse "pv";
+                        try w.print("    if ({s} == {d}) {{ {s} = {s}; }}\n", .{ sn, ce.literal, vn, mslExprName(m, names, ce.entry_value, alloc) });
+                    }
+                }
                 const saved_switch_ctx = g_switch_ctx;
+                const saved_chain = g_switch_chain;
                 g_switch_ctx = .{ .merge_label = mval, .phis = sphis.items };
+                g_switch_chain = if (is_ft) chain_entries.items else null;
                 try w.print("    switch ({s}) {{\n", .{sn});
                 if (dl != mval) {
                     try w.writeAll("    default: {\n");
@@ -6194,10 +6290,27 @@ fn emitBody(
                     try w.print("    case {d}: {{\n", .{cv});
                     _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
-                    try w.writeAll("    break;\n    }\n");
+                    // #switch-fallthrough: omit break if this case falls through to
+                    // another case target (the cross-case chain accumulates).
+                    var falls_through = false;
+                    if (is_ft) {
+                        const tidx = label_map.get(target) orelse m.instructions.len;
+                        var ri2: usize = tidx + 1;
+                        while (ri2 < m.instructions.len) : (ri2 += 1) {
+                            const rinst2 = m.instructions[ri2];
+                            if (rinst2.op == .Label or rinst2.op == .FunctionEnd or rinst2.op == .BranchConditional) break;
+                            if (rinst2.op == .Branch and rinst2.words.len > 1) {
+                                if (rinst2.words[1] != mval and rinst2.words[1] != target and isSwitchCaseTarget(inst, rinst2.words[1])) falls_through = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!falls_through) try w.writeAll("    break;\n");
+                    try w.writeAll("    }\n");
                 }
                 try w.writeAll("    }\n");
                 g_switch_ctx = saved_switch_ctx;
+                g_switch_chain = saved_chain;
                 if (label_map.get(mval)) |mi| {
                     idx = mi;
                 }
@@ -7097,6 +7210,18 @@ fn emitBlock(
                     for (ctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
                     try w.print("{s}    break;\n", .{indent});
                 };
+            }
+            // #switch-fallthrough: branch to another case-target (fallthrough) —
+            // assign the destination's cross-case chain phi(s) for this pred.
+            if (inst.words.len > 1) {
+                if (g_switch_chain) |chain| {
+                    const pred = blockLabelOf(m, i);
+                    for (chain) |ce| {
+                        if (ce.block == inst.words[1]) {
+                            try emitMergePhiCopyForPred(m, names, ce.phi, pred, indent, w, alloc);
+                        }
+                    }
+                }
             }
             break;
         }
