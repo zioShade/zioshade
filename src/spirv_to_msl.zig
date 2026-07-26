@@ -1370,6 +1370,17 @@ threadlocal var g_hoist_stripping: bool = false;
 const SwitchPhiCtx = struct { merge_label: u32, phis: []const Instruction };
 threadlocal var g_switch_ctx: ?SwitchPhiCtx = null;
 
+// #early-return-in-loop: a return inside a loop (spirv-opt) stores the return
+// value then branches to the LOOP merge from a NON-TRIVIAL block (it carries the
+// store, so it isn't a Label+Branch trivial-break). That block goes through
+// emitBlock (the general if/else handler), which didn't know it was a loop-break
+// → no loop-merge-phi copy + no `break`, so the loop kept iterating and the
+// "did we return?" flag stayed stale (early_return2, maxdiff). This context (set
+// around each loop's body emission, saved/restored for nesting) lets emitBlock,
+// at a branch to the loop merge, emit the loop-merge-phi copy + a `break;`.
+const LoopMergeCtx = struct { merge_label: u32, phis: []const Instruction };
+threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
+
 // Maps a flattened interface-block Input member to its main0_in field name so
 // buildAccessExpr can rewrite `vin.member` (an OpAccessChain into a struct-typed
 // Input var, which has no MSL declaration) to `in.<blockinstance>_<member>`.
@@ -6486,6 +6497,13 @@ fn emitWhileLoopMSL(
         if (g_materialized_phis) |mp| mp.put(phi.words[2], {}) catch {};
     }
 
+    // #early-return-in-loop: expose this loop's merge + phis to emitBlock so a
+    // non-trivial break block (e.g. a return point that stores then branches to
+    // the loop merge) can emit the loop-merge-phi copy + `break;`. Saved/restored
+    // for nesting.
+    const saved_lmc = g_loop_merge_ctx;
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .phis = loop_mphis.items };
+
     if (dw_native) {
         try w.writeAll("    do\n    {\n");
     } else {
@@ -6857,6 +6875,7 @@ fn emitWhileLoopMSL(
         }
         try w.writeAll("    }\n");
     }
+    g_loop_merge_ctx = saved_lmc;
     if (label_map.get(merge_lbl)) |mi| return mi;
     return loop_idx + 1;
 }
@@ -6968,6 +6987,17 @@ fn emitBlock(
                 i = try emitWhileLoopMSL(m, names, decs, li, m.instructions[li].words[1], m.instructions[li].words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
                 i -= 1;
                 continue;
+            }
+            // #early-return-in-loop: a branch to the enclosing LOOP merge is a
+            // non-trivial break (e.g. a return point that stored then branches to the
+            // loop merge) — assign the loop-merge-phi copy for this predecessor, then
+            // `break;` out of the while loop. The post-loop `if(flag) ...` handles the
+            // rest. (Checked before the switch-merge case; a block branches to one.)
+            if (inst.words.len > 1) {
+                if (g_loop_merge_ctx) |ctx| if (ctx.merge_label == inst.words[1]) {
+                    for (ctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
+                    try w.print("{s}    break;\n", .{indent});
+                };
             }
             // #multi-return: branch to the enclosing switch merge past this block's
             // immediate merge (early return) — assign the switch-merge phi(s).
