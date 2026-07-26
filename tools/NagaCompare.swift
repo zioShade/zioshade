@@ -45,7 +45,11 @@ func stageInStruct(_ msl: String) -> String {
 }
 
 func makeVertexLibrary(device: MTLDevice, stageInStructName: String, fragmentMSL: String) -> MTLLibrary {
-    let members = structBody(fragmentMSL, stageInStructName)
+    // Varying-less fragments (e.g. gl_FragCoord only) have no stage_in struct; copy no
+    // members. Guarding the empty name avoids structBody matching "struct " and pulling in
+    // the fragment OUTPUT struct (e.g. main0_out's [[color(0)]] member) — which is an
+    // invalid vertex output and crashed every varying-less shader into skip-render.
+    let members = stageInStructName.isEmpty ? "" : structBody(fragmentMSL, stageInStructName)
     let vertMSL = """
 #include <metal_stdlib>
 using namespace metal;
