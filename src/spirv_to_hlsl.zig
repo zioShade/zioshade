@@ -963,18 +963,21 @@ fn hlslHasRecursion(m: *const ParsedModule, alloc: std.mem.Allocator) bool {
 // MatrixInverse=34) lowers to a generated closed-form cofactor/adjugate helper,
 // byte-identical to the MSL backend's spvInverseNxN (verified valid HLSL).
 //
-// KNOWN BUG — HLSL matrix convention (WARP-confirmed; BLIND to all local gates):
-// HLSL's `floatCxR(a,b,...)` constructor fills ROWS, so building a matrix from GLSL
-// columns (`float2x2(col0,col1)`) stores the TRANSPOSE, and `mul(M,v)` then computes
-// M^T·v (wrong). spirv-cross compensates by keeping the transpose in storage but
-// multiplying `mul(v,M)`. The fix is a multi-site convention change (mul operand order
-// + construction + indexing + these inverse helpers, all consistent) — but it is
-// invisible to compile, to the macOS DXC-parse render proxy (DXC -spirv normalizes the
-// convention), and to MSL codegen-diff. The earlier "confirmed by codegen diff" note
-// was a TEXT comparison — exactly the false confidence that let this ship. VERIFY ANY
-// FIX ON WARP (Windows D3D12) ONLY; see tools/warp/README.md (3 RENDER-DIFFERs:
-// mat3_branch, mat_cond_swizzle, outer_product_test). Until WARP confirms a fix, this
-// is a DOCUMENTED KNOWN DEFECT, never a silent pass. (#488)
+// HLSL matrix convention: HLSL's `floatCxR(a,b,...)` constructor fills ROWS, so a
+// column-major GLSL matrix built as `floatNxN(col0,col1,...)` is stored TRANSPOSED in
+// HLSL. The multiply is therefore emitted via `emitMatrixMulSwapped` (see ~line 7822),
+// which mirrors spirv-cross's convention exactly:
+//   OpMatrixTimesVector(M,v) -> mul(v,M)
+//   OpVectorTimesMatrix(v,M) -> mul(M,v)
+//   OpMatrixTimesMatrix(A,B) -> mul(B,A)
+// so the transpose-in-storage is compensated at the multiply. Verified: zioshade's HLSL
+// byte-matches spirv-cross (the WARP-confirmed-correct reference) on all the previously
+// WARP-flagged matrix shaders (mat3_branch, mat_cond_swizzle, outer_product_test).
+// CAUTION: this convention is BLIND to every local gate (compile, the macOS DXC-parse
+// render proxy, MSL codegen-diff) — a regression here is only caught by WARP (Windows
+// D3D12; tools/warp). The earlier "confirmed by codegen diff" note was a TEXT
+// comparison and was the false confidence that let the original bug ship; the
+// tools/warp/README.md "Status" section predates emitMatrixMulSwapped and is stale. (#488)
 const spv_inverse2_hlsl =
     \\float2x2 spvInverse2x2(float2x2 m)
     \\{
