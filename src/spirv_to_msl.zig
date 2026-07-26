@@ -6550,6 +6550,13 @@ fn emitWhileLoopMSL(
             if (sinst.op != .Phi or sinst.words.len < 4) continue;
             const phi_result = sinst.words[2];
             if (g_phi_hdr) |ph| if (ph.get(phi_result) != null) continue;
+            // #413 already hoisted this phi's declaration above the loop (it's a
+            // loop-carried phi's back-edge value defined inside the body). Don't
+            // redeclare/rename it inside — #474's if/else materialization honors the
+            // hoist (uses this hoisted name), and the carry reads it. Redeclaring
+            // inside would shadow it with a per-iteration-uninitialized var
+            // (switch_in_loop, maxdiff 255).
+            if (g_hoisted_ids) |h| if (h.contains(phi_result)) continue;
             const vn = names.get(phi_result) orelse continue;
             const t = mslValueType(m, sinst.words[1], names, alloc) catch continue;
             try w.print("    {s} {s}_phi;\n", .{ t, vn });
@@ -6839,7 +6846,7 @@ fn emitWhileLoopMSL(
                         // Declaration: skip phis already pre-declared by the loop pre-scan (#496).
                         for (mphis.items) |pv| {
                             const vn = names.get(pv.result_id) orelse "pv";
-                            const pre_decl = if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false;
+                            const pre_decl = (if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false) or (if (g_hoisted_ids) |h| h.contains(pv.result_id) else false);
                             if (pre_decl) {
                                 // Pre-declared by the loop pre-scan (#496): skip the
                                 // declaration, but for no-else emit the fall-through
@@ -6866,7 +6873,7 @@ fn emitWhileLoopMSL(
                         // by the pre-scan) for pre-declared phis; {vn}_phi for new ones.
                         for (mphis.items) |pv| {
                             const vn = names.get(pv.result_id) orelse "pv";
-                            const pre_decl = if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false;
+                            const pre_decl = (if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false) or (if (g_hoisted_ids) |h| h.contains(pv.result_id) else false);
                             const phi_name: []const u8 = if (pre_decl) vn else std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch vn;
                             const true_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                             try w.print("            {s} = {s};\n", .{ phi_name, mslExprName(m, names, true_val, alloc) });
@@ -6876,7 +6883,7 @@ fn emitWhileLoopMSL(
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                             for (mphis.items) |pv| {
                                 const vn = names.get(pv.result_id) orelse "pv";
-                                const pre_decl = if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false;
+                                const pre_decl = (if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false) or (if (g_hoisted_ids) |h| h.contains(pv.result_id) else false);
                                 const phi_name: []const u8 = if (pre_decl) vn else std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch vn;
                                 const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                                 try w.print("            {s} = {s};\n", .{ phi_name, mslExprName(m, names, false_val, alloc) });
@@ -6886,6 +6893,7 @@ fn emitWhileLoopMSL(
                         // Rename: skip phis already pre-renamed by the loop pre-scan (#496).
                         for (mphis.items) |pv| {
                             if (g_materialized_phis) |mp| if (mp.contains(pv.result_id)) continue;
+                            if (g_hoisted_ids) |h| if (h.contains(pv.result_id)) continue; // #413 hoisted above the loop: keep its name, don't rename to _phi
                             const vn = names.get(pv.result_id) orelse "pv";
                             const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                             if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
