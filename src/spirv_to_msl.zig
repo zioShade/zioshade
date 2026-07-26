@@ -6448,8 +6448,12 @@ fn emitWhileLoopMSL(
 
     if (!is_do_while) try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
 
-    // Emit body block
-    const body_idx = label_map.get(body_lbl) orelse m.instructions.len;
+    // Emit body block. When spirv-opt -O merges the body INTO the continue block
+    // (body_lbl == cont_lbl), the body was already emitted in the if(!first) skip
+    // above (the continue block); skip it here to avoid duplicating every
+    // iteration's work (maxdiff=255 — completely wrong output). Found via
+    // prove_opt.sh (optimized-SPIR-V MSL backend render-diff).
+    const body_idx = if (body_lbl == cont_lbl) m.instructions.len else label_map.get(body_lbl) orelse m.instructions.len;
     if (body_idx < m.instructions.len) {
         var bi: usize = body_idx + 1;
         while (bi < m.instructions.len) : (bi += 1) {
