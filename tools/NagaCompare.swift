@@ -7,50 +7,51 @@ import Foundation
 // cannot see: if zioshade and SPIRV-Cross shared a spec misreading, both would render
 // identically-but-WRONG and pass silently. naga is an INDEPENDENT cross-compiler; where
 // zioshade, spirv-cross, AND naga all render the same pixels, a shared misreading is far
-// less likely → "render-proven-2-oracle". Where they disagree, there is no ground truth,
-// so this tool only FLAGS (never claims a zioshade bug) — disagreements are logged for
-// investigation, never auto-"fixed" (that would manufacture plausible-wrong).
+// less likely → "render-proven-2-oracle". MSL is wintty's shipping backend.
 //
-// naga emits MSL in a different convention than spirv-cross: a plain `main_1(...)`
-// function taking `thread` refs (no `main0`, no `main0_in` struct, no entry-point
-// attributes). So we APPEND a generated Metal entry point that calls main_1, then render
-// with the same fullscreen-triangle + read-pixels plumbing as ShaderCompare.swift.
+// HARD RULE (per the deciding panel, mitigating the devil's-advocate risk): value is in
+// AGREEMENT, not disagreement. A DIFFER has no ground truth — it is FLAGGED for
+// investigation, NEVER auto-"fixed" (that would manufacture plausible-wrong).
 //
-// FIRST CUT: handles the common simple signature main_1(thread float4& pos, thread float4&
-// color) — gl_FragCoord + a single color output, no uniforms/textures. Shaders with richer
-// main_1 signatures are honest-skipped (skip-naga-complex), mirroring prove's skip model.
+// naga emits a COMPLETE renderable MSL: a `main_` fragment entry point plus `main_Input` /
+// `main_Output` structs with proper [[stage_in]] / [[user(locN)]] / [[color(N)]] attributes
+// (spirv-cross uses `main0` / `main0_in` / `main0_out` instead). So we render naga's native
+// `main_` directly — no generated wrapper — building a fullscreen-triangle vertex whose
+// output struct mirrors the fragment's stage_in struct (zero-initialised varyings), the
+// same trick ShaderCompare.swift uses for main0_in. Both sides get the SAME (zero) varyings,
+// so the pixel differential stays valid.
+//
+// Coverage: shaders whose interface is varyings + color out (no uniforms/textures) render
+// unaided. Shaders needing buffer/texture bindings skip-render (mirrors prove's skip model).
 //
 // Usage: NagaCompare <zioshade.msl> <naga.metal> [output_prefix]
 
 func readMSL(_ path: String) throws -> String { try String(contentsOfFile: path, encoding: .utf8) }
 
-// Does naga's main_1 have the simple 2-float4-ref signature (position + single color out)?
-// Regex is intentionally narrow: exactly two `thread ... float4&` params and nothing else.
-func nagaHasSimpleSig(_ msl: String) -> Bool {
-    guard let r = msl.range(of: #"void main_1\(\s*thread\s+[A-Za-z0-9_:]*float4&\s*\w+,\s*thread\s+[A-Za-z0-9_:]*float4&\s*\w+\s*\)"#, options: .regularExpression) else {
-        return false
-    }
-    // Reject if there's a third param (regex above already bounds to exactly 2 + close paren).
-    return r != msl.startIndex..<msl.startIndex
+// Body of a MSL `struct <name> { ... }` (between the braces), or "" if absent.
+func structBody(_ msl: String, _ name: String) -> String {
+    guard let r = msl.range(of: "struct \(name)") else { return "" }
+    let after = msl[r.upperBound...]
+    guard let ob = after.firstIndex(of: "{"),
+          let cb = after[after.index(after: ob)...].firstIndex(of: "}") else { return "" }
+    return String(after[after.index(after: ob)..<cb])
 }
 
-// Append a Metal fragment entry that wires [[position]] → main_1's first param and a
-// color out → its second param. Uses `using namespace metal` so `float4` resolves.
-func wrapNagaEntry(_ msl: String) -> String {
-    return msl + "\nusing namespace metal;\n" + """
-fragment float4 naga_entry(float4 _pos [[position]]) {
-    float4 _naga_out = 0.0;
-    main_1(_pos, _naga_out);
-    return _naga_out;
-}
-"""
+// spirv-cross/zioshade use main0_in; naga uses main_Input. "" if the fragment has no varyings.
+func stageInStruct(_ msl: String) -> String {
+    if msl.contains("struct main0_in") { return "main0_in" }
+    if msl.contains("struct main_Input") { return "main_Input" }
+    return ""
 }
 
-func makeVertexLibrary(device: MTLDevice) -> MTLLibrary {
+func makeVertexLibrary(device: MTLDevice, stageInStructName: String, fragmentMSL: String) -> MTLLibrary {
+    let members = structBody(fragmentMSL, stageInStructName)
     let vertMSL = """
 #include <metal_stdlib>
 using namespace metal;
-struct VertexOut { float4 position [[position]]; };
+struct VertexOut { float4 position [[position]];
+\(members)
+};
 vertex VertexOut full_screen_vertex(uint vid [[vertex_id]]) {
     float4 pos;
     pos.x = (vid == 2) ? 3.0 : -1.0;
@@ -78,7 +79,7 @@ func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, w:
     let encoder = cmdBuf.makeRenderCommandEncoder(descriptor: passDesc)!
     let vertFunc = vertLib.makeFunction(name: "full_screen_vertex")
     var fragFunc: MTLFunction? = nil
-    for name in ["main0", "naga_entry", "mainImage", "fragment_main0"] {
+    for name in ["main0", "main_", "mainImage", "fragment_main0"] {
         if let f = fragLib.makeFunction(name: name) { fragFunc = f; break }
     }
     let pipeDesc = MTLRenderPipelineDescriptor()
@@ -102,13 +103,8 @@ func compareMax(_ a: [UInt8], _ b: [UInt8], count: Int) -> (maxDiff: Int, diffPi
     var i = 0
     while i < count {
         var pixelDiff = false
-        let end = min(i + 4, count)
-        var j = i
-        while j < end {
-            let d = abs(Int(a[j]) - Int(b[j])); maxD = max(maxD, d)
-            if d > 0 { pixelDiff = true }
-            j += 1
-        }
+        let end = min(i + 4, count); var j = i
+        while j < end { let d = abs(Int(a[j]) - Int(b[j])); maxD = max(maxD, d); if d > 0 { pixelDiff = true }; j += 1 }
         if pixelDiff { diffPx += 1 }
         i += 4
     }
@@ -128,20 +124,17 @@ let W: Int = Int(envRes ?? "64") ?? 64
 let H: Int = W
 
 let zMSL = try readMSL(zPath)
-let nRaw = try readMSL(nPath)
-guard nagaHasSimpleSig(nRaw) else {
-    print("skip-naga-complex"); exit(0)
-}
-let nMSL = wrapNagaEntry(nRaw)
+let nMSL = try readMSL(nPath)
 
 guard let device = MTLCreateSystemDefaultDevice() else { print("ERROR: No Metal device"); exit(1) }
-let vertLib = makeVertexLibrary(device: device)
+let vertLibZ = makeVertexLibrary(device: device, stageInStructName: stageInStruct(zMSL), fragmentMSL: zMSL)
+let vertLibN = makeVertexLibrary(device: device, stageInStructName: stageInStruct(nMSL), fragmentMSL: nMSL)
 
 let libZ = try device.makeLibrary(source: zMSL, options: nil)
 let libN = try device.makeLibrary(source: nMSL, options: nil)
 
-let pz = renderFrame(device: device, vertLib: vertLib, fragLib: libZ, w: W, h: H)
-let pn = renderFrame(device: device, vertLib: vertLib, fragLib: libN, w: W, h: H)
+let pz = renderFrame(device: device, vertLib: vertLibZ, fragLib: libZ, w: W, h: H)
+let pn = renderFrame(device: device, vertLib: vertLibN, fragLib: libN, w: W, h: H)
 
 let r = compareMax(pz, pn, count: W*H*4)
 print("""
