@@ -120,6 +120,12 @@ prove:
 prove-opt:
     @bash tools/prove_opt.sh --sweep
 
+# every backend differential/validity gate in one honest per-backend confidence
+# report (render-proven vs compile-verified). Additive orchestrator; delegates
+# to the existing scripts without modifying them (`--list` prints the plan).
+prove-all:
+    @bash tools/prove_all.sh
+
 # large-corpus WGSL<->naga differential: every conformance fixture -> WGSL -> naga.
 # Reports naga PASS / REJECT (divergences to fix) / honest-unsupported. Slow
 # (naga subprocess per fixture); run on demand, not in `ci`.
