@@ -5983,6 +5983,33 @@ fn emitBody(
     var materialized_phis = std.AutoHashMap(u32, void).init(alloc);
     defer materialized_phis.deinit();
     g_materialized_phis = &materialized_phis;
+    // #honest-error (cross-scope phi): build the set of loop-MERGE-phi result ids
+    // (OpPhis at the top of any loop's merge block). A loop-carried phi whose
+    // back-edge UPDATE is one of these is a CROSS-SCOPE phi — the outer loop's
+    // carry reads a NESTED loop's exit value, which zioshade's per-region
+    // phi-materialization can't resolve (naming conflict between the inner
+    // merge-phi and the outer #496 pre-declare → silent-wrong, e.g. nested_loop2,
+    // maxdiff 255). Honest-error rather than emit garbage. Narrow by construction:
+    // a single loop's back-edge is never its own merge-phi, so only nested-loop
+    // cross-scope triggers.
+    var merge_phi_results = std.AutoHashMap(u32, void).init(alloc);
+    defer merge_phi_results.deinit();
+    {
+        var mi2: usize = func_idx + 1;
+        while (mi2 < m.instructions.len) : (mi2 += 1) {
+            const minst2 = m.instructions[mi2];
+            if (minst2.op == .FunctionEnd) break;
+            if (minst2.op != .LoopMerge or minst2.words.len < 3) continue;
+            const mlbl = minst2.words[1];
+            const midx2 = label_map.get(mlbl) orelse continue;
+            var pj2: usize = midx2 + 1;
+            while (pj2 < m.instructions.len) : (pj2 += 1) {
+                const pinst2 = m.instructions[pj2];
+                if (pinst2.op != .Phi) break;
+                merge_phi_results.put(pinst2.words[2], {}) catch {};
+            }
+        }
+    }
     {
         var li = func_idx + 1;
         while (li < m.instructions.len) : (li += 1) {
@@ -6006,6 +6033,7 @@ fn emitBody(
                         if (lx < hlabel_idx) init_id = pinst.words[pp] else update_id = pinst.words[pp];
                     }
                 }
+                if (merge_phi_results.contains(update_id)) return error.UnsupportedNestedLoopPhi;
                 plist.append(alloc, .{ .result_id = pinst.words[2], .type_id = pinst.words[1], .init_id = init_id, .update_id = update_id }) catch {};
                 phi_hdr.put(pinst.words[2], li) catch {};
             }
