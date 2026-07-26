@@ -93,6 +93,18 @@ fn mslExprName(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8),
     const def = getDef(m, id) orelse return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "0";
     if (def.op == .ConstantTrue) return "true";
     if (def.op == .ConstantFalse) return "false";
+    if (def.op == .ConstantNull) {
+        // OpConstantNull = the zero value for the type. spirv-opt -O produces
+        // these for default/else values (e.g., out-of-bounds color = float3(0)).
+        const tn = mslValueType(m, def.words[1], names, alloc) catch return "0";
+        if (tn.len > 0 and tn[tn.len - 1] >= '0' and tn[tn.len - 1] <= '9') {
+            // Vector/matrix (trailing digit): use constructor.
+            return std.fmt.allocPrint(alloc, "{s}(0)", .{tn}) catch "0";
+        }
+        if (std.mem.eql(u8, tn, "float") or std.mem.eql(u8, tn, "half")) return "0.0";
+        if (std.mem.eql(u8, tn, "bool")) return "false";
+        return "0";
+    }
     return std.fmt.allocPrint(alloc, "v{d}", .{id}) catch "0";
 }
 
@@ -3603,7 +3615,7 @@ fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch (op) {
         .TypeVoid, .TypeBool, .TypeInt, .TypeFloat, .TypeVector, .TypeMatrix, .TypeImage, .TypeSampler, .TypeSampledImage, .TypeArray, .TypeRuntimeArray, .TypeStruct, .TypePointer, .TypeFunction, .TypeForwardPointer, .TypeAccelerationStructureKHR, .TypeRayQueryKHR, .TypeTensorARM => if (words.len > 1) words[1] else null,
-        .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
+        .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
         .Variable, .Function, .FunctionParameter => if (words.len > 2) words[2] else null,
         .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert, .VectorShuffle, .SampledImage, .ImageSampleImplicitLod, .ImageSampleExplicitLod, .ImageFetch, .ImageGather, .ImageQuerySizeLod, .ImageQuerySize, .ImageTexelPointer, .FunctionCall, .CopyObject, .Phi, .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast, .SNegate, .FNegate, .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul, .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod, .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix, .Dot, .Transpose, .OuterProduct, .Select, .LogicalOr, .LogicalAnd, .LogicalNot, .IEqual, .INotEqual, .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual, .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual, .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan, .FUnordLessThanEqual, .FUnordGreaterThanEqual, .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical, .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not, .BitReverse, .BitCount, .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract, .IsNan, .IsInf, .All, .Any, .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine, .DPdxCoarse, .DPdyCoarse, .FwidthCoarse, .VectorExtractDynamic, .ExtInst, .OpImage, .AtomicIAdd, .AtomicISub, .AtomicExchange, .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax, .AtomicAnd, .AtomicOr, .AtomicXor, .AtomicCompareExchange, .AtomicFAddEXT, .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod, .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod, .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples, .ImageRead, .ArrayLength => if (words.len > 2) words[2] else null,
         else => null,
@@ -3641,6 +3653,22 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
         if (inst.op == .ConstantFalse and inst.words.len > 2) {
             const l = alloc.dupe(u8, "false") catch continue;
             if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value);
+            continue;
+        }
+        if (inst.op == .ConstantNull and inst.words.len > 2) {
+            // OpConstantNull = the zero value for its type (spirv-opt -O produces
+            // these for default/else values). Resolve inline so it's never given a
+            // sequential `vNN` name that would be undeclared.
+            const vt = mslType(m, inst.words[1], names, alloc) catch "float";
+            const zero: []const u8 = if (vt.len > 0 and vt[vt.len - 1] >= '0' and vt[vt.len - 1] <= '9')
+                std.fmt.allocPrint(alloc, "{s}(0)", .{vt}) catch continue
+            else if (std.mem.eql(u8, vt, "float") or std.mem.eql(u8, vt, "half"))
+                alloc.dupe(u8, "0.0") catch continue
+            else if (std.mem.eql(u8, vt, "bool"))
+                alloc.dupe(u8, "false") catch continue
+            else
+                alloc.dupe(u8, "0") catch continue;
+            if (names.fetchPut(inst.words[2], zero) catch null) |old| alloc.free(old.value);
             continue;
         }
         if (inst.op == .ConstantComposite and inst.words.len > 3) {
@@ -7627,9 +7655,9 @@ fn emitInstruction(
             // illegal scalar Select; use the spvUnsafeArray spelling so the
             // result (and its dest, declared via localArrayValueCopyDest) match.
             const rtt = try mslValueType(m, inst.words[1], names, alloc);
-            const cond_name = names.get(inst.words[3]) orelse "c";
-            const true_name = names.get(inst.words[4]) orelse "t";
-            const false_name = names.get(inst.words[5]) orelse "f";
+            const cond_name = mslExprName(m, names, inst.words[3], alloc);
+            const true_name = mslExprName(m, names, inst.words[4], alloc);
+            const false_name = mslExprName(m, names, inst.words[5], alloc);
             // Metal doesn't support ternary with vector bool — use select()
             const cond_type_str = blk: {
                 const cond_def = getDef(m, inst.words[3]);

@@ -38,6 +38,7 @@ pub const Op = enum(u16) {
     SpecConstantComposite = 51,
     SpecConstantOp = 52,
     ConstantComposite = 44,
+    ConstantNull = 46,
     Function = 54,
     FunctionParameter = 55,
     FunctionEnd = 56,
