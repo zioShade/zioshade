@@ -185,6 +185,7 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ConstantFalse,
         .Constant,
         .ConstantComposite,
+        .ConstantNull,
         .SpecConstant,
         .SpecConstantTrue,
         .SpecConstantFalse,
