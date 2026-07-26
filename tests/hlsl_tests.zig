@@ -364,6 +364,24 @@ test "HLSL: vertex output interpolation qualifiers (flat/centroid/noperspective)
     try assertContains(hlsl, "noperspective float np");
 }
 
+// Interface-block MEMBER interpolation qualifiers: the frontend (codegen) used to
+// DROP OpMemberDecorate Flat/Centroid/NoPerspective on io-block members, so a
+// `flat float` member was silently emitted WITHOUT nointerpolation (wrong
+// interpolation). The codegen now emits them (mirrors the global-var path); the
+// HLSL flatten (hlslMemberInterpPrefix) finds them and emits the qualifier.
+test "HLSL: interface-block member interpolation qualifiers (flat/centroid)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out B { flat int x; centroid vec4 y; } b;
+        \\layout(location=5) in vec4 p;
+        \\void main(){ gl_Position = p; b.x = 1; b.y = vec4(1); }
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "nointerpolation int x");
+    try assertContains(hlsl, "centroid float4 y");
+}
+
 // #472-audit: SPIR-V OpSwitch cases do NOT fall through (each terminates in
 // OpBranch %merge), but C-family `switch` falls through without `break;`. HLSL was
 // emitting braced case bodies with NO break -> `case 0` fell into `case 1` (and since
