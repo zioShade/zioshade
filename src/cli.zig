@@ -766,6 +766,17 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // MSL: a nested-loop cross-scope phi (an outer loop's carry reads a value from
+    // a nested loop's merge) only arises on spirv-opt -O optimized SPIR-V and
+    // exceeds zioshade's per-region phi-materialization. Honest-error rather than
+    // emit silent-wrong MSL.
+    if (err == error.UnsupportedNestedLoopPhi) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: this shader has a nested-loop control-flow pattern (a loop value depends on an inner loop's exit) that the MSL backend cannot yet structure correctly on optimized SPIR-V. Workaround: feed UNOPTIMIZED SPIR-V (drop `spirv-opt -O`) — zioshade is provably correct on the unoptimized path.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     std.debug.print("error: cross-compilation failed: {s}\n", .{@errorName(err)});
     std.process.exit(1);
 }
