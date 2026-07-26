@@ -344,6 +344,26 @@ test "HLSL: pack/unpack_half2x16 via f32tof16/f16tof32 (no fabricated intrinsic)
     try assertNotContains(hlsl, "pack_half2x16(");
 }
 
+// Vertex OUTPUT interpolation qualifiers (Flat/Centroid/NoPerspective/Sample) were
+// DROPPED from VS_OUTPUT — silent plausible-wrong (the gate's glslang compile
+// passes, but a `flat int` gets interpolated, a `noperspective` float gets
+// perspective-interpolated). Now emitted matching spirv-cross --hlsl.
+test "HLSL: vertex output interpolation qualifiers (flat/centroid/noperspective)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) flat out int h;
+        \\layout(location=1) centroid out vec4 g;
+        \\layout(location=2) noperspective out float np;
+        \\layout(location=3) in vec4 p;
+        \\void main(){ gl_Position = p; h = 1; g = vec4(1); np = 1.0; }
+    ;
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "nointerpolation int h");
+    try assertContains(hlsl, "centroid float4 g");
+    try assertContains(hlsl, "noperspective float np");
+}
+
 // #472-audit: SPIR-V OpSwitch cases do NOT fall through (each terminates in
 // OpBranch %merge), but C-family `switch` falls through without `break;`. HLSL was
 // emitting braced case bodies with NO break -> `case 0` fell into `case 1` (and since
