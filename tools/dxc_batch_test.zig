@@ -314,15 +314,15 @@ pub fn main() !void {
                 return a.count > b.count;
             }
         };
-        var entries = std.ArrayList(SortEntry).empty;
-        defer entries.deinit(alloc);
+        var sort_entries = std.ArrayList(SortEntry).empty;
+        defer sort_entries.deinit(alloc);
         var it = fail_hist.iterator();
-        while (it.next()) |e| try entries.append(alloc, .{ .key = e.key_ptr.*, .count = e.value_ptr.* });
-        std.mem.sort(SortEntry, entries.items, {}, SortEntry.lessThan);
+        while (it.next()) |e| try sort_entries.append(alloc, .{ .key = e.key_ptr.*, .count = e.value_ptr.* });
+        std.mem.sort(SortEntry, sort_entries.items, {}, SortEntry.lessThan);
 
-        std.debug.print("\nTop {d} FAIL reasons:\n", .{@min(entries.items.len, 5)});
-        const limit = @min(entries.items.len, 5);
-        for (entries.items[0..limit], 0..) |e, i| {
+        std.debug.print("\nTop {d} FAIL reasons:\n", .{@min(sort_entries.items.len, 5)});
+        const limit = @min(sort_entries.items.len, 5);
+        for (sort_entries.items[0..limit], 0..) |e, i| {
             std.debug.print("  {d}. \"{s}\": {d} occurrence(s)\n", .{ i + 1, e.key, e.count });
         }
     }

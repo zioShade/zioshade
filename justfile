@@ -6,9 +6,10 @@ set dotenv-load := false
 
 # zig wrapper — ensures Zig 0.15.2 via mise
 zig := "mise exec -- zig"
-# DXC (HLSL oracle). Defaults to `dxc` on PATH so non-Windows recipes don't
-# explode; override with $ZIOSHADE_DXC or `just dxc="C:/path/to/dxc.exe" hlsl-dxc`.
-dxc := env_var_or_default("ZIOSHADE_DXC", "dxc")
+# DXC (HLSL oracle). Defaults to tools/dxc — the Docker wrapper over the pinned DXC
+# image (run `just dxc-image` once first). Override with $ZIOSHADE_DXC or
+# `just dxc="C:/path/to/dxc.exe" hlsl-dxc` for a local DXC on PATH.
+dxc := env_var_or_default("ZIOSHADE_DXC", "tools/dxc")
 
 # ── default ──────────────────────────────────────────────────────────
 
@@ -92,6 +93,11 @@ hlsl-glslang-all:
 #   * complex-expression-in-access-chain: a structured-buffer element exceeds
 #     DXC's hard 2048-byte element-size limit (16384 B); a D3D limit, not zioshade.
 # Any NEW fail beyond these four is a real divergence to fix.
+# build the pinned DXC Docker image (linux/amd64; Rosetta on Apple Silicon).
+# Required once before `just hlsl-dxc` (the default tools/dxc wrapper uses it).
+dxc-image:
+    docker build --platform linux/amd64 -f tools/dxc.Dockerfile -t zioshade-dxc tools
+
 hlsl-dxc:
     {{zig}} build test-dxc -- "{{dxc}}" tests/spirv_bins 60
 

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# DXC via the zioshade-dxc Docker image (Linux DXC under Rosetta on Apple Silicon).
+# Used by `just hlsl-dxc` (ZIOSHADE_DXC=tools/dxc): dxc-batch-test writes
+# tmp_hlsl_test.hlsl in the repo root and invokes this as `dxc -T <profile> -E main <file>`.
+# We mount the repo root ($PWD) at /work so the relative HLSL path resolves inside the
+# container, then forward all args to the image's dxc ENTRYPOINT.
+set -euo pipefail
+exec docker run --rm --platform linux/amd64 -v "$PWD":/work -w /work zioshade-dxc:latest "$@"
