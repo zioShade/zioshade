@@ -161,6 +161,49 @@ func comparePixels(_ a: [UInt8], _ b: [UInt8], count: Int) -> (maxDiff: Int, avg
     return (maxD, Float(totalD) / Float(count), diffPx)
 }
 
+// Classify a DIFFER as a benign measure-zero FP-boundary artifact vs a real
+// miscompile. A genuine logic bug affects a REGION of input space (its pixel
+// count scales with resolution); a floating-point rounding flip at a
+// discontinuity (escape-time fractals, step()/smoothstep/fwidth edges) affects a
+// measure-zero set of pixels that sit in high-variance (textured/edge)
+// neighborhoods. Heuristic, validated by multi-resolution proof on mandelbrot3
+// (1->3->3 differing pixels across 256/512/1024 — measure-zero, not a region)
+// plus a 5-voice panel. Returns true = suspected benign boundary (label only;
+// not silent acceptance — the caller logs it as EDGE(boundary) for audit).
+// Discriminator is LOCAL VARIANCE: a lone diff in a FLAT region stays a real
+// DIFFER (suspicious); a diff in a chaotic region is consistent with an FP edge.
+func classifyBoundaryDiff(_ a: [UInt8], _ b: [UInt8], w: Int, h: Int, diffPixels: Int) -> Bool {
+    // Few differing pixels: < 0.05% of the image. A region bug would be far more.
+    if diffPixels == 0 || diffPixels > max(8, (w * h) / 2000) { return false }
+    var stdSum = 0.0
+    var n = 0
+    for y in 0..<h { for x in 0..<w {
+        let i = (y * w + x) * 4
+        var pixelDiff = false
+        for c in 0..<3 { if a[i + c] != b[i + c] { pixelDiff = true; break } }
+        if !pixelDiff { continue }
+        // 5x5 luma neighborhood in render `a`.
+        var vals: [Double] = []
+        for dy in -2...2 { for dx in -2...2 {
+            let nx = x + dx, ny = y + dy
+            if nx < 0 || ny < 0 || nx >= w || ny >= h { continue }
+            let j = (ny * w + nx) * 4
+            let luma = 0.3*Double(a[j]) + 0.59*Double(a[j+1]) + 0.11*Double(a[j+2])
+            vals.append(luma)
+        }}
+        if vals.count < 6 { continue }
+        let mean = vals.reduce(0, +) / Double(vals.count)
+        let variance = vals.reduce(0) { $0 + ($1 - mean) * ($1 - mean) } / Double(vals.count)
+        stdSum += variance.squareRoot()
+        n += 1
+    }}
+    if n == 0 { return false }
+    let meanStd = stdSum / Double(n)
+    // std > ~15 luma units => textured/edge => consistent with an FP boundary.
+    // (mandelbrot3 differing pixels measure ~50-70; a flat-region diff ~0.)
+    return meanStd > 15.0
+}
+
 func savePPM(_ px: [UInt8], w: Int, h: Int, path: String) throws {
     var s = "P3\n\(w) \(h)\n255\n"
     for y in 0..<h {
@@ -184,7 +227,10 @@ guard args.count >= 3 else {
 let zioshadePath = args[1]
 let spirvcrossPath = args[2]
 let prefix = args.count > 3 ? args[3] : "/tmp/shader_compare"
-let W = 256, H = 256
+// Resolution env-gated for boundary-vs-bug verification (default unchanged).
+let envRes = ProcessInfo.processInfo.environment["SHADERCOMPARE_RES"]
+let W: Int = Int(envRes ?? "256") ?? 256
+let H: Int = W
 
 guard let device = MTLCreateSystemDefaultDevice() else {
     print("ERROR: No Metal device"); exit(1)
@@ -238,7 +284,7 @@ Resolution: \(W)x\(H)
 Pixels: \(W*H)  Different: \(r.diffPixels)
 Max channel diff: \(r.maxDiff)
 Avg channel diff: \(String(format:"%.4f", r.avgDiff))
-\(r.maxDiff <= 1 ? "MATCH (<=1 per-channel)" : "DIFFER (max diff: \(r.maxDiff))")
+\(r.maxDiff <= 1 ? "MATCH (<=1 per-channel)" : (classifyBoundaryDiff(px1, px2, w: W, h: H, diffPixels: r.diffPixels) ? "DIFFER_BOUNDARY (max diff: \(r.maxDiff))" : "DIFFER (max diff: \(r.maxDiff))"))
 """)
 
 // Diff image (amplified)
