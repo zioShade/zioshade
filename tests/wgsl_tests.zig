@@ -2787,7 +2787,11 @@ test "wgsl: stage input interface block is declared as a struct with @location m
     const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
     defer alloc.free(wgsl);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "struct Block {") != null);
-    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) f: f32") != null);
+    // f is `flat float` — now correctly @interpolate(flat) (the frontend previously
+    // DROPPED block-member interpolation decorations, so f was silently emitted
+    // without flat = perspective-interpolated, wrong). Fixed by the codegen
+    // block-member-decoration emission (mirrors the global-var qualifier path).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(0) @interpolate(flat) f: f32") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "@location(2) @interpolate(flat) h: i32") != null);
     // The param is a bare struct (members carry @location), not @location(N) vin.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "vin: Block") != null);

@@ -3065,6 +3065,19 @@ const Codegen = struct {
                                 try self.emitDecorationSectionMemberDecorate(id, @as(u32, @intCast(i)), @intFromEnum(spirv.Decoration.component), comp);
                             }
                         }
+                        // Per-member interpolation qualifiers (Flat/Centroid/NoPerspective)
+                        // as OpMemberDecorate, so each backend places them correctly
+                        // (Metal on the fragment input, HLSL on the vertex output, etc.).
+                        // Previously DROPPED here — backends had to ad-hoc re-scan the raw
+                        // module for these (4× duplicated logic). Mirrors the global-var
+                        // qualifier path (~line 3604). Additive: only fires when the member
+                        // carries an explicit qualifier (valid GLSL requires `flat` on
+                        // integer varyings, so the explicit case covers them).
+                        if (member.qualifier) |q| {
+                            if (q.is_flat) try self.emitDecorationSectionMemberDecorateNoExtra(id, @as(u32, @intCast(i)), @intFromEnum(spirv.Decoration.flat));
+                            if (q.is_centroid) try self.emitDecorationSectionMemberDecorateNoExtra(id, @as(u32, @intCast(i)), @intFromEnum(spirv.Decoration.centroid));
+                            if (q.is_noperspective) try self.emitDecorationSectionMemberDecorateNoExtra(id, @as(u32, @intCast(i)), @intFromEnum(spirv.Decoration.no_perspective));
+                        }
                     }
                 }
                 // If we emitted a forward pointer, now emit the actual pointer definition
