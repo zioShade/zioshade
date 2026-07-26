@@ -169,17 +169,17 @@ fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHash
 fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
         const t = mslValueType(m, phi.words[1], names, alloc) catch "float";
-        const vn = names.get(phi.words[2]) orelse "pv";
-        try w.print("    {s} {s}_phi;\n", .{ t, vn });
+        const vn = names.get(phi.words[2]) orelse "pv"; // already renamed to {orig}_phi by finalizeSwitchPhis (called before decl)
+        try w.print("    {s} {s};\n", .{ t, vn });
     }
 }
 fn emitSwitchPhiCaseCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, case_label: u32, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
-        const vn = names.get(phi.words[2]) orelse "pv";
+        const vn = names.get(phi.words[2]) orelse "pv"; // already renamed
         var pi: usize = 3;
         while (pi + 1 < phi.words.len) : (pi += 2) {
             if (phi.words[pi + 1] == case_label) {
-                try w.print("        {s}_phi = {s};\n", .{ vn, mslExprName(m, names, phi.words[pi], alloc) });
+                try w.print("        {s} = {s};\n", .{ vn, mslExprName(m, names, phi.words[pi], alloc) });
                 break;
             }
         }
@@ -222,10 +222,14 @@ fn collectLoopMergePhis(m: *const ParsedModule, label_map: *const std.AutoHashMa
         if (diverges) list.append(alloc, minst) catch {};
     }
 }
-// Assign one materialized loop-merge phi its incoming value for exit predecessor
-// `pred_lbl` (mirrors emitSwitchPhiCaseCopy). If `pred_lbl` is not among the
-// phi's predecessors, emit nothing — the top-of-loop fallback covers that path.
-fn emitLoopMergePhiCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phi: Instruction, pred_lbl: u32, indent: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+// The UNIFIED merge-phi copy: assign one materialized merge phi (loop OR switch
+// OR selection) its incoming value for predecessor `pred_lbl`. One mechanism for
+// every merge kind (Design's unified-subsystem constraint) — used by the
+// loop-merge-phi carry-on-break AND the switch-merge-phi early-return copy. If
+// `pred_lbl` is not among the phi's predecessors, emit nothing (a loop's
+// top-of-loop fallback covers unhandled paths; for switches every branch-to-merge
+// pred is explicit).
+fn emitMergePhiCopyForPred(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phi: Instruction, pred_lbl: u32, indent: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
     var pi: usize = 3;
     while (pi + 1 < phi.words.len) : (pi += 2) {
         if (phi.words[pi + 1] == pred_lbl) {
@@ -233,6 +237,19 @@ fn emitLoopMergePhiCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
             try w.print("{s}{s} = {s};\n", .{ indent, vn, mslExprName(m, names, phi.words[pi], alloc) });
             return;
         }
+    }
+}
+// The block label containing the instruction at index `idx` (nearest preceding
+// OpLabel). Used to resolve the predecessor for a merge-phi copy at a
+// branch-to-merge: the branch's own block, independent of how emitBlock advanced
+// its instruction cursor (it skips block Labels via i = lm.get(merge) + loop
+// increment, so a tracked "current label" would be stale).
+fn blockLabelOf(m: *const ParsedModule, idx: usize) u32 {
+    var j: usize = idx;
+    while (true) {
+        if (m.instructions[j].op == .Label and m.instructions[j].words.len > 1) return m.instructions[j].words[1];
+        if (j == 0) return 0;
+        j -= 1;
     }
 }
 fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
@@ -1340,6 +1357,18 @@ threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
 threadlocal var g_loop_hoists: ?*const std.AutoHashMap(usize, std.ArrayList(common.HoistedPhiSrc)) = null;
 threadlocal var g_hoisted_ids: ?*const std.AutoHashMap(u32, void) = null;
 threadlocal var g_hoist_stripping: bool = false;
+
+// #multi-return: spirv-opt lowers early/multi-return to an OpSwitch-on-constant
+// wrapper whose merge block holds the return-value phi(s). Those phis' predecessors
+// are NESTED inside the single case body — they branch straight to the switch
+// merge (the early return), not to a case label. emitSwitchPhiCaseCopy only
+// matches case labels, so the nested preds' assignments were dropped → the
+// return-value var stayed uninitialized (garbage, maxdiff 255). This context
+// (set around each switch's case-body emission, saved/restored for nesting) lets
+// emitBlock emit the switch-merge phi copy at each branch-to-switch-merge point
+// inside the case body. Mirrors the loop-merge-phi carry-on-break pattern.
+const SwitchPhiCtx = struct { merge_label: u32, phis: []const Instruction };
+threadlocal var g_switch_ctx: ?SwitchPhiCtx = null;
 
 // Maps a flattened interface-block Input member to its main0_in field name so
 // buildAccessExpr can rewrite `vin.member` (an OpAccessChain into a struct-typed
@@ -6107,7 +6136,10 @@ fn emitBody(
                 var sphis: std.ArrayList(Instruction) = .empty;
                 defer sphis.deinit(alloc);
                 collectSwitchMergePhis(m, &label_map, mval, &sphis, alloc);
+                finalizeSwitchPhis(names, sphis.items, alloc); // rename FIRST (unify with loop-merge-phi) so emitSwitchPhiDecls/CaseCopy + emitMergePhiCopyForPred all read the final name via names.get
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                const saved_switch_ctx = g_switch_ctx;
+                g_switch_ctx = .{ .merge_label = mval, .phis = sphis.items };
                 try w.print("    switch ({s}) {{\n", .{sn});
                 if (dl != mval) {
                     try w.writeAll("    default: {\n");
@@ -6126,7 +6158,7 @@ fn emitBody(
                     try w.writeAll("    break;\n    }\n");
                 }
                 try w.writeAll("    }\n");
-                finalizeSwitchPhis(names, sphis.items, alloc);
+                g_switch_ctx = saved_switch_ctx;
                 if (label_map.get(mval)) |mi| {
                     idx = mi;
                 }
@@ -6532,7 +6564,7 @@ fn emitWhileLoopMSL(
         // alias-to-first-incoming behavior, so no regression on currently-passing
         // loops). Handled break paths overwrite with the correct break incoming.
         for (loop_mphis.items) |phi| {
-            try emitLoopMergePhiCopy(m, names, phi, lm_norm_pred, "        ", w, alloc);
+            try emitMergePhiCopyForPred(m, names, phi, lm_norm_pred, "        ", w, alloc);
         }
         try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
     }
@@ -6576,7 +6608,10 @@ fn emitWhileLoopMSL(
                     var sphis: std.ArrayList(Instruction) = .empty;
                     defer sphis.deinit(alloc);
                     collectSwitchMergePhis(m, label_map, sml, &sphis, alloc);
+                    finalizeSwitchPhis(names, sphis.items, alloc);
                     try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                    const saved_switch_ctx = g_switch_ctx;
+                    g_switch_ctx = .{ .merge_label = sml, .phis = sphis.items };
                     try w.print("        switch ({s}) {{\n", .{sn});
                     if (dl != sml) {
                         try w.writeAll("        default: {\n");
@@ -6595,7 +6630,7 @@ fn emitWhileLoopMSL(
                         try w.writeAll("        break;\n        }\n");
                     }
                     try w.writeAll("        }\n");
-                    finalizeSwitchPhis(names, sphis.items, alloc);
+                    g_switch_ctx = saved_switch_ctx;
                     if (label_map.get(sml)) |smi| bi = smi;
                 }
                 continue;
@@ -6642,7 +6677,7 @@ fn emitWhileLoopMSL(
                     } else if (tl_is_trivial_break and fl_is_trivial_continue) {
                         if (loop_mphis.items.len > 0) {
                             const bp = if (ntl == merge_lbl) cur_body_lbl else ntl;
-                            for (loop_mphis.items) |phi| try emitLoopMergePhiCopy(m, names, phi, bp, "        ", w, alloc);
+                            for (loop_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, bp, "        ", w, alloc);
                         }
                         try w.print("        if ({s}) break;\n", .{ncn});
                         try w.writeAll("        continue;\n");
@@ -6652,7 +6687,7 @@ fn emitWhileLoopMSL(
                     } else if (tl_is_trivial_break) {
                         if (loop_mphis.items.len > 0) {
                             const bp = if (ntl == merge_lbl) cur_body_lbl else ntl;
-                            for (loop_mphis.items) |phi| try emitLoopMergePhiCopy(m, names, phi, bp, "        ", w, alloc);
+                            for (loop_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, bp, "        ", w, alloc);
                         }
                         try w.print("        if ({s}) break;\n", .{ncn});
                         if (nhe) {
@@ -6837,8 +6872,16 @@ fn emitBlock(
     while (i < m.instructions.len) : (i += 1) {
         const inst = m.instructions[i];
         if (inst.op == .FunctionEnd) break;
-        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
         if (inst.op == .Label or inst.op == .SelectionMerge) continue;
+        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) {
+            // #multi-return: a branch to the enclosing switch's merge is an early
+            // return (spirv-opt lowered it); assign the switch-merge phi(s) for this
+            // predecessor first, or the return-value var stays uninitialized.
+            if (g_switch_ctx) |ctx| if (ctx.merge_label == merge_label) {
+                for (ctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
+            };
+            break;
+        }
         // #478: a switch in a branch arm (if/else) — emit it (was silently dropped).
         if (inst.op == .Switch and inst.words.len >= 3) {
             const sn = names.get(inst.words[1]) orelse "s";
@@ -6848,7 +6891,10 @@ fn emitBlock(
                 var sphis: std.ArrayList(Instruction) = .empty;
                 defer sphis.deinit(alloc);
                 collectSwitchMergePhis(m, lm, sml, &sphis, alloc);
+                finalizeSwitchPhis(names, sphis.items, alloc);
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                const saved_switch_ctx = g_switch_ctx;
+                g_switch_ctx = .{ .merge_label = sml, .phis = sphis.items };
                 try w.print("{s}    switch ({s}) {{\n", .{ indent, sn });
                 if (dl != sml) {
                     try w.print("{s}    default: {{\n", .{indent});
@@ -6867,7 +6913,7 @@ fn emitBlock(
                     try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
                 }
                 try w.print("{s}    }}\n", .{indent});
-                finalizeSwitchPhis(names, sphis.items, alloc);
+                g_switch_ctx = saved_switch_ctx;
                 if (lm.get(sml)) |smi| i = smi;
             }
             continue;
@@ -6895,6 +6941,13 @@ fn emitBlock(
                 i = try emitWhileLoopMSL(m, names, decs, li, m.instructions[li].words[1], m.instructions[li].words[2], lm, bm, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
                 i -= 1;
                 continue;
+            }
+            // #multi-return: branch to the enclosing switch merge past this block's
+            // immediate merge (early return) — assign the switch-merge phi(s).
+            if (inst.words.len > 1) {
+                if (g_switch_ctx) |ctx| if (ctx.merge_label == inst.words[1]) {
+                    for (ctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
+                };
             }
             break;
         }
