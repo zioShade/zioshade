@@ -17,7 +17,7 @@
 # (.asm SPIR-V-assembly, .error validation tests, link.* multi-file, .nocompat).
 set -uo pipefail
 
-CLI="${CLI:-zig-out/bin/zioshade.exe}"
+CLI="${CLI:-zig-out/bin/zioshade}"
 NAGA="${NAGA:-naga}"
 TMP=".zig-cache/wgsl-naga-sweep.wgsl"
 # WGSL only has vertex/fragment/compute entry points (no geometry/tessellation/
