@@ -112,6 +112,14 @@ oracle-diff: test-conformance test-cross-compare test-realworld
 prove:
     @bash tools/prove.sh
 
+# Optimized-SPIR-V MSL BACKEND render-diff (spirv-opt -O → zioshade msl vs
+# spirv-cross --msl → Metal render+diff). Complements `prove` (which tests the
+# unoptimized FRONTEND): this reaches the control-flow/phi/merge/load-cache
+# plausible-wrong classes that only surface on optimized SPIR-V. EVERY=N sets
+# the corpus sample (default 25). See tools/prove_opt.sh.
+prove-opt:
+    @bash tools/prove_opt.sh --sweep
+
 # large-corpus WGSL<->naga differential: every conformance fixture -> WGSL -> naga.
 # Reports naga PASS / REJECT (divergences to fix) / honest-unsupported. Slow
 # (naga subprocess per fixture); run on demand, not in `ci`.
