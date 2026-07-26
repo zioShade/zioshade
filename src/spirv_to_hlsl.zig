@@ -465,6 +465,7 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ConstantFalse,
         .Constant,
         .ConstantComposite,
+        .ConstantNull,
         .SpecConstant,
         .SpecConstantTrue,
         .SpecConstantFalse,
@@ -1853,6 +1854,13 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
         }
         if (inst.op == .ConstantFalse and inst.words.len > 2) {
             const lit = alloc.dupe(u8, "false") catch continue;
+            if (names.fetchPut(inst.words[2], lit) catch null) |old| alloc.free(old.value);
+            continue;
+        }
+        // OpConstantNull = zero value for the type (spirv-opt -O produces these).
+        if (inst.op == .ConstantNull and inst.words.len > 2) {
+            const tn = hlslType(module, inst.words[1], names, alloc) catch "float";
+            const lit = std.fmt.allocPrint(alloc, "({s})0", .{tn}) catch continue;
             if (names.fetchPut(inst.words[2], lit) catch null) |old| alloc.free(old.value);
             continue;
         }

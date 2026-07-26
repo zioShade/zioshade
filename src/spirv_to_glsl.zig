@@ -1794,7 +1794,7 @@ fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
     return switch (op) {
         .TypeVoid, .TypeBool, .TypeInt, .TypeFloat, .TypeVector, .TypeMatrix, .TypeImage, .TypeSampler, .TypeSampledImage, .TypeArray, .TypeRuntimeArray, .TypeStruct, .TypePointer, .TypeFunction, .TypeForwardPointer, .TypeAccelerationStructureKHR, .TypeRayQueryKHR, .TypeTensorARM => if (words.len > 1) words[1] else null,
-        .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
+        .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
         .Variable, .Function, .FunctionParameter => if (words.len > 2) words[2] else null,
         .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert, .VectorShuffle, .SampledImage, .ImageSampleImplicitLod, .ImageSampleExplicitLod, .ImageFetch, .ImageGather, .ImageQuerySizeLod, .ImageQuerySize, .ImageTexelPointer, .FunctionCall, .CopyObject, .Phi, .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast, .SNegate, .FNegate, .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul, .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod, .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix, .Dot, .Transpose, .OuterProduct, .Select, .LogicalOr, .LogicalAnd, .LogicalNot, .IEqual, .INotEqual, .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual, .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual, .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan, .FUnordLessThanEqual, .FUnordGreaterThanEqual, .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical, .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not, .BitReverse, .BitCount, .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract, .IsNan, .IsInf, .All, .Any, .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine, .DPdxCoarse, .DPdyCoarse, .FwidthCoarse, .VectorExtractDynamic, .ExtInst, .OpImage, .AtomicIAdd, .AtomicISub, .AtomicExchange, .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax, .AtomicAnd, .AtomicOr, .AtomicXor, .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod, .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod, .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples, .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT, .ArrayLength => if (words.len > 2) words[2] else null,
         else => null,
@@ -1831,6 +1831,12 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
         }
         if (inst.op == .ConstantFalse and inst.words.len > 2) {
             const l = alloc.dupe(u8, "false") catch continue;
+            if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value);
+            continue;
+        }
+        if (inst.op == .ConstantNull and inst.words.len > 2) {
+            const tn = glslType(m, inst.words[1], names, alloc) catch "float";
+            const l = std.fmt.allocPrint(alloc, "{s}(0)", .{tn}) catch continue;
             if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value);
             continue;
         }
