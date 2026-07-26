@@ -21,7 +21,13 @@ param(
   [string]$Warp = ".\warp_render.exe"
 )
 
-$ErrorActionPreference = "Stop"
+# SilentlyContinue (not Stop): warp_render writes "shader needs resources? -> skip" to
+# stderr while exiting code 2 for resource-needing shaders, and dxc writes stderr on
+# rejected shaders — under "Stop" those native-stderr lines halt the script via
+# NativeCommandError before the $LASTEXITCODE switch below can classify them. The
+# $LASTEXITCODE checks already handle every real failure, so "Stop" only footguns the
+# full-corpus sweep. SilentlyContinue lets skips/rejects flow to the switch cleanly.
+$ErrorActionPreference = "SilentlyContinue"
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 
 # Compile the shared fullscreen vertex shader once.
