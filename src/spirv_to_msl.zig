@@ -6579,14 +6579,26 @@ fn emitWhileLoopMSL(
                         collectMergePhis(m, label_map, nmv, &mphis, alloc);
                         // Declaration: skip phis already pre-declared by the loop pre-scan (#496).
                         for (mphis.items) |pv| {
-                            if (g_materialized_phis) |mp| if (mp.contains(pv.result_id)) continue;
-                            const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
                             const vn = names.get(pv.result_id) orelse "pv";
-                            if (nhe) {
-                                try w.print("        {s} {s}_phi;\n", .{ t, vn });
+                            const pre_decl = if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false;
+                            if (pre_decl) {
+                                // Pre-declared by the loop pre-scan (#496): skip the
+                                // declaration, but for no-else emit the fall-through
+                                // init. Without this the phi is uninitialized when the
+                                // condition is false → wrong render (maxdiff up to 255).
+                                // For has-else, both branches assign (below) — no init.
+                                if (!nhe) {
+                                    const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                    try w.print("        {s} = {s};\n", .{ vn, mslExprName(m, names, false_val, alloc) });
+                                }
                             } else {
-                                const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-                                try w.print("        {s} {s}_phi = {s};\n", .{ t, vn, mslExprName(m, names, false_val, alloc) });
+                                const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
+                                if (nhe) {
+                                    try w.print("        {s} {s}_phi;\n", .{ t, vn });
+                                } else {
+                                    const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                    try w.print("        {s} {s}_phi = {s};\n", .{ t, vn, mslExprName(m, names, false_val, alloc) });
+                                }
                             }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
