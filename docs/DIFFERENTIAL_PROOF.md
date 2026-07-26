@@ -40,7 +40,8 @@ supply; each is listed in the run output, none ever counted as a pass. Honest
 limit (this is empirical, not mathematical proof): it is within-tolerance
 conformance to a peer compiler (SPIRV-Cross) on one Metal GPU class; outputs where
 zioshade and the reference share the same spec misreading are structurally invisible
-to any differential.
+to any single-oracle differential. That blind spot is now closed for the majority of
+the MSL corpus by a **second independent oracle** (naga) — see the section below.
 
 ## Per-backend confidence at a glance
 
@@ -77,6 +78,37 @@ correct*. Two consequences, by design:
 
 **Bottom line:** trust the MSL path as render-verified; treat GLSL/WGSL/HLSL as
 compile-checked and honest-error-bounded — not as semantically proven.
+
+## Second independent oracle: naga render differential
+
+The render differential above compares zioshade against ONE reference (SPIRV-Cross).
+The one thing it can never catch is a spec misreading that zioshade and SPIRV-Cross
+*share* — both would render identically-but-WRONG and pass silently. To close that
+blind spot, zioshade's MSL is now also render-diffed against a **second independent
+cross-compiler, naga** (which has its own SPIR-V→MSL backend, unrelated to SPIRV-Cross).
+Where zioshade, SPIRV-Cross, AND naga all render the same pixels, a shared misreading
+is far less likely — the shader is **render-proven-2-oracle**.
+
+`tools/prove_naga.sh` runs this over the corpus (glslang→SPIR-V, then both zioshade-MSL
+and naga-MSL rendered on Metal and pixel-diffed). Latest full-corpus run:
+
+| verdict | count | meaning |
+|---------|------:|---------|
+| MATCH (render-proven-2-oracle) | 1090 | zioshade and naga agree pixel-for-pixel — correlated-error blind spot **closed** |
+| DIFFER (flagged) | 46 | no ground truth — flagged for investigation, **never** auto-"fixed" |
+| skip-render | 21 | naga MSL needs buffer/texture bindings not yet wired |
+| skip-glslang / skip-naga / skip-zioshade-msl | 296 | non-Vulkan source / naga can't cross / zioshade can't emit |
+
+That is **1090 of 1453 corpus shaders (75%; 94% of renderable)** whose MSL now agrees
+across two independent compilers on a real GPU. The DIFFERs are treated exactly per the
+project's anti-plausible-wrong rule: a disagreement between two independent compilers has
+no ground truth (either could be wrong, or both could share a *different* misreading), so
+they are **flagged for human investigation, not silently "fixed"** — manufacturing a fix
+against an unverified oracle would be the precise sin this project exists to prevent. The
+flagged set clusters in chaotic/iterative shaders (FP-amplification) and loop-control
+shaders (the known-hard surface), which are the worthwhile investigation targets.
+
+Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 
 Three independent kinds of evidence, weakest to strongest:
 

@@ -126,6 +126,11 @@ prove-opt:
 prove-all:
     @bash tools/prove_all.sh
 
+# naga SECOND-oracle MSL render-diff: closes the single-oracle correlated-error blind
+# spot (where zioshade + spirv-cross share a misreading). --dir runs the full corpus.
+prove-naga:
+    @bash tools/prove_naga.sh --dir tests/spirv-cross
+
 # large-corpus WGSL<->naga differential: every conformance fixture -> WGSL -> naga.
 # Reports naga PASS / REJECT (divergences to fix) / honest-unsupported. Slow
 # (naga subprocess per fixture); run on demand, not in `ci`.
