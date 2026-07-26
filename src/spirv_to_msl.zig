@@ -193,6 +193,48 @@ fn finalizeSwitchPhis(names: *std.AutoHashMap(u32, []const u8), phis: []const In
         if (g_materialized_phis) |mp| mp.put(phi.words[2], {}) catch {};
     }
 }
+// #loop-merge-phi: a phi at a loop's MERGE block selects between the values
+// arriving from each exit path (the normal exit + every break). Aliasing it to a
+// single incoming (the generic OpPhi handler's old behavior) silently drops the
+// break path's distinct value -> wrong render whenever a loop reads the variable
+// after a break (while_complex: `sum` read after `if (sum > 0.8) break;`,
+// maxdiff=63). Mirrors the switch-merge phi machinery + spirv-cross's `_82`:
+// collect DIVERGENT merge phis, declare a distinct var, assign the per-exit-path
+// incoming. A non-diverging phi (all incomings equal) aliases fine and is skipped.
+fn collectLoopMergePhis(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), merge_lbl: u32, list: *std.ArrayList(Instruction), alloc: std.mem.Allocator) void {
+    const midx = label_map.get(merge_lbl) orelse return;
+    var pj: usize = midx + 1;
+    while (pj < m.instructions.len) : (pj += 1) {
+        const minst = m.instructions[pj];
+        if (minst.op != .Phi) break;
+        if (minst.words.len < 7) continue; // need >=2 (value,pred) pairs to diverge
+        var first_val: u32 = 0;
+        var diverges = false;
+        var pi: usize = 3;
+        while (pi + 1 < minst.words.len) : (pi += 2) {
+            if (pi == 3) {
+                first_val = minst.words[pi];
+            } else if (minst.words[pi] != first_val) {
+                diverges = true;
+                break;
+            }
+        }
+        if (diverges) list.append(alloc, minst) catch {};
+    }
+}
+// Assign one materialized loop-merge phi its incoming value for exit predecessor
+// `pred_lbl` (mirrors emitSwitchPhiCaseCopy). If `pred_lbl` is not among the
+// phi's predecessors, emit nothing — the top-of-loop fallback covers that path.
+fn emitLoopMergePhiCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phi: Instruction, pred_lbl: u32, indent: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    var pi: usize = 3;
+    while (pi + 1 < phi.words.len) : (pi += 2) {
+        if (phi.words[pi + 1] == pred_lbl) {
+            const vn = names.get(phi.words[2]) orelse "pv";
+            try w.print("{s}{s} = {s};\n", .{ indent, vn, mslExprName(m, names, phi.words[pi], alloc) });
+            return;
+        }
+    }
+}
 fn getMemberName(m: *const ParsedModule, struct_id: u32, member_idx: u32, buf: *[32]u8) []const u8 {
     return common.commonGetMemberName(m.instructions, struct_id, member_idx, buf, "_m");
 }
@@ -6357,6 +6399,31 @@ fn emitWhileLoopMSL(
     }
     const dw_native = dw_inlined != null;
 
+    // #loop-merge-phi: collect DIVERGENT phis at the loop's merge block (top-test
+    // loops only; do-while keeps the current behavior). Such a phi's correct
+    // post-loop value depends on which exit path was taken (normal exit vs break);
+    // see collectLoopMergePhis. Also resolve the normal-exit predecessor (the
+    // smallest-index pred: the header/cond block precedes every body/break block).
+    var loop_mphis: std.ArrayList(Instruction) = .empty;
+    defer loop_mphis.deinit(alloc);
+    var lm_norm_pred: u32 = 0;
+    if (!is_do_while) {
+        collectLoopMergePhis(m, label_map, merge_lbl, &loop_mphis, alloc);
+        if (loop_mphis.items.len > 0) {
+            var min_idx: usize = std.math.maxInt(usize);
+            var pi: usize = 3;
+            while (pi + 1 < loop_mphis.items[0].words.len) : (pi += 2) {
+                const pred = loop_mphis.items[0].words[pi + 1];
+                if (label_map.get(pred)) |pidx| {
+                    if (pidx < min_idx) {
+                        min_idx = pidx;
+                        lm_norm_pred = pred;
+                    }
+                }
+            }
+        }
+    }
+
     // #237: run the SSA phi counter update at the TOP of the loop (first-iteration
     // flag) so a `continue` still advances the counter (matching a real `for`).
     var fbuf: [40]u8 = undefined;
@@ -6364,6 +6431,17 @@ fn emitWhileLoopMSL(
     // do-while loops carry their update in the body and test at the bottom.
     const has_phis = !is_do_while and (if (g_loop_phis) |lp| (if (lp.get(loop_idx)) |pl| pl.items.len > 0 else false) else false);
     if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
+
+    // #loop-merge-phi: declare a distinct var per divergent merge phi (read after
+    // the loop) + rename its result id so the generic OpPhi handler does not
+    // re-alias it to a single incoming.
+    for (loop_mphis.items) |phi| {
+        const t = mslValueType(m, phi.words[1], names, alloc) catch "float";
+        const lm_name = std.fmt.allocPrint(alloc, "v{d}_lm", .{phi.words[2]}) catch "vlm";
+        if (names.fetchPut(phi.words[2], lm_name) catch null) |old| alloc.free(old.value);
+        try w.print("    {s} {s};\n", .{ t, lm_name });
+        if (g_materialized_phis) |mp| mp.put(phi.words[2], {}) catch {};
+    }
 
     if (dw_native) {
         try w.writeAll("    do\n    {\n");
@@ -6446,7 +6524,18 @@ fn emitWhileLoopMSL(
         cond_name = names.get(bc.words[1]) orelse cond_name;
     }
 
-    if (!is_do_while) try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
+    if (!is_do_while) {
+        // #loop-merge-phi fallback: assign each merge var its NORMAL-EXIT incoming
+        // every iteration. This is the value used on a normal exit, AND the safe
+        // fallback for any break path not explicitly handled below (a break that
+        // does not overwrite the var leaves the normal-exit value — exactly the old
+        // alias-to-first-incoming behavior, so no regression on currently-passing
+        // loops). Handled break paths overwrite with the correct break incoming.
+        for (loop_mphis.items) |phi| {
+            try emitLoopMergePhiCopy(m, names, phi, lm_norm_pred, "        ", w, alloc);
+        }
+        try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
+    }
 
     // Emit body block. When spirv-opt -O merges the body INTO the continue block
     // (body_lbl == cont_lbl), the body was already emitted in the if(!first) skip
@@ -6456,6 +6545,7 @@ fn emitWhileLoopMSL(
     const body_idx = if (body_lbl == cont_lbl) m.instructions.len else label_map.get(body_lbl) orelse m.instructions.len;
     if (body_idx < m.instructions.len) {
         var bi: usize = body_idx + 1;
+        var cur_body_lbl: u32 = body_lbl; // current block label (for direct break-to-merge merge-phi copies)
         while (bi < m.instructions.len) : (bi += 1) {
             const binst = m.instructions[bi];
             if (binst.op == .FunctionEnd) break;
@@ -6464,6 +6554,7 @@ fn emitWhileLoopMSL(
             if (binst.op == .Label and binst.words.len > 1) {
                 const lbl = binst.words[1];
                 if (lbl == cont_lbl or lbl == merge_lbl) break;
+                cur_body_lbl = lbl;
                 continue;
             }
             if (binst.op == .LoopMerge) {
@@ -6549,12 +6640,20 @@ fn emitWhileLoopMSL(
                     if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
                         try w.print("        if ({s}) continue;\n", .{ncn});
                     } else if (tl_is_trivial_break and fl_is_trivial_continue) {
+                        if (loop_mphis.items.len > 0) {
+                            const bp = if (ntl == merge_lbl) cur_body_lbl else ntl;
+                            for (loop_mphis.items) |phi| try emitLoopMergePhiCopy(m, names, phi, bp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) break;\n", .{ncn});
                         try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
                         try w.print("        if ({s}) continue;\n", .{ncn});
                         bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     } else if (tl_is_trivial_break) {
+                        if (loop_mphis.items.len > 0) {
+                            const bp = if (ntl == merge_lbl) cur_body_lbl else ntl;
+                            for (loop_mphis.items) |phi| try emitLoopMergePhiCopy(m, names, phi, bp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) break;\n", .{ncn});
                         if (nhe) {
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
