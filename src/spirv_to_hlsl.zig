@@ -977,7 +977,10 @@ fn hlslHasRecursion(m: *const ParsedModule, alloc: std.mem.Allocator) bool {
 // render proxy, MSL codegen-diff) — a regression here is only caught by WARP (Windows
 // D3D12; tools/warp). The earlier "confirmed by codegen diff" note was a TEXT
 // comparison and was the false confidence that let the original bug ship; the
-// tools/warp/README.md "Status" section predates emitMatrixMulSwapped and is stale. (#488)
+// tools/warp/README.md "Status" section predates emitMatrixMulSwapped and is stale.
+// WARP-CONFIRMED 2026-07-27: a re-run on the real DXC→DXIL→D3D12 runtime gave
+// 3 RENDER-MATCH / 0 RENDER-DIFFER on the previously-flagged mat3_branch,
+// mat_cond_swizzle, outer_product_test — the fix is verified at the shipping runtime. (#488)
 const spv_inverse2_hlsl =
     \\float2x2 spvInverse2x2(float2x2 m)
     \\{
