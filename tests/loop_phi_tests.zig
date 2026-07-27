@@ -492,6 +492,21 @@ test "GLSL emits multiple early return points (#70)" {
     try std.testing.expect(count >= 2);
 }
 
+// #wgsl-else-clobber: an if/else whose THEN-branch contains a nested (no-else) if was
+// silently mis-emitted — opening the nested if overwrote the enclosing if's
+// pending_false_label to null, so the enclosing then-block's terminating OpBranch never
+// emitted `} else {`. The else-body leaked into the then-branch and the `if` closed late
+// at the merge (wrong in BOTH branches). glslang fixture (zioshade's frontend emits the
+// same shape). Assert the else clause survives in the WGSL output.
+const NESTED_IF_ELSE_SPV = @embedFile("fixtures/nested_if_else.spv");
+
+test "WGSL emits else when then-branch nests an if (#wgsl-else-clobber)" {
+    const wgsl = try crossWgsl(NESTED_IF_ELSE_SPV);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "} else {") != null);
+}
+
+
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered
 /// an unmaterialized phi counter (named after its constant init) as the LHS.

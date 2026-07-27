@@ -5319,6 +5319,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var if_depth: u32 = 0;
     var merge_stack = std.ArrayList(?u32).initCapacity(arena, 8) catch return;
     defer merge_stack.deinit(arena);
+    // #wgsl-else-clobber: pending_false_label must be saved/restored across nested
+    // ifs. Previously a nested (no-else) if overwrote the enclosing if's
+    // pending_false_label to null, so the enclosing then-block's terminating
+    // OpBranch never emitted `} else {` and the else-body leaked into the
+    // then-branch (silent-wrong). This stack mirrors merge_stack push/pop 1:1.
+    var false_label_stack = std.ArrayList(?u32).initCapacity(arena, 8) catch return;
+    defer false_label_stack.deinit(arena);
 
     // Loop state tracking
     var loop_merge_label: ?u32 = null;
@@ -6711,6 +6718,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try writeInd(w, indent);
                             try w.print("if ({s}) {{\n", .{condition});
                             try merge_stack.append(arena, merge_label);
+                            // Save the ENCLOSING if's pending_false_label before this
+                            // if overwrites it; restored when this if's merge closes.
+                            try false_label_stack.append(arena, pending_false_label);
                             if_depth += 1;
                             indent += 1;
                             if (false_label != merge_label) {
@@ -6868,6 +6878,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try w.writeAll("}");
                             try w.writeAll("\n");
                             _ = merge_stack.pop();
+                            // Restore the enclosing if's pending_false_label (mirrors
+                            // the save in the BranchConditional Regular if/else arm).
+                            if (false_label_stack.items.len > 0) {
+                                pending_false_label = false_label_stack.pop().?;
+                            }
                             if_depth -= 1;
                         }
                     }
