@@ -3492,7 +3492,13 @@ fn emitWhileLoop(
     // do-while loops carry their update in the body and test at the bottom; the
     // #237 top-of-loop transform does not apply.
     const has_phis = !is_do_while and (if (g_loop_phis) |lp| (if (lp.get(loop_idx)) |pl| pl.items.len > 0 else false) else false);
-    if (has_phis) try w.print("    bool {s} = true;\n", .{first_flag});
+    // #loop-continue-deadincr (#237 generalized): emit the counter update at the TOP
+    // of the loop for ALL top-test loops (!is_do_while), not just phi-counter loops.
+    // A body `continue;` must advance the counter; when the increment sat at the BOTTOM
+    // (old !has_phis path), `continue;` skipped it -> infinite loop (lut_palette et al.,
+    // found via prove_naga on unopt SPIR-V; masked by spirv-opt -O). has_phis still
+    // gates the SelectionMerge honest-error in the top walker below.
+    if (!is_do_while) try w.print("    bool {s} = true;\n", .{first_flag});
 
     // Loop-carried body phis: an OpPhi materialized inside the loop body (a
     // selection merge, e.g. `j = cond ? 40u : 30u`) whose result the CONTINUE
@@ -3543,7 +3549,7 @@ fn emitWhileLoop(
         try w.writeAll("    while (true)\n    {\n");
     }
 
-    if (has_phis) {
+    if (!is_do_while) {
         try w.print("        if (!{s})\n        {{\n", .{first_flag});
         const cont_idx0 = label_map.get(cont_lbl) orelse m.instructions.len;
         if (cont_idx0 < m.instructions.len) {
@@ -3551,7 +3557,14 @@ fn emitWhileLoop(
             while (ci0 < m.instructions.len) : (ci0 += 1) {
                 const cinst = m.instructions[ci0];
                 if (cinst.op == .FunctionEnd or cinst.op == .Label or cinst.op == .Branch) break;
-                if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
+                if (cinst.op == .LoopMerge) continue;
+                if (cinst.op == .SelectionMerge) {
+                    // #loop-continue-deadincr: conditional increment (guarded store in an
+                    // unreachable intermediate block). For !has_phis loops (newly on this
+                    // top path) honest-error rather than silently drop it -> wrong counter.
+                    if (!has_phis) return error.UnstructuredControlFlow;
+                    continue;
+                }
                 try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
             }
         }
@@ -3796,11 +3809,11 @@ fn emitWhileLoop(
             try emitInstruction(m, names, decs, binst, w, alloc, is_frag, ovid);
         }
     }
-    // Emit continue block (e.g., i++ in for-loops). For phi-counter loops the
-    // update + write-back were hoisted to the top (#237), so skip them here. For the
-    // native do-while (#246) the latch block IS the condition, rebuilt inline below —
-    // its instructions must NOT be emitted as body statements.
-    if (!has_phis and !dw_native) {
+    // Emit continue block (e.g., i++ in for-loops) at the BOTTOM. ALL top-test loops
+    // (!is_do_while) now hoist the update to the top (#237 / #loop-continue-deadincr),
+    // so this bottom walker runs only for straight-line do-while (pattern C). The
+    // native do-while (#246) rebuilds its latch condition inline below.
+    if (is_do_while and !dw_native) {
         const cont_idx = label_map.get(cont_lbl) orelse m.instructions.len;
         if (cont_idx < m.instructions.len) {
             var ci2: usize = cont_idx + 1;
