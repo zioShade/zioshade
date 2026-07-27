@@ -506,6 +506,25 @@ test "WGSL emits else when then-branch nests an if (#wgsl-else-clobber)" {
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "} else {") != null);
 }
 
+// #wgsl-loop-in-switch-case: a loop nested inside a switch case body cannot be lowered
+// by the limited case-body replay (emitSimpleInstruction has no loop machinery), so it
+// was silently DROPPED. zioshade-WGSL now honest-errors instead. GLSL/MSL emit it
+// correctly, so this is a WGSL-only gap. This test PINS the honest-error so the path
+// cannot silently regress to silent-wrong; if full loop-in-case emission is ever added,
+// flip this to assert the loop survives. (Tracked follow-up; revisit if real workloads
+// need the construct.)
+const LOOP_IN_SWITCH_SPV = @embedFile("fixtures/loop_in_switch.spv");
+
+test "WGSL honest-errors on a loop nested in a switch case (#wgsl-loop-in-switch-case)" {
+    try std.testing.expectError(error.UnsupportedLoopInSwitchCase, crossWgsl(LOOP_IN_SWITCH_SPV));
+}
+
+test "GLSL still emits a loop nested in a switch case (the construct is valid)" {
+    const glsl = try crossGlsl(LOOP_IN_SWITCH_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while") != null);
+}
+
 
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered
