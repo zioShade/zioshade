@@ -143,6 +143,14 @@ prove-naga:
 wgsl-naga:
     @bash tools/wgsl_naga_sweep.sh
 
+# GLSL/WGSL render proxies: re-compile the backend's output to SPIR-V (glslang/naga) ->
+# spirv-cross MSL -> render-diff on Metal vs the render-proven MSL_ref. MATCH = the
+# backend's output is render-correct (as glslang/naga parse it); single-oracle proxy.
+glsl-render:
+    @bash tools/glsl_render_check.sh
+wgsl-render:
+    @bash tools/wgsl_render_check.sh
+
 # large-corpus MSL silent-wrong INVARIANT sweep — the MSL analog of wgsl-naga.
 # No Metal compiler runs on Windows, so instead of validating we assert
 # zero-false-positive invariants every valid MSL must satisfy (e.g. a pointer
