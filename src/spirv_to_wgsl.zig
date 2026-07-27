@@ -294,6 +294,22 @@ fn recordUnsupportedEarlyReturn() error{UnsupportedEarlyReturn} {
     return error.UnsupportedEarlyReturn;
 }
 
+/// Record the detail for a loop nested inside a switch case body, then return
+/// the honest error. The `.Switch` handler replays case bodies through a
+/// limited emitter (emitSimpleInstruction) that cannot construct loops, so a
+/// loop nested in a case (directly or inside a nested if) would be silently
+/// DROPPED. Fail loud rather than miscompile. GLSL/MSL/HLSL emit this correctly;
+/// full loop-in-case emission for WGSL is a tracked follow-up. Revisit if the
+/// construct appears in real target workloads. (#wgsl-loop-in-switch-case)
+fn recordUnsupportedLoopInSwitchCase() error{UnsupportedLoopInSwitchCase} {
+    last_error_detail = std.fmt.bufPrint(
+        &last_error_detail_buf,
+        "a loop nested inside a switch case body cannot be lowered to WGSL yet (the case-body replay cannot construct loops); hoist the loop outside the switch or rewrite the case as an if-chain",
+        .{},
+    ) catch null;
+    return error.UnsupportedLoopInSwitchCase;
+}
+
 /// Single source of truth: zioshade's internal GLSL.std.450 opcode number → WGSL
 /// builtin name. Used by BOTH the main emit path and the loop-replay path so the
 /// two cannot drift (they previously had divergent inline switches — the replay
@@ -6117,6 +6133,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const default_label = inst.words[2];
                     const merge_label = pending_merge;
                     if (merge_label != null) {
+                        // #wgsl-loop-in-switch-case: any OpLoopMerge between OpSwitch and
+                        // the switch merge sits in a case body. The whole region is
+                        // consumed by this handler and replayed via emitSimpleInstruction,
+                        // which cannot construct loops, so such a loop would be silently
+                        // DROPPED. Honest-error instead of miscompiling. (Full loop-in-case
+                        // emission is a tracked follow-up.)
+                        {
+                            var li: usize = i + 1;
+                            while (li < module.instructions.len) : (li += 1) {
+                                const linst = module.instructions[li];
+                                if (linst.op == .Label and linst.words.len > 1 and linst.words[1] == merge_label.?) break;
+                                if (linst.op == .LoopMerge) return recordUnsupportedLoopInSwitchCase();
+                            }
+                        }
                         try writeInd(w, indent);
                         try w.print("switch {s} {{\n", .{selector});
                         const case_ind = indent + 1;
