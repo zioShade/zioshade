@@ -462,6 +462,19 @@ test "WGSL puts a Private-var counter increment in continuing{} (#loop-continue-
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "continuing {") != null);
 }
 
+// #69: a loop nested inside an if/else BRANCH (here, an else with an early return) was
+// silently DROPPED — emitBlock stopped at the else block's OpBranch to the loop header and
+// never reached the OpLoopMerge -> emitWhileLoop. glslang-produced fixture (zioshade's own
+// frontend can't reach the broken emitBlock path for source-compiled loops). Assert the loop
+// survives in the GLSL output.
+const LOOP_IN_ELSE_SPV = @embedFile("fixtures/loop_in_else.spv");
+
+test "GLSL emits a loop nested in an else branch (#69)" {
+    const glsl = try crossGlsl(LOOP_IN_ELSE_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while") != null);
+}
+
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered
 /// an unmaterialized phi counter (named after its constant init) as the LHS.
