@@ -3925,7 +3925,18 @@ fn emitBlock(
             continue;
         }
         if (inst.op == .Branch) {
-            if (is_switch) try w.print("{s}    break;\n", .{indent});
+            if (is_switch) { try w.print("{s}    break;\n", .{indent}); break; }
+            // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
+            // end-of-branch — otherwise a nested loop is silently dropped (early_return2:
+            // the else branch flows into a for-loop; emitBlock stopped at the OpBranch and
+            // never reached the OpLoopMerge -> emitWhileLoop). Other OpBranches (e.g. a
+            // break to an outer loop's merge) still terminate this block.
+            const br_target = if (inst.words.len > 1) inst.words[1] else 0;
+            if (lm.get(br_target)) |hi| {
+                var hi2 = hi + 1;
+                while (hi2 < m.instructions.len and m.instructions[hi2].op == .Phi) : (hi2 += 1) {}
+                if (hi2 < m.instructions.len and m.instructions[hi2].op == .LoopMerge) continue;
+            }
             break;
         }
         if (inst.op == .BranchConditional) {
