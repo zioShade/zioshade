@@ -181,6 +181,16 @@ prove-integer:
 chaos-classify dir="tests/spirv-cross":
     @bash tools/chaos_classify.sh {{dir}}
 
+# GLSL faithfulness check (non-proxy ground truth for zioshade-GLSL). Renders naga(zioshade-
+# GLSL(source)->glslang) vs zioshade-MSL(source) [the proven-correct reference] — an
+# INDEPENDENT renderer of the round-tripped SPIR-V, no spirv-cross. MATCH => zioshade-GLSL
+# is faithful (any proxy DIFFER is a spirv-cross artifact). DIFFER => zioshade-GLSL emits
+# GLSL that compiles to a semantically different SPIR-V -> a REAL zioshade-GLSL bug.
+# Found a real bug class this way (zioshade-GLSL drops loops/returns in control-flow —
+# early_return2, loop-dominator-and-switch-default). Pass the frags to check.
+glsl-faithful frags="tests/spirv-cross/early_return2.frag tests/spirv-cross/loop-dominator-and-switch-default.frag":
+    @bash tools/glsl_faithfulness.sh {{frags}}
+
 # large-corpus MSL silent-wrong INVARIANT sweep — the MSL analog of wgsl-naga.
 # No Metal compiler runs on Windows, so instead of validating we assert
 # zero-false-positive invariants every valid MSL must satisfy (e.g. a pointer
