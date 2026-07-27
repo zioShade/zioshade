@@ -4476,6 +4476,20 @@ fn emitWhileLoopHLSL(
                 }
             }
             if (bc_idx >= module.instructions.len) {
+                // #dowhile-compound-cond: a do-while whose continue block has a nested
+                // OpSelectionMerge (a short-circuit && / || loop condition) reaches here:
+                // detectDoWhileBackEdge returned null (the continue is not a single-block
+                // back-edge) and Pattern A found no top-test condition. Previously this
+                // silently DROPPED the entire loop. Honest-error instead. (#77; full
+                // emission is a tracked follow-up; WGSL lowers it correctly.)
+                if (label_map.get(cont_lbl)) |cidx| {
+                    var sci: usize = cidx + 1;
+                    while (sci < module.instructions.len) : (sci += 1) {
+                        const t = module.instructions[sci];
+                        if (t.op == .SelectionMerge) return error.UnsupportedDoWhileCompoundCond;
+                        if (t.op == .Label or t.op == .FunctionEnd or t.op == .Branch) break;
+                    }
+                }
                 if (label_map.get(merge_lbl)) |mi| return mi;
                 return loop_idx + 1;
             }
