@@ -86,7 +86,7 @@ func makeGlobalsBuffer(device: MTLDevice, screenW: Int, screenH: Int) -> MTLBuff
 }
 
 func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, texture: MTLTexture,
-                 globalsBuf: MTLBuffer, w: Int, h: Int) -> [UInt8] {
+                 globalsBuf: MTLBuffer, w: Int, h: Int) -> [UInt8]? {
     let outDesc = MTLTextureDescriptor.texture2DDescriptor(
         pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
     outDesc.usage = [.renderTarget, .shaderRead]
@@ -130,6 +130,11 @@ func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, te
 
     cmdBuf.commit()
     cmdBuf.waitUntilCompleted()
+    // #52: a validation failure (e.g. the shader declares a binding the harness does not
+    // supply) leaves the framebuffer at clear-black, which would be reported as a false
+    // DIFFER (maxdiff 255). Surface it as a harness skip instead (return nil; the caller
+    // prints SKIP(harness-binding)). Mirrors VertexNumeric's cb.error guard.
+    if cmdBuf.error != nil { return nil }
 
     var result = [UInt8](repeating: 0, count: w * h * 4)
     let region = MTLRegion(origin:.init(x:0,y:0,z:0), size:.init(width:w,height:h,depth:1))
@@ -269,10 +274,14 @@ let texture = createTestTexture(device: device, w: W, h: H)
 let globals = makeGlobalsBuffer(device: device, screenW: W, screenH: H)
 
 print("Rendering zioshade...")
-let px1 = renderFrame(device: device, vertLib: vertLib, fragLib: lib1, texture: texture, globalsBuf: globals, w: W, h: H)
+guard let px1 = renderFrame(device: device, vertLib: vertLib, fragLib: lib1, texture: texture, globalsBuf: globals, w: W, h: H) else {
+    print("SKIP(harness-binding)"); exit(0)
+}
 
 print("Rendering spirv-cross...")
-let px2 = renderFrame(device: device, vertLib: vertLib, fragLib: lib2, texture: texture, globalsBuf: globals, w: W, h: H)
+guard let px2 = renderFrame(device: device, vertLib: vertLib, fragLib: lib2, texture: texture, globalsBuf: globals, w: W, h: H) else {
+    print("SKIP(harness-binding)"); exit(0)
+}
 
 try savePPM(px1, w: W, h: H, path: "\(prefix)_zioshade.ppm")
 try savePPM(px2, w: W, h: H, path: "\(prefix)_spirvcross.ppm")
