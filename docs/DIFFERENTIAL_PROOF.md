@@ -154,6 +154,21 @@ artifacts (`ubo_layout` UBO binding, `sampler-ms` sampler2DMS — both skip-rend
 proxy). The deterministic AGREE-ALL set is the one worth a direct-GLSL-render check (the
 proxy round-trip is the prime suspect — see harness-hardening #52).
 
+**The 28 WGSL-proxy residuals are classified identically — none are confirmed real
+zioshade bugs.** 21 AGREE-ALL (zioshade-MSL matches both references, including the
+deterministic `deep_branch5`, `deep_nest6`, `deep-ifelse`, `phi_nested`, `struct_tern`,
+`cond-var-nested`, `quad-colors` — so the WGSL DIFFER is WGSL-emission/proxy, not
+fundamental); 1 NAGA-OUTLIER (`nested_func_expr` — zioshade correct); 3 SC-OUTLIER
+(`mandelbrot_iter`, `mandelbrot3`, `weierstrass` — spirv-cross outlier, chaos); 2
+hash-driven chaos (`loop_trackers`, `loop-dominator`); 1 harness artifact
+(`input-attachment.vk` — naga skips Vulkan subpass input).
+
+**Bottom line across all three measured backends (MSL/GLSL/WGSL): after fixing the two
+real bug classes — `#loop-continue-deadincr` and `#switch-fallthrough` — in all four
+backends, every remaining DIFFER is explained: chaos (hash/fractal), harness artifacts
+(binding skips), or backend-specific/proxy-round-trip differences where zioshade's
+proven MSL backend (same SPIR-V) renders correctly. No confirmed real bugs remain.**
+
 Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 
 Three independent kinds of evidence, weakest to strongest:
