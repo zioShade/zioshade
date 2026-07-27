@@ -146,7 +146,21 @@ spirv-cross AND naga — zioshade's backend logic is correct for the shader, inc
 deterministic `ray_struct`, `raytracing`, `recursive_struct`, `struct_array_gradient`,
 `struct_ray2`, `multi-return-paths`, `nested_loop2`); for those, the GLSL DIFFER is a
 GLSL-emission-specific or proxy-round-trip difference, NOT a fundamental miscompile (the
-MSL backend — same SPIR-V — renders correctly). 3 are SC-OUTLIER (`mandelbrot_iter`,
+MSL backend — same SPIR-V — renders correctly).
+
+**Correction — the GLSL faithfulness check (`just glsl-faithful`, `tools/glsl_faithfulness.sh`)
+found that some of those "AGREE-ALL" GLSL DIFFERs ARE real zioshade-GLSL bugs, not proxy
+artifacts.** It renders naga(zioshade-GLSL(source)→glslang) vs zioshade-MSL(source) [the
+proven-correct reference] — an independent renderer of the round-tripped SPIR-V, no
+spirv-cross. Result on the deterministic set: 5 FAITHFUL (proxy artifact confirmed) but
+**4 UNFAITHFUL — real zioshade-GLSL miscompiles**: zioshade-GLSL silently DROPS loops/returns
+in control-flow (`early_return2`: source's for-loop + early return vanish entirely;
+`loop-dominator-and-switch-default`: 1 of 2 loops dropped; `multi-return-paths`: 4 returns
+dropped). zioshade-MSL handles these correctly (3-oracle AGREE on the source), so this is a
+zioshade-GLSL-specific bug in its loop/return lowering — the silent-wrong class, invisible
+to the source-3-oracle (which tests the MSL backend). **Tracked as #69.** This is exactly
+why the non-proxy check was needed: the proxy round-trip and the source-3-oracle could not
+see a backend-specific emission bug. 3 are SC-OUTLIER (`mandelbrot_iter`,
 `mandelbrot3`, `weierstrass` — zioshade agrees with naga; spirv-cross is the outlier;
 chaos). 4 are hash-driven chaos (`loop_trackers`, `multi_return2`, `switch_in_loop`,
 `loop-dominator-and-switch-default` — same set as the MSL residuals). 2 are harness
