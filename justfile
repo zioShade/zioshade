@@ -137,6 +137,15 @@ prove-all:
 prove-naga:
     @bash tools/prove_naga.sh --dir tests/spirv-cross
 
+# 3-oracle MSL MAJORITY VOTE (ground-truth classification of a naga DIFFER). Renders
+# zioshade / spirv-cross / naga MSL on Metal and lets the majority rule: AGREE-ALL,
+# NAGA-OUTLIER (z==spirv-cross, naga dissents — zioshade correct), SC-OUTLIER, or
+# Z-DISAGREES-BOTH (chaos / real bug — chaos-probe target). spirv-cross is the render-
+# proven reference, so "z agrees with spirv-cross" is decisive. Pass frags or --dir.
+#   just prove-3oracle tests/spirv-cross/exp-log-pow.frag tests/spirv-cross/mandelbox.frag
+prove-3oracle frags="--dir tests/spirv-cross":
+    @bash tools/prove_3oracle.sh {{frags}}
+
 # large-corpus WGSL<->naga differential: every conformance fixture -> WGSL -> naga.
 # Reports naga PASS / REJECT (divergences to fix) / honest-unsupported. Slow
 # (naga subprocess per fixture); run on demand, not in `ci`.
