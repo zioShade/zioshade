@@ -52,9 +52,9 @@ render-proven," here is the honest per-backend confidence level:
 
 | Backend | Confidence | Evidence | Regenerate |
 |---------|------------|----------|------------|
-| **MSL** | **render-proven** (strongest) | full-corpus Metal GPU pixel/exec differential vs glslang→SPIRV-Cross: 1315 shaders, **0 divergences** (table above) | `PROVE_FULL=1 just prove` |
+| **MSL** | **render-proven** (strongest) | full-corpus Metal GPU pixel/exec differential vs glslang→SPIRV-Cross: 1315 shaders, **0 divergences** (table above). **Honest scope:** that run (`frag_oracle_check.sh`) drives **SPIRV-Cross on both sides** (zioshade's *frontend* SPIR-V vs glslang's), so it proves zioshade's GLSL→SPIR-V frontend matches glslang — using SPIRV-Cross as a shared backend. zioshade's *own* MSL backend is render-proven separately: on optimized SPIR-V (`prove_opt`, 1123 MATCH, 0 structural) and on **unoptimized** SPIR-V via the naga 2nd-oracle (`prove_naga`, 1127 MATCH / 7 DIFFER — see below; a loop-lowering bug found there is now fixed). | `PROVE_FULL=1 just prove`, `just prove-opt`, `just prove-naga` |
 | **MSL on `spirv-opt -O`** | **render-proven** | `prove_opt` runs the SPIR-V optimizer's output through both zioshade-MSL and SPIRV-Cross-MSL and render-diffs on Metal; a focused campaign closed 39 structural miscompiles to 0, and wintty's own `crt_output`/`focus_output` shaders verify MATCH on optimized SPIR-V | `just prove-opt` |
-| **GLSL** | **render-verified (proxy)** | glslang compile (0 INVALID) + Metal-reuse render proxy (zioshade GLSL → glslang → MSL → Metal vs MSL_ref): **1098 MATCH / 70 DIFFER (flagged)** — single-oracle proxy, same correlated-normalization caveat as HLSL | `just glsl-glslang-all`, `bash tools/glsl_render_check.sh` |
+| **GLSL** | **render-verified (proxy)** | glslang compile (0 INVALID) + Metal-reuse render proxy (zioshade GLSL → glslang → MSL → Metal vs MSL_ref): **1140 MATCH / 26 DIFFER (flagged)** — the `#loop-continue-deadincr` fix (below) dropped DIFFER 70 → 26; residual is chaotic-FP / control-flow / harness artifacts. Single-oracle proxy, same correlated-normalization caveat as HLSL | `just glsl-glslang-all`, `bash tools/glsl_render_check.sh` |
 | **WGSL** | **render-verified (proxy)** | naga compile (0 REJECT) + Metal-reuse render proxy (zioshade WGSL → naga → MSL → Metal vs MSL_ref): **1106 MATCH / 60 DIFFER (flagged)** — same caveat | `just wgsl-naga`, `bash tools/wgsl_render_check.sh` |
 | **HLSL** | **compile-verified** (glslang + DXC) | glslang accepts the emitted HLSL (0 INVALID); DXC canonical SM6.x compile-verify now provisioned in Docker — 51 PASS / 3 honest-error / 2 SKIP; the D3D12 *render*-diff (semantic truth) is still founder-gated. The previously WARP-flagged matrix-convention bug (`floatCxR` row-fill → transpose) is **FIXED via `emitMatrixMulSwapped`** (mirrors spirv-cross's `mul(v,M)` convention) and **WARP-CONFIRMED** — a re-run on the real DXC→DXIL→D3D12 runtime gave **3 RENDER-MATCH / 0 RENDER-DIFFER** on the exact three previously flagged (mat3_branch, mat_cond_swizzle, outer_product_test); zioshade's HLSL byte-matches spirv-cross. A **full WARP corpus sweep** on real D3D12 (ryzen7pro): **803 RENDER-MATCH / 9 RENDER-DIFFER / 599 skip** (post-fix re-sweep confirmed at scale — zero regression). The one control-flow DIFFER (`switch_fallthrough` — HLSL emitted unconditional `break;`, dropping the fallthrough accumulation) is **FIXED** (emit `break;` only for terminal cases; fallthrough cases fall through, mirroring spirv-cross) and moved DIFFER→MATCH. The remaining 9 DIFFERs are benign-FP (mandelbrot_iter/simple/3, multi_return2, nested_func_expr — chaotic shaders diverging by FP ordering) or harness artifacts (.vk.nocompat; .desktop depth-greater/less + image-query) | `just hlsl-glslang-all`, `just hlsl-dxc` |
 
@@ -94,8 +94,8 @@ and naga-MSL rendered on Metal and pixel-diffed). Latest full-corpus run:
 
 | verdict | count | meaning |
 |---------|------:|---------|
-| MATCH (render-proven-2-oracle) | 1090 | zioshade and naga agree pixel-for-pixel — correlated-error blind spot **closed** |
-| DIFFER (flagged; 0 are boundary-FP) | 46 | no ground truth — flagged, **never** auto-"fixed"; a precise-FP pass classified all 46 as persistent (none are measure-zero FP edges) |
+| MATCH (render-proven-2-oracle) | 1127 | zioshade and naga agree pixel-for-pixel — correlated-error blind spot **closed** |
+| DIFFER (flagged; 0 are boundary-FP) | 7 | no ground truth — flagged, **never** auto-"fixed". Was 46; 39 were the `#loop-continue-deadincr` bug (a Private-var loop counter whose increment a body `continue;` skipped → infinite loop, fixed — see below). The residual 7 are chaotic/iterative shaders with no single correct pixel (mandelbox, exp-log-pow, logistic-map, …). |
 | skip-render | 21 | naga MSL needs buffer/texture bindings not yet wired |
 | skip-glslang / skip-naga / skip-zioshade-msl | 296 | non-Vulkan source / naga can't cross / zioshade can't emit |
 
@@ -116,6 +116,20 @@ ordering (whole-image disagreement, e.g. mandelbox), which precise-FP cannot res
 since the two MSL programs are structurally different. So the persistent set is a mix of
 benign chaotic-FP divergence and genuine control-flow differences; separating them needs
 manual analysis with ground truth, not more automation — the disciplined stopping point.
+
+**Update (2026-07-27) — that manual analysis has been done.** 39 of the 46 were NOT
+chaotic: they were one systematic bug, `#loop-continue-deadincr`. On unoptimized SPIR-V,
+a loop with a Private-var (non-OpPhi) counter emitted the increment at the BOTTOM of the
+`while(true)` body, where a body `continue;` skipped it → the counter never advanced → an
+infinite loop. The `#237` top-of-loop increment (which makes `continue` advance the
+counter) was gated on `has_phis` (OpPhi counters) only; generalizing it to all top-test
+loops fixed it in MSL, GLSL, and HLSL. It was masked by `spirv-opt -O` (which lowers to
+the phi/do-while form) — so `prove_opt` passed and only `prove_naga` (unoptimized)
+surfaced it. After the fix: MSL naga 46 → 7, GLSL proxy 70 → 26, `prove_opt` 0 structural
+regression. The residual is genuinely chaotic (no single correct pixel). Locked in
+`tests/loop_phi_tests.zig` via a glslang-produced fixture (zioshade's own frontend emits
+OpPhi counters, so source-compiled tests cannot reach the broken `!has_phis` path). WGSL
+uses a separate `loop{}`/`continuing` lowering — tracked separately.
 
 Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 

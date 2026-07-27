@@ -377,6 +377,73 @@ test "loop counter advances in HLSL (phi not frozen)" {
     }
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// #loop-continue-deadincr: a Private-var (non-OpPhi) loop counter with a continue
+// path must still advance the counter on the continue path. Before the fix the
+// increment was emitted at the BOTTOM of the while(true) body, where a body
+// `continue;` skipped it -> the counter never advanced -> infinite loop
+// (lut_palette et al., maxdiff 255, found via prove_naga on UNOPTIMIZED SPIR-V;
+// masked by spirv-opt -O, which lowers to the phi/do-while form). The fix
+// generalizes the #237 top-of-loop increment to ALL top-test loops.
+//
+// zioshade's OWN frontend emits OpPhi loop counters, so the source-compiled tests
+// above cannot reach the !has_phis path that was broken. This fixture is
+// glslang-produced (Private-var counter, the external-input form) — embedded so the
+// test needs no external glslang on PATH.
+const PRIVATE_COUNTER_SPV = @embedFile("fixtures/continue_private_counter.spv");
+
+fn crossMsl(spv_bytes: []const u8) ![]const u8 {
+    const spv = try wordsFromBytes(spv_bytes);
+    defer alloc.free(spv);
+    return try zioshade.spirvToMSL(alloc, spv, .{});
+}
+fn crossGlsl(spv_bytes: []const u8) ![]const u8 {
+    const spv = try wordsFromBytes(spv_bytes);
+    defer alloc.free(spv);
+    return try zioshade.spirvToGLSL(alloc, spv, .{});
+}
+fn crossHlsl(spv_bytes: []const u8) ![]const u8 {
+    const spv = try wordsFromBytes(spv_bytes);
+    defer alloc.free(spv);
+    return try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+}
+
+/// Reinterpret raw little-endian SPIR-V bytes as u32 words (SPIR-V is a word stream).
+/// Copies into an aligned buffer — @embedFile data is byte-aligned, not word-aligned.
+fn wordsFromBytes(bytes: []const u8) ![]const u32 {
+    std.debug.assert(bytes.len % 4 == 0); // SPIR-V is a whole number of 32-bit words
+    const spv = try alloc.alloc(u32, bytes.len / 4);
+    @memcpy(std.mem.sliceAsBytes(spv), bytes);
+    return spv;
+}
+
+test "continue advances a Private-var counter in MSL (#loop-continue-deadincr)" {
+    const msl = try crossMsl(PRIVATE_COUNTER_SPV);
+    defer alloc.free(msl);
+    if (!try continueAdvancesCounter(msl)) {
+        std.debug.print("MSL continue skips the Private-var counter update:\n{s}\n", .{msl});
+        return error.ContinueSkipsUpdate;
+    }
+}
+
+test "continue advances a Private-var counter in GLSL (#loop-continue-deadincr)" {
+    const glsl = try crossGlsl(PRIVATE_COUNTER_SPV);
+    defer alloc.free(glsl);
+    if (!try continueAdvancesCounter(glsl)) {
+        std.debug.print("GLSL continue skips the Private-var counter update:\n{s}\n", .{glsl});
+        return error.ContinueSkipsUpdate;
+    }
+}
+
+test "continue advances a Private-var counter in HLSL (#loop-continue-deadincr)" {
+    const hlsl = try crossHlsl(PRIVATE_COUNTER_SPV);
+    defer alloc.free(hlsl);
+    if (!try continueAdvancesCounter(hlsl)) {
+        std.debug.print("HLSL continue skips the Private-var counter update:\n{s}\n", .{hlsl});
+        return error.ContinueSkipsUpdate;
+    }
+}
+
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered
 /// an unmaterialized phi counter (named after its constant init) as the LHS.
