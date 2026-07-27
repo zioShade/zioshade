@@ -463,6 +463,19 @@ fn frexpModfField(module: *const ParsedModule, source_id: u32, idx: u32) ?[]cons
 /// structurizer's break detection otherwise matches only the DIRECT form (the
 /// conditional branch target IS the loop merge), so without this the trampoline
 /// branch is dropped → an empty `if (cond) { }` = silent-wrong. (#170)
+/// #switch-fallthrough (WGSL): true iff `lbl` is a case/default target of the OpSwitch
+/// whose words are `switch_words` (words[2]=default, words[4,6,…]=case targets). Used to
+/// detect a SPIR-V fallthrough edge — a case body OpBranching to another case label — so
+/// the chain can be duplicated (WGSL removed `fallthrough` from the spec).
+fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
+    if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
+    var k: usize = 4; // words[3] = first case literal, words[4] = first case target
+    while (k < switch_words.len) : (k += 2) {
+        if (switch_words[k] == lbl) return true;
+    }
+    return false;
+}
+
 fn isPureBranchTrampoline(module: *const ParsedModule, label: u32, target: u32) bool {
     var idx: usize = 0;
     while (idx < module.instructions.len) : (idx += 1) {
@@ -6209,78 +6222,105 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (target_label == merge_label.?) continue;
                             try writeInd(w, case_ind);
                             try w.print("case {d}: {{\n", .{case_val});
-                            // Find and emit target block
-                            var si: usize = i + 1;
-                            while (si < module.instructions.len) : (si += 1) {
-                                const sinst = module.instructions[si];
-                                if (sinst.op == .Label and sinst.words.len > 1 and sinst.words[1] == target_label) {
-                                    si += 1;
-                                    while (si < module.instructions.len) : (si += 1) {
-                                        const dinst = module.instructions[si];
-                                        if (dinst.op == .Label) break;
-                                        if (dinst.op == .Branch) break;
-                                        if (dinst.op == .BranchConditional) {
-                                            // #478 F4: emit a nested if/else within the case body (was dropped).
-                                            const bcond = names.get(dinst.words[1]) orelse "c";
-                                            const btrue = dinst.words[2];
-                                            const bfalse = if (dinst.words.len > 3) dinst.words[3] else null;
-                                            var merge_lbl: u32 = 0;
-                                            if (si > 0 and module.instructions[si - 1].op == .SelectionMerge and module.instructions[si - 1].words.len > 1)
-                                                merge_lbl = module.instructions[si - 1].words[1];
-                                            try writeInd(w, body_ind);
-                                            try w.print("if {s} {{\n", .{bcond});
-                                            // Emit true arm
-                                            {
-                                                var ti = si + 1;
-                                                while (ti < module.instructions.len) : (ti += 1) {
-                                                    if (module.instructions[ti].op == .Label and module.instructions[ti].words.len > 1 and module.instructions[ti].words[1] == btrue) {
-                                                        ti += 1;
-                                                        while (ti < module.instructions.len) : (ti += 1) {
-                                                            const tinst = module.instructions[ti];
-                                                            if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
-                                                            try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
-                                                        }
-                                                        break;
-                                                    }
-                                                }
+                            // #switch-fallthrough: WGSL removed `fallthrough` from the spec, so a
+                            // SPIR-V fallthrough chain is rendered by DUPLICATING each subsequent
+                            // case's body into this one (cases share the accumulated variable, so the
+                            // running sum matches spirv-cross). The chain follows the case body's
+                            // OpBranch target only when it is another case label; terminal cases
+                            // (OpBranch to the merge) and non-fallthrough cases emit exactly one
+                            // block — byte-identical to before.
+                            var chain_label = target_label;
+                            var chain_guard: usize = 0;
+                            while (chain_guard < inst.words.len) : (chain_guard += 1) {
+                                var term_target: ?u32 = null;
+                                var si: usize = i + 1;
+                                while (si < module.instructions.len) : (si += 1) {
+                                    const sinst = module.instructions[si];
+                                    if (sinst.op == .Label and sinst.words.len > 1 and sinst.words[1] == chain_label) {
+                                        si += 1;
+                                        while (si < module.instructions.len) : (si += 1) {
+                                            const dinst = module.instructions[si];
+                                            if (dinst.op == .Label) break;
+                                            if (dinst.op == .Branch) {
+                                                if (dinst.words.len > 1) term_target = dinst.words[1];
+                                                break;
                                             }
-                                            if (bfalse) |bf| {
-                                                if (bf != merge_lbl) {
-                                                    try writeInd(w, body_ind);
-                                                    try w.writeAll("} else {\n");
-                                                    var fi = si + 1;
-                                                    while (fi < module.instructions.len) : (fi += 1) {
-                                                        if (module.instructions[fi].op == .Label and module.instructions[fi].words.len > 1 and module.instructions[fi].words[1] == bf) {
-                                                            fi += 1;
-                                                            while (fi < module.instructions.len) : (fi += 1) {
-                                                                const finst = module.instructions[fi];
-                                                                if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
-                                                                try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                            if (dinst.op == .BranchConditional) {
+                                                // #478 F4: emit a nested if/else within the case body (was dropped).
+                                                const bcond = names.get(dinst.words[1]) orelse "c";
+                                                const btrue = dinst.words[2];
+                                                const bfalse = if (dinst.words.len > 3) dinst.words[3] else null;
+                                                var merge_lbl: u32 = 0;
+                                                if (si > 0 and module.instructions[si - 1].op == .SelectionMerge and module.instructions[si - 1].words.len > 1)
+                                                    merge_lbl = module.instructions[si - 1].words[1];
+                                                try writeInd(w, body_ind);
+                                                try w.print("if {s} {{\n", .{bcond});
+                                                // Emit true arm
+                                                {
+                                                    var ti = si + 1;
+                                                    while (ti < module.instructions.len) : (ti += 1) {
+                                                        if (module.instructions[ti].op == .Label and module.instructions[ti].words.len > 1 and module.instructions[ti].words[1] == btrue) {
+                                                            ti += 1;
+                                                            while (ti < module.instructions.len) : (ti += 1) {
+                                                                const tinst = module.instructions[ti];
+                                                                if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
+                                                                try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                             }
                                                             break;
                                                         }
                                                     }
                                                 }
-                                            }
-                                            try writeInd(w, body_ind);
-                                            try w.writeAll("}\n");
-                                            // Advance si past the if/else blocks to the merge.
-                                            if (merge_lbl != 0) {
-                                                var mi = si + 1;
-                                                while (mi < module.instructions.len) : (mi += 1) {
-                                                    if (module.instructions[mi].op == .Label and module.instructions[mi].words.len > 1 and module.instructions[mi].words[1] == merge_lbl) {
-                                                        si = mi;
-                                                        break;
+                                                if (bfalse) |bf| {
+                                                    if (bf != merge_lbl) {
+                                                        try writeInd(w, body_ind);
+                                                        try w.writeAll("} else {\n");
+                                                        var fi = si + 1;
+                                                        while (fi < module.instructions.len) : (fi += 1) {
+                                                            if (module.instructions[fi].op == .Label and module.instructions[fi].words.len > 1 and module.instructions[fi].words[1] == bf) {
+                                                                fi += 1;
+                                                                while (fi < module.instructions.len) : (fi += 1) {
+                                                                    const finst = module.instructions[fi];
+                                                                    if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
+                                                                    try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                                }
+                                                                break;
+                                                            }
+                                                        }
                                                     }
                                                 }
+                                                try writeInd(w, body_ind);
+                                                try w.writeAll("}\n");
+                                                // Advance si past the if/else blocks to the merge.
+                                                if (merge_lbl != 0) {
+                                                    var mi = si + 1;
+                                                    while (mi < module.instructions.len) : (mi += 1) {
+                                                        if (module.instructions[mi].op == .Label and module.instructions[mi].words.len > 1 and module.instructions[mi].words[1] == merge_lbl) {
+                                                            si = mi;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                continue;
                                             }
-                                            continue;
+                                            if (dinst.op == .Switch) break;
+                                            try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                         }
-                                        if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
+                                        break;
                                     }
-                                    break;
                                 }
+                                // Follow the fallthrough chain only if this block OpBranched to
+                                // another CASE target (not the merge, not an external label).
+                                const follow = blk: {
+                                    if (term_target) |tt| {
+                                        if (tt != merge_label.? and isSwitchCaseTarget(inst.words, tt)) break :blk tt;
+                                    }
+                                    break :blk @as(?u32, null);
+                                };
+                                if (follow) |tt| {
+                                    chain_label = tt;
+                                    continue;
+                                }
+                                break;
                             }
                             // #477: sel_phi update for this case's branch-to-merge.
                             if (sel_phis.get(merge_label.?)) |phi_list| {

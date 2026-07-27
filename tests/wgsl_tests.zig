@@ -7410,3 +7410,32 @@ test "#499: WGSL declares spec-constant ternary (OpSelect) result" {
     try assertContains(wgsl, "override f: u32 = select(");
     try nagaValidateOrSkip(wgsl, "specconst-tern");
 }
+
+// #switch-fallthrough (WGSL): `fallthrough` was REMOVED from the WGSL spec, so a SPIR-V
+// fallthrough chain must be rendered by DUPLICATING each subsequent case's body into this
+// one (the cases share the accumulated variable, so the running sum is correct). Assert the
+// output has no invalid `fallthrough` keyword and naga accepts it. The corpus shader
+// switch_fallthrough.frag gates the render-diff (was maxdiff 153, now MATCH).
+test "WGSL switch fallthrough duplicates the chain (no invalid `fallthrough`)" {
+    const src =
+        \\#version 450
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    float col = 0.0;
+        \\    int mode = int(gl_FragCoord.x) & 3;
+        \\    switch (mode) {
+        \\        case 3: col += 0.3;
+        \\        case 2: col += 0.2;
+        \\        case 1: col += 0.1;
+        \\        case 0: col += 0.05;
+        \\    }
+        \\    FragColor = vec4(col, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const spirv = zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment }) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "fallthrough") == null); // removed from WGSL
+    try nagaValidateOrSkip(wgsl, "switch-fallthrough");
+}
