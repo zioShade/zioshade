@@ -160,6 +160,17 @@ glsl-render:
 wgsl-render:
     @bash tools/wgsl_render_check.sh
 
+# Integer/quantized-output CORRECTNESS corpus: hand-written shaders whose output is
+# FP-ordering-independent (integer arithmetic, comparisons, bit ops, quantized writes) —
+# so ANY DIFFER is a guaranteed real bug (chaos cannot contaminate; the Csmith move). The
+# airtight headline: 0 divergences across all backends. Exercises loops (Collatz, GCD,
+# factorial, fibonacci-mod, nested), a fallthrough switch, and integer control flow.
+#   just prove-integer
+prove-integer:
+    @bash tools/prove_naga.sh --dir tests/integer_corpus
+    @bash tools/glsl_render_check.sh tests/integer_corpus
+    @bash tools/wgsl_render_check.sh tests/integer_corpus
+
 # large-corpus MSL silent-wrong INVARIANT sweep — the MSL analog of wgsl-naga.
 # No Metal compiler runs on Windows, so instead of validating we assert
 # zero-false-positive invariants every valid MSL must satisfy (e.g. a pointer
