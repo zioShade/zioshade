@@ -140,6 +140,20 @@ diverge; `loop_trackers`' emitted structure verified correct); 1 is an undef edg
 (`loop-dominator-and-switch-default` — zioshade's frontend honest-errors the GLSL, an
 uninitialized `vec4` driving a switch).
 
+**The 25 GLSL-proxy residuals are classified the same way (3-oracle vote on each shader's
+SPIR-V) — none are confirmed real zioshade bugs.** 15 are AGREE-ALL (zioshade-MSL matches
+spirv-cross AND naga — zioshade's backend logic is correct for the shader, including the
+deterministic `ray_struct`, `raytracing`, `recursive_struct`, `struct_array_gradient`,
+`struct_ray2`, `multi-return-paths`, `nested_loop2`); for those, the GLSL DIFFER is a
+GLSL-emission-specific or proxy-round-trip difference, NOT a fundamental miscompile (the
+MSL backend — same SPIR-V — renders correctly). 3 are SC-OUTLIER (`mandelbrot_iter`,
+`mandelbrot3`, `weierstrass` — zioshade agrees with naga; spirv-cross is the outlier;
+chaos). 4 are hash-driven chaos (`loop_trackers`, `multi_return2`, `switch_in_loop`,
+`loop-dominator-and-switch-default` — same set as the MSL residuals). 2 are harness
+artifacts (`ubo_layout` UBO binding, `sampler-ms` sampler2DMS — both skip-render under the
+proxy). The deterministic AGREE-ALL set is the one worth a direct-GLSL-render check (the
+proxy round-trip is the prime suspect — see harness-hardening #52).
+
 Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 
 Three independent kinds of evidence, weakest to strongest:
