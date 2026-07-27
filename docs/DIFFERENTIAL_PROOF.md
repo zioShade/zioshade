@@ -177,11 +177,28 @@ fundamental); 1 NAGA-OUTLIER (`nested_func_expr` — zioshade correct); 3 SC-OUT
 hash-driven chaos (`loop_trackers`, `loop-dominator`); 1 harness artifact
 (`input-attachment.vk` — naga skips Vulkan subpass input).
 
-**Bottom line across all three measured backends (MSL/GLSL/WGSL): after fixing the two
-real bug classes — `#loop-continue-deadincr` and `#switch-fallthrough` — in all four
-backends, every remaining DIFFER is explained: chaos (hash/fractal), harness artifacts
-(binding skips), or backend-specific/proxy-round-trip differences where zioshade's
-proven MSL backend (same SPIR-V) renders correctly. No confirmed real bugs remain.**
+**Bottom line across all three measured backends (MSL/GLSL/WGSL): the silent-wrong bug
+hunt (non-proxy faithfulness + source-output inspection) has found and resolved **seven**
+real bug classes to date, not two.** Fixed: `#loop-continue-deadincr` and
+`#switch-fallthrough` (all four backends), `#69` loop-in-else and `#70` multi-return
+(GLSL), `#75` WGSL else-clobber (an if/else whose then-branch nested a no-else if dropped
+the `else`). Honest-errored (per the goal "never plausible-but-wrong; honest-error
+instead", unanimous panel): `#76` WGSL loop-in-switch-case, `#77` do-while with a
+short-circuit `&&`/`||` condition (MSL/GLSL/HLSL — see below). After these, the residual
+DIFFERs are chaos / binding / proxy-round-trip / UB — **but see the chaos-masking caveat:
+that classification is necessary, not sufficient.**
+
+**Caveat — render-diff + chaos classification can MASK structural bugs (#77).** The `#77`
+do-while drop was invisible to `prove_naga`/render-diff because the affected shaders also
+use `sin()` (FP chaos): a dropped loop and a correctly-emitted loop both produce
+"chaotic" pixels that the chaos bin dismisses as legitimate divergence. **The clean
+discriminator for the silent-wrong class is source-output inspection** (run the backend,
+read the emitted code for dropped loops/returns/branches), NOT render-diff. Implication:
+the CHAOS-bin residuals above are *not* certified bug-free — a chaotic shader can harbor a
+structural bug masked by FP noise. Open thread (higher-value than a wgpu render): re-examine
+the MSL/GLSL/HLSL CHAOS-bin DIFFERs via source-output inspection; `#77` proves at least one
+structural bug hid there. The DETERMINISTIC corpus (`just prove-integer`, 12/12 MATCH)
+remains airtight — chaos cannot contaminate it.
 
 **Integer/quantized-output corpus (`just prove-integer`) — the airtight claim.** A
 hand-written corpus of shaders whose output is FP-ordering-independent (integer
