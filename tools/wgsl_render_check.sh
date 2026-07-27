@@ -32,9 +32,12 @@ check_one() {
   spirv-cross --msl "$d.z.spv" > "$d.z.msl" 2>/dev/null || { echo "skip-zcrossmsl"; return; }
   local o; o=$("$SC" "$d.z.msl" "$d.ref.msl" "${d}_r" 2>&1)
   printf '%s' "$o" | grep -q '^MATCH' && { echo "MATCH"; return; }
+  printf '%s' "$o" | grep -q 'SKIP(harness-binding)' && { echo "skip-binding"; return; }
   printf '%s' "$o" | grep -qE '^DIFFER' || { echo "skip-render"; return; }
   local md; md=$(printf '%s' "$o" | grep -oE 'Max channel diff: [0-9]+' | grep -oE '[0-9]+$')
-  echo "DIFFER maxdiff=${md:-?}"
+  # #52 (Risk C): adjudicate benign fast-math FP — re-render precise (mathMode=.safe).
+  local os; os=$(SHADERCOMPARE_SAFE_MATH=1 "$SC" "$d.z.msl" "$d.ref.msl" "${d}_rp" 2>&1)
+  if printf '%s' "$os" | grep -q '^MATCH'; then echo "EDGE(fast-math-fp)"; else echo "DIFFER maxdiff=${md:-?}"; fi
 }
 
 declare -A C
@@ -48,6 +51,6 @@ for f in "$DIR"/*.frag; do
 done
 echo ""
 echo "=== WGSL render proxy coverage ==="
-for k in MATCH DIFFER skip-glslang skip-crossmsl skip-zwgsl skip-naga skip-zcrossmsl skip-render; do
+for k in MATCH "EDGE(fast-math-fp)" DIFFER skip-binding skip-glslang skip-crossmsl skip-zwgsl skip-naga skip-zcrossmsl skip-render; do
   echo "  $k: ${C[$k]:-0}"
 done
