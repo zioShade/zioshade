@@ -5365,7 +5365,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             }
         }
     }
-    var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32, phi_start: usize, phi_end: usize }).initCapacity(arena, 4) catch return;
+    var loop_stack = std.ArrayList(struct { merge: u32, cont: u32, header: u32, phi_start: usize, phi_end: usize, emit_continuing: bool, continuing_open: bool }).initCapacity(arena, 4) catch return;
     defer loop_stack.deinit(arena);
     // Track phi range for pending loop (Phi processed before LoopMerge).
     // `phi_group_open` is set at the FIRST loop-header phi of a loop and cleared
@@ -6338,7 +6338,39 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const phi_start = if (phi_group_open) pending_phi_start else phi_updates.items.len;
                     const phi_end = phi_updates.items.len;
                     phi_group_open = false;
-                    try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header, .phi_start = phi_start, .phi_end = phi_end });
+                    // #loop-continue-deadincr (WGSL): wrap the continue-block content + back-edge
+                    // phi updates in `continuing {}` so a body `continue` advances the counter
+                    // (WGSL `continue` in a loop jumps to the continuing block; without it the
+                    // increment sat at the body bottom where `continue` skipped it -> infinite
+                    // loop, same class as the MSL/GLSL/HLSL bug). ONLY when the continue block
+                    // ends in a plain OpBranch to the header — a do-while's continue block ends
+                    // in a BranchConditional back-edge, which the .Branch handler below does not
+                    // close on (so `continuing {}` would be left open and naga would reject it),
+                    // and ONLY when it has content or header phis (an empty continuing block is
+                    // invalid WGSL).
+                    var emit_continuing = false;
+                    scan_cont: {
+                        var ci2: usize = i + 1;
+                        while (ci2 < module.instructions.len) : (ci2 += 1) {
+                            const cin = module.instructions[ci2];
+                            if (cin.op == .Label and cin.words.len > 1 and cin.words[1] == cont) break;
+                            if (cin.op == .FunctionEnd) break :scan_cont;
+                        }
+                        var has_content = (phi_start < phi_end);
+                        var ends_in_branch = false;
+                        ci2 += 1; // past the continue label
+                        while (ci2 < module.instructions.len) : (ci2 += 1) {
+                            const cin = module.instructions[ci2];
+                            if (cin.op == .Branch) { ends_in_branch = true; break; }
+                            if (cin.op == .BranchConditional or cin.op == .FunctionEnd) break;
+                            switch (cin.op) {
+                                .Label, .Phi, .LoopMerge, .SelectionMerge => {},
+                                else => { has_content = true; },
+                            }
+                        }
+                        emit_continuing = has_content and ends_in_branch;
+                    }
+                    try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header, .phi_start = phi_start, .phi_end = phi_end, .emit_continuing = emit_continuing, .continuing_open = false });
                     try writeInd(w, indent);
                     try w.writeAll("loop {\n");
                     indent += 1;
@@ -6659,7 +6691,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (target == loop_header_label) {
                             // Back edge — emit phi updates for THIS loop only
                             if (loop_stack.items.len > 0) {
-                                const cur = loop_stack.items[loop_stack.items.len - 1];
+                                const cur = &loop_stack.items[loop_stack.items.len - 1];
                                 var idx: usize = cur.phi_start;
                                 while (idx < cur.phi_end) : (idx += 1) {
                                     const pu = phi_updates.items[idx];
@@ -6667,6 +6699,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     const val_name = names.get(pu.value_id) orelse continue;
                                     try writeInd(w, indent);
                                     try w.print("{s} = {s};\n", .{ res_name, val_name });
+                                }
+                                // #loop-continue-deadincr: close the `continuing {}` block
+                                // (opened at the continue label). The increment + these phi
+                                // updates are now inside it, so a body `continue` reaches them.
+                                if (cur.continuing_open) {
+                                    indent -= 1;
+                                    try writeInd(w, indent);
+                                    try w.writeAll("}\n");
+                                    cur.continuing_open = false;
                                 }
                             }
                             continue;
@@ -6722,6 +6763,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Check if this is the continue block label
                     if (in_loop and loop_continue_label != null and label_id == loop_continue_label.?) {
                         in_continue_block = true;
+                        // #loop-continue-deadincr: open a `continuing {}` block. The
+                        // continue-construct content (counter increment) + the back-edge phi
+                        // updates are emitted inside it, so a body `continue` (which jumps to
+                        // the continuing block) reaches them — matching a real `for`.
+                        if (loop_stack.items.len > 0) {
+                            const top = &loop_stack.items[loop_stack.items.len - 1];
+                            if (top.emit_continuing) {
+                                try writeInd(w, indent);
+                                try w.writeAll("continuing {\n");
+                                indent += 1;
+                                top.continuing_open = true;
+                            }
+                        }
                         continue;
                     }
                     // Check if this label matches a loop merge (close loop)

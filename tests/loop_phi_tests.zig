@@ -444,6 +444,24 @@ test "continue advances a Private-var counter in HLSL (#loop-continue-deadincr)"
     }
 }
 
+fn crossWgsl(spv_bytes: []const u8) ![]const u8 {
+    const spv = try wordsFromBytes(spv_bytes);
+    defer alloc.free(spv);
+    return try zioshade.spirvToWGSL(alloc, spv, .{});
+}
+
+// WGSL lowers loops as `loop { }` with a `continuing { }` block (not while(true) +
+// _loopfirst), so continueAdvancesCounter (which finds `while (true)`) does not apply.
+// The #loop-continue-deadincr fix for WGSL puts the counter increment in `continuing {}`,
+// which a body `continue` reaches. Assert that structural signature directly. (A do-while
+// counter — continue block ends in a BranchConditional back-edge — must NOT get a
+// continuing block; that is covered by wgsl_tests' "do-while counter" naga-validated test.)
+test "WGSL puts a Private-var counter increment in continuing{} (#loop-continue-deadincr)" {
+    const wgsl = try crossWgsl(PRIVATE_COUNTER_SPV);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "continuing {") != null);
+}
+
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered
 /// an unmaterialized phi counter (named after its constant init) as the LHS.
