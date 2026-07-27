@@ -2968,6 +2968,25 @@ fn finalizeSwitchPhis(names: *std.AutoHashMap(u32, []const u8), phis: []const In
     }
 }
 
+/// #switch-fallthrough: the label this case/default body ultimately OpBranches to. If it
+/// is the switch merge, the case is terminal (emit `break;`); if it OpBranches to another
+/// case label (SPIR-V fallthrough chain), the case falls through — omit `break;` so the
+/// accumulation continues, matching spirv-cross. The old "every case → break;" assumption
+/// dropped fallthrough accumulation (switch_fallthrough, maxdiff 153). Mirrors HLSL.
+fn caseTerminatorTargetGLSL(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), target_label: u32) ?u32 {
+    const start = label_map.get(target_label) orelse return null;
+    var i = start;
+    while (i < m.instructions.len) : (i += 1) {
+        const op = m.instructions[i].op;
+        if (op == .Branch) {
+            const inst = m.instructions[i];
+            return if (inst.words.len >= 2) inst.words[1] else null;
+        }
+        if (op == .Label and i != start) return null; // next block reached before a Branch
+    }
+    return null;
+}
+
 fn emitBody(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3231,7 +3250,15 @@ fn emitBody(
                     try w.print("    case {d}:\n", .{cv});
                     _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
-                    try w.writeAll("    break;\n");
+                    // #switch-fallthrough: emit `break;` only if this case is terminal
+                    // (its body OpBranches to the merge). If it OpBranches to another case
+                    // label (SPIR-V fallthrough chain), omit `break;` so GLSL falls through
+                    // — accumulating like spirv-cross. (The default keeps its unconditional
+                    // break: it is emitted first, so its fallthrough target would be
+                    // ambiguous in emit order.) Mirrors HLSL (#58).
+                    const cterm = caseTerminatorTargetGLSL(m, &label_map, target);
+                    const cterminal = if (cterm) |t| (t == mval) else true;
+                    try w.writeAll(if (cterminal) "    break;\n" else "");
                 }
                 try w.writeAll("    }\n");
                 finalizeSwitchPhis(names, sphis.items, alloc);
