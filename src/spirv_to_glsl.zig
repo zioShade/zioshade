@@ -4062,6 +4062,15 @@ fn emitBlock(
             }
             continue;
         }
+        // #70: a function return / discard TERMINATES this block — emit it and stop. Without
+        // this, emitBlock continued past an early OpReturn into the merge block, nesting the
+        // next if inside the branch + duplicating it (multi-return-paths: control flow
+        // mis-structured). The terminator is emitted (always `return;`/`discard;`), then we
+        // break so emitBlock returns at the return, not past it.
+        if (inst.op == .Return or inst.op == .ReturnValue or inst.op == .Kill) {
+            try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid);
+            break;
+        }
         try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid);
     }
     return i;
@@ -5134,7 +5143,12 @@ fn emitInstruction(
             try w.print("    bool {s} = subgroupAny({s});\n", .{ rn, val });
         },
         .Return => {
-            if (!(is_frag and ovid != null)) try w.writeAll("    return;\n");
+            // #70: always emit `return;`. The old `!(is_frag and ovid != null)` skip assumed
+            // every fragment-shader return was the final one (output already written), so it
+            // DROPPED early/multiple returns — control then fell through past where it should
+            // have exited (multi-return-paths: 4 returns vanished). A trailing `return;` at
+            // end-of-main is a harmless no-op; an early one is required for correctness.
+            try w.writeAll("    return;\n");
         },
         .ReturnValue => {
             const vid = inst.words[1];

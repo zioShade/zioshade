@@ -475,6 +475,23 @@ test "GLSL emits a loop nested in an else branch (#69)" {
     try std.testing.expect(std.mem.indexOf(u8, glsl, "while") != null);
 }
 
+// #70: multiple early return points in a function were silently DROPPED — OpReturn skipped
+// emitting `return;` for fragment shaders (assumed all returns were final), AND emitBlock
+// continued past an early return into the merge block, nesting+duplicating the subsequent
+// ifs. The fixture has 3 return paths; assert zioshade-GLSL emits the early returns.
+const MULTI_RETURN_SPV = @embedFile("fixtures/multi_return.spv");
+
+test "GLSL emits multiple early return points (#70)" {
+    const glsl = try crossGlsl(MULTI_RETURN_SPV);
+    defer alloc.free(glsl);
+    // 3 return paths in the source (2 early + 1 implicit); at least 2 explicit `return;`
+    // must survive (the early ones — the final fall-off needs none).
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, glsl, i, "return;")) |pos| : (count += 1) i = pos + 1;
+    try std.testing.expect(count >= 2);
+}
+
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered
 /// an unmaterialized phi counter (named after its constant init) as the LHS.
