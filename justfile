@@ -191,6 +191,12 @@ chaos-classify dir="tests/spirv-cross":
 glsl-faithful frags="tests/spirv-cross/early_return2.frag tests/spirv-cross/loop-dominator-and-switch-default.frag":
     @bash tools/glsl_faithfulness.sh {{frags}}
 
+# WGSL faithfulness check (non-proxy, mirror of glsl-faithful). CAVEAT: confounded by the
+# naga-wgsl-vs-glslang frontend difference (no clean WGSL source to compare against), so
+# UNFAITHFUL is suggestive not decisive — verify directly or via a wgpu render.
+wgsl-faithful frags="tests/spirv-cross/quad-colors.frag tests/spirv-cross/nested_if_deep3.frag":
+    @bash tools/wgsl_faithfulness.sh {{frags}}
+
 # large-corpus MSL silent-wrong INVARIANT sweep — the MSL analog of wgsl-naga.
 # No Metal compiler runs on Windows, so instead of validating we assert
 # zero-false-positive invariants every valid MSL must satisfy (e.g. a pointer
