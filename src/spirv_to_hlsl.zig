@@ -239,6 +239,27 @@ fn emitSwitchPhiCaseCopyHLSL(module: *const ParsedModule, names: *std.AutoHashMa
         }
     }
 }
+/// The label the case body at `target_label` branches to at its terminator (the ending
+/// OpBranch's target), or null if the block doesn't end in a plain OpBranch (it ends in
+/// a BranchConditional/Return/etc., or runs into the next block). Switch emission uses
+/// this to emit `break;` only for terminal cases (→ merge) and let fallthrough cases
+/// (→ another case label) fall through in HLSL, matching SPIR-V's case→case chaining.
+/// (#switch-fallthrough — the #472-audit "every case → merge" assumption was wrong for
+/// fallthrough switches.)
+fn caseTerminatorTarget(module: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), target_label: u32) ?u32 {
+    const start = label_map.get(target_label) orelse return null;
+    var i = start;
+    while (i < module.instructions.len) : (i += 1) {
+        const op = module.instructions[i].op;
+        if (op == .Branch) {
+            const inst = module.instructions[i];
+            return if (inst.words.len >= 2) inst.words[1] else null;
+        }
+        if (op == .Label and i != start) return null; // next block reached before a Branch
+    }
+    return null;
+}
+
 fn finalizeSwitchPhisHLSL(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
     for (phis) |phi| {
         const vn = names.get(phi.words[2]) orelse "pv";
@@ -4216,7 +4237,15 @@ fn emitBody(
                     try w.print("    case {d}: {{\n", .{case_val});
                     _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
-                    try w.writeAll("    break;\n    }\n");
+                    // #switch-fallthrough: emit `break;` only if this case is terminal
+                    // (its body OpBranches to the merge). If it OpBranches to ANOTHER
+                    // case label (SPIR-V fallthrough chain), omit `break;` so HLSL falls
+                    // through to the next case — accumulating like spirv-cross. The
+                    // #472-audit "every case → merge" assumption was wrong for fallthrough
+                    // switches; unconditional `break;` dropped the fallthrough accumulation.
+                    const term = caseTerminatorTarget(module, &label_map, target_label);
+                    const terminal = if (term) |t| (t == ml) else true;
+                    try w.writeAll(if (terminal) "    break;\n    }\n" else "    }\n");
                 }
                 try w.writeAll("    }\n");
                 finalizeSwitchPhisHLSL(names, sphis.items, alloc);
