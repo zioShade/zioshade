@@ -525,6 +525,27 @@ test "GLSL still emits a loop nested in a switch case (the construct is valid)" 
     try std.testing.expect(std.mem.indexOf(u8, glsl, "while") != null);
 }
 
+// #dowhile-compound-cond (#77): a do-while whose continue block has a nested
+// OpSelectionMerge (a short-circuit && / || condition; here forced by abs(), which
+// glslang will not fold to OpLogicalAnd) was silently DROPPED by the MSL/GLSL/HLSL
+// backends — detectDoWhileBackEdge assumes a single-block continue ending in the
+// back-edge. They now honest-error instead. WGSL emits the loop correctly. This PINS
+// the honest-error so it cannot silently regress to the drop; when full emission
+// lands, flip MSL/GLSL/HLSL to assert the loop survives.
+const DOWHILE_COMPOUND_SPV = @embedFile("fixtures/dowhile_compound_cond.spv");
+
+test "MSL/GLSL/HLSL honest-error on a do-while with a compound condition (#77)" {
+    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossMsl(DOWHILE_COMPOUND_SPV));
+    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossGlsl(DOWHILE_COMPOUND_SPV));
+    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossHlsl(DOWHILE_COMPOUND_SPV));
+}
+
+test "WGSL still emits a do-while with a compound condition (the construct is valid)" {
+    const wgsl = try crossWgsl(DOWHILE_COMPOUND_SPV);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "loop {") != null);
+}
+
 
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered

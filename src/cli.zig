@@ -698,6 +698,16 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // MSL/GLSL/HLSL: a do-while whose continue block has a nested OpSelectionMerge
+    // (a short-circuit && / || loop condition) is silently dropped by the loop
+    // classifier; honest-error instead. Full emission tracked as follow-up (#77).
+    if (err == error.UnsupportedDoWhileCompoundCond) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: a do-while loop with a short-circuit && / || condition in its continue block (a nested OpSelectionMerge) cannot be lowered yet by the MSL/GLSL/HLSL backends. Workaround: hoist the compound condition into a single bool computed before the loop, or rewrite the loop as a while with an explicit break. (The WGSL backend handles this correctly.)\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL records an actionable detail for some honest errors (errors carry no
     // payload) — surface it so the message is more than just the error name.
     if (err == error.UnsupportedExtInst or err == error.UnsupportedEarlyReturn) {
