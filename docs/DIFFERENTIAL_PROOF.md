@@ -178,6 +178,18 @@ contaminate (the Csmith move). Result: **12/12 MATCH, 0 DIFFER, 0 skips across M
 (direct) + GLSL + WGSL** — a correctness claim that floating-point divergence is
 structurally incapable of falsifying.
 
+**Chaos sensitivity classifier (`just chaos-classify`) — the honest scope.** Bins each
+shader CHAOS (FP-amplifying: hash/fractal/iterative-escape/transcendental — no single
+correct pixel; excluded from the pixel-correctness claim), BINDING (declares a
+texture/sampler/UBO the harness can't supply — a DIFFER is an artifact), or DETERMINISTIC
+(FP-ordering-independent — a DIFFER is a real-bug suspect). This fills the GraphicsFuzz gap
+(detect-and-exclude, not just tolerate). Over `tests/spirv-cross`: **868 CHAOS / 536
+DETERMINISTIC / 49 BINDING** — so the pixel-correctness claim meaningfully covers the ~536
+deterministic shaders; the ~868 chaotic are compile+run-verified only (two correct
+compilers legitimately diverge on them). Applied to the residual sets, it confirms every
+residual is chaos / binding / deterministic-AGREE-ALL (zioshade-MSL correct) — no
+deterministic DIFFER that is a real bug.
+
 Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 
 Three independent kinds of evidence, weakest to strongest:

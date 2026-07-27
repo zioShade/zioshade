@@ -171,6 +171,16 @@ prove-integer:
     @bash tools/glsl_render_check.sh tests/integer_corpus
     @bash tools/wgsl_render_check.sh tests/integer_corpus
 
+# Chaos sensitivity classifier (source-signature heuristic): bin a corpus's shaders as
+# CHAOS (FP-amplifying — no single correct pixel; excluded from the pixel-correctness claim),
+# BINDING (declares a texture/sampler/UBO the harness can't supply — a DIFFER is an artifact),
+# or DETERMINISTIC (FP-ordering-independent — a DIFFER is a real-bug suspect). Fills the
+# GraphicsFuzz gap (detect-and-exclude, not just tolerate). Gives the honest scope claim.
+#   just chaos-classify                           # tests/spirv-cross corpus
+#   just chaos-classify tests/integer_corpus      # expect all DETERMINISTIC
+chaos-classify dir="tests/spirv-cross":
+    @bash tools/chaos_classify.sh {{dir}}
+
 # large-corpus MSL silent-wrong INVARIANT sweep — the MSL analog of wgsl-naga.
 # No Metal compiler runs on Windows, so instead of validating we assert
 # zero-false-positive invariants every valid MSL must satisfy (e.g. a pointer
