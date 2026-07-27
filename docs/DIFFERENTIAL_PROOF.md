@@ -131,6 +131,15 @@ regression. The residual is genuinely chaotic (no single correct pixel). Locked 
 OpPhi counters, so source-compiled tests cannot reach the broken `!has_phis` path). WGSL
 uses a separate `loop{}`/`continuing` lowering — tracked separately.
 
+**The 7 MSL residuals are classified (3-oracle majority vote, `just prove-3oracle`):
+NONE are real zioshade bugs.** 2 are NAGA-OUTLIER (zioshade matches spirv-cross, naga
+dissents — `exp-log-pow`, `nested_func_expr`; zioshade is correct); 4 are CHAOS
+(`loop_trackers`, `multi_return2`, `switch_in_loop`, `dowhile_exit` — all hash /
+`fract(sin(…))`-driven, FP-amplified control flow where the three compilers legitimately
+diverge; `loop_trackers`' emitted structure verified correct); 1 is an undef edge case
+(`loop-dominator-and-switch-default` — zioshade's frontend honest-errors the GLSL, an
+uninitialized `vec4` driving a switch).
+
 Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 
 Three independent kinds of evidence, weakest to strongest:
