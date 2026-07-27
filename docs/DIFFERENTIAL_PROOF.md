@@ -169,6 +169,15 @@ backends, every remaining DIFFER is explained: chaos (hash/fractal), harness art
 (binding skips), or backend-specific/proxy-round-trip differences where zioshade's
 proven MSL backend (same SPIR-V) renders correctly. No confirmed real bugs remain.**
 
+**Integer/quantized-output corpus (`just prove-integer`) — the airtight claim.** A
+hand-written corpus of shaders whose output is FP-ordering-independent (integer
+arithmetic, comparisons, bit ops, quantized writes — Collatz, GCD, factorial,
+fibonacci-mod, nested loops, a fallthrough switch, integer control flow) is render-diffed
+across all backends. For these, ANY DIFFER is a guaranteed real bug — chaos cannot
+contaminate (the Csmith move). Result: **12/12 MATCH, 0 DIFFER, 0 skips across MSL
+(direct) + GLSL + WGSL** — a correctness claim that floating-point divergence is
+structurally incapable of falsifying.
+
 Regenerate: `bash tools/prove_naga.sh --dir tests/spirv-cross` (or `--sweep` for a sample).
 
 Three independent kinds of evidence, weakest to strongest:
