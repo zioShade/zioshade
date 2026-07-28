@@ -79,12 +79,12 @@ valid=0 invalid=0 glim=0 incon=0 ocrash=0 herr=0 total=0 regression=0
 # memory HLSL section. Run all stages: `just hlsl-glslang-all`.
 case "$STAGE" in
   fragment)
-    # false-loop-init.frag: #491 selection-merge _phi not hoisted before the loop.
-    # partial-write-preserve.frag: cross-backend inout partial-write bug.
-    # Both pre-existing, root-caused, deferred (deep shared machinery). for-loop-init.frag
-    # was previously here too but is FIXED by #482 (hoist the carry-read header load) -- it
-    # is now valid, so it is no longer deferred. Merge #482 before this for a green gate.
-    KNOWN_INVALID=" false-loop-init.frag partial-write-preserve.frag ";;
+    # No known HLSL fragment INVALIDs. false-loop-init.frag (#491 selection-merge-phi
+    # hoist) and partial-write-preserve.frag (inout struct member write) WERE here but are
+    # FIXED by #483 and #484 respectively; for-loop-init.frag by #482. Merge #482, #483,
+    # #484 before this for a green gate (else the empty baseline re-flags whichever is
+    # still unfixed on main).
+    KNOWN_INVALID=" ";;
   vertex)
     KNOWN_INVALID=" out-block-qualifiers.vert read-from-row-major-array.vert ";;
   compute)
