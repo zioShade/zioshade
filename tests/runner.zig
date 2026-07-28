@@ -10,7 +10,7 @@ const Stats = struct {
     skip: u32 = 0,
     compile_error: u32 = 0,
     strict_fp: u32 = 0, // false-positive candidates (tolerate OK, strict fails)
-    xfail: u32 = 0,     // expected failures (known-unsupported fixtures)
+    xfail: u32 = 0, // expected failures (known-unsupported fixtures)
 
     fn total(self: Stats) u32 {
         return self.pass + self.fail + self.skip + self.compile_error + self.xfail;
@@ -93,7 +93,7 @@ fn inlineIncludes(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8,
     if (std.mem.startsWith(u8, include_content, "#version")) {
         // Skip until newline
         if (std.mem.indexOfScalar(u8, include_content, '\n')) |nl| {
-            include_content = include_content[nl + 1..];
+            include_content = include_content[nl + 1 ..];
         }
     }
 
