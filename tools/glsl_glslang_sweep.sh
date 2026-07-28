@@ -81,10 +81,10 @@ valid=0 invalid=0 glim=0 incon=0 herr=0 total=0 regression=0
 # effort; until then `glsl-glslang-all` is expected to flag them. Fragment is the gate.
 case "$STAGE" in
   fragment)
-    # for-loop-init.frag: loop-carried phi scope bug from #loop-continue-deadincr (86c856f)
-    # -- the top-of-loop carry copy reads the phi before its declaration. Pre-existing,
-    # root-caused, deferred; NOT a regression of any later change (e.g. #77).
-    KNOWN_INVALID=" for-loop-init.frag ";;
+    # No known GLSL fragment INVALIDs currently. for-loop-init.frag WAS here (a loop-carried
+    # counter-load scope bug from #loop-continue-deadincr) but is FIXED by #482 -- empty now.
+    # Merge #482 before this for a green gate.
+    KNOWN_INVALID=" ";;
   *)
     KNOWN_INVALID=" ";;
 esac

@@ -79,10 +79,12 @@ valid=0 invalid=0 glim=0 incon=0 ocrash=0 herr=0 total=0 regression=0
 # memory HLSL section. Run all stages: `just hlsl-glslang-all`.
 case "$STAGE" in
   fragment)
-    # for-loop-init.frag: a loop-carried phi scope bug introduced by #loop-continue-deadincr
-    # (86c856f) -- the top-of-loop carry copy reads the phi before its declaration. Pre-existing,
-    # root-caused, deferred (deep shared loop/phi machinery); NOT a regression of any later change.
-    KNOWN_INVALID=" false-loop-init.frag for-loop-init.frag partial-write-preserve.frag ";;
+    # false-loop-init.frag: #491 selection-merge _phi not hoisted before the loop.
+    # partial-write-preserve.frag: cross-backend inout partial-write bug.
+    # Both pre-existing, root-caused, deferred (deep shared machinery). for-loop-init.frag
+    # was previously here too but is FIXED by #482 (hoist the carry-read header load) -- it
+    # is now valid, so it is no longer deferred. Merge #482 before this for a green gate.
+    KNOWN_INVALID=" false-loop-init.frag partial-write-preserve.frag ";;
   vertex)
     KNOWN_INVALID=" out-block-qualifiers.vert read-from-row-major-array.vert ";;
   compute)
