@@ -15991,6 +15991,32 @@ test "hlsl: loop-carried selection phi read by the continue is hoisted before th
     try std.testing.expect(decl < loop);
 }
 
+// #partial-write-preserve: a struct passed as an inout pointer parameter had its member
+// writes emitted as numeric indices (`v[1]`) instead of `.member`, because
+// resolvePointeeType didn't resolve an OpFunctionParameter base -- invalid HLSL ("left
+// of '[' is not array/matrix/vector"; HLSL structs have no operator[]). Mirrors the MSL
+// (msl_tests "struct pointer param is thread T& with .member access") and GLSL siblings.
+test "hlsl: struct inout param member access uses .member (not [idx]) (#partial-write-preserve)" {
+    const source =
+        \\#version 450
+        \\layout(location=0) out vec4 fragColor;
+        \\struct Particle { vec2 pos; vec2 vel; float life; };
+        \\void updateParticle(inout Particle p, float dt){ p.pos = p.pos + p.vel * dt; p.life -= dt; if (p.life < 0.0) p.life = 0.0; }
+        \\void main(){
+        \\  vec2 uv = gl_FragCoord.xy / 300.0;
+        \\  Particle p; p.pos = uv; p.vel = vec2(0.01, -0.02); p.life = 1.0;
+        \\  for (int i = 0; i < 5; i++) { updateParticle(p, 0.1); }
+        \\  fragColor = vec4(p.pos, p.life, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "inout Particle");
+    try assertContains(hlsl, ".vel");
+    // Numeric-index struct member access (the regression) must not appear.
+    try assertNotContains(hlsl, "[1]");
+}
+
 // #497: HLSL's floatCxR(a,b,c) constructor fills ROWS (MSL's matCxR fills COLUMNS),
 // so a LOCAL matrix built column-by-column is stored TRANSPOSED and mul(M,v) would
 // compute M^T*v. It must swap the operands (vector first) to compute M*v, matching

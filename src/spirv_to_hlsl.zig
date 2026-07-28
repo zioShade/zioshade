@@ -8034,7 +8034,11 @@ fn isSSBOVariable(module: *const ParsedModule, decorations: *const std.AutoHashM
 fn resolvePointeeType(module: *const ParsedModule, id: u32) ?u32 {
     const inst = getDef(module, id) orelse return null;
     switch (inst.op) {
-        .Variable => {
+        // OpFunctionParameter shares OpVariable's word layout (words[1] = pointer result
+        // type). Without this a struct pointer param (`inout B v`) was unresolved, so its
+        // member writes emitted a numeric index (v[1]) instead of `.member` (HLSL structs
+        // have no operator[]) -- partial-write-preserve. Mirrors the MSL/GLSL fix.
+        .Variable, .FunctionParameter => {
             // Variable type is a pointer; get its pointee
             const ptr_type_inst = getDef(module, inst.words[1]) orelse return null;
             if (ptr_type_inst.op == .TypePointer and ptr_type_inst.words.len > 3) {
