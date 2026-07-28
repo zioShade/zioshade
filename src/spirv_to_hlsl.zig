@@ -41,6 +41,14 @@ threadlocal var g_hoist_stripping: bool = false;
 // temp is out of scope at the merge — DXC rejects it). Mirrors the MSL backend's
 // g_materialized_phis. See collectMergePhisHLSL. (#491)
 threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
+// #false-loop-init: selection-merge OpPhis materialized inside a loop body whose result
+// the CONTINUE reads (loop-carried). They are declared + renamed to `_phi` BEFORE the
+// loop (so the #237 top-of-loop carry reads the persistent var, not an undeclared temp),
+// and the body #491 (emitMergePhiDeclsHLSL / emitMergePhiArmCopiesHLSL /
+// finalizeMergePhisHLSL) must then skip the re-decl/rename and use the bare name for arm
+// copies. Set per-loop in emitWhileLoopHLSL (save/restore for nesting). Mirrors GLSL's
+// local carried_phis set + the GLSL body #491's carried_phis.contains() branches.
+threadlocal var g_carried_phis_h: ?*const std.AutoHashMap(u32, void) = null;
 // #471: OpStore targets (OpAccessChain result ids) into UNREPRESENTABLE gl_PerVertex
 // block members (gl_PointSize) that must be dropped — HLSL has no equivalent, so the
 // store is skipped entirely rather than emitted against a non-existent output field.
@@ -167,6 +175,8 @@ fn collectMergePhisHLSL(module: *const ParsedModule, label_map: *const std.AutoH
 /// `if`), so initialize to it. (#491)
 fn emitMergePhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), label_map: *const std.AutoHashMap(u32, usize), mphis: []const HlslMergePhi, has_else: bool, tl: u32, mval: u32, w: anytype, alloc: std.mem.Allocator, indent: []const u8) !void {
     for (mphis) |pv| {
+        // #false-loop-init: a carried phi was already declared before the loop; skip.
+        if (g_carried_phis_h) |cp| if (cp.contains(pv.result_id)) continue;
         const t = hlslType(module, pv.type_id, names, alloc) catch "float";
         const vn = names.get(pv.result_id) orelse "pv";
         if (has_else) {
@@ -183,13 +193,20 @@ fn emitMergePhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u3
 fn emitMergePhiArmCopiesHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), label_map: *const std.AutoHashMap(u32, usize), mphis: []const HlslMergePhi, tl: u32, mval: u32, true_arm: bool, w: anytype, alloc: std.mem.Allocator, indent: []const u8) !void {
     for (mphis) |pv| {
         const vn = names.get(pv.result_id) orelse "pv";
+        // #false-loop-init: a carried phi is already renamed to `<vn>_phi` (== vn now),
+        // so assign the bare name; non-carried get the `_phi` suffix here.
+        const carried = if (g_carried_phis_h) |cp| cp.contains(pv.result_id) else false;
         const pred1_true = hlslPhiPred1InTrueRegion(module, label_map, tl, mval, pv.preds[1], alloc);
         // vals[1] pairs with preds[1]; pick the value whose predecessor is on this arm.
         const val = if (true_arm)
             (if (pred1_true) pv.vals[1] else pv.vals[0])
         else
             (if (pred1_true) pv.vals[0] else pv.vals[1]);
-        try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, hlslExprName(module, names, val, alloc) });
+        if (carried) {
+            try w.print("{s}        {s} = {s};\n", .{ indent, vn, hlslExprName(module, names, val, alloc) });
+        } else {
+            try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, hlslExprName(module, names, val, alloc) });
+        }
     }
 }
 
@@ -197,6 +214,8 @@ fn emitMergePhiArmCopiesHLSL(module: *const ParsedModule, names: *std.AutoHashMa
 /// materialized so the generic OpPhi handler leaves it alone. (#491)
 fn finalizeMergePhisHLSL(names: *std.AutoHashMap(u32, []const u8), mphis: []const HlslMergePhi, alloc: std.mem.Allocator) void {
     for (mphis) |pv| {
+        // #false-loop-init: a carried phi was renamed + materialized at loop top; skip.
+        if (g_carried_phis_h) |cp| if (cp.contains(pv.result_id)) continue;
         const vn = names.get(pv.result_id) orelse "pv";
         const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
         if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
@@ -4846,6 +4865,58 @@ fn emitWhileLoopHLSL(
     // found via prove_naga on unopt SPIR-V; masked by spirv-opt -O). has_phis still
     // gates the SelectionMerge honest-error in the top walker below.
     if (!is_do_while) try w.print("    bool {s} = true;\n", .{first_flag});
+
+    // #false-loop-init (port of GLSL's carried-phis hoist): a selection-merge OpPhi
+    // materialized inside the loop body (e.g. `j = cond ? 40u : 30u`) whose result the
+    // CONTINUE block reads (`i += int(j)`) runs a full iteration behind -- the #237
+    // carry emits the continue at the TOP, reading the PREVIOUS iteration's value. Such
+    // a phi must persist ACROSS iterations, so declare it BEFORE the loop + rename its
+    // result id to `_phi` NOW, so the carry (emitted next) reads the persistent var. The
+    // body #491 then sees the rename and (via g_carried_phis_h) skips re-decl/rename and
+    // uses the bare name for arm copies. Without this the carry read an undeclared temp
+    // (false-loop-init). The common non-carried case leaves the set empty.
+    // Declare carried_phis + register its deinit FIRST so it runs LAST; register the
+    // threadlocal restore SECOND so it runs FIRST -- restore g_carried_phis_h to the
+    // outer value BEFORE carried_phis is freed (else the global briefly dangles).
+    var carried_phis = std.AutoHashMap(u32, void).init(alloc);
+    defer carried_phis.deinit();
+    const saved_carried = g_carried_phis_h;
+    defer g_carried_phis_h = saved_carried;
+    g_carried_phis_h = &carried_phis;
+    if (has_phis and !dw_native) {
+        var cont_refs = std.AutoHashMap(u32, void).init(alloc);
+        defer cont_refs.deinit();
+        if (label_map.get(cont_lbl)) |cidx| {
+            var k: usize = cidx + 1;
+            while (k < module.instructions.len) : (k += 1) {
+                const cinst = module.instructions[k];
+                if (cinst.op == .Label or cinst.op == .Branch or cinst.op == .BranchConditional or cinst.op == .FunctionEnd) break;
+                if (cinst.words.len < 2) continue;
+                for (cinst.words[1..]) |wrd| cont_refs.put(wrd, {}) catch {};
+            }
+        }
+        if (cont_refs.count() > 0) {
+            const body_start = label_map.get(body_lbl) orelse module.instructions.len;
+            const body_end = label_map.get(merge_lbl) orelse module.instructions.len;
+            var k: usize = if (body_start < module.instructions.len) body_start + 1 else module.instructions.len;
+            while (k < body_end and k < module.instructions.len) : (k += 1) {
+                const pinst = module.instructions[k];
+                if (pinst.op == .FunctionEnd) break;
+                if (pinst.op != .Phi or pinst.words.len < 3) continue;
+                const rid = pinst.words[2];
+                if (!cont_refs.contains(rid) or carried_phis.contains(rid)) continue;
+                const rtt = hlslType(module, pinst.words[1], names, alloc) catch "float";
+                const vn = names.get(rid) orelse continue;
+                const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                try w.print("    {s} {s};\n", .{ rtt, phi_name });
+                if (names.fetchPut(rid, phi_name) catch null) |old| alloc.free(old.value);
+                carried_phis.put(rid, {}) catch {};
+                // Mark materialized so the generic OpPhi handler leaves it alone
+                // (finalizeMergePhisHLSL skips carried phis, so it won't mark them).
+                if (g_materialized_phis) |mp| mp.put(rid, {}) catch {};
+            }
+        }
+    }
 
     if (dw_native) {
         try w.writeAll("    do\n    {\n");
