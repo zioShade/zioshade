@@ -6390,6 +6390,23 @@ fn inlineDoWhileOperand(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
             const x = inlineDoWhileOperand(m, names, def.words[3], alloc) orelse return null;
             return std.fmt.allocPrint(alloc, "(-{s})", .{x}) catch null;
         },
+        // #77: pure unary GLSL.std.450 calls inside a do-while back-edge condition
+        // (`abs(sum) < 0.4`) rebuild as `name(arg)` over the recursively-inlined operand.
+        // Reuses std450ToMsl (the same table emitStd450 uses) so every unary pure function
+        // the target supports is covered (tan/asin/exp/log/rsqrt/...) and per-target naming
+        // is correct. words.len==6 restricts to unary (binary ops like powr/atan2 have >=7).
+        // Vector-only ops (length/distance/cross/normalize/faceforward/reflect/refract) are
+        // excluded: their SCALAR forms need the special lowering emitStd450 does (e.g. scalar
+        // length -> abs), which a bare name call would skip -> invalid for a scalar operand;
+        // they honest-error here (as they did before this arm existed).
+        .ExtInst => {
+            if (def.words.len != 6) return null; // unary only (type,result,set,inst,arg0)
+            const op = def.words[4];
+            switch (op) { 66, 67, 68, 69, 70, 71, 72 => return null, else => {} } // vector-only
+            const nm = std450ToMsl(op) orelse return null;
+            const arg = inlineDoWhileOperand(m, names, def.words[5], alloc) orelse return null;
+            return std.fmt.allocPrint(alloc, "{s}({s})", .{ nm, arg }) catch null;
+        },
         else => return null,
     }
 }
@@ -6398,8 +6415,18 @@ fn inlineDoWhileOperand(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
 /// variables (#246): a single comparison `a OP b` whose operands are loads-of-vars or
 /// constants. Returns null for compound (`&&`/`||`) or non-trivial conditions so the
 /// caller falls back to the honest-error path.
-fn tryInlineDoWhileCond(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), cond_id: u32, alloc: std.mem.Allocator) ?[]const u8 {
+fn tryInlineDoWhileCond(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    cond_id: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+    alloc: std.mem.Allocator,
+) ?[]const u8 {
     const def = getDef(m, cond_id) orelse return null;
+    // #77: a short-circuit && / || back-edge condition is emitted by glslang as an OpPhi
+    // of two bools at the selection-merge block (one incoming per short-circuit path).
+    // Rebuild it faithfully as a ternary over the short-circuit router's condition.
+    if (def.op == .Phi) return inlineShortCircuitPhi(m, names, cond_id, label_map, alloc);
     const op_str: ?[]const u8 = switch (def.op) {
         .SLessThan, .ULessThan, .FOrdLessThan => "<",
         .SGreaterThan, .UGreaterThan, .FOrdGreaterThan => ">",
@@ -6428,17 +6455,86 @@ fn tryInlineDoWhileCond(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     // over them is equivalent even though MSL short-circuits.
     if (def.op == .LogicalAnd or def.op == .LogicalOr) {
         if (def.words.len < 5) return null;
-        const lhs = tryInlineDoWhileCond(m, names, def.words[3], alloc) orelse return null;
-        const rhs = tryInlineDoWhileCond(m, names, def.words[4], alloc) orelse return null;
+        const lhs = tryInlineDoWhileCond(m, names, def.words[3], label_map, alloc) orelse return null;
+        const rhs = tryInlineDoWhileCond(m, names, def.words[4], label_map, alloc) orelse return null;
         const jop: []const u8 = if (def.op == .LogicalAnd) "&&" else "||";
         return std.fmt.allocPrint(alloc, "({s}) {s} ({s})", .{ lhs, jop, rhs }) catch null;
     }
     if (def.op == .LogicalNot and def.words.len >= 4) {
-        const inner = tryInlineDoWhileCond(m, names, def.words[3], alloc) orelse return null;
+        const inner = tryInlineDoWhileCond(m, names, def.words[3], label_map, alloc) orelse return null;
         return std.fmt.allocPrint(alloc, "!({s})", .{inner}) catch null;
     }
     if (def.op == .Load and def.words.len > 3) return names.get(def.words[3]);
     return null;
+}
+
+const DwRouter = struct { cond: u32, true_t: u32, false_t: u32 };
+
+/// Find the short-circuit router BranchConditional inside `pred_lbl`'s block: the one
+/// whose targets include `other_pred`. Returns its condition + targets, else null.
+fn dwFindRouter(
+    m: *const ParsedModule,
+    pred_lbl: u32,
+    other_pred: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) ?DwRouter {
+    const bi = label_map.get(pred_lbl) orelse return null;
+    var k: usize = bi + 1;
+    while (k < m.instructions.len) : (k += 1) {
+        const u = m.instructions[k];
+        if (u.op == .Label or u.op == .FunctionEnd) break;
+        if (u.op == .Branch) break;
+        if (u.op == .BranchConditional and u.words.len >= 4) {
+            if (u.words[2] == other_pred or u.words[3] == other_pred) {
+                return .{ .cond = u.words[1], .true_t = u.words[2], .false_t = u.words[3] };
+            }
+            break; // a BranchConditional not routing to other_pred = not the short-circuit shape
+        }
+    }
+    return null;
+}
+
+/// #77: rebuild a short-circuit OpPhi-of-bools (a do-while && / || back-edge condition)
+/// as a faithful ternary `cond ? <cond-true incoming> : <cond-false incoming>` over the
+/// short-circuit router's condition. The phi has exactly two (value, pred) incomings;
+/// one pred is the structural block (holds the router OpSelectionMerge+BranchConditional),
+/// the other is the eval sub-block. The router's condition + which of its targets is the
+/// eval block determine the ternary arms — polarity-agnostic (correct for && when the
+/// eval block is the cond-true target, and || when it is the cond-false target), so no
+/// operator need be labelled. Returns null (→ honest-error) for any other shape.
+fn inlineShortCircuitPhi(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    phi_id: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+    alloc: std.mem.Allocator,
+) ?[]const u8 {
+    const phi = getDef(m, phi_id) orelse return null;
+    // OpPhi layout: [type, result, val0, pred0, val1, pred1] → exactly 2 incomings here.
+    if (phi.op != .Phi or phi.words.len != 7) return null;
+    const v0 = phi.words[3];
+    const p0 = phi.words[4];
+    const v1 = phi.words[5];
+    const p1 = phi.words[6];
+    // The router lives in the structural pred (its block branches to the other pred).
+    const router = dwFindRouter(m, p0, p1, label_map) orelse
+        dwFindRouter(m, p1, p0, label_map) orelse return null;
+    // The eval block is the router target that is also one of the phi's preds; the merge
+    // (the phi's own block) is the other router target.
+    const eval_is_p0 = (router.true_t == p0 or router.false_t == p0);
+    const eval_is_p1 = (router.true_t == p1 or router.false_t == p1);
+    if (eval_is_p0 == eval_is_p1) return null; // router must target EXACTLY one pred (the eval block); both-or-neither is ambiguous/not our shape
+    const eval_val: u32 = if (eval_is_p0) v0 else v1;
+    const struct_val: u32 = if (eval_is_p0) v1 else v0; // incoming from the structural pred
+    // cond-true leads to whichever router target is the eval block; cond-false reaches the
+    // merge via the structural pred. Map the ternary arms accordingly.
+    const true_target_is_eval = (router.true_t == p0 or router.true_t == p1);
+    const tv: u32 = if (true_target_is_eval) eval_val else struct_val;
+    const fv: u32 = if (true_target_is_eval) struct_val else eval_val;
+    const cond = tryInlineDoWhileCond(m, names, router.cond, label_map, alloc) orelse return null;
+    const tve = tryInlineDoWhileCond(m, names, tv, label_map, alloc) orelse return null;
+    const fve = tryInlineDoWhileCond(m, names, fv, label_map, alloc) orelse return null;
+    return std.fmt.allocPrint(alloc, "({s}) ? ({s}) : ({s})", .{ cond, tve, fve }) catch null;
 }
 
 /// A do-while (bottom-test) loop's CONTINUE block ends in a back-edge
@@ -6456,14 +6552,44 @@ fn detectDoWhileBackEdge(
 ) ?usize {
     const ci = label_map.get(cont_lbl) orelse return null;
     var s = ci + 1;
+    // #77: a short-circuit && / || back-edge condition lowers (glslang) to a NESTED
+    // OpSelectionMerge inside the continue block, so the continue is no longer a
+    // single block: <cond-A>; OpSelectionMerge M; OpBranchConditional A, eval, M;
+    // eval: <cond-B>; OpBranch M; M: %phi = OpPhi bool; OpBranchConditional phi, hdr, merge.
+    // Track the nested selection-merge target so the short-circuit router below is
+    // recognised and the REAL back-edge (the terminator of M) is found.
+    var sel_merge_lbl: ?u32 = null;
     while (s < m.instructions.len) : (s += 1) {
         const t = m.instructions[s];
         if (t.op == .Label or t.op == .FunctionEnd) return null;
         if (t.op == .Branch) return null; // unconditional back-edge = top-test loop
+        if (t.op == .SelectionMerge and t.words.len >= 2) {
+            sel_merge_lbl = t.words[1];
+            continue;
+        }
         if (t.op == .BranchConditional and t.words.len >= 4) {
             const a = t.words[2];
             const b = t.words[3];
             if ((a == header_lbl and b == merge_lbl) or (a == merge_lbl and b == header_lbl)) return s;
+            // #77: this BranchConditional is the short-circuit router (its targets are
+            // the eval sub-block + the selection merge), NOT the loop back-edge. The
+            // real back-edge is the BranchConditional terminator of the selection-merge
+            // block. Descend to it; if the shape doesn't match, fall through to null.
+            if (sel_merge_lbl) |sml| {
+                if (label_map.get(sml)) |smi| {
+                    var k: usize = smi + 1;
+                    while (k < m.instructions.len) : (k += 1) {
+                        const u = m.instructions[k];
+                        if (u.op == .Label or u.op == .FunctionEnd or u.op == .Branch) break;
+                        if (u.op == .BranchConditional and u.words.len >= 4) {
+                            const c = u.words[2];
+                            const d = u.words[3];
+                            if ((c == header_lbl and d == merge_lbl) or (c == merge_lbl and d == header_lbl)) return k;
+                            break;
+                        }
+                    }
+                }
+            }
             return null;
         }
     }
@@ -6562,8 +6688,11 @@ fn emitWhileLoopMSL(
                 // OpSelectionMerge (a short-circuit && / || loop condition) reaches here:
                 // detectDoWhileBackEdge returned null (the continue is not a single-block
                 // back-edge) and Pattern A found no top-test condition. Previously this
-                // silently DROPPED the entire loop. Honest-error instead. (#77; full
-                // emission is a tracked follow-up; WGSL lowers it correctly.)
+                // silently DROPPED the entire loop. Honest-error instead. (Single-level short-circuit
+                // is now lowered end-to-end: detectDoWhileBackEdge follows the nested SelectionMerge
+                // to the real back-edge and tryInlineDoWhileCond rebuilds the OpPhi-of-bools cond;
+                // this floor is reached only when detectDoWhileBackEdge STILL returns null -- shapes
+                // its single-level SelectionMerge descent cannot handle. #77)
                 if (label_map.get(cont_lbl)) |cidx| {
                     var sci: usize = cidx + 1;
                     while (sci < m.instructions.len) : (sci += 1) {
@@ -6619,8 +6748,18 @@ fn emitWhileLoopMSL(
             // if(c)continue;/break; bodies are accepted in this increment).
             if (t.op == .Branch and t.words.len > 1 and t.words[1] != cont_lbl and t.words[1] != merge_lbl) return error.UnstructuredControlFlow;
         }
-        if (body_has_cf) {
-            dw_inlined = tryInlineDoWhileCond(m, names, bc.words[1], alloc) orelse return error.UnstructuredControlFlow;
+        // #77: a compound (short-circuit && / ||) back-edge condition is an OpPhi of two
+        // bools at the selection-merge block (the continue block has a nested
+        // OpSelectionMerge). Rebuild it as an inline expression for BOTH straight-line
+        // and control-flow-bearing bodies so the native do-while path can emit
+        // `do { body } while(<cond>);`. If a phi cond cannot be rebuilt, fail LOUD:
+        // the straight-line break-test path would otherwise read an unmaterialised phi
+        // (silent-wrong — the hazard that kept #77 honest-errored until S1+S2 landed).
+        const cond_is_phi = if (getDef(m, bc.words[1])) |cdef| cdef.op == .Phi else false;
+        if (cond_is_phi) {
+            dw_inlined = tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc) orelse return error.UnsupportedDoWhileCompoundCond;
+        } else if (body_has_cf) {
+            dw_inlined = tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc) orelse return error.UnstructuredControlFlow;
         }
     }
     const dw_native = dw_inlined != null;
@@ -6712,6 +6851,11 @@ fn emitWhileLoopMSL(
             if (sinst.op != .Phi or sinst.words.len < 4) continue;
             const phi_result = sinst.words[2];
             if (g_phi_hdr) |ph| if (ph.get(phi_result) != null) continue;
+            // #77: the do-while back-edge CONDITION phi (a short-circuit && / || cond)
+            // is rebuilt inline as a ternary by tryInlineDoWhileCond — it is NOT a
+            // loop-carried var, so don't pre-declare/rename it (would emit a stray
+            // unused `bool vN_phi;` and shadow the inline reconstruction).
+            if (is_do_while and phi_result == bc.words[1]) continue;
             // #413 already hoisted this phi's declaration above the loop (it's a
             // loop-carried phi's back-edge value defined inside the body). Don't
             // redeclare/rename it inside — #474's if/else materialization honors the
