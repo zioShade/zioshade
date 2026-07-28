@@ -4302,27 +4302,18 @@ fn inlineDoWhileOperand(module: *const ParsedModule, names: *std.AutoHashMap(u32
         },
         // #77: pure unary GLSL.std.450 calls inside a do-while back-edge condition
         // (`abs(sum) < 0.4`) rebuild as `name(arg)` over the recursively-inlined operand.
-        // Only side-effect-free unary ops with a direct HLSL name are mapped; anything
-        // else returns null so the caller honest-errors rather than emit a guess.
+        // Reuses std450ToHlsl (the same table emitStd450 uses) so every unary pure function
+        // HLSL supports is covered (incl. frac for Fract). words.len==6 restricts to unary.
+        // Vector-only ops excluded (their scalar forms need emitStd450's special lowering;
+        // a bare name call would be invalid for a scalar operand) -- they honest-error here.
         .ExtInst => {
-            if (def.words.len < 6) return null;
+            if (def.words.len != 6) return null; // unary only
             const op = def.words[4];
-            const name: ?[]const u8 = switch (op) {
-                4, 5 => "abs", // FAbs, SAbs
-                6, 7 => "sign", // FSign, SSign
-                8 => "floor",
-                9 => "ceil",
-                10 => "frac", // Fract -- HLSL frac() == GLSL fract() (x - floor(x))
-                13 => "sin",
-                14 => "cos",
-                31 => "sqrt",
-                else => null,
-            };
-            if (name) |nm| {
-                const arg = inlineDoWhileOperand(module, names, def.words[5], alloc) orelse return null;
-                return std.fmt.allocPrint(alloc, "{s}({s})", .{ nm, arg }) catch null;
-            }
-            return null;
+            switch (op) { 66, 67, 68, 69, 70, 71, 72 => return null, else => {} } // vector-only
+            const func = std.meta.intToEnum(spirv.GLSLstd450, op) catch return null;
+            const nm = std450ToHlsl(func) orelse return null;
+            const arg = inlineDoWhileOperand(module, names, def.words[5], alloc) orelse return null;
+            return std.fmt.allocPrint(alloc, "{s}({s})", .{ nm, arg }) catch null;
         },
         else => return null,
     }
@@ -4439,7 +4430,7 @@ fn inlineShortCircuitPhi(
     // (the phi's own block) is the other router target.
     const eval_is_p0 = (router.true_t == p0 or router.false_t == p0);
     const eval_is_p1 = (router.true_t == p1 or router.false_t == p1);
-    if (!eval_is_p0 and !eval_is_p1) return null; // router targets neither pred → not our shape
+    if (eval_is_p0 == eval_is_p1) return null; // router must target EXACTLY one pred (the eval block); both-or-neither is ambiguous/not our shape
     const eval_val: u32 = if (eval_is_p0) v0 else v1;
     const struct_val: u32 = if (eval_is_p0) v1 else v0; // incoming from the structural pred
     // cond-true leads to whichever router target is the eval block; cond-false reaches the
