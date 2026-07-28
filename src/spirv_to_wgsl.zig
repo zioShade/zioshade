@@ -6438,11 +6438,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         ci2 += 1; // past the continue label
                         while (ci2 < module.instructions.len) : (ci2 += 1) {
                             const cin = module.instructions[ci2];
-                            if (cin.op == .Branch) { ends_in_branch = true; break; }
+                            if (cin.op == .Branch) {
+                                ends_in_branch = true;
+                                break;
+                            }
                             if (cin.op == .BranchConditional or cin.op == .FunctionEnd) break;
                             switch (cin.op) {
                                 .Label, .Phi, .LoopMerge, .SelectionMerge => {},
-                                else => { has_content = true; },
+                                else => {
+                                    has_content = true;
+                                },
                             }
                         }
                         emit_continuing = has_content and ends_in_branch;

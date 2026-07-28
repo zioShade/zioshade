@@ -627,11 +627,11 @@ test "reflection #177: buffer coherent / restrict / readonly flags" {
 
     // B: coherent buffer.
     try std.testing.expectEqual(true, b.coherent);
-    try std.testing.expectEqual(false, b.@"restrict");
+    try std.testing.expectEqual(false, b.restrict);
     try std.testing.expectEqual(false, b.readonly);
 
     // C: restrict readonly buffer.
-    try std.testing.expectEqual(true, c.@"restrict");
+    try std.testing.expectEqual(true, c.restrict);
     try std.testing.expectEqual(true, c.readonly);
     try std.testing.expectEqual(false, c.coherent);
 }

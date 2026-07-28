@@ -584,7 +584,6 @@ test "WGSL still emits a do-while with a compound condition (the construct is va
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "loop {") != null);
 }
 
-
 /// True if any statement assigns to a NUMERIC-LITERAL left-hand side (e.g.
 /// `0 = v19;`), which is invalid output — the broken nested-loop case rendered
 /// an unmaterialized phi counter (named after its constant init) as the LHS.

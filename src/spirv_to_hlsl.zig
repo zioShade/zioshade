@@ -1641,8 +1641,7 @@ pub fn spirvToHLSL(
             for (inst.words[4..]) |op_id| {
                 if (getDef(&module, op_id)) |od| {
                     switch (od.op) {
-                        .SpecConstant, .SpecConstantTrue, .SpecConstantFalse,
-                        .SpecConstantComposite, .SpecConstantOp => break :blk "static",
+                        .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp => break :blk "static",
                         else => {},
                     }
                 }
@@ -2116,18 +2115,16 @@ fn isHlslKeyword(name: []const u8) bool {
     // NOT reserved (e.g. `scalar`, `color`, `normal`, `position`) to avoid needless
     // renames; includes the keywords glslang's HLSL frontend rejects as identifiers.
     const keywords = [_][]const u8{
-        "vector",   "matrix",   "texture", "sampler",  "input",     "output",
-        "linear",   "centroid", "sample",  "nointerpolation", "noperspective",
-        "uniform",  "static",   "extern",  "volatile", "groupshared",
-        "row_major", "column_major", "buffer", "cbuffer", "tbuffer",
-        "register", "packoffset", "technique", "pass", "pipeline",
-        "compile",  "this",     "typedef", "class",   "struct",
-        "enum",     "string",   "void",    "bool",    "int",
-        "uint",     "float",    "double",  "half",    "if",
-        "else",     "for",      "while",   "do",      "switch",
-        "case",     "default",  "break",   "continue", "return",
-        "discard",  "true",     "false",   "in",      "out",
-        "inout",    "precise",  "inline",  "noinline",
+        "vector", "matrix",   "texture",  "sampler",         "input",         "output",
+        "linear", "centroid", "sample",   "nointerpolation", "noperspective", "uniform",
+        "static", "extern",   "volatile", "groupshared",     "row_major",     "column_major",
+        "buffer", "cbuffer",  "tbuffer",  "register",        "packoffset",    "technique",
+        "pass",   "pipeline", "compile",  "this",            "typedef",       "class",
+        "struct", "enum",     "string",   "void",            "bool",          "int",
+        "uint",   "float",    "double",   "half",            "if",            "else",
+        "for",    "while",    "do",       "switch",          "case",          "default",
+        "break",  "continue", "return",   "discard",         "true",          "false",
+        "in",     "out",      "inout",    "precise",         "inline",        "noinline",
     };
     for (keywords) |kw| if (std.mem.eql(u8, kw, name)) return true;
     return false;
@@ -4393,7 +4390,10 @@ fn inlineDoWhileOperand(module: *const ParsedModule, names: *std.AutoHashMap(u32
         .ExtInst => {
             if (def.words.len != 6) return null; // unary only
             const op = def.words[4];
-            switch (op) { 66, 67, 68, 69, 70, 71, 72 => return null, else => {} } // vector-only
+            switch (op) {
+                66, 67, 68, 69, 70, 71, 72 => return null,
+                else => {},
+            } // vector-only
             const func = std.meta.intToEnum(spirv.GLSLstd450, op) catch return null;
             const nm = std450ToHlsl(func) orelse return null;
             const arg = inlineDoWhileOperand(module, names, def.words[5], alloc) orelse return null;
