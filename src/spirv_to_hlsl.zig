@@ -4111,23 +4111,28 @@ fn emitBody(
             const cont_lbl = minst.words[2]; // OpLoopMerge: words[1]=merge, words[2]=continue
             const cont_idx0 = label_map.get(cont_lbl) orelse continue;
             var hlbl = li;
-            while (hlbl > 0) : (hlbl -= 1) {
+            while (hlbl > func_idx) : (hlbl -= 1) {
                 if (module.instructions[hlbl].op == .Label) break;
             } // header block = (this Label .. the LoopMerge at li)
             var hi = hlbl + 1;
             while (hi < li) : (hi += 1) {
+                // Pattern-B header instructions only: those replayed INSIDE the while-body
+                // (where the carry can read them out of scope). Pattern-A header instrs are
+                // emitted in-place before the LoopMerge; hoisting them would declare below
+                // their in-place use. deferred_hdr holds exactly the Pattern-B header instrs.
+                if (!deferred_hdr.contains(hi)) continue;
                 const hinst = module.instructions[hi];
                 if (hinst.op == .Phi) continue; // phis are pre-declared above the loop
-                if (hinst.words.len < 3) continue;
-                const rid = hinst.words[2]; // result id (words[1] = type)
+                const rid = common.resultIdFromOp(hinst.op, hinst.words) orelse continue; // encoding-correct result id (don't mistake words[2] of a no-result op, e.g. OpStore, for a result)
                 if (hoisted_ids.contains(rid)) continue;
-                // Does the continue block reference rid?
+                // Does the continue block reference rid? Scan from word 1: no-result ops
+                // (OpStore/CopyMemory/AtomicStore) carry operands at words[1..2].
                 var referenced = false;
                 var ci = cont_idx0 + 1;
                 while (ci < module.instructions.len) : (ci += 1) {
                     const cinst = module.instructions[ci];
                     if (cinst.op == .Label or cinst.op == .FunctionEnd or cinst.op == .Branch or cinst.op == .BranchConditional) break;
-                    var wi: usize = 3;
+                    var wi: usize = 1;
                     while (wi < cinst.words.len) : (wi += 1) {
                         if (cinst.words[wi] == rid) {
                             referenced = true;
