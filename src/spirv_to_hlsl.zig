@@ -4094,6 +4094,66 @@ fn emitBody(
             }
         }
     }
+    // #for-loop-init: extend the hoist to values the top-of-loop CARRY reads that are
+    // defined in the loop HEADER (cond) block. The carry re-emits the continue block at
+    // the TOP of the while-body; a continue operand defined in the header (e.g. the
+    // counter OpLoad living in a Pattern-B cond block, present when the counter is a
+    // Function var used past the loop) is emitted in the body AFTER the carry, so the
+    // carry reads it out of scope. HLSL rejects that (Metal tolerates it, which is why
+    // prove_opt never surfaced it). OpPhi header values are pre-declared, so only NON-phi
+    // header definitions need this. Mirrors the #413 phi-update hoist above.
+    {
+        var li = func_idx + 1;
+        while (li < module.instructions.len) : (li += 1) {
+            const minst = module.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            const cont_lbl = minst.words[2]; // OpLoopMerge: words[1]=merge, words[2]=continue
+            const cont_idx0 = label_map.get(cont_lbl) orelse continue;
+            var hlbl = li;
+            while (hlbl > 0) : (hlbl -= 1) {
+                if (module.instructions[hlbl].op == .Label) break;
+            } // header block = (this Label .. the LoopMerge at li)
+            var hi = hlbl + 1;
+            while (hi < li) : (hi += 1) {
+                const hinst = module.instructions[hi];
+                if (hinst.op == .Phi) continue; // phis are pre-declared above the loop
+                if (hinst.words.len < 3) continue;
+                const rid = hinst.words[2]; // result id (words[1] = type)
+                if (hoisted_ids.contains(rid)) continue;
+                // Does the continue block reference rid?
+                var referenced = false;
+                var ci = cont_idx0 + 1;
+                while (ci < module.instructions.len) : (ci += 1) {
+                    const cinst = module.instructions[ci];
+                    if (cinst.op == .Label or cinst.op == .FunctionEnd or cinst.op == .Branch or cinst.op == .BranchConditional) break;
+                    var wi: usize = 3;
+                    while (wi < cinst.words.len) : (wi += 1) {
+                        if (cinst.words[wi] == rid) {
+                            referenced = true;
+                            break;
+                        }
+                    }
+                    if (referenced) break;
+                }
+                if (!referenced) continue;
+                if (loop_hoists.getPtr(li)) |e| {
+                    e.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch continue;
+                } else {
+                    var hlist = std.ArrayList(common.HoistedPhiSrc).initCapacity(alloc, 1) catch continue;
+                    hlist.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                    loop_hoists.put(li, hlist) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                }
+                hoisted_ids.put(rid, {}) catch {};
+            }
+        }
+    }
     g_loop_hoists = &loop_hoists;
     g_hoisted_ids = &hoisted_ids;
     // Expose the loop-context maps so emitBlock can delegate a loop-in-branch to
