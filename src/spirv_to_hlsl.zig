@@ -4302,8 +4302,8 @@ fn inlineDoWhileOperand(module: *const ParsedModule, names: *std.AutoHashMap(u32
         },
         // #77: pure unary GLSL.std.450 calls inside a do-while back-edge condition
         // (`abs(sum) < 0.4`) rebuild as `name(arg)` over the recursively-inlined operand.
-        // Only side-effect-free unary ops with a direct HLSL name are mapped (HLSL has no
-        // fract(); 10 stays unmapped); anything else returns null so the caller honest-errors.
+        // Only side-effect-free unary ops with a direct HLSL name are mapped; anything
+        // else returns null so the caller honest-errors rather than emit a guess.
         .ExtInst => {
             if (def.words.len < 6) return null;
             const op = def.words[4];
@@ -4312,6 +4312,7 @@ fn inlineDoWhileOperand(module: *const ParsedModule, names: *std.AutoHashMap(u32
                 6, 7 => "sign", // FSign, SSign
                 8 => "floor",
                 9 => "ceil",
+                10 => "frac", // Fract -- HLSL frac() == GLSL fract() (x - floor(x))
                 13 => "sin",
                 14 => "cos",
                 31 => "sqrt",
@@ -4612,10 +4613,11 @@ fn emitWhileLoopHLSL(
                 // OpSelectionMerge (a short-circuit && / || loop condition) reaches here:
                 // detectDoWhileBackEdge returned null (the continue is not a single-block
                 // back-edge) and Pattern A found no top-test condition. Previously this
-                // silently DROPPED the entire loop. Honest-error instead. (Single-level
-                // short-circuit is now lowered by tryInlineDoWhileCond via detectDoWhileBackEdge
-                // following the nested SelectionMerge; this floor now catches only multi-level
-                // or otherwise unhandled short-circuit shapes. #77)
+                // silently DROPPED the entire loop. Honest-error instead. (Single-level short-circuit
+                // is now lowered end-to-end: detectDoWhileBackEdge follows the nested SelectionMerge
+                // to the real back-edge and tryInlineDoWhileCond rebuilds the OpPhi-of-bools cond;
+                // this floor is reached only when detectDoWhileBackEdge STILL returns null -- shapes
+                // its single-level SelectionMerge descent cannot handle. #77)
                 if (label_map.get(cont_lbl)) |cidx| {
                     var sci: usize = cidx + 1;
                     while (sci < module.instructions.len) : (sci += 1) {
