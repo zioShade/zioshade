@@ -528,16 +528,34 @@ test "GLSL still emits a loop nested in a switch case (the construct is valid)" 
 // #dowhile-compound-cond (#77): a do-while whose continue block has a nested
 // OpSelectionMerge (a short-circuit && / || condition; here forced by abs(), which
 // glslang will not fold to OpLogicalAnd) was silently DROPPED by the MSL/GLSL/HLSL
-// backends — detectDoWhileBackEdge assumes a single-block continue ending in the
-// back-edge. They now honest-error instead. WGSL emits the loop correctly. This PINS
-// the honest-error so it cannot silently regress to the drop; when full emission
-// lands, flip MSL/GLSL/HLSL to assert the loop survives.
+// backends — detectDoWhileBackEdge assumed a single-block continue ending in the
+// back-edge. It now follows the nested SelectionMerge to the real back-edge and
+// tryInlineDoWhileCond rebuilds the OpPhi-of-bools condition as a faithful ternary
+// (polarity-agnostic: correct for both && and ||), so the native do-while emits.
+// WGSL also emits the loop correctly. (Previously these honest-errored; the
+// MSL output is render-verified pixel-identical to spirv-cross on Metal.)
 const DOWHILE_COMPOUND_SPV = @embedFile("fixtures/dowhile_compound_cond.spv");
 
-test "MSL/GLSL/HLSL honest-error on a do-while with a compound condition (#77)" {
-    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossMsl(DOWHILE_COMPOUND_SPV));
-    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossGlsl(DOWHILE_COMPOUND_SPV));
-    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossHlsl(DOWHILE_COMPOUND_SPV));
+// The compound back-edge condition `i < 5 && abs(sum) < 0.4` must survive as a native
+// do-while whose controlling expression carries BOTH operands (the `abs(` proves the
+// short-circuit's B operand was not dropped) joined by a ternary over `i < 5`.
+fn expectCompoundDoWhile(out: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, out, "} while (") != null); // native do-while form
+    try std.testing.expect(std.mem.indexOf(u8, out, "while (true)") == null); // not the broken form
+    try std.testing.expect(std.mem.indexOf(u8, out, "abs(") != null); // B operand survived
+    try std.testing.expect(std.mem.indexOf(u8, out, "?") != null); // compound (ternary) condition
+}
+
+test "MSL/GLSL/HLSL emit a do-while with a compound condition (#77)" {
+    const msl = try crossMsl(DOWHILE_COMPOUND_SPV);
+    defer alloc.free(msl);
+    try expectCompoundDoWhile(msl);
+    const glsl = try crossGlsl(DOWHILE_COMPOUND_SPV);
+    defer alloc.free(glsl);
+    try expectCompoundDoWhile(glsl);
+    const hlsl = try crossHlsl(DOWHILE_COMPOUND_SPV);
+    defer alloc.free(hlsl);
+    try expectCompoundDoWhile(hlsl);
 }
 
 test "WGSL still emits a do-while with a compound condition (the construct is valid)" {
