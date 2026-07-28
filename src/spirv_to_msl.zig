@@ -6695,10 +6695,11 @@ fn emitWhileLoopMSL(
                 // OpSelectionMerge (a short-circuit && / || loop condition) reaches here:
                 // detectDoWhileBackEdge returned null (the continue is not a single-block
                 // back-edge) and Pattern A found no top-test condition. Previously this
-                // silently DROPPED the entire loop. Honest-error instead. (Single-level
-                // short-circuit is now lowered by tryInlineDoWhileCond via detectDoWhileBackEdge
-                // following the nested SelectionMerge; this floor now catches only multi-level
-                // or otherwise unhandled short-circuit shapes. #77)
+                // silently DROPPED the entire loop. Honest-error instead. (Single-level short-circuit
+                // is now lowered end-to-end: detectDoWhileBackEdge follows the nested SelectionMerge
+                // to the real back-edge and tryInlineDoWhileCond rebuilds the OpPhi-of-bools cond;
+                // this floor is reached only when detectDoWhileBackEdge STILL returns null -- shapes
+                // its single-level SelectionMerge descent cannot handle. #77)
                 if (label_map.get(cont_lbl)) |cidx| {
                     var sci: usize = cidx + 1;
                     while (sci < m.instructions.len) : (sci += 1) {
