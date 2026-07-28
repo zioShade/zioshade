@@ -1,15 +1,15 @@
 test "T24.2c: debug HLSL loop output" {
     const source =
-        \#version 430
-        \layout(binding = 0, std140) uniform U { int n; float x; } u;
-        \void main() {
-        \    float sum = 0.0;
-        \    for (int i = 0; i < u.n; i++) {
-        \        sum += u.x;
-        \        if (sum > 10.0) break;
-        \    }
-        \    if (sum > 0.0) discard;
-        \}
+        \\#version 430
+        \\layout(binding = 0, std140) uniform U { int n; float x; } u;
+        \\void main() {
+        \\    float sum = 0.0;
+        \\    for (int i = 0; i < u.n; i++) {
+        \\        sum += u.x;
+        \\        if (sum > 10.0) break;
+        \\    }
+        \\    if (sum > 0.0) discard;
+        \\}
     ;
     const spirv = try compileToSpirv(source);
     defer alloc.free(spirv);

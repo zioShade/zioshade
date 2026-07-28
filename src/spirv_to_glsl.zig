@@ -3393,7 +3393,10 @@ fn inlineDoWhileOperand(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         .ExtInst => {
             if (def.words.len != 6) return null; // unary only
             const op = def.words[4];
-            switch (op) { 66, 67, 68, 69, 70, 71, 72 => return null, else => {} } // vector-only
+            switch (op) {
+                66, 67, 68, 69, 70, 71, 72 => return null,
+                else => {},
+            } // vector-only
             const nm = std450ToGlsl(op) orelse return null;
             const arg = inlineDoWhileOperand(m, names, def.words[5], alloc) orelse return null;
             return std.fmt.allocPrint(alloc, "{s}({s})", .{ nm, arg }) catch null;
@@ -4177,7 +4180,10 @@ fn emitBlock(
             continue;
         }
         if (inst.op == .Branch) {
-            if (is_switch) { try w.print("{s}    break;\n", .{indent}); break; }
+            if (is_switch) {
+                try w.print("{s}    break;\n", .{indent});
+                break;
+            }
             // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
             // end-of-branch — otherwise a nested loop is silently dropped (early_return2:
             // the else branch flows into a for-loop; emitBlock stopped at the OpBranch and

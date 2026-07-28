@@ -965,7 +965,10 @@ const Analyzer = struct {
                 if (!is_spec) return null; // Pure-literal expressions stay on the normal fold path.
                 // v1: both operands must share a scalar arithmetic type.
                 if (!std.meta.eql(left.ty, right.ty)) return null;
-                const is_comparison = switch (op_kind) { .gt, .lt, .gte, .lte, .eq, .neq => true, else => false };
+                const is_comparison = switch (op_kind) {
+                    .gt, .lt, .gte, .lte, .eq, .neq => true,
+                    else => false,
+                };
                 const result_ty: ast.Type = if (is_comparison) .bool else left.ty;
                 const is_sint = left.ty == .int;
                 const is_uint = left.ty == .uint;
@@ -981,14 +984,38 @@ const Analyzer = struct {
                 //   FOrdEqual=180 FOrdNotEqual=182 FOrdLessThan=184 FOrdGreaterThan=186
                 //   FOrdLessThanEqual=188 FOrdGreaterThanEqual=190
                 const spirv_opcode: u32 = if (is_float) switch (op_kind) {
-                    .add => 129, .sub => 131, .mul => 133, .div => 136,
-                    .gt => 186, .lt => 184, .gte => 190, .lte => 188, .eq => 180, .neq => 182,
+                    .add => 129,
+                    .sub => 131,
+                    .mul => 133,
+                    .div => 136,
+                    .gt => 186,
+                    .lt => 184,
+                    .gte => 190,
+                    .lte => 188,
+                    .eq => 180,
+                    .neq => 182,
                 } else if (is_sint) switch (op_kind) {
-                    .add => 128, .sub => 130, .mul => 132, .div => 135,
-                    .gt => 173, .lt => 177, .gte => 175, .lte => 179, .eq => 170, .neq => 171,
+                    .add => 128,
+                    .sub => 130,
+                    .mul => 132,
+                    .div => 135,
+                    .gt => 173,
+                    .lt => 177,
+                    .gte => 175,
+                    .lte => 179,
+                    .eq => 170,
+                    .neq => 171,
                 } else switch (op_kind) {
-                    .add => 128, .sub => 130, .mul => 132, .div => 134,
-                    .gt => 172, .lt => 176, .gte => 174, .lte => 178, .eq => 170, .neq => 171,
+                    .add => 128,
+                    .sub => 130,
+                    .mul => 132,
+                    .div => 134,
+                    .gt => 172,
+                    .lt => 176,
+                    .gte => 174,
+                    .lte => 178,
+                    .eq => 170,
+                    .neq => 171,
                 };
                 const result_id = self.allocId();
                 const operand_ids = try self.alloc.alloc(u32, 2);

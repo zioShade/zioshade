@@ -537,7 +537,7 @@ test "strict: partial swizzle compound-assign writes the correct components (reg
         \\layout(location=0) in vec4 inCol;
         \\layout(location=0) out vec4 o;
         \\void main() { vec4 col = inCol; col.rgb *= 2.0; o = col; }
-        ;
+    ;
     const spv = try zioshade.compileToSPIRVNoOpt(alloc, src, .{ .stage = .fragment });
     defer alloc.free(spv);
     var i: usize = 5;
@@ -603,8 +603,7 @@ test "F1: double type yields a named honest unsupported error (not UndeclaredIde
     const inner = zioshade.lastErrorInner() orelse "";
     // The error must NAME the unsupported 64-bit construct — NOT "UndeclaredIdentifier".
     // ctx or inner must contain "64" or "double".
-    const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, ctx, "double") != null
-        or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null;
+    const names_it = std.mem.indexOf(u8, ctx, "64") != null or std.mem.indexOf(u8, ctx, "double") != null or std.mem.indexOf(u8, inner, "double") != null or std.mem.indexOf(u8, inner, "64") != null;
     try std.testing.expect(names_it);
 }
 
