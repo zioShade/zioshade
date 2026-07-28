@@ -698,12 +698,13 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
-    // MSL/GLSL/HLSL: a do-while whose continue block has a nested OpSelectionMerge
-    // (a short-circuit && / || loop condition) is silently dropped by the loop
-    // classifier; honest-error instead. Full emission tracked as follow-up (#77).
+    // MSL/GLSL/HLSL: a do-while with a short-circuit && / || back-edge condition is now
+    // lowered end-to-end (single-level). This fires only for shapes the lowering can't
+    // rebuild inline: a back-edge phi with a non-inlineable operand, or a multi-level
+    // nested OpSelectionMerge in the continue (#77).
     if (err == error.UnsupportedDoWhileCompoundCond) {
         std.debug.print(
-            "error: cross-compilation failed: {s}: a do-while loop with a short-circuit && / || condition in its continue block (a nested OpSelectionMerge) cannot be lowered yet by the MSL/GLSL/HLSL backends. Workaround: hoist the compound condition into a single bool computed before the loop, or rewrite the loop as a while with an explicit break. (The WGSL backend handles this correctly.)\n",
+            "error: cross-compilation failed: {s}: a do-while loop with a short-circuit && / || back-edge condition whose phi shape the MSL/GLSL/HLSL backends can't rebuild inline (e.g. a multi-level nested OpSelectionMerge in the continue, or a non-inlineable operand). The common single-level form is supported. Workaround: hoist the compound condition into a single bool computed before the loop, or rewrite the loop as a while with an explicit break. (The WGSL backend handles this correctly.)\n",
             .{@errorName(err)},
         );
         std.process.exit(1);
