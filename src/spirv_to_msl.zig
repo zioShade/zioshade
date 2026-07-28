@@ -1068,7 +1068,10 @@ fn writeAccessExprPlain(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
                 if (tdef.op != .TypeStruct or val + 2 >= tdef.words.len) break;
                 var mnb: [32]u8 = undefined;
                 const mname = getMemberName(m, ct, val, &mnb);
-                if (nlen + 1 + mname.len > nbuf.len) { overflow = true; break; }
+                if (nlen + 1 + mname.len > nbuf.len) {
+                    overflow = true;
+                    break;
+                }
                 nbuf[nlen] = '_';
                 nlen += 1;
                 @memcpy(nbuf[nlen..][0..mname.len], mname);
@@ -1529,7 +1532,10 @@ fn mslConsumeFlatInputIndices(alloc: std.mem.Allocator, m: *const ParsedModule, 
 // `{ in.<prefix>_<leaf0>, {substruct...}, ... }`.
 fn mslEmitFlatStructInit(m: *const ParsedModule, w: anytype, alloc: std.mem.Allocator, prefix: []const u8, struct_type_id: u32) !void {
     try w.writeAll("{ ");
-    const sdef = getDef(m, struct_type_id) orelse { try w.writeAll("}"); return; };
+    const sdef = getDef(m, struct_type_id) orelse {
+        try w.writeAll("}");
+        return;
+    };
     if (sdef.op != .TypeStruct) {
         try w.print("in.{s} }}", .{prefix});
         return;
@@ -1596,7 +1602,6 @@ fn tryReconstructFlatStructLoad(m: *const ParsedModule, names: *std.AutoHashMap(
     }
     return false;
 }
-
 
 // Input builtin variables whose GLSL array indexing must be dropped because the
 // Metal builtin is a SCALAR: gl_SampleMaskIn[0] -> gl_SampleMaskIn, since
@@ -6402,7 +6407,10 @@ fn inlineDoWhileOperand(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         .ExtInst => {
             if (def.words.len != 6) return null; // unary only (type,result,set,inst,arg0)
             const op = def.words[4];
-            switch (op) { 66, 67, 68, 69, 70, 71, 72 => return null, else => {} } // vector-only
+            switch (op) {
+                66, 67, 68, 69, 70, 71, 72 => return null,
+                else => {},
+            } // vector-only
             const nm = std450ToMsl(op) orelse return null;
             const arg = inlineDoWhileOperand(m, names, def.words[5], alloc) orelse return null;
             return std.fmt.allocPrint(alloc, "{s}({s})", .{ nm, arg }) catch null;
