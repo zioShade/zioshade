@@ -4673,10 +4673,13 @@ fn emitWhileLoopHLSL(
     // body #491 then sees the rename and (via g_carried_phis_h) skips re-decl/rename and
     // uses the bare name for arm copies. Without this the carry read an undeclared temp
     // (false-loop-init). The common non-carried case leaves the set empty.
-    const saved_carried = g_carried_phis_h;
-    defer g_carried_phis_h = saved_carried;
+    // Declare carried_phis + register its deinit FIRST so it runs LAST; register the
+    // threadlocal restore SECOND so it runs FIRST -- restore g_carried_phis_h to the
+    // outer value BEFORE carried_phis is freed (else the global briefly dangles).
     var carried_phis = std.AutoHashMap(u32, void).init(alloc);
     defer carried_phis.deinit();
+    const saved_carried = g_carried_phis_h;
+    defer g_carried_phis_h = saved_carried;
     g_carried_phis_h = &carried_phis;
     if (has_phis and !dw_native) {
         var cont_refs = std.AutoHashMap(u32, void).init(alloc);
