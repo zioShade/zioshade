@@ -528,16 +528,54 @@ test "GLSL still emits a loop nested in a switch case (the construct is valid)" 
 // #dowhile-compound-cond (#77): a do-while whose continue block has a nested
 // OpSelectionMerge (a short-circuit && / || condition; here forced by abs(), which
 // glslang will not fold to OpLogicalAnd) was silently DROPPED by the MSL/GLSL/HLSL
-// backends — detectDoWhileBackEdge assumes a single-block continue ending in the
-// back-edge. They now honest-error instead. WGSL emits the loop correctly. This PINS
-// the honest-error so it cannot silently regress to the drop; when full emission
-// lands, flip MSL/GLSL/HLSL to assert the loop survives.
+// backends — detectDoWhileBackEdge assumed a single-block continue ending in the
+// back-edge. It now follows the nested SelectionMerge to the real back-edge and
+// tryInlineDoWhileCond rebuilds the OpPhi-of-bools condition as a faithful ternary
+// (polarity-agnostic: correct for both && and ||), so the native do-while emits.
+// WGSL also emits the loop correctly. Previously these honest-errored; both the &&
+// and || MSL outputs are render-verified pixel-identical to spirv-cross on Metal.
 const DOWHILE_COMPOUND_SPV = @embedFile("fixtures/dowhile_compound_cond.spv");
+const DOWHILE_COMPOUND_OR_SPV = @embedFile("fixtures/dowhile_compound_cond_or.spv");
 
-test "MSL/GLSL/HLSL honest-error on a do-while with a compound condition (#77)" {
-    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossMsl(DOWHILE_COMPOUND_SPV));
-    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossGlsl(DOWHILE_COMPOUND_SPV));
-    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossHlsl(DOWHILE_COMPOUND_SPV));
+// Assert a native do-while whose controlling expression is EXACTLY `expected_cond`.
+// Pinning the full ternary (not just survival) catches an arm-swap in
+// inlineShortCircuitPhi, which would otherwise emit a plausible-looking but
+// semantically-flipped condition (silent miscompile) while every loose check passed.
+fn expectDoWhileCond(out: []const u8, expected_cond: []const u8) !void {
+    try std.testing.expect(std.mem.indexOf(u8, out, "} while (") != null); // native do-while form
+    try std.testing.expect(std.mem.indexOf(u8, out, "while (true)") == null); // not the broken form
+    try std.testing.expect(std.mem.indexOf(u8, out, expected_cond) != null); // exact ternary (pins arm order)
+}
+
+// `i < 5 && abs(sum) < 0.4` -> the eval block (abs) is the cond-TRUE arm.
+test "MSL/GLSL/HLSL emit a do-while with a compound && condition (#77)" {
+    const cond = "(i < 5) ? (abs(sum) < 0.4) : (i < 5)";
+    const msl = try crossMsl(DOWHILE_COMPOUND_SPV);
+    defer alloc.free(msl);
+    try expectDoWhileCond(msl, cond);
+    const glsl = try crossGlsl(DOWHILE_COMPOUND_SPV);
+    defer alloc.free(glsl);
+    try expectDoWhileCond(glsl, cond);
+    const hlsl = try crossHlsl(DOWHILE_COMPOUND_SPV);
+    defer alloc.free(hlsl);
+    try expectDoWhileCond(hlsl, cond);
+}
+
+// `i < 5 || abs(sum) < 0.4` -> glslang lowers || with a NEGATED router cond
+// (`OpBranchConditional !(i<5), eval, merge`), so the eval block (abs) is reached on
+// the cond-true path of `!(i<5)`. Exercises the opposite polarity from the && case,
+// so the polarity-agnostic claim is actually tested.
+test "MSL/GLSL/HLSL emit a do-while with a compound || condition (#77)" {
+    const cond = "(!(i < 5)) ? (abs(sum) < 0.4) : (i < 5)";
+    const msl = try crossMsl(DOWHILE_COMPOUND_OR_SPV);
+    defer alloc.free(msl);
+    try expectDoWhileCond(msl, cond);
+    const glsl = try crossGlsl(DOWHILE_COMPOUND_OR_SPV);
+    defer alloc.free(glsl);
+    try expectDoWhileCond(glsl, cond);
+    const hlsl = try crossHlsl(DOWHILE_COMPOUND_OR_SPV);
+    defer alloc.free(hlsl);
+    try expectDoWhileCond(hlsl, cond);
 }
 
 test "WGSL still emits a do-while with a compound condition (the construct is valid)" {

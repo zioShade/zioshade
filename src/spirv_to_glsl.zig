@@ -3132,6 +3132,72 @@ fn emitBody(
             }
         }
     }
+    // #for-loop-init: extend the hoist to values the top-of-loop CARRY reads that are
+    // defined in the loop HEADER (cond) block. The carry re-emits the continue block at
+    // the TOP of the while-body; a continue operand defined in the header (e.g. the
+    // counter OpLoad `%x = OpLoad %counter` living in a Pattern-B cond block, present
+    // when the counter is a Function var used past the loop) is emitted in the body
+    // AFTER the carry, so the carry reads it out of scope. GLSL/HLSL reject that (Metal
+    // tolerates it, which is why prove_opt never surfaced it). OpPhi header values are
+    // pre-declared, so only NON-phi header definitions need this. Mirrors the #413
+    // phi-update hoist above, generalised to continue-block operands.
+    {
+        var li = func_idx + 1;
+        while (li < m.instructions.len) : (li += 1) {
+            const minst = m.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            const cont_lbl = minst.words[2]; // OpLoopMerge: words[1]=merge, words[2]=continue
+            const cont_idx0 = label_map.get(cont_lbl) orelse continue;
+            var hlbl = li;
+            while (hlbl > func_idx) : (hlbl -= 1) {
+                if (m.instructions[hlbl].op == .Label) break;
+            } // header block = (this Label .. the LoopMerge at li)
+            var hi = hlbl + 1;
+            while (hi < li) : (hi += 1) {
+                // Pattern-B header instructions only: those replayed INSIDE the while-body
+                // (where the carry can read them out of scope). Pattern-A header instrs are
+                // emitted in-place before the LoopMerge; hoisting them would declare below
+                // their in-place use. deferred_hdr holds exactly the Pattern-B header instrs.
+                if (!deferred_hdr.contains(hi)) continue;
+                const hinst = m.instructions[hi];
+                if (hinst.op == .Phi) continue; // phis are pre-declared above the loop
+                const rid = common.resultIdFromOp(hinst.op, hinst.words) orelse continue; // encoding-correct result id (don't mistake words[2] of a no-result op, e.g. OpStore, for a result)
+                if (hoisted_ids.contains(rid)) continue;
+                // Does the continue block reference rid? Scan from word 1: no-result ops
+                // (OpStore/CopyMemory/AtomicStore) carry operands at words[1..2].
+                var referenced = false;
+                var ci = cont_idx0 + 1;
+                while (ci < m.instructions.len) : (ci += 1) {
+                    const cinst = m.instructions[ci];
+                    if (cinst.op == .Label or cinst.op == .FunctionEnd or cinst.op == .Branch or cinst.op == .BranchConditional) break;
+                    var wi: usize = 1;
+                    while (wi < cinst.words.len) : (wi += 1) {
+                        if (cinst.words[wi] == rid) {
+                            referenced = true;
+                            break;
+                        }
+                    }
+                    if (referenced) break;
+                }
+                if (!referenced) continue;
+                if (loop_hoists.getPtr(li)) |e| {
+                    e.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch continue;
+                } else {
+                    var hlist = std.ArrayList(common.HoistedPhiSrc).initCapacity(alloc, 1) catch continue;
+                    hlist.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                    loop_hoists.put(li, hlist) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                }
+                hoisted_ids.put(rid, {}) catch {};
+            }
+        }
+    }
     g_loop_phis = &loop_phis;
     g_phi_hdr = &phi_hdr;
     g_deferred_hdr = &deferred_hdr;
@@ -3287,30 +3353,75 @@ fn emitBody(
 /// block scope, so it cannot reference a body-local SSA temp — it must read the loop's
 /// persistent (function-scope) variables directly. An `OpLoad ptr` therefore resolves to
 /// the loaded variable's name (a fresh read at the bottom test); a constant to its
-/// literal. Returns null for anything else, so the caller honest-errors.
-fn inlineDoWhileOperand(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32) ?[]const u8 {
+/// literal. Pure arithmetic and side-effect-free GLSL.std.450 calls over persistent vars
+/// are rebuilt recursively (the controlling expression is function-scope, so `a+b < c`
+/// and `abs(x) < c` are valid there). Returns null for anything else, so the caller
+/// honest-errors.
+fn inlineDoWhileOperand(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, alloc: std.mem.Allocator) ?[]const u8 {
     const def = getDef(m, id) orelse return null;
     switch (def.op) {
         .Load => return if (def.words.len > 3) names.get(def.words[3]) else null,
         .Constant => return if (def.words.len > 3) names.get(def.words[2]) else null,
         .ConstantTrue => return "true",
         .ConstantFalse => return "false",
-        // Any other operand (e.g. an arithmetic intermediate `OpIAdd …`) is a body-local
-        // SSA temp that would be OUT OF SCOPE in the do-while controlling expression —
-        // return null so the caller honest-errors instead of emitting invalid GLSL.
+        // Arithmetic inside the condition (`zx*zx + zy*zy < 4.0`, a magnitude/distance
+        // test ubiquitous in iteration loops) is rebuilt recursively over the persistent
+        // vars, fully parenthesised so precedence matches the source.
+        .FAdd, .IAdd, .FSub, .ISub, .FMul, .IMul, .FDiv, .SDiv, .UDiv => {
+            if (def.words.len < 5) return null;
+            const l = inlineDoWhileOperand(m, names, def.words[3], alloc) orelse return null;
+            const r = inlineDoWhileOperand(m, names, def.words[4], alloc) orelse return null;
+            const bop: []const u8 = switch (def.op) {
+                .FAdd, .IAdd => "+",
+                .FSub, .ISub => "-",
+                .FMul, .IMul => "*",
+                else => "/",
+            };
+            return std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ l, bop, r }) catch null;
+        },
+        .FNegate, .SNegate => {
+            if (def.words.len < 4) return null;
+            const x = inlineDoWhileOperand(m, names, def.words[3], alloc) orelse return null;
+            return std.fmt.allocPrint(alloc, "(-{s})", .{x}) catch null;
+        },
+        // #77: pure unary GLSL.std.450 calls inside a do-while back-edge condition
+        // (`abs(sum) < 0.4`) rebuild as `name(arg)` over the recursively-inlined operand.
+        // Reuses std450ToGlsl (the same table emitStd450 uses) so every unary pure function
+        // GLSL supports is covered and naming is correct. words.len==6 restricts to unary.
+        // Vector-only ops excluded (their scalar forms need emitStd450's special lowering;
+        // a bare name call would be invalid for a scalar operand) -- they honest-error here.
+        .ExtInst => {
+            if (def.words.len != 6) return null; // unary only
+            const op = def.words[4];
+            switch (op) { 66, 67, 68, 69, 70, 71, 72 => return null, else => {} } // vector-only
+            const nm = std450ToGlsl(op) orelse return null;
+            const arg = inlineDoWhileOperand(m, names, def.words[5], alloc) orelse return null;
+            return std.fmt.allocPrint(alloc, "{s}({s})", .{ nm, arg }) catch null;
+        },
         else => return null,
     }
 }
 
 /// Try to rebuild a do-while back-edge condition (the SSA id tested by the latch
 /// `OpBranchConditional`) as an inline GLSL expression over persistent variables (#246).
-/// Handles a single comparison `a OP b` whose operands are loads-of-vars or constants —
-/// the common loop-condition shape. Returns null for compound (`&&`/`||`, which SPIR-V
-/// renders as explicit branches) or otherwise non-trivial conditions, so the caller can
-/// fall back to the honest-error path rather than emit a body-local temp that would be
-/// out of scope in the controlling expression.
-fn tryInlineDoWhileCond(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), cond_id: u32, alloc: std.mem.Allocator) ?[]const u8 {
+/// Handles a single comparison `a OP b` whose operands are loads-of-vars, constants, or
+/// pure arithmetic/std-450 over them — the common loop-condition shape. Compound
+/// (`&&`/`||`) conditions are rebuilt too: glslang's eager form lowers them to
+/// OpLogicalAnd/Or, OR (when an operand won't fold, e.g. abs()) to an OpPhi of two bools
+/// at a selection-merge block — the latter is reconstructed as a faithful ternary (#77).
+/// Returns null for non-trivial conditions so the caller can honest-error.
+fn tryInlineDoWhileCond(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    cond_id: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+    alloc: std.mem.Allocator,
+) ?[]const u8 {
     const def = getDef(m, cond_id) orelse return null;
+    // #77: a short-circuit && / || back-edge condition is emitted by glslang as an OpPhi
+    // of two bools at the selection-merge block (one incoming per short-circuit path).
+    // Rebuild it faithfully as a ternary over the short-circuit router's condition.
+    if (def.op == .Phi) return inlineShortCircuitPhi(m, names, cond_id, label_map, alloc);
     const op_str: ?[]const u8 = switch (def.op) {
         .SLessThan, .ULessThan, .FOrdLessThan => "<",
         .SGreaterThan, .UGreaterThan, .FOrdGreaterThan => ">",
@@ -3328,13 +3439,97 @@ fn tryInlineDoWhileCond(m: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     };
     if (op_str) |ops| {
         if (def.words.len < 5) return null;
-        const lhs = inlineDoWhileOperand(m, names, def.words[3]) orelse return null;
-        const rhs = inlineDoWhileOperand(m, names, def.words[4]) orelse return null;
+        const lhs = inlineDoWhileOperand(m, names, def.words[3], alloc) orelse return null;
+        const rhs = inlineDoWhileOperand(m, names, def.words[4], alloc) orelse return null;
         return std.fmt.allocPrint(alloc, "{s} {s} {s}", .{ lhs, ops, rhs }) catch null;
+    }
+    // Compound conditions (`n < 20 && x < 4.0`) lower to OpLogicalAnd/Or over two
+    // comparison results; rebuild each side recursively and join. The SPIR-V is eager
+    // (both operands are side-effect-free comparisons), so `&&`/`||` over them is
+    // equivalent even though GLSL short-circuits.
+    if (def.op == .LogicalAnd or def.op == .LogicalOr) {
+        if (def.words.len < 5) return null;
+        const lhs = tryInlineDoWhileCond(m, names, def.words[3], label_map, alloc) orelse return null;
+        const rhs = tryInlineDoWhileCond(m, names, def.words[4], label_map, alloc) orelse return null;
+        const jop: []const u8 = if (def.op == .LogicalAnd) "&&" else "||";
+        return std.fmt.allocPrint(alloc, "({s}) {s} ({s})", .{ lhs, jop, rhs }) catch null;
+    }
+    if (def.op == .LogicalNot and def.words.len >= 4) {
+        const inner = tryInlineDoWhileCond(m, names, def.words[3], label_map, alloc) orelse return null;
+        return std.fmt.allocPrint(alloc, "!({s})", .{inner}) catch null;
     }
     // A bare boolean condition: a direct load of a bool variable.
     if (def.op == .Load and def.words.len > 3) return names.get(def.words[3]);
     return null;
+}
+
+const DwRouter = struct { cond: u32, true_t: u32, false_t: u32 };
+
+/// Find the short-circuit router BranchConditional inside `pred_lbl`'s block: the one
+/// whose targets include `other_pred`. Returns its condition + targets, else null.
+fn dwFindRouter(
+    m: *const ParsedModule,
+    pred_lbl: u32,
+    other_pred: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) ?DwRouter {
+    const bi = label_map.get(pred_lbl) orelse return null;
+    var k: usize = bi + 1;
+    while (k < m.instructions.len) : (k += 1) {
+        const u = m.instructions[k];
+        if (u.op == .Label or u.op == .FunctionEnd) break;
+        if (u.op == .Branch) break;
+        if (u.op == .BranchConditional and u.words.len >= 4) {
+            if (u.words[2] == other_pred or u.words[3] == other_pred) {
+                return .{ .cond = u.words[1], .true_t = u.words[2], .false_t = u.words[3] };
+            }
+            break; // a BranchConditional not routing to other_pred = not the short-circuit shape
+        }
+    }
+    return null;
+}
+
+/// #77: rebuild a short-circuit OpPhi-of-bools (a do-while && / || back-edge condition)
+/// as a faithful ternary `cond ? <cond-true incoming> : <cond-false incoming>` over the
+/// short-circuit router's condition. The phi has exactly two (value, pred) incomings;
+/// one pred is the structural block (holds the router OpSelectionMerge+BranchConditional),
+/// the other is the eval sub-block. The router's condition + which of its targets is the
+/// eval block determine the ternary arms — polarity-agnostic (correct for && when the
+/// eval block is the cond-true target, and || when it is the cond-false target), so no
+/// operator need be labelled. Returns null (→ honest-error) for any other shape.
+fn inlineShortCircuitPhi(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    phi_id: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+    alloc: std.mem.Allocator,
+) ?[]const u8 {
+    const phi = getDef(m, phi_id) orelse return null;
+    // OpPhi layout: [type, result, val0, pred0, val1, pred1] → exactly 2 incomings here.
+    if (phi.op != .Phi or phi.words.len != 7) return null;
+    const v0 = phi.words[3];
+    const p0 = phi.words[4];
+    const v1 = phi.words[5];
+    const p1 = phi.words[6];
+    // The router lives in the structural pred (its block branches to the other pred).
+    const router = dwFindRouter(m, p0, p1, label_map) orelse
+        dwFindRouter(m, p1, p0, label_map) orelse return null;
+    // The eval block is the router target that is also one of the phi's preds; the merge
+    // (the phi's own block) is the other router target.
+    const eval_is_p0 = (router.true_t == p0 or router.false_t == p0);
+    const eval_is_p1 = (router.true_t == p1 or router.false_t == p1);
+    if (eval_is_p0 == eval_is_p1) return null; // router must target EXACTLY one pred (the eval block); both-or-neither is ambiguous/not our shape
+    const eval_val: u32 = if (eval_is_p0) v0 else v1;
+    const struct_val: u32 = if (eval_is_p0) v1 else v0; // incoming from the structural pred
+    // cond-true leads to whichever router target is the eval block; cond-false reaches the
+    // merge via the structural pred. Map the ternary arms accordingly.
+    const true_target_is_eval = (router.true_t == p0 or router.true_t == p1);
+    const tv: u32 = if (true_target_is_eval) eval_val else struct_val;
+    const fv: u32 = if (true_target_is_eval) struct_val else eval_val;
+    const cond = tryInlineDoWhileCond(m, names, router.cond, label_map, alloc) orelse return null;
+    const tve = tryInlineDoWhileCond(m, names, tv, label_map, alloc) orelse return null;
+    const fve = tryInlineDoWhileCond(m, names, fv, label_map, alloc) orelse return null;
+    return std.fmt.allocPrint(alloc, "({s}) ? ({s}) : ({s})", .{ cond, tve, fve }) catch null;
 }
 
 /// A do-while (bottom-test) loop's CONTINUE block ends in a back-edge
@@ -3352,14 +3547,44 @@ fn detectDoWhileBackEdge(
 ) ?usize {
     const ci = label_map.get(cont_lbl) orelse return null;
     var s = ci + 1;
+    // #77: a short-circuit && / || back-edge condition lowers (glslang) to a NESTED
+    // OpSelectionMerge inside the continue block, so the continue is no longer a
+    // single block: <cond-A>; OpSelectionMerge M; OpBranchConditional A, eval, M;
+    // eval: <cond-B>; OpBranch M; M: %phi = OpPhi bool; OpBranchConditional phi, hdr, merge.
+    // Track the nested selection-merge target so the short-circuit router below is
+    // recognised and the REAL back-edge (the terminator of M) is found.
+    var sel_merge_lbl: ?u32 = null;
     while (s < m.instructions.len) : (s += 1) {
         const t = m.instructions[s];
         if (t.op == .Label or t.op == .FunctionEnd) return null;
         if (t.op == .Branch) return null; // unconditional back-edge = top-test loop
+        if (t.op == .SelectionMerge and t.words.len >= 2) {
+            sel_merge_lbl = t.words[1];
+            continue;
+        }
         if (t.op == .BranchConditional and t.words.len >= 4) {
             const a = t.words[2];
             const b = t.words[3];
             if ((a == header_lbl and b == merge_lbl) or (a == merge_lbl and b == header_lbl)) return s;
+            // #77: this BranchConditional is the short-circuit router (its targets are
+            // the eval sub-block + the selection merge), NOT the loop back-edge. The
+            // real back-edge is the BranchConditional terminator of the selection-merge
+            // block. Descend to it; if the shape doesn't match, fall through to null.
+            if (sel_merge_lbl) |sml| {
+                if (label_map.get(sml)) |smi| {
+                    var k: usize = smi + 1;
+                    while (k < m.instructions.len) : (k += 1) {
+                        const u = m.instructions[k];
+                        if (u.op == .Label or u.op == .FunctionEnd or u.op == .Branch) break;
+                        if (u.op == .BranchConditional and u.words.len >= 4) {
+                            const c = u.words[2];
+                            const d = u.words[3];
+                            if ((c == header_lbl and d == merge_lbl) or (c == merge_lbl and d == header_lbl)) return k;
+                            break;
+                        }
+                    }
+                }
+            }
             return null;
         }
     }
@@ -3454,8 +3679,11 @@ fn emitWhileLoop(
                 // OpSelectionMerge (a short-circuit && / || loop condition) reaches here:
                 // detectDoWhileBackEdge returned null (the continue is not a single-block
                 // back-edge) and Pattern A found no top-test condition. Previously this
-                // silently DROPPED the entire loop. Honest-error instead. (#77; full
-                // emission is a tracked follow-up; WGSL lowers it correctly.)
+                // silently DROPPED the entire loop. Honest-error instead. (Single-level short-circuit
+                // is now lowered end-to-end: detectDoWhileBackEdge follows the nested SelectionMerge
+                // to the real back-edge and tryInlineDoWhileCond rebuilds the OpPhi-of-bools cond;
+                // this floor is reached only when detectDoWhileBackEdge STILL returns null -- shapes
+                // its single-level SelectionMerge descent cannot handle. #77)
                 if (label_map.get(cont_lbl)) |cidx| {
                     var sci: usize = cidx + 1;
                     while (sci < m.instructions.len) : (sci += 1) {
@@ -3518,9 +3746,19 @@ fn emitWhileLoop(
             // bodies are accepted in this first increment; richer bodies honest-error.
             if (t.op == .Branch and t.words.len > 1 and t.words[1] != cont_lbl and t.words[1] != merge_lbl) return error.UnstructuredControlFlow;
         }
-        if (body_has_cf) {
+        // #77: a compound (short-circuit && / ||) back-edge condition is an OpPhi of two
+        // bools at the selection-merge block (the continue block has a nested
+        // OpSelectionMerge). Rebuild it as an inline expression for BOTH straight-line
+        // and control-flow-bearing bodies so the native do-while path can emit
+        // `do { body } while(<cond>);`. If a phi cond cannot be rebuilt, fail LOUD:
+        // the straight-line break-test path would otherwise read an unmaterialised phi
+        // (silent-wrong — the hazard that kept #77 honest-errored until S1+S2 landed).
+        const cond_is_phi = if (getDef(m, bc.words[1])) |cdef| cdef.op == .Phi else false;
+        if (cond_is_phi) {
+            dw_inlined = tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc) orelse return error.UnsupportedDoWhileCompoundCond;
+        } else if (body_has_cf) {
             // Native do-while requires the condition rebuilt over persistent vars.
-            dw_inlined = tryInlineDoWhileCond(m, names, bc.words[1], alloc) orelse return error.UnstructuredControlFlow;
+            dw_inlined = tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc) orelse return error.UnstructuredControlFlow;
         }
     }
     const dw_native = dw_inlined != null;

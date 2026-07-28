@@ -15961,6 +15961,36 @@ test "hlsl: a selection-merge phi inside a loop body is materialized (#493)" {
     try assertContains(hlsl, "_phi = ");
 }
 
+// #false-loop-init: a loop-carried selection-merge phi whose result the CONTINUE
+// reads (here the loop increment `i += int(j)`) must be declared BEFORE the loop +
+// renamed to `_phi`, so the #237 top-of-loop carry reads the persistent var -- not an
+// undeclared body-local name (the regression: HLSL `v14 unknown variable`). Mirrors the
+// GLSL test "loop-carried selection phi used in the increment persists across iterations"
+// and the corpus shader tests/spirv-cross/false-loop-init.frag.
+test "hlsl: loop-carried selection phi read by the continue is hoisted before the loop (#false-loop-init)" {
+    const source: [:0]const u8 =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) in vec4 accum;
+        \\layout(location = 0) out vec4 result;
+        \\void main() {
+        \\  result = vec4(0.0);
+        \\  uint j;
+        \\  for (int i = 0; i < 4; i += int(j)) {
+        \\    if (accum.y > 10.0) j = 40u; else j = 30u;
+        \\    result += accum;
+        \\  }
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // The carried phi is declared BEFORE `while (true)` (hoisted above the loop), not
+    // inside the body after the carry -- the regression read an undeclared name.
+    const decl = std.mem.indexOf(u8, hlsl, "_phi;") orelse return error.TestUnexpectedResult;
+    const loop = std.mem.indexOf(u8, hlsl, "while (true)") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(decl < loop);
+}
+
 // #partial-write-preserve: a struct passed as an inout pointer parameter had its member
 // writes emitted as numeric indices (`v[1]`) instead of `.member`, because
 // resolvePointeeType didn't resolve an OpFunctionParameter base -- invalid HLSL ("left
