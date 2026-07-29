@@ -86,7 +86,13 @@ case "$STAGE" in
     # still unfixed on main).
     KNOWN_INVALID=" ";;
   vertex)
-    KNOWN_INVALID=" out-block-qualifiers.vert read-from-row-major-array.vert ";;
+    # read-from-row-major-array.vert WAS here (dropped a multi-dim UBO array dim +
+    # missed row_major on array-of-matrix members -> emitted column-major silent-wrong
+    # MSL). Fixed: emitStructMembers now emits all array dims and drills matrix_tid
+    # through nested arrays -> the non-square row_major matrix honest-errors
+    # (UnsupportedRowMajorMatrix) instead of mis-reading. Full validity (swapped-dims
+    # for non-square row_major) is deferred.
+    KNOWN_INVALID=" out-block-qualifiers.vert ";;
   compute)
     KNOWN_INVALID=" cfg.comp spec-constant-op-member-array.vk.comp ";;
   *)
