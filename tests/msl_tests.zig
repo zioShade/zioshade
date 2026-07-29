@@ -1336,7 +1336,7 @@ test "msl: bitCount vector result is constructor-cast (int2(popcount(uint2)))" {
 // #170 OpFUnordEqual: unordered-equal is TRUE on a NaN operand (ordered == is false
 // there = plausible-but-wrong). Metal lowers it to isunordered(a,b) || (a==b).
 // glslang never emits OpFUnordEqual (GLSL has no unordered-equal), so hand SPIR-V.
-test "msl: OpFUnordEqual lowers to isunused(a,b) || (a==b) NaN-correctly (#170)" {
+test "msl: OpFUnordEqual lowers to isunordered(a,b) || (a==b) NaN-correctly (#170)" {
     const spirv = assembleSpirv("funord_eq",
         \\OpCapability Shader
         \\OpMemoryModel Logical GLSL450
