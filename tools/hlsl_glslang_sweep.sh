@@ -86,13 +86,12 @@ case "$STAGE" in
     # still unfixed on main).
     KNOWN_INVALID=" ";;
   vertex)
-    # read-from-row-major-array.vert WAS here (dropped a multi-dim UBO array dim +
-    # missed row_major on array-of-matrix members -> emitted column-major silent-wrong
-    # MSL). Fixed: emitStructMembers now emits all array dims and drills matrix_tid
-    # through nested arrays -> the non-square row_major matrix honest-errors
-    # (UnsupportedRowMajorMatrix) instead of mis-reading. Full validity (swapped-dims
-    # for non-square row_major) is deferred.
-    KNOWN_INVALID=" out-block-qualifiers.vert ";;
+    # No known HLSL vertex INVALIDs. read-from-row-major-array.vert fixed (#489:
+    # multi-dim UBO array dims + row_major drilling). out-block-qualifiers.vert now
+    # honest-errors (#491: colliding output block members can't flatten without
+    # duplicate VS_OUTPUT fields; full member-name-prefixing/block-reconstruction
+    # deferred).
+    KNOWN_INVALID=" ";;
   compute)
     # spec-constant-op-member-array.vk.comp WAS here (OpSpecConstantOp-sized array
     # member dropped its dim -> scalar). Fixed: the analyzer already bound user_name
