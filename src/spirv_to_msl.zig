@@ -497,6 +497,21 @@ fn imageValueDim(m: *const ParsedModule, image_value_id: u32) u32 {
     return tinst.words[3];
 }
 
+/// True if an image VALUE (OpLoad result) is multisampled — the OpTypeImage MS
+/// flag (word[6]). Mirrors imageValueDim's resolution (OpLoad -> its type, unwrapping
+/// OpTypeSampledImage). Used to honest-error MS subpass reads (SubpassData + MS),
+/// which need texture2d_ms + per-sample-read modeling this backend defers.
+fn imageValueIsMultisampled(m: *const ParsedModule, image_value_id: u32) bool {
+    const vdef = getDef(m, image_value_id) orelse return false;
+    if (vdef.words.len < 2) return false;
+    var tinst = getDef(m, vdef.words[1]) orelse return false;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(m, tinst.words[2]) orelse return false;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 7) return false;
+    return tinst.words[6] != 0; // MS flag (OpTypeImage: ..., Dim, Depth, Arrayed, MS, ...)
+}
+
 /// For an ARRAYED sampled-image VALUE, MSL passes the array layer as a SEPARATE
 /// argument after the (dimension-sliced) coordinate. Given the SSA coordinate
 /// name and the image dim, returns `"<coord>.xy, uint(rint(<coord>.z))"` (2D
@@ -8320,8 +8335,23 @@ fn emitInstruction(
         .ImageRead => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "img";
-            const ct = mslReadCoordCast(m, inst.words[4]);
-            try w.print("    {s} {s} = {s}.read({s}({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, names.get(inst.words[4]) orelse "0" });
+            // SubpassData (SPIR-V Dim 6 = Vulkan input attachments): the SPIR-V
+            // coordinate operand is a (0,0) placeholder, because Vulkan reads a
+            // subpass attachment implicitly at the current fragment position. Metal
+            // has no implicit subpass read, so emit the threaded fragment coordinate
+            // (`_fragCoord`, always threaded into fragment impls) instead of passing
+            // (0,0) through verbatim -- otherwise every fragment samples the
+            // top-left pixel. (spirv-cross does the same: read(uint2(gl_FragCoord.xy)).)
+            if (imageValueDim(m, inst.words[3]) == 6) {
+                // MS subpass needs texture2d_ms + a per-sample read (read(coord, sample));
+                // this backend defers MS texture-type modeling, so refuse rather than emit
+                // a non-MS read that would silently sample the wrong pixel/sample.
+                if (imageValueIsMultisampled(m, inst.words[3])) return error.UnsupportedMultisampledSubpassInput;
+                try w.print("    {s} {s} = {s}.read(uint2(_fragCoord.xy));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si });
+            } else {
+                const ct = mslReadCoordCast(m, inst.words[4]);
+                try w.print("    {s} {s} = {s}.read({s}({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, ct, names.get(inst.words[4]) orelse "0" });
+            }
         },
         .ImageWrite => {
             const img = names.get(inst.words[1]) orelse "img";

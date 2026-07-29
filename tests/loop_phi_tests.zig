@@ -700,3 +700,29 @@ test "nested loop counters both advance in MSL (#phi-loop)" {
         return error.LoopCounterFrozen;
     }
 }
+
+// ---------------------------------------------------------------------------
+// SubpassData (Vulkan input attachments): glslang lowers `subpassLoad(x)` to an
+// OpImageRead whose coordinate is a (0,0) placeholder (the read is implicitly at
+// the fragment position in Vulkan). Metal has NO implicit subpass reads, so the
+// MSL must read at the threaded fragment coordinate (`uint2(_fragCoord.xy)`), NOT
+// at (0,0) (which would make every fragment sample the top-left pixel). Fixture is
+// glslang-produced (zioshade's own frontend does not parse Vulkan `subpassInput`).
+// ---------------------------------------------------------------------------
+const SUBPASS_INPUT_SPV = @embedFile("fixtures/subpass_input.spv");
+
+test "subpassInput OpImageRead reads at the fragment coordinate, not (0,0)" {
+    const msl = try crossMsl(SUBPASS_INPUT_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "read(uint2(_fragCoord") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "read(uint2(int2(0)))") == null);
+}
+
+// Multisampled input attachments (subpassInputMS) need texture2d_ms + a per-sample
+// read, which this backend defers; honest-error (refuse) rather than emit a non-MS
+// read that silently samples the wrong pixel. glslang-produced fixture.
+const SUBPASS_INPUT_MS_SPV = @embedFile("fixtures/subpass_input_ms.spv");
+
+test "subpassInputMS honest-errors (MS texture-type modeling deferred)" {
+    try std.testing.expectError(error.UnsupportedMultisampledSubpassInput, crossMsl(SUBPASS_INPUT_MS_SPV));
+}
