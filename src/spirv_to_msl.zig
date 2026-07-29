@@ -7743,7 +7743,13 @@ fn emitInstruction(
         },
         .BitCount => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = popcount({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
+            // Metal's popcount returns the OPERAND's type (e.g. uint2), but OpBitCount's
+            // result is signed int (GLSL `genIType bitCount(genUType)`); a vector result
+            // then needs an explicit constructor cast (int2(popcount(uint2))) or Metal
+            // rejects `int2 v = popcount(uint2)` ("cannot initialize int2 with uint2").
+            // The cast is a no-op when the types already match. Mirrors spirv-cross
+            // (int2(popcount(...))) and zioshade's WGSL backend (vec2i(countOneBits(...))).
+            try w.print("    {s} {s} = {s}(popcount({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", rtt, names.get(inst.words[3]) orelse "0" });
         },
         // OpBitFieldInsert: base, insert, offset, count → MSL insert_bits(base, insert, uint
         // offset, uint bits). MSL takes the offset/width as uint, so cast them.
