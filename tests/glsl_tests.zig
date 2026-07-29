@@ -338,6 +338,47 @@ test "glsl: OpFUnordEqual lowers NaN-correctly (isnan||isnan||==) (#170)" {
     try glslValidateOrSkip("funord-eq-vec", v_glsl);
 }
 
+// #170 OpFOrdNotEqual: ordered not-equal is FALSE on a NaN operand, but GLSL `!=`/
+// `notEqual` is unordered (true on NaN), so bare `!=` is plausible-but-wrong. GLSL
+// now lowers it to !isnan(a) && !isnan(b) && (a != b) (scalar) / a per-component bvec
+// (vector). The mirror of the FUnordEqual fix. glslang emits FUnordNotEqual (183) for
+// `!=`; rewritten to FOrdNotEqual (182).
+test "glsl: OpFOrdNotEqual lowers NaN-correctly (!isnan&&!isnan&&!=) (#170)" {
+    // scalar: !isnan(a) && !isnan(b) && (a != b)
+    const s_spv = try compileToSpirv("ford_ne_s",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = (a != b) ? vec4(1.0) : vec4(0.0); }
+    );
+    defer alloc.free(s_spv);
+    const s_rw = try rewriteFirstOpcode(s_spv, 183, 182); // FUnordNotEqual -> FOrdNotEqual
+    defer alloc.free(s_rw);
+    const s_glsl = try zioshade.spirvToGLSL(alloc, s_rw, .{ .version = 430 });
+    defer alloc.free(s_glsl);
+    try assertContains(s_glsl, "!isnan(");
+    try assertContains(s_glsl, "&& (");
+    try glslValidateOrSkip("ford-ne-scalar", s_glsl);
+
+    // vector: per-component bvec3(!isnan(a).x&&!isnan(b).x&&(a.x!=b.x), ...)
+    const v_spv = try compileToSpirv("ford_ne_v",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { bvec3 c = notEqual(a, b); o = vec4(float(c.x), float(c.y), float(c.z), 1.0); }
+    );
+    defer alloc.free(v_spv);
+    const v_rw = try rewriteFirstOpcode(v_spv, 183, 182);
+    defer alloc.free(v_rw);
+    const v_glsl = try zioshade.spirvToGLSL(alloc, v_rw, .{ .version = 430 });
+    defer alloc.free(v_glsl);
+    try assertContains(v_glsl, "!isnan(");
+    try assertContains(v_glsl, ".x != "); // per-component, not bare notEqual()
+    try glslValidateOrSkip("ford-ne-vec", v_glsl);
+}
+
 // OpImageFetch (GLSL texelFetch) must pass the EXPLICIT LOD image-operand, not hardcode mip 0.
 // Dropping it silently read the base mip for any `texelFetch(s, coord, lod>0)` -- a
 // silent-pixel miscompile. WGSL already passes the operand; GLSL was hardcoding 0. (#170)
