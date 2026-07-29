@@ -3129,10 +3129,34 @@ const Codegen = struct {
                         try self.emitTypeWord(base_id);
                         try self.emitTypeWord(sc.result_id);
                     } else {
-                        // Fallback: runtime array
-                        try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
-                        try self.emitTypeWord(id);
-                        try self.emitTypeWord(base_id);
+                        // Derived spec-constant expression (e.g. `const int d = c + 50;`
+                        // -> OpSpecConstantOp). The analyzer binds its user_name on the
+                        // spec_constant_ops entry, but that map is keyed by a synthetic id,
+                        // so look the entry up by user_name. Emit OpTypeArray with its
+                        // result ID -- matches glslang and preserves specialization.
+                        // Previously this fell through to OpTypeRuntimeArray, which
+                        // mis-typed a fixed-size spec-const-op array as unsized.
+                        var sco_result: ?u32 = null;
+                        var sco_iter = self.module.spec_constant_ops.iterator();
+                        while (sco_iter.next()) |entry| {
+                            if (entry.value_ptr.user_name) |un| {
+                                if (std.mem.eql(u8, un, sname)) {
+                                    sco_result = entry.value_ptr.result_id;
+                                    break;
+                                }
+                            }
+                        }
+                        if (sco_result) |rid| {
+                            try self.emitTypeWord(spirv.encodeInstructionHeader(4, @intFromEnum(spirv.Op.TypeArray)));
+                            try self.emitTypeWord(id);
+                            try self.emitTypeWord(base_id);
+                            try self.emitTypeWord(rid);
+                        } else {
+                            // Fallback: runtime array
+                            try self.emitTypeWord(spirv.encodeInstructionHeader(3, @intFromEnum(spirv.Op.TypeRuntimeArray)));
+                            try self.emitTypeWord(id);
+                            try self.emitTypeWord(base_id);
+                        }
                     }
                 } else if (arr.size == 0) {
                     // Runtime array: OpTypeRuntimeArray

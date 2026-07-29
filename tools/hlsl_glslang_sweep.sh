@@ -94,7 +94,12 @@ case "$STAGE" in
     # for non-square row_major) is deferred.
     KNOWN_INVALID=" out-block-qualifiers.vert ";;
   compute)
-    KNOWN_INVALID=" cfg.comp spec-constant-op-member-array.vk.comp ";;
+    # spec-constant-op-member-array.vk.comp WAS here (OpSpecConstantOp-sized array
+    # member dropped its dim -> scalar). Fixed: the analyzer already bound user_name
+    # on the spec_constant_ops entry; codegen now looks it up by user_name (not the
+    # synthetic map key) and emits OpTypeArray, and the HLSL backend evaluates the
+    # OpSpecConstantOp (IAdd/ISub/IMul of operand defaults) to a concrete size.
+    KNOWN_INVALID=" cfg.comp ";;
   *)
     KNOWN_INVALID=" ";;
 esac
