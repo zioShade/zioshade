@@ -4,9 +4,28 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
+(nothing yet)
+
+## [0.4.0] - 2026-07-29
+
+- **#170 NaN-correctness campaign complete:** all 12 float comparison opcodes
+  (FOrd/FUnord x Equal/NotEqual/LessThan/GreaterThan/LessEqual/GreaterEqual) are now NaN-correct
+  across all four backends (MSL/HLSL/GLSL/WGSL). The last two wrong ones -- OpFUnordEqual and
+  OpFOrdNotEqual -- were lowered to ordered `==`/`!=` (wrong on a NaN operand); now lowered via
+  isnan-aware forms (MSL `isunordered`, HLSL/GLSL `isnan`, WGSL `select()`). Deliberate divergence
+  from spirv-cross, which is NaN-wrong on GLSL/HLSL for these two. (#494, #495, #496)
+- **Compile-validity matrix fully clean:** 0 real-bug compile-INVALID across HLSL/GLSL/MSL/WGSL x
+  fragment/vertex/compute (spirv-cross-discriminated gates + Metal/naga/glslang real-compiler
+  checks). Closed the last INVALIDs this cycle: for-loop-init MSL (no-OpPhi carry-read
+  use-before-declaration, #482 port), cfg.comp HLSL (OpUndef stored to memory now declared),
+  OpBitCount MSL vector result constructor-cast (`int2(popcount(uint2))`). (#493)
+- **Operand-level chaos hunt:** 10 chaos-proof (integer/quantized-output) shaders certified across
+  backends, where any render DIFFER is a guaranteed real bug. Found + fixed the OpBitCount vector
+  bug; the other 9 patterns (bitfield, findMSB, OpSelect, shifts, multi-loop carry, clamp, ...) are
+  clean. Strong evidence the operand path is sound for the patterns probed.
 - **ZERO REAL BUGS across all non-deferred backends and stages.** Cross-stage compile-validity
   campaign (spirv-cross-discriminated gates) drove GLSL 0/0/0, MSL 0/0/0 (fragment/compute/vertex).
-  HLSL gates GREEN at regression=0 (7 known-deferred structural bugs). From ~30 real bugs at
+  HLSL gates GREEN at regression=0 (known-deferred structural bugs). From ~30 real bugs at
   campaign start to 0.
 - Frontend fixes (diagnosed via `zioshade spirv` dump tool):
   - SSBO (`buffer`) blocks default to std430 layout (GLSL/Vulkan spec), not std140 -- was
