@@ -122,6 +122,40 @@ fn emitNegatedRelOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         try w.print("    {s} {s} = !({s} {s} {s});\n", .{ rtt, rn, a, complement_op, b });
     }
 }
+/// #170 OpFUnordEqual: unordered-equal is TRUE if either operand is NaN (ordered
+/// `==`/`equal` is false there = plausible-but-wrong). GLSL has no `isunordered`
+/// and `||` does not operate on bvec, so the scalar emits isnan(a)||isnan(b)||(a==b)
+/// and the vector builds the bvec per-component (the only componentwise form that
+/// compiles). (spirv-cross GLSL emits `!(a != b)`, which is NaN-wrong; zioshade
+/// diverges to be correct.) OpFUnordNotEqual is already exact on `!=`/`notEqual`
+/// (GLSL != is unordered = true on NaN, matching the opcode).
+fn emitUnordEqual(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    const rtt = try glslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const a = names.get(inst.words[3]) orelse "a";
+    const b = names.get(inst.words[4]) orelse "b";
+    if (isVectorType(m, inst.words[1])) {
+        const swz = [_][]const u8{ "x", "y", "z", "w" };
+        const width: usize = blk: {
+            const d = getDef(m, inst.words[1]) orelse break :blk 0;
+            if (d.op == .TypeVector and d.words.len > 3) break :blk d.words[3];
+            break :blk 0;
+        };
+        if (width < 2 or width > 4) return error.UnsupportedVectorWidth;
+        try w.print("    {s} {s} = {s}(", .{ rtt, rn, rtt });
+        var i: usize = 0;
+        while (i < width) : (i += 1) {
+            if (i > 0) try w.writeAll(", ");
+            try w.print("isnan({s}).{s} || isnan({s}).{s} || ({s}.{s} == {s}.{s})", .{
+                a, swz[i], b, swz[i], a, swz[i], b, swz[i],
+            });
+        }
+        try w.writeAll(");\n");
+    } else {
+        try w.print("    {s} {s} = isnan({s}) || isnan({s}) || ({s} == {s});\n", .{ rtt, rn, a, b, a, b });
+    }
+}
+
 /// Element type reached by descending one composite level: the element type of an
 /// array (fixed or runtime), the column type of a matrix, or the component type of
 /// a vector. Used per access-chain index for the runtime-index descent (#419).
@@ -4289,7 +4323,8 @@ fn emitInstruction(
         // operand order. Without this arm it fell through to `// unhandled op 147`,
         // leaving the result id undefined at its use sites.
         .OuterProduct => try common.emitCall(m, names, inst, "outerProduct", w, alloc, glslType),
-        .FOrdEqual, .FUnordEqual, .IEqual => try emitRelOp(m, names, inst, "==", "equal", w, alloc),
+        .FOrdEqual, .IEqual => try emitRelOp(m, names, inst, "==", "equal", w, alloc),
+        .FUnordEqual => try emitUnordEqual(m, names, inst, w, alloc),
         .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitRelOp(m, names, inst, "!=", "notEqual", w, alloc),
         .FOrdLessThan, .SLessThan, .ULessThan => try emitRelOp(m, names, inst, "<", "lessThan", w, alloc),
         .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitRelOp(m, names, inst, ">", "greaterThan", w, alloc),
@@ -4298,7 +4333,9 @@ fn emitInstruction(
         // #170: unordered float inequalities are TRUE on NaN, so `!(ordered complement)`
         // (scalar) / `not(complementFunc(a,b))` (vector), not the naive ordered op (false
         // on NaN = plausible-but-wrong, as spirv-cross emits). See emitNegatedRelOp.
-        // (FUnordEqual stays on `==`/`equal` for now -- documented follow-up, see the MSL note.)
+        // OpFUnordEqual is TRUE on NaN too and has no ordered complement (`!=` is true on
+        // NaN), so it goes through emitUnordEqual (isnan||isnan||==, per-component for
+        // vectors since GLSL has no componentwise || on bvec).
         .FUnordLessThan => try emitNegatedRelOp(m, names, inst, ">=", "greaterThanEqual", w, alloc),
         .FUnordGreaterThan => try emitNegatedRelOp(m, names, inst, "<=", "lessThanEqual", w, alloc),
         .FUnordLessThanEqual => try emitNegatedRelOp(m, names, inst, ">", "greaterThan", w, alloc),

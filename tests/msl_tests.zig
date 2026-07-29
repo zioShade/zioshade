@@ -1333,6 +1333,47 @@ test "msl: bitCount vector result is constructor-cast (int2(popcount(uint2)))" {
     try std.testing.expect(std.mem.indexOf(u8, msl, "= popcount(") == null);
 }
 
+// #170 OpFUnordEqual: unordered-equal is TRUE on a NaN operand (ordered == is false
+// there = plausible-but-wrong). Metal lowers it to isunordered(a,b) || (a==b).
+// glslang never emits OpFUnordEqual (GLSL has no unordered-equal), so hand SPIR-V.
+test "msl: OpFUnordEqual lowers to isunordered(a,b) || (a==b) NaN-correctly (#170)" {
+    const spirv = assembleSpirv("funord_eq",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v2float = OpTypeVector %float 2
+        \\%bool = OpTypeBool
+        \\%v2bool = OpTypeVector %bool 2
+        \\%v4float = OpTypeVector %float 4
+        \\%f1 = OpConstant %float 1
+        \\%f2 = OpConstant %float 2
+        \\%v2 = OpConstantComposite %v2float %f1 %f2
+        \\%ptr_o = OpTypePointer Output %v4float
+        \\%o = OpVariable %ptr_o Output
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%s = OpFUnordEqual %bool %f1 %f2
+        \\%v = OpFUnordEqual %v2bool %v2 %v2
+        \\%fs = OpSelect %float %s %f1 %f2
+        \\%vx = OpCompositeExtract %bool %v 0
+        \\%fx = OpSelect %float %vx %f1 %f2
+        \\%res = OpCompositeConstruct %v4float %fs %fx %f1 %f1
+        \\OpStore %o %res
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "isunordered(");
+    try assertContains(msl, "|| (");
+}
+
 test "T11.1: MSL loop reconstruction produces while loop" {
     const source =
         \\#version 430
