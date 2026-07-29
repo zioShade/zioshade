@@ -1308,6 +1308,31 @@ test "msl: bitCount -> popcount" {
     try std.testing.expect(std.mem.indexOf(u8, msl, "popcount") != null);
 }
 
+// OpBitCount on a vector whose result type is signed int (GLSL genIType
+// bitCount(genUType)): uint2 operand -> int2 result. Metal's popcount returns
+// the operand's type (uint2), so the result must be wrapped in the result-type
+// constructor (int2(popcount(uint2))) or Metal rejects `int2 = popcount(uint2)`.
+test "msl: bitCount vector result is constructor-cast (int2(popcount(uint2)))" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    uvec2 u = uvec2(gl_FragCoord.xy);
+        \\    ivec2 c = bitCount(u);
+        \\    int s = c.x + c.y;
+        \\    fragColor = vec4(float(s));
+        \\}
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    // The fixed form wraps popcount in the result-type constructor.
+    try assertContains(msl, "int2(popcount(");
+    // The buggy bare form (int2 vN = popcount(...); without the cast) must be gone.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "= popcount(") == null);
+}
+
 test "T11.1: MSL loop reconstruction produces while loop" {
     const source =
         \\#version 430

@@ -93,12 +93,13 @@ case "$STAGE" in
     # deferred).
     KNOWN_INVALID=" ";;
   compute)
-    # spec-constant-op-member-array.vk.comp WAS here (OpSpecConstantOp-sized array
-    # member dropped its dim -> scalar). Fixed: the analyzer already bound user_name
-    # on the spec_constant_ops entry; codegen now looks it up by user_name (not the
-    # synthetic map key) and emits OpTypeArray, and the HLSL backend evaluates the
-    # OpSpecConstantOp (IAdd/ISub/IMul of operand defaults) to a concrete size.
-    KNOWN_INVALID=" cfg.comp ";;
+    # No known HLSL compute INVALIDs. cfg.comp WAS here (OpUndef result id
+    # referenced by an OpStore but never declared -> glslang "unknown variable";
+    # the frontend folds dead loops over uninitialized locals into `data = undef`).
+    # Fixed: the HLSL backend now declares OpUndef as a zero-initialized local
+    # (`<type> vN = {};`), matching the MSL backend. spec-constant-op-member-array
+    # was the prior entry (fixed: see below).
+    KNOWN_INVALID=" ";;
   *)
     KNOWN_INVALID=" ";;
 esac
