@@ -8125,7 +8125,7 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 46 => "lerp", // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
-                50 => "mad", // FMA (fused multiply-add) — HLSL uses mad for float
+                50 => "fma", // OpFma: contractually fused multiply-add. HLSL fma (SM5+) -- mad may double-round.
                 51 => "frexp", // Frexp (scalar return, pointer out-param)
                 52 => "frexp", // FrexpStruct (struct return - intercepted)
                 53 => "ldexp", // Ldexp
@@ -8142,16 +8142,14 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 79 => "min",
                 80 => "max",
                 81 => "clamp",
-                54 => "pack_snorm4x8",
-                55 => "pack_unorm4x8",
-                56 => "pack_snorm2x16",
-                57 => "pack_unorm2x16",
-                58 => "pack_half2x16",
-                60 => "unpack_snorm2x16",
-                61 => "unpack_unorm2x16",
-                62 => "unpack_half2x16",
-                63 => "unpack_snorm4x8",
-                64 => "unpack_unorm4x8",
+                // Pack/unpack opcodes (54-64) emit NO fabricated name here:
+                //  - 58/62 (Pack/UnpackHalf2x16) are intercepted above via
+                //    f32tof16/f16tof32, so they never reach this table.
+                //  - 54-57, 60, 61, 63, 64 (snorm/unorm pack/unpack) have no real
+                //    HLSL intrinsic -- correct lowering is a scale/round/asuint bit
+                //    helper (spirv-cross spvPack/Unpack{S,U}norm*), deferred until a
+                //    DXC oracle. Drop to the honest-error path (else => null) rather
+                //    than emit a Metal/OpenCL name that is an undeclared HLSL function.
                 76 => "EvaluateAttributeAtCentroid",
                 77 => "EvaluateAttributeAtSample",
                 78 => "EvaluateAttributeSnapped",
