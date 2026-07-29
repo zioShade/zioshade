@@ -5215,6 +5215,19 @@ fn emitUnordEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []co
     });
 }
 
+/// #170 OpFOrdNotEqual: ordered not-equal is FALSE on a NaN operand, but HLSL's `!=`
+/// is unordered (true on NaN), so bare `!=` is plausible-but-wrong. Lower to
+/// `!isnan(a) && !isnan(b) && (a != b)` (ordered-AND-not-equal); && is componentwise on
+/// bool vectors. The mirror of emitUnordEqual; glslang never emits FOrdNotEqual.
+fn emitOrdNotEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    const rt = try hlslType(module, inst.words[1], names, alloc);
+    try w.print("    {s} {s} = !isnan({s}) && !isnan({s}) && ({s} != {s});\n", .{
+        rt,                                  names.get(inst.words[2]) orelse "v",
+        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
+        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
+    });
+}
+
 fn emitInstruction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5553,7 +5566,8 @@ fn emitInstruction(
         // Comparisons
         .FOrdEqual, .IEqual => try common.emitBinOp(module, names, inst, "==", w, alloc, hlslType),
         .FUnordEqual => try emitUnordEqual(module, names, inst, w, alloc),
-        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try common.emitBinOp(module, names, inst, "!=", w, alloc, hlslType),
+        .FUnordNotEqual, .INotEqual => try common.emitBinOp(module, names, inst, "!=", w, alloc, hlslType),
+        .FOrdNotEqual => try emitOrdNotEqual(module, names, inst, w, alloc),
         .FOrdLessThan, .SLessThan, .ULessThan => try common.emitBinOp(module, names, inst, "<", w, alloc, hlslType),
         .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try common.emitBinOp(module, names, inst, ">", w, alloc, hlslType),
         .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try common.emitBinOp(module, names, inst, "<=", w, alloc, hlslType),
