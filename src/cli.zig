@@ -709,6 +709,17 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // MSL: multisampled Vulkan input attachments (subpassInputMS) need texture2d_ms +
+    // a per-sample read (read(coord, sample)); this backend defers MS texture-type
+    // modeling, so refuse rather than emit a non-MS read that silently samples the
+    // wrong pixel/sample.
+    if (err == error.UnsupportedMultisampledSubpassInput) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: multisampled Vulkan input attachments (subpassInputMS) are not yet lowered by the MSL backend (need texture2d_ms + per-sample read). Workaround: use a non-MS input attachment, or lower the MS subpass read manually.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL records an actionable detail for some honest errors (errors carry no
     // payload) — surface it so the message is more than just the error name.
     if (err == error.UnsupportedExtInst or err == error.UnsupportedEarlyReturn) {
