@@ -1717,3 +1717,25 @@ pub fn detectDoWhileBackEdge(
     }
     return null;
 }
+
+// ---------------------------------------------------------------------------
+// Shared binary-op + function-call emission (#emitBinOp/#emitCall).
+// Used by the MSL/GLSL/HLSL backends. `module` is `anytype` (HLSL's own
+// ParsedModule shares the .instructions/.id_defs shape); `type_name` is each
+// backend's type-name resolver (mslType/glslType/hlslType, uniform signature),
+// threaded in so the result-type spelling is per-target.
+// ---------------------------------------------------------------------------
+pub fn emitBinOp(module: anytype, names: *std.AutoHashMap(u32, []const u8), inst: anytype, op: []const u8, w: anytype, alloc: std.mem.Allocator, type_name: anytype) !void {
+    const rtt = try type_name(module, inst.words[1], names, alloc);
+    try w.print("    {s} {s} = {s} {s} {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "a", op, names.get(inst.words[4]) orelse "b" });
+}
+
+pub fn emitCall(module: anytype, names: *std.AutoHashMap(u32, []const u8), inst: anytype, func: []const u8, w: anytype, alloc: std.mem.Allocator, type_name: anytype) !void {
+    const rtt = try type_name(module, inst.words[1], names, alloc);
+    try w.print("    {s} {s} = {s}(", .{ rtt, names.get(inst.words[2]) orelse "v", func });
+    for (inst.words[3..], 0..) |arg, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.writeAll(names.get(arg) orelse "x");
+    }
+    try w.writeAll(");\n");
+}

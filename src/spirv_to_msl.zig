@@ -7508,11 +7508,11 @@ fn emitInstruction(
             const ex = try buildAccessExpr(m, names, bi, inst.words[4..], alloc);
             if (names.fetchPut(ri, ex) catch null) |old| alloc.free(old.value);
         },
-        .FAdd, .IAdd => try emitBinOp(m, names, inst, "+", w, alloc),
-        .FSub, .ISub => try emitBinOp(m, names, inst, "-", w, alloc),
-        .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
-        .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
-        .UMod, .SRem => try emitBinOp(m, names, inst, "%", w, alloc),
+        .FAdd, .IAdd => try common.emitBinOp(m, names, inst, "+", w, alloc, mslType),
+        .FSub, .ISub => try common.emitBinOp(m, names, inst, "-", w, alloc, mslType),
+        .FMul, .IMul => try common.emitBinOp(m, names, inst, "*", w, alloc, mslType),
+        .FDiv, .SDiv, .UDiv => try common.emitBinOp(m, names, inst, "/", w, alloc, mslType),
+        .UMod, .SRem => try common.emitBinOp(m, names, inst, "%", w, alloc, mslType),
         // OpSMod is floored (sign of the DIVISOR); Metal `%` is truncated (sign of the
         // dividend = OpSRem), so `((x % y) + y) % y` adjusts it to floored for every sign
         // combination. Componentwise. Matches spirv-cross's spvSMod helper. Bare `%` was a
@@ -7553,9 +7553,9 @@ fn emitInstruction(
             const idx = names.get(inst.words[4]) orelse "0";
             try w.print("    {s} {s} = {s}[{s}];\n", .{ rtt, names.get(inst.words[2]) orelse "e", vec, idx });
         },
-        .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitBinOp(m, names, inst, "*", w, alloc),
-        .Dot => try emitCall(m, names, inst, "dot", w, alloc),
-        .Transpose => try emitCall(m, names, inst, "transpose", w, alloc),
+        .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try common.emitBinOp(m, names, inst, "*", w, alloc, mslType),
+        .Dot => try common.emitCall(m, names, inst, "dot", w, alloc, mslType),
+        .Transpose => try common.emitCall(m, names, inst, "transpose", w, alloc, mslType),
         .OuterProduct => {
             // Metal has no outerProduct builtin. Build the matrix column by column:
             // SPIR-V OpOuterProduct's result column j is v1 * v2[j], and Metal
@@ -7576,16 +7576,16 @@ fn emitInstruction(
             }
             try w.writeAll(");\n");
         },
-        .FOrdEqual, .FUnordEqual, .IEqual => try emitBinOp(m, names, inst, "==", w, alloc),
-        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitBinOp(m, names, inst, "!=", w, alloc),
-        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitBinOp(m, names, inst, "<", w, alloc),
-        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(m, names, inst, ">", w, alloc),
-        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(m, names, inst, "<=", w, alloc),
-        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(m, names, inst, ">=", w, alloc),
-        .LogicalOr => try emitBinOp(m, names, inst, "||", w, alloc),
-        .LogicalAnd => try emitBinOp(m, names, inst, "&&", w, alloc),
-        .IsNan => try emitCall(m, names, inst, "isnan", w, alloc),
-        .IsInf => try emitCall(m, names, inst, "isinf", w, alloc),
+        .FOrdEqual, .FUnordEqual, .IEqual => try common.emitBinOp(m, names, inst, "==", w, alloc, mslType),
+        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try common.emitBinOp(m, names, inst, "!=", w, alloc, mslType),
+        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try common.emitBinOp(m, names, inst, "<", w, alloc, mslType),
+        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try common.emitBinOp(m, names, inst, ">", w, alloc, mslType),
+        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try common.emitBinOp(m, names, inst, "<=", w, alloc, mslType),
+        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try common.emitBinOp(m, names, inst, ">=", w, alloc, mslType),
+        .LogicalOr => try common.emitBinOp(m, names, inst, "||", w, alloc, mslType),
+        .LogicalAnd => try common.emitBinOp(m, names, inst, "&&", w, alloc, mslType),
+        .IsNan => try common.emitCall(m, names, inst, "isnan", w, alloc, mslType),
+        .IsInf => try common.emitCall(m, names, inst, "isinf", w, alloc, mslType),
         .LogicalNot => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = !{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -7616,11 +7616,11 @@ fn emitInstruction(
                 try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", cond_name, true_name, false_name });
             }
         },
-        .BitwiseOr => try emitBinOp(m, names, inst, "|", w, alloc),
-        .BitwiseXor => try emitBinOp(m, names, inst, "^", w, alloc),
-        .BitwiseAnd => try emitBinOp(m, names, inst, "&", w, alloc),
-        .ShiftRightLogical, .ShiftRightArithmetic => try emitBinOp(m, names, inst, ">>", w, alloc),
-        .ShiftLeftLogical => try emitBinOp(m, names, inst, "<<", w, alloc),
+        .BitwiseOr => try common.emitBinOp(m, names, inst, "|", w, alloc, mslType),
+        .BitwiseXor => try common.emitBinOp(m, names, inst, "^", w, alloc, mslType),
+        .BitwiseAnd => try common.emitBinOp(m, names, inst, "&", w, alloc, mslType),
+        .ShiftRightLogical, .ShiftRightArithmetic => try common.emitBinOp(m, names, inst, ">>", w, alloc, mslType),
+        .ShiftLeftLogical => try common.emitBinOp(m, names, inst, "<<", w, alloc, mslType),
         .Not => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = ~{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -7836,11 +7836,11 @@ fn emitInstruction(
             }
             try w.writeAll(");\n");
         },
-        .DPdx, .DPdxFine, .DPdxCoarse => try emitCall(m, names, inst, "dfdx", w, alloc),
-        .DPdy, .DPdyFine, .DPdyCoarse => try emitCall(m, names, inst, "dfdy", w, alloc),
-        .Fwidth, .FwidthFine, .FwidthCoarse => try emitCall(m, names, inst, "fwidth", w, alloc),
-        .All => try emitCall(m, names, inst, "all", w, alloc),
-        .Any => try emitCall(m, names, inst, "any", w, alloc),
+        .DPdx, .DPdxFine, .DPdxCoarse => try common.emitCall(m, names, inst, "dfdx", w, alloc, mslType),
+        .DPdy, .DPdyFine, .DPdyCoarse => try common.emitCall(m, names, inst, "dfdy", w, alloc, mslType),
+        .Fwidth, .FwidthFine, .FwidthCoarse => try common.emitCall(m, names, inst, "fwidth", w, alloc, mslType),
+        .All => try common.emitCall(m, names, inst, "all", w, alloc, mslType),
+        .Any => try common.emitCall(m, names, inst, "any", w, alloc, mslType),
         .ExtInst => {
             if (inst.words.len < 5) return;
             const instruction = inst.words[4];
@@ -8820,12 +8820,6 @@ fn emitInstruction(
         },
     }
 }
-
-fn emitBinOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rtt = try mslType(m, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = {s} {s} {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "a", op, names.get(inst.words[4]) orelse "b" });
-}
-
 /// #170: OpSMod (floored signed modulo, sign of the DIVISOR) as `((x % y) + y) % y`. Metal
 /// `%` is truncated (sign of the dividend = OpSRem); this compound turns it floored for every
 /// sign combination. Componentwise. Equivalent to spirv-cross's spvSMod helper.
@@ -8835,17 +8829,6 @@ fn emitSMod(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), in
     const y = names.get(inst.words[4]) orelse "b";
     try w.print("    {s} {s} = (({s} % {s}) + {s}) % {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", x, y, y, y });
 }
-
-fn emitCall(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rtt = try mslType(m, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = {s}(", .{ rtt, names.get(inst.words[2]) orelse "v", func });
-    for (inst.words[3..], 0..) |arg, i| {
-        if (i > 0) try w.writeAll(", ");
-        try w.writeAll(names.get(arg) orelse "x");
-    }
-    try w.writeAll(");\n");
-}
-
 /// Classify an atomic pointer: SSBO variable or ImageTexelPointer (image atomic)
 // The MSL address space an atomic pointer lives in, derived from the SPIR-V storage
 // class of the pointer's type. `shared` (Workgroup) → threadgroup; SSBO (StorageBuffer /
