@@ -2576,9 +2576,16 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
         const matrix_tid: ?u32 = blk: {
             if (mt_inst) |mi| {
                 if (mi.op == .TypeMatrix) break :blk member_type_id;
-                if (mi.op == .TypeArray and mi.words.len > 3) {
-                    const et = getDef(module, mi.words[2]);
-                    if (et != null and et.?.op == .TypeMatrix) break :blk mi.words[2];
+                // Drill through nested TypeArray levels (a multi-dim array of matrix,
+                // e.g. `mat2x3 var[3][4]`) to find the innermost matrix element type,
+                // so the row_major / non-square-row-major checks fire on it.
+                if (mi.op == .TypeArray) {
+                    var cur: Instruction = mi;
+                    while (cur.op == .TypeArray and cur.words.len > 3) {
+                        const et = getDef(module, cur.words[2]) orelse break;
+                        if (et.op == .TypeMatrix) break :blk cur.words[2];
+                        cur = et;
+                    }
                 }
             }
             break :blk null;
@@ -2622,11 +2629,26 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
         };
         if (mt_inst) |mi| {
             if (mi.op == .TypeArray and mi.words.len > 3) {
-                const elem_type = try hlslType(module, mi.words[2], names, alloc);
-                const len_id = mi.words[3];
-                const len_inst = getDef(module, len_id);
-                const len_val: u32 = if (len_inst) |li| li.words[3] else 1;
-                try w.print("    {s}{s} {s}_{s}[{d}]{s};\n", .{ row_major_qual, elem_type, cbuffer_name, mname, len_val, packoff });
+                // Multi-dim array member (e.g. `T var[A][B]`): collect every nested
+                // TypeArray dimension; the base (innermost) element type is what
+                // hlslType spells. Each level's size is its OpConstant literal.
+                var dims_buf: [64]u8 = undefined;
+                var dims_fbs = std.io.fixedBufferStream(&dims_buf);
+                var base_type_id: u32 = mi.words[2];
+                var cur: Instruction = mi;
+                while (true) {
+                    const len_inst = getDef(module, cur.words[3]) orelse break;
+                    if (len_inst.words.len < 4) break;
+                    dims_fbs.writer().print("[{d}]", .{len_inst.words[3]}) catch break;
+                    const elem = getDef(module, cur.words[2]) orelse break;
+                    if (elem.op != .TypeArray or elem.words.len < 4) {
+                        base_type_id = cur.words[2];
+                        break;
+                    }
+                    cur = elem;
+                }
+                const elem_type = try hlslType(module, base_type_id, names, alloc);
+                try w.print("    {s}{s} {s}_{s}{s}{s};\n", .{ row_major_qual, elem_type, cbuffer_name, mname, dims_fbs.getWritten(), packoff });
                 continue;
             }
         }
