@@ -7515,7 +7515,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // WGSL `!=` follows IEEE-754, so it is the *unordered* not-equal (true
             // when either operand is NaN) — exactly OpFUnordNotEqual. glslang emits
             // FUnordNotEqual for every GLSL float `!=`/`notEqual()`. (#170)
-            .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
+            .FUnordNotEqual, .INotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
+            .FOrdNotEqual => try emitOrderedNotEqual(module, names, &inline_exprs, inst, w, arena, indent),
             .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, &inline_exprs, inst, "<", w, arena, indent),
             .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, &inline_exprs, inst, ">", w, arena, indent),
             .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, &inline_exprs, inst, "<=", w, arena, indent),
@@ -9029,6 +9030,30 @@ fn emitUnorderedEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, 
     );
 }
 
+/// OpFOrdNotEqual: ordered not-equal is FALSE on a NaN operand, but WGSL `!=` follows
+/// IEEE-754 (unordered = true on NaN), so bare `!=` is plausible-but-wrong for the
+/// ordered form. FOrdNotEqual is the complement of FUnordEqual, so emit `!(...)` over
+/// the select()-based FUnordEqual form (mirrors emitUnorderedEqual; WGSL `!` is
+/// componentwise on vecN<bool>, and select() avoids &&/|| on vecN<bool>). glslang
+/// never emits FOrdNotEqual. Like emitUnorderedEqual/emitUnorderedCompare, this is kept
+/// out of EVERY inline/symbol table (isInlineableArithOp, getInlineBinOp,
+/// buildInlineExpr, getBinOpSymbol, the condition-resolution switch) and routed through
+/// this emitter in BOTH the main dispatch and the switch/loop replay path, so a
+/// single-use or replayed FOrdNotEqual can NEVER be re-derived as a bare (wrong) `!=`.
+fn emitOrderedNotEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const lhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, 0);
+    const rhs_raw = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
+    const lhs = if (isCompoundExpr(lhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{lhs_raw}) else lhs_raw;
+    const rhs = if (isCompoundExpr(rhs_raw)) try std.fmt.allocPrint(arena, "({s})", .{rhs_raw}) else rhs_raw;
+    try writeIndentStatic(w, indent);
+    try w.print(
+        "let {s}: {s} = !(select(select({s} != {s}, {s} != {s}, {s} != {s}), {s} == {s}, {s} == {s}));\n",
+        .{ result_name, rt, rhs, rhs, lhs, lhs, lhs, lhs, lhs, rhs, lhs, rhs },
+    );
+}
+
 /// OpFMod takes the sign of operand 2 (the divisor) — GLSL mod() semantics. WGSL's
 /// float `%` takes the sign of operand 1 (truncated remainder, like C fmod), so it
 /// is silently wrong for operands of opposite sign. Emit the sign-correct expansion
@@ -9235,7 +9260,7 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
     const cond_def = getDef(module, cond_id) orelse return null;
     switch (cond_def.op) {
         // Comparison ops — inline as "lhs op rhs"
-        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .SLessThan, .SGreaterThan, .SLessThanEqual, .SGreaterThanEqual, .ULessThan, .UGreaterThan, .ULessThanEqual, .UGreaterThanEqual, .IEqual, .INotEqual => {
+        .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FUnordNotEqual, .SLessThan, .SGreaterThan, .SLessThanEqual, .SGreaterThanEqual, .ULessThan, .UGreaterThan, .ULessThanEqual, .UGreaterThanEqual, .IEqual, .INotEqual => {
             if (cond_def.words.len < 5) return null;
             // Resolve operands through CopyObject/Load chains to use live variable names
             const lhs = resolveSourceName(module, names, cond_def.words[3], 0) orelse return null;
@@ -9555,6 +9580,10 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         .FUnordLessThanEqual => try emitUnorderedCompare(module, names, inline_exprs, inst, ">", w, arena, indent),
         .FUnordGreaterThanEqual => try emitUnorderedCompare(module, names, inline_exprs, inst, "<", w, arena, indent),
         .FUnordEqual => try emitUnorderedEqual(module, names, inline_exprs, inst, w, arena, indent),
+        // OpFOrdNotEqual needs the `!(FUnordEqual)` lowering (see emitOrderedNotEqual),
+        // not the bare `!=` the generic getBinOpSymbol path below would emit (WGSL !=
+        // is unordered = true on NaN, but FOrdNotEqual is false on NaN). (#170)
+        .FOrdNotEqual => try emitOrderedNotEqual(module, names, inline_exprs, inst, w, arena, indent),
         else => {
             // For all other instructions, try emitCall/emitBinOp patterns
             // Comparison ops
@@ -9616,7 +9645,7 @@ fn getBinOpSymbol(op: spirv.Op) ?[]const u8 {
         .FOrdLessThanEqual => "<=",
         .FOrdGreaterThanEqual => ">=",
         .FOrdEqual => "==",
-        .FOrdNotEqual, .FUnordNotEqual => "!=",
+        .FUnordNotEqual => "!=",
         .IEqual => "==",
         .INotEqual => "!=",
         .VectorTimesScalar, .MatrixTimesScalar => "*",
@@ -9770,7 +9799,7 @@ fn isInlineableArithOp(op: spirv.Op) bool {
     return switch (op) {
         // OpFMod excluded: it must not be inlined as `%` (wrong sign in WGSL); it
         // routes to emitFMod's floor expansion as a named statement instead.
-        .FMul, .FAdd, .FSub, .FDiv, .FNegate, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual, .ExtInst => true,
+        .FMul, .FAdd, .FSub, .FDiv, .FNegate, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FUnordNotEqual, .ExtInst => true,
         else => false,
     };
 }
@@ -9788,7 +9817,7 @@ fn getInlineBinOp(op: spirv.Op) ?[]const u8 {
         .FOrdLessThanEqual => "<=",
         .FOrdGreaterThanEqual => ">=",
         .FOrdEqual => "==",
-        .FOrdNotEqual, .FUnordNotEqual => "!=",
+        .FUnordNotEqual => "!=",
         else => null,
     };
 }
@@ -9820,7 +9849,7 @@ fn buildInlineExpr(module: *const ParsedModule, names: *const std.AutoHashMap(u3
         },
         // Binary arithmetic ops: lhs op rhs (OpFMod excluded — wrong-sign `%` in
         // WGSL; it is never inlined, see isInlineableArithOp / emitFMod)
-        .FMul, .FAdd, .FSub, .FDiv, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FOrdNotEqual, .FUnordNotEqual => {
+        .FMul, .FAdd, .FSub, .FDiv, .IMul, .IAdd, .ISub, .SDiv, .UDiv, .VectorTimesScalar, .MatrixTimesScalar, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FOrdEqual, .FUnordNotEqual => {
             if (inst.words.len < 5) return null;
             const op_sym = getInlineBinOp(inst.op) orelse return null;
             const lhs = resolveOperandExpr(module, names, inline_exprs, inst.words[3], arena, depth + 1);

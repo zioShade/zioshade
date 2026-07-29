@@ -1730,6 +1730,89 @@ test "wgsl: unordered float equality lowers to the isNaN-aware select form (#170
     try nagaValidateOrSkip(v_wgsl, "funord-eq-vec");
 }
 
+// #170: OpFOrdNotEqual (ordered not-equal) is FALSE on NaN, but WGSL `!=` is unordered
+// (true on NaN), so bare `!=` is silent-wrong. It is the complement of OpFUnordEqual, so
+// it lowers to `!(...)` over the select()-based FUnordEqual form (WGSL `!` is componentwise
+// on vecN<bool>). glslang emits FUnordNotEqual (183) for `!=`; rewritten to FOrdNotEqual (182).
+test "wgsl: ordered float not-equal lowers to the negated select form (#170)" {
+    // Scalar: `a != b` -> FUnordNotEqual, rewritten to FOrdNotEqual.
+    const scalar = try compileToSpirv("ford_ne_scalar",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = (a != b) ? vec4(1.0) : vec4(0.0); }
+    );
+    defer alloc.free(scalar);
+    const s_rw = try rewriteFirstOpcode(scalar, 183, 182);
+    defer alloc.free(s_rw);
+    const s_wgsl = try zioshade.spirvToWGSL(alloc, s_rw, .{});
+    defer alloc.free(s_wgsl);
+    try assertContains(s_wgsl, "!(select(select(");
+    try nagaValidateOrSkip(s_wgsl, "ford-ne-scalar");
+
+    // Vector: `notEqual(a,b)` on vec3 -> FUnordNotEqual bvec3, rewritten to FOrdNotEqual.
+    const vec = try compileToSpirv("ford_ne_vec",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec3 c = notEqual(a, b);
+        \\    fragColor = vec4(float(c.x), float(c.y), float(c.z), 1.0);
+        \\}
+    );
+    defer alloc.free(vec);
+    const v_rw = try rewriteFirstOpcode(vec, 183, 182);
+    defer alloc.free(v_rw);
+    const v_wgsl = try zioshade.spirvToWGSL(alloc, v_rw, .{});
+    defer alloc.free(v_wgsl);
+    try assertContains(v_wgsl, "!(select(select(");
+    try nagaValidateOrSkip(v_wgsl, "ford-ne-vec");
+}
+
+// #170 regression: a SINGLE-USE OpFOrdNotEqual consumed by another op (here
+// OpLogicalAnd) must NOT be inlined as a bare `!=` (WGSL `!=` is unordered = true on
+// NaN, but FOrdNotEqual is false on NaN). The inline-expression pre-pass keeps the
+// FOrdNotEqual materialized as the `!(select(...))` let and references it by name.
+// Hand SPIR-V (glslang cannot emit FOrdNotEqual); uses constants so `&&` does not
+// short-circuit-restructure, exercising the inline path directly.
+test "wgsl: single-use OpFOrdNotEqual consumed by another op is not inlined as bare != (#170)" {
+    const spirv = assembleSpirv("ford_ne_inline",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%bool = OpTypeBool
+        \\%v4float = OpTypeVector %float 4
+        \\%f1 = OpConstant %float 1
+        \\%f2 = OpConstant %float 2
+        \\%ptr_o = OpTypePointer Output %v4float
+        \\%o = OpVariable %ptr_o Output
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%ne = OpFOrdNotEqual %bool %f1 %f2
+        \\%eq = OpFOrdEqual %bool %f1 %f2
+        \\%both = OpLogicalAnd %bool %ne %eq
+        \\%res = OpSelect %v4float %both %f1 %f2
+        \\OpStore %o %res
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // FOrdNotEqual is lowered to the NaN-correct !(select(...)) form.
+    try assertContains(wgsl, "!(select(select(");
+    // The buggy inlined form `1.0f != 2.0f` (the bare FOrdNotEqual) must be absent --
+    // the consumer must reference the named let, not re-derive a bare `!=`.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "1.0f != 2.0f") == null);
+}
+
 // #170: an `if / else-if / else` chain where every branch RETURNS must lower to a
 // properly right-nested WGSL if/else. The WGSL structurizer emits `} else {` when a
 // true-branch OpBranches to the merge; but a branch that DIVERGES (return/discard,
