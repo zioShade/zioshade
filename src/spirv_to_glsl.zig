@@ -711,17 +711,6 @@ fn writeAccessExpr(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
         }
     }
 }
-
-fn resolvePointer(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(m, ptr_id) orelse {
-        const n = names.get(ptr_id) orelse "var";
-        return try alloc.dupe(u8, n);
-    };
-    if (inst.op == .AccessChain) return try buildAccessExpr(m, names, inst.words[3], inst.words[4..], alloc);
-    const n = names.get(ptr_id) orelse "var";
-    return try alloc.dupe(u8, n);
-}
-
 // ---- GLSL type resolution ----
 fn getArraySuffix(m: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
     // multi_dim=true: a local/output variable of a multi-dimensional array type
@@ -4230,10 +4219,10 @@ fn emitInstruction(
             const ex = try buildAccessExpr(m, names, bi, inst.words[4..], alloc);
             if (names.fetchPut(ri, ex) catch null) |old| alloc.free(old.value);
         },
-        .FAdd, .IAdd => try emitBinOp(m, names, inst, "+", w, alloc),
-        .FSub, .ISub => try emitBinOp(m, names, inst, "-", w, alloc),
-        .FMul, .IMul => try emitBinOp(m, names, inst, "*", w, alloc),
-        .FDiv, .SDiv, .UDiv => try emitBinOp(m, names, inst, "/", w, alloc),
+        .FAdd, .IAdd => try common.emitBinOp(m, names, inst, "+", w, alloc, glslType),
+        .FSub, .ISub => try common.emitBinOp(m, names, inst, "-", w, alloc, glslType),
+        .FMul, .IMul => try common.emitBinOp(m, names, inst, "*", w, alloc, glslType),
+        .FDiv, .SDiv, .UDiv => try common.emitBinOp(m, names, inst, "/", w, alloc, glslType),
         .FMod => {
             // OpFMod takes the sign of operand 2 (the divisor) -- exactly GLSL mod()'s
             // floor-based semantics (`x - y*floor(x/y)`), so mod() is correct here.
@@ -4263,7 +4252,7 @@ fn emitInstruction(
         // (sign of the DIVIDEND). Emit `x - y*(x/y)` for SRem (GLSL `/` truncates toward
         // zero, giving the truncated remainder). Componentwise. GLSL was the lone backend
         // getting SRem wrong (WGSL/HLSL/MSL `%` is already truncated). (#170)
-        .UMod, .SMod => try emitBinOp(m, names, inst, "%", w, alloc),
+        .UMod, .SMod => try common.emitBinOp(m, names, inst, "%", w, alloc, glslType),
         .SRem => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const x = names.get(inst.words[3]) orelse "a";
@@ -4274,23 +4263,23 @@ fn emitInstruction(
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = -{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
         },
-        .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitBinOp(m, names, inst, "*", w, alloc),
-        .Dot => try emitCall(m, names, inst, "dot", w, alloc),
-        .Transpose => try emitCall(m, names, inst, "transpose", w, alloc),
+        .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try common.emitBinOp(m, names, inst, "*", w, alloc, glslType),
+        .Dot => try common.emitCall(m, names, inst, "dot", w, alloc, glslType),
+        .Transpose => try common.emitCall(m, names, inst, "transpose", w, alloc, glslType),
         // GLSL has a native outerProduct(c, r); SPIR-V OpOuterProduct uses the same
         // operand order. Without this arm it fell through to `// unhandled op 147`,
         // leaving the result id undefined at its use sites.
-        .OuterProduct => try emitCall(m, names, inst, "outerProduct", w, alloc),
+        .OuterProduct => try common.emitCall(m, names, inst, "outerProduct", w, alloc, glslType),
         .FOrdEqual, .FUnordEqual, .IEqual => try emitRelOp(m, names, inst, "==", "equal", w, alloc),
         .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitRelOp(m, names, inst, "!=", "notEqual", w, alloc),
         .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitRelOp(m, names, inst, "<", "lessThan", w, alloc),
         .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitRelOp(m, names, inst, ">", "greaterThan", w, alloc),
         .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitRelOp(m, names, inst, "<=", "lessThanEqual", w, alloc),
         .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitRelOp(m, names, inst, ">=", "greaterThanEqual", w, alloc),
-        .LogicalOr => try emitBinOp(m, names, inst, "||", w, alloc),
-        .LogicalAnd => try emitBinOp(m, names, inst, "&&", w, alloc),
-        .IsNan => try emitCall(m, names, inst, "isnan", w, alloc),
-        .IsInf => try emitCall(m, names, inst, "isinf", w, alloc),
+        .LogicalOr => try common.emitBinOp(m, names, inst, "||", w, alloc, glslType),
+        .LogicalAnd => try common.emitBinOp(m, names, inst, "&&", w, alloc, glslType),
+        .IsNan => try common.emitCall(m, names, inst, "isnan", w, alloc, glslType),
+        .IsInf => try common.emitCall(m, names, inst, "isinf", w, alloc, glslType),
         .LogicalNot => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = !{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -4331,11 +4320,11 @@ fn emitInstruction(
                 try w.print("    {s} {s} = ({s}) ? {s} : {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", cond_name, true_name, false_name });
             }
         },
-        .BitwiseOr => try emitBinOp(m, names, inst, "|", w, alloc),
-        .BitwiseXor => try emitBinOp(m, names, inst, "^", w, alloc),
-        .BitwiseAnd => try emitBinOp(m, names, inst, "&", w, alloc),
-        .ShiftRightLogical, .ShiftRightArithmetic => try emitBinOp(m, names, inst, ">>", w, alloc),
-        .ShiftLeftLogical => try emitBinOp(m, names, inst, "<<", w, alloc),
+        .BitwiseOr => try common.emitBinOp(m, names, inst, "|", w, alloc, glslType),
+        .BitwiseXor => try common.emitBinOp(m, names, inst, "^", w, alloc, glslType),
+        .BitwiseAnd => try common.emitBinOp(m, names, inst, "&", w, alloc, glslType),
+        .ShiftRightLogical, .ShiftRightArithmetic => try common.emitBinOp(m, names, inst, ">>", w, alloc, glslType),
+        .ShiftLeftLogical => try common.emitBinOp(m, names, inst, "<<", w, alloc, glslType),
         .Not => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
             try w.print("    {s} {s} = ~{s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -4549,17 +4538,17 @@ fn emitInstruction(
         // natively (GL_ARB_derivative_control / 4.5 core); collapsing them to plain
         // dFdx/dFdy/fwidth silently changes the derivative (plain is impl-defined
         // coarse-or-fine). The extension is spliced when these tokens are emitted.
-        .DPdx => try emitCall(m, names, inst, "dFdx", w, alloc),
-        .DPdxCoarse => try emitCall(m, names, inst, "dFdxCoarse", w, alloc),
-        .DPdxFine => try emitCall(m, names, inst, "dFdxFine", w, alloc),
-        .DPdy => try emitCall(m, names, inst, "dFdy", w, alloc),
-        .DPdyCoarse => try emitCall(m, names, inst, "dFdyCoarse", w, alloc),
-        .DPdyFine => try emitCall(m, names, inst, "dFdyFine", w, alloc),
-        .Fwidth => try emitCall(m, names, inst, "fwidth", w, alloc),
-        .FwidthCoarse => try emitCall(m, names, inst, "fwidthCoarse", w, alloc),
-        .FwidthFine => try emitCall(m, names, inst, "fwidthFine", w, alloc),
-        .All => try emitCall(m, names, inst, "all", w, alloc),
-        .Any => try emitCall(m, names, inst, "any", w, alloc),
+        .DPdx => try common.emitCall(m, names, inst, "dFdx", w, alloc, glslType),
+        .DPdxCoarse => try common.emitCall(m, names, inst, "dFdxCoarse", w, alloc, glslType),
+        .DPdxFine => try common.emitCall(m, names, inst, "dFdxFine", w, alloc, glslType),
+        .DPdy => try common.emitCall(m, names, inst, "dFdy", w, alloc, glslType),
+        .DPdyCoarse => try common.emitCall(m, names, inst, "dFdyCoarse", w, alloc, glslType),
+        .DPdyFine => try common.emitCall(m, names, inst, "dFdyFine", w, alloc, glslType),
+        .Fwidth => try common.emitCall(m, names, inst, "fwidth", w, alloc, glslType),
+        .FwidthCoarse => try common.emitCall(m, names, inst, "fwidthCoarse", w, alloc, glslType),
+        .FwidthFine => try common.emitCall(m, names, inst, "fwidthFine", w, alloc, glslType),
+        .All => try common.emitCall(m, names, inst, "all", w, alloc, glslType),
+        .Any => try common.emitCall(m, names, inst, "any", w, alloc, glslType),
         .ExtInst => {
             if (inst.words.len < 5) return;
             const std450_opcode = inst.words[4];
@@ -5254,22 +5243,6 @@ fn emitInstruction(
         },
     }
 }
-
-fn emitBinOp(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rtt = try glslType(m, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = {s} {s} {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "a", op, names.get(inst.words[4]) orelse "b" });
-}
-
-fn emitCall(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rtt = try glslType(m, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = {s}(", .{ rtt, names.get(inst.words[2]) orelse "v", func });
-    for (inst.words[3..], 0..) |arg, i| {
-        if (i > 0) try w.writeAll(", ");
-        try w.writeAll(names.get(arg) orelse "x");
-    }
-    try w.writeAll(");\n");
-}
-
 /// Classify an atomic pointer: SSBO variable or ImageTexelPointer (image atomic)
 const AtomicPtr = union(enum) {
     ssbo: []const u8,

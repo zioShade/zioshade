@@ -5432,10 +5432,10 @@ fn emitInstruction(
         },
 
         // Arithmetic
-        .FAdd, .IAdd => try emitBinOp(module, names, inst, "+", w, alloc),
-        .FSub, .ISub => try emitBinOp(module, names, inst, "-", w, alloc),
-        .FMul, .IMul => try emitBinOp(module, names, inst, "*", w, alloc),
-        .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, inst, "/", w, alloc),
+        .FAdd, .IAdd => try common.emitBinOp(module, names, inst, "+", w, alloc, hlslType),
+        .FSub, .ISub => try common.emitBinOp(module, names, inst, "-", w, alloc, hlslType),
+        .FMul, .IMul => try common.emitBinOp(module, names, inst, "*", w, alloc, hlslType),
+        .FDiv, .SDiv, .UDiv => try common.emitBinOp(module, names, inst, "/", w, alloc, hlslType),
         .FMod => {
             // GLSL mod(x,y) = x - y * floor(x/y) — floor-based, NOT truncation
             // HLSL % and fmod() both use truncation, so we must inline the floor formula
@@ -5445,7 +5445,7 @@ fn emitInstruction(
             const rhs = names.get(inst.words[4]) orelse "b";
             try w.print("    {s} {s} = {s} - {s} * floor({s} / {s});\n", .{ rt, result_name, lhs, rhs, lhs, rhs });
         },
-        .UMod, .SRem, .FRem => try emitBinOp(module, names, inst, "%", w, alloc),
+        .UMod, .SRem, .FRem => try common.emitBinOp(module, names, inst, "%", w, alloc, hlslType),
         // OpSMod takes the sign of operand 2 (the DIVISOR) -- floored modulo -- whereas
         // HLSL `%` is truncated (sign of the dividend = OpSRem). `((x % y) + y) % y` turns
         // the truncated remainder into the floored one for every sign combination
@@ -5453,21 +5453,21 @@ fn emitInstruction(
         // uses an equivalent spvSMod helper; bare `%` was a silent miscompile on
         // opposite-sign operands (a common case: glslang emits OpSMod for GLSL `int %`). (#170)
         .SMod => try emitSMod(module, names, inst, w, alloc),
-        .ShiftLeftLogical => try emitBinOp(module, names, inst, "<<", w, alloc),
+        .ShiftLeftLogical => try common.emitBinOp(module, names, inst, "<<", w, alloc, hlslType),
         // HLSL `>>` is arithmetic for signed operands and logical for unsigned (it
         // keys off the lhs type), so both SPIR-V shift-right ops map to `>>`; the
         // operand's HLSL type (int vs uint) selects the right behavior.
-        .ShiftRightLogical, .ShiftRightArithmetic => try emitBinOp(module, names, inst, ">>", w, alloc),
+        .ShiftRightLogical, .ShiftRightArithmetic => try common.emitBinOp(module, names, inst, ">>", w, alloc, hlslType),
 
         .FNegate, .SNegate => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             try w.print("    {s} {s} = -{s};\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
         },
 
-        .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, inst, "*", w, alloc),
+        .VectorTimesScalar, .MatrixTimesScalar => try common.emitBinOp(module, names, inst, "*", w, alloc, hlslType),
         .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => try emitMatrixMulSwapped(module, names, inst, w, alloc),
-        .Dot => try emitCall(module, names, inst, "dot", w, alloc),
-        .Transpose => try emitCall(module, names, inst, "transpose", w, alloc),
+        .Dot => try common.emitCall(module, names, inst, "dot", w, alloc, hlslType),
+        .Transpose => try common.emitCall(module, names, inst, "transpose", w, alloc, hlslType),
         .OuterProduct => {
             // HLSL has no outerProduct builtin. Build the matrix column by column:
             // SPIR-V OpOuterProduct's result column j is v1 * v2[j]. zioshade
@@ -5492,15 +5492,15 @@ fn emitInstruction(
         },
 
         // Comparisons
-        .FOrdEqual, .FUnordEqual, .IEqual => try emitBinOp(module, names, inst, "==", w, alloc),
-        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitBinOp(module, names, inst, "!=", w, alloc),
-        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, inst, "<", w, alloc),
-        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, inst, ">", w, alloc),
-        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, inst, "<=", w, alloc),
-        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, inst, ">=", w, alloc),
+        .FOrdEqual, .FUnordEqual, .IEqual => try common.emitBinOp(module, names, inst, "==", w, alloc, hlslType),
+        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try common.emitBinOp(module, names, inst, "!=", w, alloc, hlslType),
+        .FOrdLessThan, .FUnordLessThan, .SLessThan, .ULessThan => try common.emitBinOp(module, names, inst, "<", w, alloc, hlslType),
+        .FOrdGreaterThan, .FUnordGreaterThan, .SGreaterThan, .UGreaterThan => try common.emitBinOp(module, names, inst, ">", w, alloc, hlslType),
+        .FOrdLessThanEqual, .FUnordLessThanEqual, .SLessThanEqual, .ULessThanEqual => try common.emitBinOp(module, names, inst, "<=", w, alloc, hlslType),
+        .FOrdGreaterThanEqual, .FUnordGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try common.emitBinOp(module, names, inst, ">=", w, alloc, hlslType),
 
-        .LogicalOr => try emitBinOp(module, names, inst, "||", w, alloc),
-        .LogicalAnd => try emitBinOp(module, names, inst, "&&", w, alloc),
+        .LogicalOr => try common.emitBinOp(module, names, inst, "||", w, alloc, hlslType),
+        .LogicalAnd => try common.emitBinOp(module, names, inst, "&&", w, alloc, hlslType),
         .LogicalNot => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             try w.print("    {s} {s} = !{s};\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -5544,9 +5544,9 @@ fn emitInstruction(
             }
         },
 
-        .BitwiseOr => try emitBinOp(module, names, inst, "|", w, alloc),
-        .BitwiseXor => try emitBinOp(module, names, inst, "^", w, alloc),
-        .BitwiseAnd => try emitBinOp(module, names, inst, "&", w, alloc),
+        .BitwiseOr => try common.emitBinOp(module, names, inst, "|", w, alloc, hlslType),
+        .BitwiseXor => try common.emitBinOp(module, names, inst, "^", w, alloc, hlslType),
+        .BitwiseAnd => try common.emitBinOp(module, names, inst, "&", w, alloc, hlslType),
         .Not => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             try w.print("    {s} {s} = ~{s};\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -5849,12 +5849,12 @@ fn emitInstruction(
         // #474: preserve the coarse/fine precision request (HLSL SM4+ has ddx_coarse/
         // ddx_fine/ddy_coarse/ddy_fine natively). Collapsing to plain ddx/ddy silently
         // changes the derivative (plain is impl-defined coarse-or-fine).
-        .DPdx => try emitCall(module, names, inst, "ddx", w, alloc),
-        .DPdxCoarse => try emitCall(module, names, inst, "ddx_coarse", w, alloc),
-        .DPdxFine => try emitCall(module, names, inst, "ddx_fine", w, alloc),
-        .DPdy => try emitCall(module, names, inst, "ddy", w, alloc),
-        .DPdyCoarse => try emitCall(module, names, inst, "ddy_coarse", w, alloc),
-        .DPdyFine => try emitCall(module, names, inst, "ddy_fine", w, alloc),
+        .DPdx => try common.emitCall(module, names, inst, "ddx", w, alloc, hlslType),
+        .DPdxCoarse => try common.emitCall(module, names, inst, "ddx_coarse", w, alloc, hlslType),
+        .DPdxFine => try common.emitCall(module, names, inst, "ddx_fine", w, alloc, hlslType),
+        .DPdy => try common.emitCall(module, names, inst, "ddy", w, alloc, hlslType),
+        .DPdyCoarse => try common.emitCall(module, names, inst, "ddy_coarse", w, alloc, hlslType),
+        .DPdyFine => try common.emitCall(module, names, inst, "ddy_fine", w, alloc, hlslType),
         .Fwidth, .FwidthFine, .FwidthCoarse => {
             // HLSL has no fwidth_coarse/fine; build it from the matching-precision ddx/ddy.
             const dx: []const u8 = switch (inst.op) {
@@ -5873,10 +5873,10 @@ fn emitInstruction(
             try w.print("    {s} {s} = abs({s}({s})) + abs({s}({s}));\n", .{ rt, result, dx, arg, dy, arg });
         },
 
-        .All => try emitCall(module, names, inst, "all", w, alloc),
-        .Any => try emitCall(module, names, inst, "any", w, alloc),
-        .IsNan => try emitCall(module, names, inst, "isnan", w, alloc),
-        .IsInf => try emitCall(module, names, inst, "isinf", w, alloc),
+        .All => try common.emitCall(module, names, inst, "all", w, alloc, hlslType),
+        .Any => try common.emitCall(module, names, inst, "any", w, alloc, hlslType),
+        .IsNan => try common.emitCall(module, names, inst, "isnan", w, alloc, hlslType),
+        .IsInf => try common.emitCall(module, names, inst, "isinf", w, alloc, hlslType),
 
         // GLSLstd450
         .ExtInst => {
@@ -7450,19 +7450,6 @@ fn writeAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
         }
     }
 }
-
-fn resolvePointer(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), ptr_id: u32, alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(module, ptr_id) orelse {
-        const name = names.get(ptr_id) orelse "var";
-        return try alloc.dupe(u8, name);
-    };
-    if (inst.op == .AccessChain) {
-        return try buildAccessExpr(module, names, inst.words[3], inst.words[4..], alloc);
-    }
-    const name = names.get(ptr_id) orelse "var";
-    return try alloc.dupe(u8, name);
-}
-
 fn buildAccessExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32, alloc: std.mem.Allocator) ![]const u8 {
     const base_name_raw = names.get(base_id) orelse "base";
 
@@ -7842,16 +7829,6 @@ fn resolvePointeeType(module: *const ParsedModule, id: u32) ?u32 {
         else => return null,
     }
 }
-
-fn emitBinOp(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rt = try hlslType(module, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = {s} {s} {s};\n", .{
-        rt,                                  names.get(inst.words[2]) orelse "v",
-        names.get(inst.words[3]) orelse "a", op,
-        names.get(inst.words[4]) orelse "b",
-    });
-}
-
 /// #170: emit OpSMod (floored signed modulo, sign of the divisor) as `((x % y) + y) % y`.
 /// HLSL `%` is truncated (sign of the dividend = OpSRem), so it is wrong for opposite-sign
 /// operands; this compound turns the truncated remainder into the floored result for every
@@ -7863,17 +7840,6 @@ fn emitSMod(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     const y = names.get(inst.words[4]) orelse "b";
     try w.print("    {s} {s} = (({s} % {s}) + {s}) % {s};\n", .{ rt, names.get(inst.words[2]) orelse "v", x, y, y, y });
 }
-
-fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
-    const rt = try hlslType(module, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = {s}(", .{ rt, names.get(inst.words[2]) orelse "v", func });
-    for (inst.words[3..], 0..) |arg, i| {
-        if (i > 0) try w.writeAll(", ");
-        try w.writeAll(names.get(arg) orelse "x");
-    }
-    try w.writeAll(");\n");
-}
-
 /// True if the matrix VALUE `id` is loaded from a buffer-backed variable
 /// (Uniform / PushConstant / StorageBuffer). Such a matrix is declared bare
 /// (HLSL default column_major) and holds the LOGICAL matrix M, so `mul(M, v)` is
@@ -7933,7 +7899,7 @@ fn valueTypeIsMatrix(module: *const ParsedModule, id: u32) bool {
 /// compensates. The local case is confirmed on D3D12 WARP + Metal
 /// (docs/DIFFERENTIAL_PROOF.md, tools/warp). (#497)
 fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
-    if (inst.words.len < 5) return emitCall(module, names, inst, "mul", w, alloc);
+    if (inst.words.len < 5) return common.emitCall(module, names, inst, "mul", w, alloc, hlslType);
     const rt = try hlslType(module, inst.words[1], names, alloc);
     const a = names.get(inst.words[3]) orelse "x";
     const b = names.get(inst.words[4]) orelse "x";
