@@ -1212,6 +1212,36 @@ pub fn localGetDef(instructions: anytype, id_defs: anytype, id: u32) ?@TypeOf(in
     return instructions[idx];
 }
 
+/// Resolve an OpTypeArray length id to a concrete u32 for backends that have no
+/// specialization constants (HLSL/GLSL/MSL). OpConstant/OpSpecConstant -> their
+/// literal/default (words[3]); OpSpecConstantOp -> evaluated using operand defaults
+/// (IAdd/ISub/IMul of leaf constants, e.g. `const int d = c + 50;` -> c's default
+/// + 50). Returns null for shapes it can't evaluate so the caller can honest-error
+/// rather than emit a wrong size. `module` is anytype (HLSL's own ParsedModule
+/// shares the .instructions/.id_defs shape).
+pub fn arrayLengthValue(module: anytype, len_id: u32) ?u32 {
+    return arrayLenEval(module, len_id, 0);
+}
+fn arrayLenEval(module: anytype, len_id: u32, depth: u32) ?u32 {
+    if (depth > 8) return null;
+    const def = localGetDef(module.instructions, module.id_defs, len_id) orelse return null;
+    switch (def.op) {
+        .Constant, .SpecConstant => return if (def.words.len > 3) def.words[3] else null,
+        .SpecConstantOp => {
+            // words layout: [hdr, result_type, result_id, opcode, operand1, operand2, ...]
+            if (def.words.len < 6) return null;
+            const oc = def.words[3];
+            const a = arrayLenEval(module, def.words[4], depth + 1) orelse return null;
+            const b = arrayLenEval(module, def.words[5], depth + 1) orelse return null;
+            if (oc == @intFromEnum(spirv.Op.IAdd)) return a +% b;
+            if (oc == @intFromEnum(spirv.Op.ISub)) return a -% b;
+            if (oc == @intFromEnum(spirv.Op.IMul)) return a *% b;
+            return null;
+        },
+        else => return null,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unified Backend Helpers (used by GLSL, HLSL, MSL, WGSL backends)
 // ---------------------------------------------------------------------------

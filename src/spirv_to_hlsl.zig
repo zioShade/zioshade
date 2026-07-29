@@ -2530,8 +2530,11 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
                 const et = try hlslType(module, mi2.words[2], names, alloc);
-                const li = common.localGetDef(instructions, id_defs, mi2.words[3]);
-                const lv: u32 = if (li) |l| l.words[3] else 1;
+                // Resolve the length to a concrete value (OpConstant / OpSpecConstant
+                // / OpSpecConstantOp arithmetic like `c + 50`); honest-error if it
+                // can't be evaluated rather than emit a wrong/garbage dimension.
+                const lv: u32 = common.arrayLengthValue(module, mi2.words[3]) orelse
+                    return error.UnsupportedSpecConstantArraySize;
                 var mname_buf: [32]u8 = undefined;
                 const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
                 try w.print("    {s} {s}[{d}];\n", .{ et, mname, lv });
@@ -2637,9 +2640,9 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
                 var base_type_id: u32 = mi.words[2];
                 var cur: Instruction = mi;
                 while (true) {
-                    const len_inst = getDef(module, cur.words[3]) orelse break;
-                    if (len_inst.words.len < 4) break;
-                    dims_fbs.writer().print("[{d}]", .{len_inst.words[3]}) catch break;
+                    const lv = common.arrayLengthValue(module, cur.words[3]) orelse
+                        return error.UnsupportedSpecConstantArraySize;
+                    dims_fbs.writer().print("[{d}]", .{lv}) catch break;
                     const elem = getDef(module, cur.words[2]) orelse break;
                     if (elem.op != .TypeArray or elem.words.len < 4) {
                         base_type_id = cur.words[2];
