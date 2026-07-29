@@ -256,6 +256,46 @@ test "glsl: OpSRem lowers to the truncated x - y*(x/y), not a bare % (#170)" {
     try glslValidateOrSkip("srem", glsl);
 }
 
+// #170: the unordered float inequalities (OpFUnordLessThan etc.) are TRUE on a NaN operand,
+// so mapping them onto the naive ordered operator (`<`, false on NaN) is plausible-but-wrong.
+// GLSL now lowers them to the negation of the complementary ordered comparison: scalar
+// `!(a >= b)`, vector `not(greaterThanEqual(a, b))` (GLSL has no `!` on bvec). Deliberate
+// divergence from spirv-cross toward correctness. glslang emits ordered FOrdLessThan (184),
+// rewritten to FUnordLessThan (185) on real SPIR-V; glslang then validates the emitted GLSL.
+test "glsl: unordered float inequality lowers to the NaN-correct negated complement (#170)" {
+    // scalar: !(a >= b)
+    const s_spv = try compileToSpirv("funord_lt_s",
+        \\#version 450
+        \\layout(location = 0) in float a;
+        \\layout(location = 1) in float b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = (a < b) ? vec4(1.0) : vec4(0.0); }
+    );
+    defer alloc.free(s_spv);
+    const s_rw = try rewriteFirstOpcode(s_spv, 184, 185); // FOrdLessThan -> FUnordLessThan
+    defer alloc.free(s_rw);
+    const s_glsl = try zioshade.spirvToGLSL(alloc, s_rw, .{ .version = 430 });
+    defer alloc.free(s_glsl);
+    try assertContains(s_glsl, "!(");
+    try glslValidateOrSkip("funord-lt-scalar", s_glsl);
+
+    // vector: not(greaterThanEqual(a, b))
+    const v_spv = try compileToSpirv("funord_lt_v",
+        \\#version 450
+        \\layout(location = 0) in vec3 a;
+        \\layout(location = 1) in vec3 b;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { bvec3 c = lessThan(a, b); o = vec4(float(c.x), float(c.y), float(c.z), 1.0); }
+    );
+    defer alloc.free(v_spv);
+    const v_rw = try rewriteFirstOpcode(v_spv, 184, 185);
+    defer alloc.free(v_rw);
+    const v_glsl = try zioshade.spirvToGLSL(alloc, v_rw, .{ .version = 430 });
+    defer alloc.free(v_glsl);
+    try assertContains(v_glsl, "not(greaterThanEqual(");
+    try glslValidateOrSkip("funord-lt-vec", v_glsl);
+}
+
 // OpImageFetch (GLSL texelFetch) must pass the EXPLICIT LOD image-operand, not hardcode mip 0.
 // Dropping it silently read the base mip for any `texelFetch(s, coord, lod>0)` -- a
 // silent-pixel miscompile. WGSL already passes the operand; GLSL was hardcoding 0. (#170)
