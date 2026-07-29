@@ -5202,6 +5202,19 @@ fn emitNegatedCompare(module: *const ParsedModule, names: *std.AutoHashMap(u32, 
     });
 }
 
+/// #170 OpFUnordEqual: unordered-equal is TRUE if either operand is NaN (ordered
+/// `==` is false there = plausible-but-wrong). isnan(a)||isnan(b)||(a==b); HLSL's
+/// || is componentwise on bool vectors, so this covers scalar and vector. (spirv-
+/// cross HLSL emits bare `==`, which is NaN-wrong; zioshade diverges to be correct.)
+fn emitUnordEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    const rt = try hlslType(module, inst.words[1], names, alloc);
+    try w.print("    {s} {s} = isnan({s}) || isnan({s}) || ({s} == {s});\n", .{
+        rt,                                  names.get(inst.words[2]) orelse "v",
+        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
+        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
+    });
+}
+
 fn emitInstruction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5538,7 +5551,8 @@ fn emitInstruction(
         },
 
         // Comparisons
-        .FOrdEqual, .FUnordEqual, .IEqual => try common.emitBinOp(module, names, inst, "==", w, alloc, hlslType),
+        .FOrdEqual, .IEqual => try common.emitBinOp(module, names, inst, "==", w, alloc, hlslType),
+        .FUnordEqual => try emitUnordEqual(module, names, inst, w, alloc),
         .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try common.emitBinOp(module, names, inst, "!=", w, alloc, hlslType),
         .FOrdLessThan, .SLessThan, .ULessThan => try common.emitBinOp(module, names, inst, "<", w, alloc, hlslType),
         .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try common.emitBinOp(module, names, inst, ">", w, alloc, hlslType),
@@ -5546,8 +5560,9 @@ fn emitInstruction(
         .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try common.emitBinOp(module, names, inst, ">=", w, alloc, hlslType),
         // #170: unordered float inequalities are TRUE on NaN, so `!(ordered complement)`,
         // not the naive ordered op (false on NaN = plausible-but-wrong, as spirv-cross
-        // emits). See emitNegatedCompare. (FUnordEqual stays on `==` for now -- documented
-        // follow-up, see the MSL note.)
+        // emits). See emitNegatedCompare. OpFUnordEqual is TRUE on NaN too and has no
+        // ordered complement (`!=` is true on NaN), so it goes through emitUnordEqual
+        // (isnan(a)||isnan(b)||(a==b)). OpFUnordNotEqual is already exact on `!=`.
         .FUnordLessThan => try emitNegatedCompare(module, names, inst, ">=", w, alloc),
         .FUnordGreaterThan => try emitNegatedCompare(module, names, inst, "<=", w, alloc),
         .FUnordLessThanEqual => try emitNegatedCompare(module, names, inst, ">", w, alloc),
