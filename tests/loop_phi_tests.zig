@@ -726,3 +726,114 @@ const SUBPASS_INPUT_MS_SPV = @embedFile("fixtures/subpass_input_ms.spv");
 test "subpassInputMS honest-errors (MS texture-type modeling deferred)" {
     try std.testing.expectError(error.UnsupportedMultisampledSubpassInput, crossMsl(SUBPASS_INPUT_MS_SPV));
 }
+
+// ---------------------------------------------------------------------------
+// #for-loop-init (#482 MSL port): no use-before-declaration in a no-OpPhi loop
+// ---------------------------------------------------------------------------
+
+/// Assert no SSA temp (`v<digits>`) is referenced textually before the statement
+/// that declares it. A declaration site is an occurrence whose previous token is
+/// another identifier (its type); statement keywords are excluded so `return v5;`
+/// counts as a use. Ported from glsl_tests.zig (#413).
+fn assertNoUseBeforeDecl(src: []const u8) !void {
+    const keywords = [_][]const u8{ "return", "else", "if", "while", "for", "do", "case", "in", "out", "inout", "const", "break", "continue", "discard" };
+    var seen = std.StringHashMap(void).init(alloc);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |k| alloc.free(k.*);
+        seen.deinit();
+    }
+    var i: usize = 0;
+    while (i < src.len) {
+        if (!(std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) {
+            i += 1;
+            continue;
+        }
+        var j = i;
+        while (j < src.len and (std.ascii.isAlphanumeric(src[j]) or src[j] == '_')) j += 1;
+        const tok = src[i..j];
+        const start = i;
+        i = j;
+        if (tok.len < 2 or tok[0] != 'v') continue;
+        var all_digits = true;
+        for (tok[1..]) |ch| {
+            if (!std.ascii.isDigit(ch)) {
+                all_digits = false;
+                break;
+            }
+        }
+        if (!all_digits) continue;
+        var k = start;
+        while (k > 0 and (src[k - 1] == ' ' or src[k - 1] == '\t')) k -= 1;
+        var is_decl = false;
+        if (k > 0 and (std.ascii.isAlphanumeric(src[k - 1]) or src[k - 1] == '_')) {
+            var t0 = k;
+            while (t0 > 0 and (std.ascii.isAlphanumeric(src[t0 - 1]) or src[t0 - 1] == '_')) t0 -= 1;
+            const prev = src[t0..k];
+            is_decl = true;
+            for (keywords) |kw| {
+                if (std.mem.eql(u8, prev, kw)) {
+                    is_decl = false;
+                    break;
+                }
+            }
+        }
+        if (is_decl and seen.contains(tok)) {
+            std.debug.print("#for-loop-init: `{s}` is referenced before its declaration in output:\n{s}\n", .{ tok, src });
+            return error.UseBeforeDeclaration;
+        }
+        if (!seen.contains(tok)) {
+            const dup = try alloc.dupe(u8, tok);
+            try seen.put(dup, {});
+        }
+    }
+}
+
+// #for-loop-init (#482 MSL port): a loop whose counter is a Private/Function
+// var (NOT an OpPhi), present when the counter is used PAST the loop, has its
+// continue block hoisted to the top of the while-body inside `if (!_loopfirst)`.
+// The continue reads the header's OpLoad of the counter (e.g. `v25 + 1`), but
+// that OpLoad was emitted in the body AFTER the if-block -> the if-block reads
+// it before its declaration -> Metal rejects ("use of undeclared identifier
+// 'v25'"). GLSL/HLSL were fixed in #482 (carried-phi/header-load hoist); MSL's
+// #413 pass only covered phi update ids and skipped phi-less loops. The fix
+// ports the header-load hoist to MSL. zioshade's own frontend reaches the
+// no-phi path for a counter used past the loop (it stays a Function var).
+const FOR_LOOP_INIT_COUNTER_USED_AFTER_SRC =
+    \\#version 310 es
+    \\precision mediump float;
+    \\layout(location = 0) out int FragColor;
+    \\void main()
+    \\{
+    \\   FragColor = 16;
+    \\   int k = 0;
+    \\   for (; k < 20; k++)
+    \\      FragColor += 12;
+    \\   k += 3;
+    \\   FragColor += k;
+    \\}
+;
+
+test "MSL: no-OpPhi Function-counter loop has no use-before-declaration (#for-loop-init, #482 MSL port)" {
+    const msl = try compileToMsl(FOR_LOOP_INIT_COUNTER_USED_AFTER_SRC);
+    defer alloc.free(msl);
+    // The loop must be present (sanity: we reached the loop-lowering path).
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    // The continue-hoist's if-block must not read a temp declared later in the
+    // body. Buggy output declares the header OpLoad temp inside the body after
+    // the if-block reads it (Metal: "use of undeclared identifier").
+    assertNoUseBeforeDecl(msl) catch |err| {
+        std.debug.print("MSL for-loop-init output has a use-before-declaration:\n{s}\n", .{msl});
+        return err;
+    };
+}
+
+test "GLSL: no-OpPhi Function-counter loop has no use-before-declaration (#for-loop-init)" {
+    const glsl = try compileToGlsl(FOR_LOOP_INIT_COUNTER_USED_AFTER_SRC);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    assertNoUseBeforeDecl(glsl) catch |err| {
+        std.debug.print("GLSL for-loop-init output has a use-before-declaration:\n{s}\n", .{glsl});
+        return err;
+    };
+}
