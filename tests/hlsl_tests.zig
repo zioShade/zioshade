@@ -344,6 +344,25 @@ test "HLSL: pack/unpack_half2x16 via f32tof16/f16tof32 (no fabricated intrinsic)
     try assertNotContains(hlsl, "pack_half2x16(");
 }
 
+// OpFma (GLSL.std.450 #50) is contractually a single-rounded fused multiply-add.
+// HLSL `fma` (SM5+) is fused; `mad` is `a*b+c` with no fusion guarantee (may
+// double-round). Guard that zioshade emits `fma(`, not `mad(`.
+test "HLSL: OpFma lowers to fma (fused), not mad" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\#extension GL_EXT_gpu_shader5 : enable
+        \\layout(location=0) out float c;
+        \\layout(location=0) in float a;
+        \\layout(location=1) in float b;
+        \\layout(location=2) in float d;
+        \\void main(){ c = fma(a, b, d); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "fma(");
+    try assertNotContains(hlsl, "mad(");
+}
+
 // Vertex OUTPUT interpolation qualifiers (Flat/Centroid/NoPerspective/Sample) were
 // DROPPED from VS_OUTPUT — silent plausible-wrong (the gate's glslang compile
 // passes, but a `flat int` gets interpolated, a `noperspective` float gets
