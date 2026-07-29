@@ -730,6 +730,18 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // HLSL: a vertex output interface block whose member names collide with
+    // standalone outputs (or another block) can't flatten into VS_OUTPUT without
+    // duplicate fields, and the write-routing can't prefix member names. Refuse
+    // rather than emit a confusing undeclared-identifier INVALID. (Full lowering
+    // via member-name prefixing / block reconstruction is a follow-up.)
+    if (err == error.UnsupportedCollidingOutputBlock) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: a vertex output interface block has member names that collide with standalone outputs (or another block); this backend can't flatten it without duplicate VS_OUTPUT fields. Workaround: rename the colliding members, or drop the standalone outputs / block.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL records an actionable detail for some honest errors (errors carry no
     // payload) — surface it so the message is more than just the error name.
     if (err == error.UnsupportedExtInst or err == error.UnsupportedEarlyReturn) {

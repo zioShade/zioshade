@@ -3022,17 +3022,17 @@ fn emitFunction(
         std.sort.insertion(VtxField, vtx_inputs.items, {}, SortCtx.lessThan);
         std.sort.insertion(VtxField, vtx_outputs.items, {}, SortCtx.lessThan);
 
-        // Collision guard: drop user output blocks whose member names collide
-        // with standalone outputs or another kept block's members. The flatten
-        // path emits members under their raw OpMemberName, so a collision would
-        // produce duplicate VS_OUTPUT field names — invalid HLSL that glslang's
-        // frontend false-passes (DXC rejects), i.e. the plausible-wrong the wedge
-        // forbids. Such blocks need member-name prefixing (spirv-cross
-        // reconstructs a local block struct), a separate follow-up; leave them a
-        // loud INVALID for now. Distinct-member blocks (io-block-style) pass.
+        // Collision guard: an output interface block whose member names collide
+        // with standalone outputs (or another block's members) can't flatten into
+        // VS_OUTPUT without duplicate field names, and the write-routing only
+        // renames the block VARIABLE (not members), so a colliding block can't be
+        // lowered correctly without member-name prefixing (spirv-cross reconstructs
+        // a local block struct + entry copy) -- a separate follow-up. Honest-error
+        // (refuse) rather than emit a confusing undeclared-identifier INVALID.
+        // Distinct-member blocks (io-block-style) still pass.
         {
             var keep: usize = 0;
-            outer: for (user_out_blocks.items) |blk| {
+            for (user_out_blocks.items) |blk| {
                 const sdef = getDef(module, blk.struct_id) orelse continue;
                 const nmembers: usize = if (sdef.words.len > 2) sdef.words.len - 2 else 0;
                 var mi: u32 = 0;
@@ -3040,7 +3040,7 @@ fn emitFunction(
                     var buf_a: [32]u8 = undefined;
                     const mname = hlslGetMemberName(module, blk.struct_id, mi, &buf_a);
                     for (vtx_outputs.items) |fld| {
-                        if (std.mem.eql(u8, mname, fld.orig_name)) continue :outer;
+                        if (std.mem.eql(u8, mname, fld.orig_name)) return error.UnsupportedCollidingOutputBlock;
                     }
                     var kj: usize = 0;
                     while (kj < keep) : (kj += 1) {
@@ -3050,7 +3050,7 @@ fn emitFunction(
                         var omi: u32 = 0;
                         while (omi < onmem) : (omi += 1) {
                             var buf_b: [32]u8 = undefined;
-                            if (std.mem.eql(u8, mname, hlslGetMemberName(module, oblk.struct_id, omi, &buf_b))) continue :outer;
+                            if (std.mem.eql(u8, mname, hlslGetMemberName(module, oblk.struct_id, omi, &buf_b))) return error.UnsupportedCollidingOutputBlock;
                         }
                     }
                 }
