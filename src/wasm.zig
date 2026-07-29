@@ -132,7 +132,7 @@ export fn zs_compile(backend: u32, src_ptr: usize, src_len: usize) i32 {
     // Release the previous result so repeated calls do not leak.
     freeResult();
 
-    const be = std.meta.intToEnum(Backend, backend) catch {
+    const be = std.enums.fromInt(Backend, backend) orelse {
         return storeError(ZS_ERR_BAD_BACKEND, "unknown backend selector {d}", .{backend});
     };
 
