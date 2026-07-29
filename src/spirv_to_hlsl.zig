@@ -2636,13 +2636,18 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
                 // TypeArray dimension; the base (innermost) element type is what
                 // hlslType spells. Each level's size is its OpConstant literal.
                 var dims_buf: [64]u8 = undefined;
-                var dims_fbs = std.io.fixedBufferStream(&dims_buf);
+                var dims_len: usize = 0;
                 var base_type_id: u32 = mi.words[2];
                 var cur: Instruction = mi;
                 while (true) {
                     const lv = common.arrayLengthValue(module, cur.words[3]) orelse
                         return error.UnsupportedSpecConstantArraySize;
-                    dims_fbs.writer().print("[{d}]", .{lv}) catch break;
+                    const dim = std.fmt.bufPrint(
+                        dims_buf[dims_len..],
+                        "[{d}]",
+                        .{lv},
+                    ) catch break;
+                    dims_len += dim.len;
                     const elem = getDef(module, cur.words[2]) orelse break;
                     if (elem.op != .TypeArray or elem.words.len < 4) {
                         base_type_id = cur.words[2];
@@ -2651,7 +2656,7 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
                     cur = elem;
                 }
                 const elem_type = try hlslType(module, base_type_id, names, alloc);
-                try w.print("    {s}{s} {s}_{s}{s}{s};\n", .{ row_major_qual, elem_type, cbuffer_name, mname, dims_fbs.getWritten(), packoff });
+                try w.print("    {s}{s} {s}_{s}{s}{s};\n", .{ row_major_qual, elem_type, cbuffer_name, mname, dims_buf[0..dims_len], packoff });
                 continue;
             }
         }
@@ -8017,7 +8022,7 @@ fn classifyHlslAtomicPtr(module: *const ParsedModule, names: *const std.AutoHash
 /// passes the ExtInst opcode as u32, but std450ToHlsl takes the enum. Used as the
 /// std450_name resolver handed to common.tryInlineDoWhileCond / inlineDoWhileOperand.
 fn std450NameU32(op: u32) ?[]const u8 {
-    const func = std.meta.intToEnum(spirv.GLSLstd450, op) catch return null;
+    const func = std.enums.fromInt(spirv.GLSLstd450, op) orelse return null;
     return std450ToHlsl(func);
 }
 

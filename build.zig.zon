@@ -20,6 +20,7 @@
     .paths = .{
         "build.zig",
         "build.zig.zon",
+        "build_compat.zig",
         "src",
     },
     .fingerprint = 0x8a823918dadacdf2,
