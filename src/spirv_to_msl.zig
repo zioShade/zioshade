@@ -7379,6 +7379,19 @@ fn emitUnordEqual(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     });
 }
 
+/// #170 OpFOrdNotEqual: ordered not-equal is FALSE on a NaN operand, but Metal's `!=`
+/// is unordered (true on NaN), so mapping FOrdNotEqual to bare `!=` is plausible-but-
+/// wrong. Lower to `!isunordered(a, b) && (a != b)` (ordered-AND-not-equal), exact for
+/// scalar and vector. The mirror of emitUnordEqual; glslang never emits FOrdNotEqual.
+fn emitOrdNotEqual(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    const rt = try mslType(m, inst.words[1], names, alloc);
+    try w.print("    {s} {s} = !isunordered({s}, {s}) && ({s} != {s});\n", .{
+        rt,                                  names.get(inst.words[2]) orelse "v",
+        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
+        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
+    });
+}
+
 fn emitInstruction(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -7694,7 +7707,8 @@ fn emitInstruction(
         },
         .FOrdEqual, .IEqual => try common.emitBinOp(m, names, inst, "==", w, alloc, mslType),
         .FUnordEqual => try emitUnordEqual(m, names, inst, w, alloc),
-        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try common.emitBinOp(m, names, inst, "!=", w, alloc, mslType),
+        .FUnordNotEqual, .INotEqual => try common.emitBinOp(m, names, inst, "!=", w, alloc, mslType),
+        .FOrdNotEqual => try emitOrdNotEqual(m, names, inst, w, alloc),
         .FOrdLessThan, .SLessThan, .ULessThan => try common.emitBinOp(m, names, inst, "<", w, alloc, mslType),
         .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try common.emitBinOp(m, names, inst, ">", w, alloc, mslType),
         .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try common.emitBinOp(m, names, inst, "<=", w, alloc, mslType),
