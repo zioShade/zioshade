@@ -6890,7 +6890,23 @@ fn emitInstruction(
         },
 
         // Skip non-code-emitting ops
-        .Constant, .ConstantTrue, .ConstantFalse, .ConstantComposite, .SpecConstant, .Undef => {},
+        .Constant, .ConstantTrue, .ConstantFalse, .ConstantComposite, .SpecConstant => {},
+        // OpUndef: an undefined value. SPIR-V permits OpStore of an OpUndef (the
+        // zioshade frontend emits this when folding dead loops over uninitialized
+        // locals, e.g. `float h; for(...) h+=10; data = h;` -> `data = undef`). The
+        // result id is referenced by a later OpStore, so it must be declared like any
+        // other value. Lower it to a zero-initialized local (`= {}`), matching the MSL
+        // backend. Without this the store emitted `data = v17;` for an undeclared id
+        // (glslang: "unknown variable") -- INVALID HLSL. Zero-init is a sound lowering
+        // of undef here: the source reads an uninitialized variable, so any value is
+        // defensible and zero is the HLSL conventional default.
+        .Undef => {
+            if (inst.words.len >= 3) {
+                const rtt = hlslType(module, inst.words[1], names, alloc) catch "float";
+                const rn = names.get(inst.words[2]) orelse "v";
+                try w.print("    {s} {s} = {{}};\n", .{ rtt, rn });
+            }
+        },
         .Function, .FunctionParameter, .FunctionEnd => {},
         .Source, .Name, .MemberName => {},
         .Nop => {},

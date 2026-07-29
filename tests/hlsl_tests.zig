@@ -204,6 +204,47 @@ test "#475: LocalSizeId resolves spec-constant defaults to numthreads" {
     try assertContains(hlsl, "[numthreads(8, 4, 2)]");
 }
 
+// cfg.comp regression: an OpStore whose value operand is an OpUndef result. The
+// zioshade frontend emits this shape when it folds dead loops over uninitialized
+// locals (e.g. `float h; for(...) h+=10; data = h;` -> `data = undef`). The OpUndef
+// result id is referenced by the store, so it MUST be declared like any other value;
+// previously the HLSL backend skipped OpUndef and emitted `data = vN;` for an
+// undeclared id (glslang: "unknown variable" -> INVALID HLSL, gate failure on
+// cfg.comp). Now it declares a zero-initialized local, matching the MSL backend.
+test "cfg.comp: OpUndef value stored to an SSBO is declared (not an unknown variable)" {
+    const spirv = assembleSpirv("undefstore",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %SSBO
+        \\OpExecutionMode %main LocalSize 1 1 1
+        \\OpDecorate %SSBO DescriptorSet 0
+        \\OpDecorate %SSBO Binding 0
+        \\OpDecorate %SSBOT BufferBlock
+        \\OpMemberDecorate %SSBOT 0 Offset 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%uint = OpTypeInt 32 0
+        \\%uint_0 = OpConstant %uint 0
+        \\%SSBOT = OpTypeStruct %float
+        \\%ptr_ubuf = OpTypePointer Uniform %SSBOT
+        \\%SSBO = OpVariable %ptr_ubuf Uniform
+        \\%ptr_ufloat = OpTypePointer Uniform %float
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%undef = OpUndef %float
+        \\%chain = OpAccessChain %ptr_ufloat %SSBO %uint_0
+        \\OpStore %chain %undef
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    // The OpUndef result is declared with zero-initialization before the store.
+    try assertContains(hlsl, "= {};");
+}
+
 // ---------------------------------------------------------------------------
 // #471: gl_PerVertex interface-block vertex outputs (external glslang/shaderc form).
 // glslang wraps gl_Position et al. in a member-decorated Block written via

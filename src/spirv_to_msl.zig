@@ -6192,6 +6192,79 @@ fn emitBody(
             }
         }
     }
+    // #for-loop-init (#482 MSL port): extend the hoist to values the top-of-loop
+    // CARRY reads that are defined in the loop HEADER (cond) block. The carry
+    // re-emits the continue block at the top of the while-body; a continue
+    // operand defined in the header (e.g. the counter OpLoad `%x = OpLoad
+    // %counter` living in a Pattern-B cond block, present when the counter is a
+    // Function/Private var used past the loop) is emitted in the body AFTER the
+    // carry, so the carry reads it out of scope -> Metal rejects ("use of
+    // undeclared identifier"). OpPhi header values are pre-declared, so only
+    // NON-phi header definitions need this. The #413 pass above only covers phi
+    // update ids and skips phi-less loops (`loop_phis.get(li) orelse continue`),
+    // so a no-OpPhi Private/Function counter was missed. Mirrors the GLSL/HLSL
+    // #for-loop-init hoist (spirv_to_glsl.zig, spirv_to_hlsl.zig), generalised to
+    // continue-block operands. Sound because the pre-declared var is assigned at
+    // its single header def point and the counter is not modified between that
+    // load and the next iteration's continue read (the only modifier is the
+    // continue store itself, paired with the next header load).
+    {
+        var li = func_idx + 1;
+        while (li < m.instructions.len) : (li += 1) {
+            const minst = m.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            const cont_lbl = minst.words[2]; // OpLoopMerge: words[1]=merge, words[2]=continue
+            const cont_idx0 = label_map.get(cont_lbl) orelse continue;
+            var hlbl = li;
+            while (hlbl > func_idx) : (hlbl -= 1) {
+                if (m.instructions[hlbl].op == .Label) break;
+            } // header block = (this Label .. the LoopMerge at li)
+            var hi = hlbl + 1;
+            while (hi < li) : (hi += 1) {
+                // Pattern-B header instructions only: those replayed INSIDE the while-body
+                // (where the carry can read them out of scope). Pattern-A header instrs are
+                // emitted in-place before the LoopMerge; hoisting them would declare below
+                // their in-place use. deferred_hdr holds exactly the Pattern-B header instrs.
+                if (!deferred_hdr.contains(hi)) continue;
+                const hinst = m.instructions[hi];
+                if (hinst.op == .Phi) continue; // phis are pre-declared above the loop
+                const rid = common.resultIdFromOp(hinst.op, hinst.words) orelse continue; // encoding-correct result id (don't mistake words[2] of a no-result op, e.g. OpStore, for a result)
+                if (hoisted_ids.contains(rid)) continue;
+                // Does the continue block reference rid? Scan from word 1: no-result ops
+                // (OpStore/CopyMemory/AtomicStore) carry operands at words[1..2].
+                var referenced = false;
+                var ci = cont_idx0 + 1;
+                while (ci < m.instructions.len) : (ci += 1) {
+                    const cinst = m.instructions[ci];
+                    if (cinst.op == .Label or cinst.op == .FunctionEnd or cinst.op == .Branch or cinst.op == .BranchConditional) break;
+                    var wi: usize = 1;
+                    while (wi < cinst.words.len) : (wi += 1) {
+                        if (cinst.words[wi] == rid) {
+                            referenced = true;
+                            break;
+                        }
+                    }
+                    if (referenced) break;
+                }
+                if (!referenced) continue;
+                if (loop_hoists.getPtr(li)) |e| {
+                    e.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch continue;
+                } else {
+                    var hlist = std.ArrayList(common.HoistedPhiSrc).initCapacity(alloc, 1) catch continue;
+                    hlist.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                    loop_hoists.put(li, hlist) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                }
+                hoisted_ids.put(rid, {}) catch {};
+            }
+        }
+    }
     g_loop_phis = &loop_phis;
     g_phi_hdr = &phi_hdr;
     g_deferred_hdr = &deferred_hdr;
@@ -7670,7 +7743,13 @@ fn emitInstruction(
         },
         .BitCount => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
-            try w.print("    {s} {s} = popcount({s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
+            // Metal's popcount returns the OPERAND's type (e.g. uint2), but OpBitCount's
+            // result is signed int (GLSL `genIType bitCount(genUType)`); a vector result
+            // then needs an explicit constructor cast (int2(popcount(uint2))) or Metal
+            // rejects `int2 v = popcount(uint2)` ("cannot initialize int2 with uint2").
+            // The cast is a no-op when the types already match. Mirrors spirv-cross
+            // (int2(popcount(...))) and zioshade's WGSL backend (vec2i(countOneBits(...))).
+            try w.print("    {s} {s} = {s}(popcount({s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", rtt, names.get(inst.words[3]) orelse "0" });
         },
         // OpBitFieldInsert: base, insert, offset, count → MSL insert_bits(base, insert, uint
         // offset, uint bits). MSL takes the offset/width as uint, so cast them.
