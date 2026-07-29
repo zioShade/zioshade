@@ -286,6 +286,47 @@ test "hlsl: OpFUnordEqual lowers to isnan(a)||isnan(b)||(a==b) NaN-correctly (#1
     try assertContains(hlsl, "|| (");
 }
 
+// #170 OpFOrdNotEqual: ordered not-equal is FALSE on a NaN operand, but HLSL's `!=`
+// is unordered (true on NaN). Lower to !isnan(a) && !isnan(b) && (a!=b). Mirror of
+// the FUnordEqual fix; glslang never emits FOrdNotEqual, so hand SPIR-V.
+test "hlsl: OpFOrdNotEqual lowers to !isnan(a)&&!isnan(b)&&(a!=b) NaN-correctly (#170)" {
+    const spirv = assembleSpirv("ford_ne",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v2float = OpTypeVector %float 2
+        \\%bool = OpTypeBool
+        \\%v2bool = OpTypeVector %bool 2
+        \\%v4float = OpTypeVector %float 4
+        \\%f1 = OpConstant %float 1
+        \\%f2 = OpConstant %float 2
+        \\%v2 = OpConstantComposite %v2float %f1 %f2
+        \\%ptr_o = OpTypePointer Output %v4float
+        \\%o = OpVariable %ptr_o Output
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%s = OpFOrdNotEqual %bool %f1 %f2
+        \\%v = OpFOrdNotEqual %v2bool %v2 %v2
+        \\%fs = OpSelect %float %s %f1 %f2
+        \\%vx = OpCompositeExtract %bool %v 0
+        \\%fx = OpSelect %float %vx %f1 %f2
+        \\%res = OpCompositeConstruct %v4float %fs %fx %f1 %f1
+        \\OpStore %o %res
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "!isnan(");
+    try assertContains(hlsl, "&& (");
+}
+
 // ---------------------------------------------------------------------------
 // #471: gl_PerVertex interface-block vertex outputs (external glslang/shaderc form).
 // glslang wraps gl_Position et al. in a member-decorated Block written via

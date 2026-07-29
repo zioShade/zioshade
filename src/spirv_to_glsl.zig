@@ -156,6 +156,38 @@ fn emitUnordEqual(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u
     }
 }
 
+/// #170 OpFOrdNotEqual: ordered not-equal is FALSE on a NaN operand, but GLSL `!=`/
+/// `notEqual` is unordered (true on NaN -- which is why it is the correct lowering for
+/// OpFUnordNotEqual), so bare `!=` is plausible-but-wrong for the ORDERED form. Lower
+/// to `!isnan(a) && !isnan(b) && (a != b)` (scalar) and a per-component bvecN for
+/// vectors (GLSL has no componentwise && on bvec). The mirror of emitUnordEqual.
+fn emitOrdNotEqual(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
+    const rtt = try glslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const a = names.get(inst.words[3]) orelse "a";
+    const b = names.get(inst.words[4]) orelse "b";
+    if (isVectorType(m, inst.words[1])) {
+        const swz = [_][]const u8{ "x", "y", "z", "w" };
+        const width: usize = blk: {
+            const d = getDef(m, inst.words[1]) orelse break :blk 0;
+            if (d.op == .TypeVector and d.words.len > 3) break :blk d.words[3];
+            break :blk 0;
+        };
+        if (width < 2 or width > 4) return error.UnsupportedVectorWidth;
+        try w.print("    {s} {s} = {s}(", .{ rtt, rn, rtt });
+        var i: usize = 0;
+        while (i < width) : (i += 1) {
+            if (i > 0) try w.writeAll(", ");
+            try w.print("!isnan({s}).{s} && !isnan({s}).{s} && ({s}.{s} != {s}.{s})", .{
+                a, swz[i], b, swz[i], a, swz[i], b, swz[i],
+            });
+        }
+        try w.writeAll(");\n");
+    } else {
+        try w.print("    {s} {s} = !isnan({s}) && !isnan({s}) && ({s} != {s});\n", .{ rtt, rn, a, b, a, b });
+    }
+}
+
 /// Element type reached by descending one composite level: the element type of an
 /// array (fixed or runtime), the column type of a matrix, or the component type of
 /// a vector. Used per access-chain index for the runtime-index descent (#419).
@@ -4325,7 +4357,8 @@ fn emitInstruction(
         .OuterProduct => try common.emitCall(m, names, inst, "outerProduct", w, alloc, glslType),
         .FOrdEqual, .IEqual => try emitRelOp(m, names, inst, "==", "equal", w, alloc),
         .FUnordEqual => try emitUnordEqual(m, names, inst, w, alloc),
-        .FOrdNotEqual, .FUnordNotEqual, .INotEqual => try emitRelOp(m, names, inst, "!=", "notEqual", w, alloc),
+        .FUnordNotEqual, .INotEqual => try emitRelOp(m, names, inst, "!=", "notEqual", w, alloc),
+        .FOrdNotEqual => try emitOrdNotEqual(m, names, inst, w, alloc),
         .FOrdLessThan, .SLessThan, .ULessThan => try emitRelOp(m, names, inst, "<", "lessThan", w, alloc),
         .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitRelOp(m, names, inst, ">", "greaterThan", w, alloc),
         .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitRelOp(m, names, inst, "<=", "lessThanEqual", w, alloc),
