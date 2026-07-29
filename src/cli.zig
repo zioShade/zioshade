@@ -720,6 +720,16 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // HLSL/etc.: an array length that can't be resolved to a concrete size for a
+    // backend without specialization constants (e.g. an OpSpecConstantOp shape this
+    // backend can't evaluate). Refuse rather than emit a wrong/garbage dimension.
+    if (err == error.UnsupportedSpecConstantArraySize) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: an array length could not be resolved to a concrete size for this backend (e.g. an OpSpecConstantOp specialization-constant expression it can't evaluate). Workaround: use a literal or plain spec-constant size.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL records an actionable detail for some honest errors (errors carry no
     // payload) — surface it so the message is more than just the error name.
     if (err == error.UnsupportedExtInst or err == error.UnsupportedEarlyReturn) {
