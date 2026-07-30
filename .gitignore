@@ -58,3 +58,6 @@ Thumbs.db
 __pycache__/
 *.pyc
 zig-pkg/
+
+# Local task ledger (local tooling), not for the repo
+GOAL.md
