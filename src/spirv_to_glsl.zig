@@ -12,7 +12,7 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
-const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false, shadow: bool = false };
+const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false, shadow: bool = false, is_ms: bool = false };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
@@ -1548,7 +1548,14 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             // sampler2DArrayShadow, samplerCubeShadow); it is always float, so the
             // u/i-sampler prefixes never combine with it.
             const shadow_suffix: []const u8 = if (tex.shadow) "Shadow" else "";
-            const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{dim_str}) catch "isampler2D" else std.fmt.allocPrint(aa, "sampler{s}{s}", .{ dim_str, shadow_suffix }) catch "sampler2D";
+            // Multisampled samplers insert "MS" between the dim spelling and any
+            // "Array" suffix (sampler2DMS, sampler2DMSArray). GLSL has no 1D/3D/Cube
+            // MS sampler, so this only fires for the valid 2D case; MS storage images
+            // do not exist either, so this is sampler-path only. Built from the raw
+            // tex.dim_str (before the arrayed "Array" suffix) so the order is
+            // dim+MS+Array, matching the GLSL spelling.
+            const ms_dim_str: []const u8 = if (tex.is_ms) (if (tex.arrayed) (std.fmt.allocPrint(aa, "{s}MSArray", .{tex.dim_str}) catch dim_str) else (std.fmt.allocPrint(aa, "{s}MS", .{tex.dim_str}) catch dim_str)) else dim_str;
+            const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{ms_dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{ms_dim_str}) catch "isampler2D" else std.fmt.allocPrint(aa, "sampler{s}{s}", .{ ms_dim_str, shadow_suffix }) catch "sampler2D";
             try w.print("layout(binding = {d}) uniform {s} {s}{s};\n", .{ tex_shifted, stype, tex.name, arr });
         }
     }
@@ -2157,7 +2164,11 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                         // declaration to a plain sampler2D, which glslang rejects against
                         // the Dref sample/gather calls the body emits.
                         const si_shadow = si_img != null and si_img.?.words.len > 4 and si_img.?.words[4] == 1;
-                        tex.append(alloc, .{ .name = name, .binding = binding, .is_uint = si_uint, .is_int = si_int, .dim_str = si_dim, .array_size = arr_sz, .arrayed = si_arrayed, .shadow = si_shadow }) catch {};
+                        // OpTypeImage MS operand (words[6]) == 1 marks a multisampled image
+                        // (sampler2DMS / sampler2DMSArray). Dropping it degraded the decl to a
+                        // plain sampler2D and made the per-sample texelFetch reads wrong.
+                        const si_ms = si_img != null and si_img.?.words.len > 6 and si_img.?.words[6] == 1;
+                        tex.append(alloc, .{ .name = name, .binding = binding, .is_uint = si_uint, .is_int = si_int, .dim_str = si_dim, .array_size = arr_sz, .arrayed = si_arrayed, .shadow = si_shadow, .is_ms = si_ms }) catch {};
                     },
                     .TypeImage => {
                         const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0;
@@ -2229,7 +2240,8 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                             break :blk "2D";
                         };
                         const img_arrayed = pei.words.len > 5 and pei.words[5] == 1;
-                        tex.append(alloc, .{ .name = name, .binding = binding, .is_storage = is_storage, .format_str = fmt, .dim_str = dim, .is_uint = is_uint, .is_int = is_int, .array_size = arr_sz, .arrayed = img_arrayed }) catch {};
+                        const img_ms = pei.words.len > 6 and pei.words[6] == 1;
+                        tex.append(alloc, .{ .name = name, .binding = binding, .is_storage = is_storage, .format_str = fmt, .dim_str = dim, .is_uint = is_uint, .is_int = is_int, .array_size = arr_sz, .arrayed = img_arrayed, .is_ms = img_ms }) catch {};
                     },
                     else => {},
                 }
@@ -4971,28 +4983,31 @@ fn emitInstruction(
         },
         .ImageFetch => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
-            // Check if the sampled image is a buffer texture (texelFetch takes 2 args for buffers)
-            const is_buffer = blk: {
-                const si_def = getDef(m, inst.words[3]);
-                if (si_def) |sd| {
-                    if (sd.op == .SampledImage and sd.words.len > 2) {
-                        const img_def = getDef(m, sd.words[2]);
-                        if (img_def) |id| {
-                            if (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) break :blk true;
-                        }
-                    }
-                    // Also check direct image reference (OpImage result)
-                    if (sd.op == .OpImage and sd.words.len > 1) {
-                        const img_type_def = getDef(m, sd.words[1]);
-                        if (img_type_def) |id| {
-                            if (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) break :blk true;
-                        }
-                    }
-                }
-                break :blk false;
+            // Resolve the OpTypeImage behind the fetch operand (words[3]) to read Dim
+            // (Buffer=5) and the multisample flag (MS=words[6]). The operand is an
+            // OpSampledImage result or -- the common OpImageFetch shape -- an OpImage
+            // result whose Result Type IS the OpTypeImage.
+            const img_def = blk: {
+                const sd = getDef(m, inst.words[3]) orelse break :blk null;
+                if (sd.op == .SampledImage and sd.words.len > 2) break :blk getDef(m, sd.words[2]);
+                if (sd.op == .OpImage and sd.words.len > 1) break :blk getDef(m, sd.words[1]);
+                break :blk null;
             };
+            const is_buffer = if (img_def) |id| (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) else false;
+            const is_ms = if (img_def) |id| (id.op == .TypeImage and id.words.len > 6 and id.words[6] == 1) else false;
             if (is_buffer) {
+                // Buffer: texelFetch takes (sampler, coord) -- no LOD/sample arg.
                 try w.print("    {s} {s} = texelFetch({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
+            } else if (is_ms) {
+                // Multisampled: texelFetch's 3rd arg is the SAMPLE index (NOT an LOD),
+                // carried by the Sample image operand (mask 0x40, id at words[6]). MS
+                // textures have no mip chain. Without this zioshade hardcoded 0, reading
+                // only sample 0 from every per-sample fetch (silent-wrong). (#imagefetch)
+                const sample: []const u8 = if (inst.words.len > 6 and (inst.words[5] & 0x40) != 0)
+                    names.get(inst.words[6]) orelse "0"
+                else
+                    "0";
+                try w.print("    {s} {s} = texelFetch({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0", sample });
             } else {
                 // OpImageFetch: pass the explicit LOD (image-operand Lod bit 0x2, value at
                 // words[6]) instead of hardcoding mip 0. `texelFetch` REQUIRES a lod arg for a

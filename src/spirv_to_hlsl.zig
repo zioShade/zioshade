@@ -715,6 +715,42 @@ fn sampledImageDim(module: *const ParsedModule, image_value_id: u32) u32 {
     return tinst.words[3];
 }
 
+/// True if the image behind a sampled-image VALUE id is arrayed (OpTypeImage
+/// `Arrayed` operand, words[5] == 1). Mirrors sampledImageDim's resolution
+/// (unwraps OpTypeSampledImage, follows an OpImage's Result Type).
+fn sampledImageIsArrayed(module: *const ParsedModule, image_value_id: u32) bool {
+    const vdef = getDef(module, image_value_id) orelse return false;
+    if (vdef.words.len < 2) return false;
+    var tinst = getDef(module, vdef.words[1]) orelse return false;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return false;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 6) return false;
+    return tinst.words[5] == 1;
+}
+
+/// HLSL `Texture*.Load` position constructor name ("int2"/"int3"/"int4") for an
+/// OpImageFetch on a texture of SPIR-V `dim` + `arrayed`. The .Load position
+/// packs (coord components, lod): spatial 1D=1, 2D/Rect=2, 3D=3, plus 1 for the
+/// array layer if arrayed, plus 1 for the mip level. So 1D -> int2, 2D ->
+/// int3, 2DArray/3D -> int4. Hardcoding int3 made 1D and 3D/2DArray fetches
+/// reject in DXC (wrong ctor arity). Cube is not OpImageFetch-able; falls back
+/// to int3. (#imagefetch)
+fn hlslLoadPositionCtor(dim: u32, arrayed: bool) []const u8 {
+    const spatial: u32 = switch (dim) {
+        0 => 1, // 1D
+        1, 4 => 2, // 2D, Rect
+        2 => 3, // 3D
+        else => 2,
+    };
+    const comps: u32 = spatial + @as(u32, @intFromBool(arrayed)) + 1; // +1 for lod
+    return switch (comps) {
+        2 => "int2",
+        4 => "int4",
+        else => "int3",
+    };
+}
+
 /// Trace a sampling op's image operand back to its underlying uniform texture
 /// Variable id, for per-texture comparison-sampler detection. The operand (words[3]
 /// of an ImageSampleDref*/ImageDrefGather op) may be:
@@ -6461,6 +6497,10 @@ fn emitInstruction(
                     rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, sample_idx,
                 });
             } else {
+                // .Load position ctor width tracks the texture rank: 1D -> int2, 2D ->
+                // int3, 2DArray/3D -> int4. Hardcoding int3 made 1D and 3D/2DArray
+                // fetches reject in DXC. (#imagefetch)
+                const pos_ctor = hlslLoadPositionCtor(sampledImageDim(module, inst.words[3]), sampledImageIsArrayed(module, inst.words[3]));
                 // ConstOffset (texelFetchOffset): HLSL Load has no offset arg, so apply
                 // the offset to the coordinate via int math (`coord + offset`) — this is
                 // the unambiguous form (spirv-cross's `.Load(int3, int2)` 2-arg shape
@@ -6482,14 +6522,14 @@ fn emitInstruction(
                     }
                 }
                 if (has_off) {
-                    try w.print("    {s} {s} = {s}.Load(int3({s} + ", .{
-                        rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name,
+                    try w.print("    {s} {s} = {s}.Load({s}({s} + ", .{
+                        rt, names.get(inst.words[2]) orelse "v", tex_name, pos_ctor, coord_name,
                     });
                     _ = writeHlslConstOffset(module, w, off_id);
                     try w.print(", {s}));\n", .{lod_val});
                 } else {
-                    try w.print("    {s} {s} = {s}.Load(int3({s}, {s}));\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, lod_val,
+                    try w.print("    {s} {s} = {s}.Load({s}({s}, {s}));\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", tex_name, pos_ctor, coord_name, lod_val,
                     });
                 }
             }

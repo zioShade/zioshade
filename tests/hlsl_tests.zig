@@ -3056,6 +3056,46 @@ test "T31.1b: texelFetch LOD is carried into Load's int3.z, not dropped to 0" {
     try assertNotContains(hlsl, ", 0))");
 }
 
+// OpImageFetch's HLSL `.Load` position ctor must track the texture rank: the
+// position packs (coord components, lod), so 1D -> int2, 2D -> int3,
+// 2DArray/3D -> int4. The non-buffer/non-MS arm used to hardcode int3, which
+// made 1D and 3D/2DArray fetches reject in DXC (wrong ctor arity). (#imagefetch)
+test "hlsl: OpImageFetch Load ctor width tracks texture rank (#imagefetch)" {
+    // 1D -> int2(coord, lod)
+    const src1d =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler1D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = texelFetch(tex, int(gl_FragCoord.x), 2); }
+    ;
+    const h1d = try compileToHlsl(src1d);
+    defer alloc.free(h1d);
+    try assertContains(h1d, ".Load(int2(");
+    try assertNotContains(h1d, ".Load(int3(");
+
+    // 3D -> int4(coord, lod)
+    const src3d =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler3D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = texelFetch(tex, ivec3(gl_FragCoord.xyz), 2); }
+    ;
+    const h3d = try compileToHlsl(src3d);
+    defer alloc.free(h3d);
+    try assertContains(h3d, ".Load(int4(");
+
+    // 2DArray -> int4(coord3, lod)
+    const srcarr =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2DArray tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = texelFetch(tex, ivec3(gl_FragCoord.xy, 0), 2); }
+    ;
+    const harr = try compileToHlsl(srcarr);
+    defer alloc.free(harr);
+    try assertContains(harr, ".Load(int4(");
+}
+
 test "T31.2: textureLod maps to SampleLevel" {
     const source =
         \\#version 430

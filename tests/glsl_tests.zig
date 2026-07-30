@@ -397,6 +397,27 @@ test "glsl: OpImageFetch passes the explicit LOD, not a hardcoded 0 (#170)" {
     try glslValidateOrSkip("imagefetch-lod", glsl);
 }
 
+// OpImageFetch on a multisampled texture (sampler2DMS) must (a) keep the MS
+// spelling in the declaration (sampler2DMS, not sampler2D) and (b) carry the
+// Sample image-operand as texelFetch's 3rd arg (the sample index), not drop it
+// to 0. Dropping either made every per-sample fetch silently read sample 0.
+// (#imagefetch)
+test "glsl: OpImageFetch on sampler2DMS keeps the MS decl and the sample index (#imagefetch)" {
+    const glsl = try compileToGlsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DMS tex;
+        \\layout(location = 0) flat in int samp;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texelFetch(tex, ivec2(uv), samp); }
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "sampler2DMS"); // MS spelling preserved (was sampler2D)
+    try assertContains(glsl, "texelFetch(");
+    try assertContains(glsl, ", samp)"); // sample index carried (was hardcoded 0)
+    try glslValidateOrSkip("imagefetch-ms", glsl);
+}
+
 // OpImageSampleImplicitLod must carry a ConstOffset image-operand as GLSL `textureOffset`,
 // not drop it. `textureOffset(sampler2D, uv, off)` lowers to implicit-lod + ConstOffset;
 // the backend used to discard the offset -> silently sampled the wrong texel. (#170)
