@@ -497,6 +497,28 @@ fn imageValueDim(m: *const ParsedModule, image_value_id: u32) u32 {
     return tinst.words[3];
 }
 
+/// SPATIAL coord swizzle (".x"/".xy"/".xyz") for a NON-ARRAYED OpImageSampleDref*
+/// coord operand, by sampler Dim. A glslang producer packs the dref INTO the coord
+/// (vec3 for a 2D shadow), so passing the raw coord to MSL `.sample_compare` (which
+/// wants the spatial rank -- float2 for depth2d) is a type mismatch Metal rejects.
+/// The swizzle takes the leading spatial components; a scalar coord (1D shadow as a
+/// bare float) takes none. Arrayed textures are handled separately
+/// (mslArrayedSampleArgs). (#170)
+fn mslDrefCoordSwizzle(m: *const ParsedModule, sampled_image_id: u32, coord_id: u32) []const u8 {
+    if (getDef(m, coord_id)) |cdef| {
+        if (cdef.words.len >= 2) {
+            if (getDef(m, cdef.words[1])) |t| {
+                if (t.op == .TypeFloat) return ""; // scalar coord (1D shadow)
+            }
+        }
+    }
+    return switch (imageValueDim(m, sampled_image_id)) {
+        0 => ".x", // 1D
+        3 => ".xyz", // Cube
+        else => ".xy", // 2D (and default)
+    };
+}
+
 /// True if an image VALUE (OpLoad result) is multisampled — the OpTypeImage MS
 /// flag (word[6]). Mirrors imageValueDim's resolution (OpLoad -> its type, unwrapping
 /// OpTypeSampledImage). Used to honest-error MS subpass reads (SubpassData + MS),
@@ -526,6 +548,23 @@ fn mslArrayedSampleArgs(alloc: std.mem.Allocator, coord: []const u8, dim: u32) !
         // 2D (and any other) array layout: xy + layer in z.
         else => try std.fmt.allocPrint(alloc, "{s}.xy, uint(rint({s}.z))", .{ coord, coord }),
     };
+}
+
+/// Index of the ConstOffset (image-operand bit 0x8) value word for an
+/// OpImageSampleDref* instruction. Dref occupies words[5] and the image-operands
+/// mask is words[6], so operand values start at words[7]; ConstOffset follows
+/// Bias(1)/Lod(1)/Grad(2) in ascending bit order. Returns null when ConstOffset
+/// is absent or its word is missing. (#170)
+fn drefConstOffsetIdx(words: []const u32) ?usize {
+    if (words.len <= 6) return null;
+    const mask = words[6];
+    if (mask & 0x8 == 0) return null;
+    var off: usize = 7;
+    if (mask & 0x1 != 0) off += 1; // Bias
+    if (mask & 0x2 != 0) off += 1; // Lod
+    if (mask & 0x4 != 0) off += 2; // Grad
+    if (off >= words.len) return null;
+    return off;
 }
 
 /// Render a ConstOffset image operand (an OpConstantComposite of int constants)
@@ -3638,6 +3677,11 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
         .Variable, .Function, .FunctionParameter => if (words.len > 2) words[2] else null,
         .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert, .VectorShuffle, .SampledImage, .ImageSampleImplicitLod, .ImageSampleExplicitLod, .ImageFetch, .ImageGather, .ImageQuerySizeLod, .ImageQuerySize, .ImageTexelPointer, .FunctionCall, .CopyObject, .Phi, .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast, .SNegate, .FNegate, .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul, .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod, .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix, .Dot, .Transpose, .OuterProduct, .Select, .LogicalOr, .LogicalAnd, .LogicalNot, .IEqual, .INotEqual, .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual, .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual, .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan, .FUnordLessThanEqual, .FUnordGreaterThanEqual, .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical, .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not, .BitReverse, .BitCount, .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract, .IsNan, .IsInf, .All, .Any, .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine, .DPdxCoarse, .DPdyCoarse, .FwidthCoarse, .VectorExtractDynamic, .ExtInst, .OpImage, .AtomicIAdd, .AtomicISub, .AtomicExchange, .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax, .AtomicAnd, .AtomicOr, .AtomicXor, .AtomicCompareExchange, .AtomicFAddEXT, .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod, .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod, .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples, .ImageRead, .ArrayLength => if (words.len > 2) words[2] else null,
+        // #subgroup-operand: subgroup ops define a result at words[2]; without
+        // this the result was never pre-named, so the emit handler's `orelse "v"`
+        // fallback collided with a user variable and the downstream store dropped
+        // the value. Mirrors common.resultIdFromOp.
+        .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual, .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst, .GroupNonUniformBallot, .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr, .GroupNonUniformShuffle, .GroupNonUniformShuffleXor, .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown, .SubgroupAllKHR, .SubgroupAnyKHR => if (words.len > 2) words[2] else null,
         else => null,
     };
 }
@@ -4638,6 +4682,10 @@ fn collectComputeBuiltins(
             @intFromEnum(spirv.BuiltIn.workgroup_id) => .{ .ty = "uint3", .attr = "threadgroup_position_in_grid" },
             @intFromEnum(spirv.BuiltIn.num_workgroups) => .{ .ty = "uint3", .attr = "threadgroups_per_grid" },
             @intFromEnum(spirv.BuiltIn.local_invocation_index) => .{ .ty = "uint", .attr = "thread_index_in_threadgroup" },
+            // #subgroup-operand: SubgroupLocalInvocationId (BuiltIn 41) -> the lane
+            // index within the simdgroup. Without this the body referenced an
+            // undeclared gl_SubgroupInvocationID (MSL has no such builtin).
+            41 => .{ .ty = "uint", .attr = "thread_index_in_simdgroup" },
             else => null,
         };
         if (spec) |s| {
@@ -6397,12 +6445,11 @@ fn emitBody(
                 g_switch_ctx = .{ .merge_label = mval, .phis = sphis.items };
                 g_switch_chain = if (is_ft) chain_entries.items else null;
                 try w.print("    switch ({s}) {{\n", .{sn});
-                if (dl != mval) {
-                    try w.writeAll("    default: {\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
-                    try w.writeAll("    break;\n    }\n");
-                }
+                // Cases FIRST, default LAST: a case whose body OpBranches to the default
+                // label (SPIR-V fallthrough INTO default) needs default below it in source
+                // order for C-fallthrough to reach it. The old default-first order made
+                // such a case fall off the switch end (fallthrough_then_break: sel=0 lost
+                // the default body). Mirrors spirv-cross + the GLSL/HLSL fix.
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
                     const cv = inst.words[wi];
@@ -6428,6 +6475,12 @@ fn emitBody(
                     }
                     if (!falls_through) try w.writeAll("    break;\n");
                     try w.writeAll("    }\n");
+                }
+                if (dl != mval) {
+                    try w.writeAll("    default: {\n");
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                    try w.writeAll("    break;\n    }\n");
                 }
                 try w.writeAll("    }\n");
                 g_switch_ctx = saved_switch_ctx;
@@ -7392,6 +7445,75 @@ fn emitOrdNotEqual(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     });
 }
 
+/// Lower a subgroup ARITHMETIC op (IAdd/FAdd/IMul/FMul/Min/Max/Bitwise/Logical)
+/// honoring the GroupOperation literal. SPIR-V layout for these ops:
+///   words[1]=ResultType words[2]=Result words[3]=Execution(Scope <id>)
+///   words[4]=GroupOperation literal (0=Reduce, 1=InclusiveScan,
+///            2=ExclusiveScan, 3=ClusteredReduce)
+///   words[5]=Value <id>  words[6]=ClusterSize <id> (ClusteredReduce only)
+/// The old code read words[4] as the value; it is the GroupOperation literal, so
+/// the value silently fell back to "x" AND every variant lowered as Reduce.
+/// Metal has simd_{sum,product,min,max,and,or,xor} for Reduce, and prefix-inclusive
+/// /exclusive ONLY for sum/product; Min/Max/And/Or/Xor scans and ALL ClusteredReduce
+/// honest-error (no Metal equivalent). (#subgroup-operand)
+fn mslEmitSubgroupArith(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    inst: Instruction,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    if (inst.words.len < 6) return error.UnsupportedOp;
+    const rtt = try mslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const gop = inst.words[4];
+    const val = names.get(inst.words[5]) orelse "x";
+    const Stem = enum { sum, product, min, max, band, bor, bxor, land, lor };
+    const stem: Stem = switch (inst.op) {
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd => .sum,
+        .GroupNonUniformIMul, .GroupNonUniformFMul => .product,
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => .min,
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => .max,
+        .GroupNonUniformBitwiseAnd => .band,
+        .GroupNonUniformBitwiseOr => .bor,
+        .GroupNonUniformBitwiseXor => .bxor,
+        .GroupNonUniformLogicalAnd => .land,
+        .GroupNonUniformLogicalOr => .lor,
+        else => return error.UnsupportedOp,
+    };
+    switch (gop) {
+        0 => { // Reduce
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = simd_sum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = simd_product({s});\n", .{ rtt, rn, val }),
+                .min => try w.print("    {s} {s} = simd_min({s});\n", .{ rtt, rn, val }),
+                .max => try w.print("    {s} {s} = simd_max({s});\n", .{ rtt, rn, val }),
+                .band => try w.print("    {s} {s} = simd_and({s});\n", .{ rtt, rn, val }),
+                .bor => try w.print("    {s} {s} = simd_or({s});\n", .{ rtt, rn, val }),
+                .bxor => try w.print("    {s} {s} = simd_xor({s});\n", .{ rtt, rn, val }),
+                .land => try w.print("    {s} {s} = simd_all({s}) ? true : false;\n", .{ rtt, rn, val }),
+                .lor => try w.print("    {s} {s} = simd_any({s}) ? true : false;\n", .{ rtt, rn, val }),
+            }
+        },
+        1 => { // InclusiveScan: Metal prefix-inclusive only for sum/product
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = simd_prefix_inclusive_sum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = simd_prefix_inclusive_product({s});\n", .{ rtt, rn, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        2 => { // ExclusiveScan: Metal prefix-exclusive only for sum/product
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = simd_prefix_exclusive_sum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = simd_prefix_exclusive_product({s});\n", .{ rtt, rn, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        3 => return error.UnsupportedOp, // ClusteredReduce: no Metal equivalent
+        else => return error.UnsupportedOp,
+    }
+}
+
 fn emitInstruction(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -8205,7 +8327,8 @@ fn emitInstruction(
         .ImageSampleDrefImplicitLod => {
             // Shadow texture: MSL uses .sample_compare(compare_sampler, coord, dref).
             // Arrayed: the layer is a SEPARATE arg between coord and dref
-            // (coord.xy, uint(rint(coord.z)), dref) — matching spirv-cross --msl.
+            // (coord.xy, uint(rint(coord.z)), dref) -- matching spirv-cross --msl.
+            // ConstOffset (0x8) -> trailing int2 arg. Dref=words[5], mask=words[6]. (#170)
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             var samp: []const u8 = try std.fmt.allocPrint(alloc, "{s}Smplr", .{si});
@@ -8217,8 +8340,13 @@ fn emitInstruction(
             const coord = if (imageValueIsArrayed(m, inst.words[3]))
                 try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
             else
-                coord_name;
-            try w.print("    {s} {s} = {s}.sample_compare({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, dref });
+                try std.fmt.allocPrint(alloc, "{s}{s}", .{ coord_name, mslDrefCoordSwizzle(m, inst.words[3], inst.words[4]) });
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}, {s}, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, dref, off_suffix });
         },
         .ImageSampleDrefExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
@@ -8228,8 +8356,20 @@ fn emitInstruction(
             const coord = if (imageValueIsArrayed(m, inst.words[3]))
                 try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
             else
-                coord_name;
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s}, level(0));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref });
+                try std.fmt.allocPrint(alloc, "{s}{s}", .{ coord_name, mslDrefCoordSwizzle(m, inst.words[3], inst.words[4]) });
+            // Lod value at words[7] (bit 0x2; Dref=words[5], mask=words[6]); the old
+            // code hardcoded 0, silently sampling mip 0. ConstOffset (0x8) -> trailing
+            // int2 arg after level(). (#170)
+            const lod: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x2) != 0)
+                names.get(inst.words[7]) orelse "0"
+            else
+                "0";
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s}, level({s}){s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref, lod, off_suffix });
         },
         .ImageSampleProjImplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
@@ -8251,16 +8391,22 @@ fn emitInstruction(
             }
         },
         .ImageSampleProjDrefImplicitLod => {
-            // Projected shadow: divide xy by the coord's last component, compare depth
+            // Projected shadow: divide xy by the coord's last component, compare depth.
+            // OpImageSampleProjDref divides BOTH coord and Dref by the projective
+            // divisor; emitting the raw Dref silently compares un-projected depth.
+            // Matches the spirv-cross oracle and the WGSL/GLSL lowerings. ConstOffset
+            // (0x8) -> trailing int2 arg. (#170, #470)
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const dvs = projDivisorSwizzle(m, inst.words[4]);
-            // OpImageSampleProjDref divides BOTH coord and Dref by the projective
-            // divisor; emitting the raw Dref silently compares un-projected depth.
-            // Matches the spirv-cross oracle and the WGSL/GLSL lowerings. (#170, #470)
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs });
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs, off_suffix });
         },
         .ImageSampleProjDrefExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
@@ -8268,8 +8414,19 @@ fn emitInstruction(
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const dvs = projDivisorSwizzle(m, inst.words[4]);
-            // Projective divide applies to the Dref too (see ProjDrefImplicitLod). (#170, #470)
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s}, level(0));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs });
+            // Projective divide applies to the Dref too (see ProjDrefImplicitLod). Lod
+            // value at words[7] (bit 0x2); was hardcoded 0. ConstOffset (0x8) -> trailing
+            // int2 arg after level(). (#170, #470)
+            const lod: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x2) != 0)
+                names.get(inst.words[7]) orelse "0"
+            else
+                "0";
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s}, level({s}){s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs, lod, off_suffix });
         },
         .ImageSampleProjExplicitLod => {
             // Projected explicit LOD: sample with manual projection + lod. Divisor
@@ -8745,71 +8902,11 @@ fn emitInstruction(
             const delta = names.get(inst.words[5]) orelse "0";
             try w.print("    {s} {s} = simd_shuffle_down({s}, {s});\n", .{ rtt, rn, val, delta });
         },
-        .GroupNonUniformIAdd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_sum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFAdd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_sum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformIMul => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_product({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFMul => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_product({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_min({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_max({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseAnd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_and({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseOr => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_or({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseXor => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_xor({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalAnd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_all({s}) ? true : false;\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalOr => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_any({s}) ? true : false;\n", .{ rtt, rn, val });
+        // Subgroup ARITHMETIC ops share one lowering that honors the
+        // GroupOperation literal (Reduce/InclusiveScan/ExclusiveScan/
+        // ClusteredReduce); see mslEmitSubgroupArith for the operand fix.
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr => {
+            try mslEmitSubgroupArith(m, names, inst, w, alloc);
         },
         // SubgroupAllKHR / SubgroupAnyKHR (older extension equivalents)
         .SubgroupAllKHR => {

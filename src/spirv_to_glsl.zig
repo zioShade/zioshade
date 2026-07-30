@@ -12,7 +12,7 @@ const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
-const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false, shadow: bool = false };
+const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false, shadow: bool = false, is_ms: bool = false };
 
 // ---- Helpers ----
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
@@ -275,6 +275,21 @@ fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator
         .{ .token = "dFdyFine", .ext = "GL_ARB_derivative_control" },
         .{ .token = "fwidthCoarse", .ext = "GL_ARB_derivative_control" },
         .{ .token = "fwidthFine", .ext = "GL_ARB_derivative_control" },
+        // #subgroup-operand: subgroup builtins/arithmetic need their KHR pragmas.
+        // basic gates the gl_SubgroupInvocationID builtin; arithmetic gates the
+        // subgroup{Add,Mul,Min,Max,And,Or,Xor} + Inclusive/Exclusive scans;
+        // clustered gates subgroupClustered*. (detected via substring tokens.)
+        .{ .token = "gl_SubgroupInvocationID", .ext = "GL_KHR_shader_subgroup_basic" },
+        .{ .token = "subgroupAdd(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupMul(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupMin(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupMax(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupAnd(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupOr(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupXor(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupInclusive", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupExclusive", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupClustered", .ext = "GL_KHR_shader_subgroup_clustered" },
     };
     var block = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
     defer block.deinit(alloc);
@@ -900,6 +915,11 @@ threadlocal var g_hoist_stripping: bool = false;
 // operands) — needs GL_EXT_shader_integer_mix (core GLSL mix is genType=float
 // only). Read by spliceRequiredExtensions.
 threadlocal var g_int_mix_needed: bool = false;
+// #loop-break-on-selection-merge: the enclosing loop's merge label, so an
+// OpBranch to it from a side-effecting break block can emit `break;` (mirrors
+// MSL's g_loop_merge_ctx). Set per-loop by emitWhileLoop, saved/restored for nesting.
+const LoopMergeCtx = struct { merge_label: u32 };
+threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
 /// GLSL type name for a loop-phi variable declaration — STATIC strings only (no
 /// allocation), for the scalar/vector types loop phis realistically carry.
@@ -1061,31 +1081,87 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 /// are mutually exclusive; Flat wins if both are set. Matches spirv-cross. (#475)
 /// Centroid/Sample are orthogonal auxiliary qualifiers — handled separately if added.
 /// GLSL shadow-compare coord constructor + coord swizzle for an OpImageSampleDref*
-/// `coord` operand. The compare coordinate packs the texture coordinate plus the
-/// depth-reference scalar, so it is `vecN(coord.<first N-1>, dref)`. The coord's
-/// first (N-1) components are the texture coordinate regardless of whether the SPIR-V
-/// producer appended the dref to the coord (glslang: vec4 with dref in .w) or kept it
-/// separate (zioshade frontend: vec3) — swizzling `.xyz`/`.xy` takes the texture
-/// coords in both encodings, so `vecN(coord.swizzle, dref)` is producer-independent.
-/// A 2D shadow (vec2 coord) -> vec3(coord.xy, dref); a 2D-array/cube shadow (vec3 or
-/// vec4 coord) -> vec4(coord.xyz, dref).
+/// instruction. The compare coordinate packs the texture coordinate (plus an array
+/// layer, if any) and the depth-reference scalar, so it is `vecN(coord.<leading>, dref)`.
+/// The constructor WIDTH and the leading-component count are derived from the sampler's
+/// OpTypeImage Dim/Arrayed behind the sampled image -- NOT the coord width. A glslang
+/// producer packs the dref INTO the coord (vec3 for a 2D shadow), so reading the coord
+/// width double-counts the dref (a vec4 where vec3 is needed). The leading coord
+/// components are the texture coords in both producer encodings (glslang appends dref;
+/// zioshade keeps it separate), so swizzling them is producer-independent. A 2D shadow
+/// -> vec3(coord.xy, dref); a 2D-array/cube shadow -> vec4(coord.xyz, dref). (#170)
 const ShadowCoord = struct { ctor: []const u8, swizzle: []const u8 };
-fn glslShadowCoordCtor(m: *const ParsedModule, coord_id: u32) ShadowCoord {
-    const def = getDef(m, coord_id) orelse return .{ .ctor = "vec3", .swizzle = ".xy" };
-    if (def.words.len < 2) return .{ .ctor = "vec3", .swizzle = ".xy" };
-    const t = getDef(m, def.words[1]) orelse return .{ .ctor = "vec3", .swizzle = ".xy" };
-    if (t.op == .TypeFloat) return .{ .ctor = "vec2", .swizzle = "" }; // scalar coord (1D shadow)
-    if (t.op == .TypeVector and t.words.len > 3) {
-        // Take up to 3 leading components (a shadow coord never needs more than 3:
-        // 2D-array/cube = xyz); a 4th, if present, is a producer-appended dref to drop.
-        return switch (if (t.words[3] >= 3) @as(u32, 3) else t.words[3]) {
-            1 => .{ .ctor = "vec2", .swizzle = ".x" },
-            2 => .{ .ctor = "vec3", .swizzle = ".xy" },
-            3 => .{ .ctor = "vec4", .swizzle = ".xyz" },
-            else => .{ .ctor = "vec3", .swizzle = ".xy" },
-        };
+fn shadowSwizzle(n: u32) []const u8 {
+    return switch (n) {
+        1 => ".x",
+        2 => ".xy",
+        3 => ".xyz",
+        else => "",
+    };
+}
+/// Resolve the OpTypeImage behind a sampled-image VALUE `id` (an OpSampledImage or
+/// OpLoad result), unwrapping its result type's OpTypeSampledImage wrapper. Mirrors
+/// the MSL backend's imageValueDim resolution. Returns null if unreachable.
+fn resolveSampledImageType(m: *const ParsedModule, sampled_image_id: u32) ?Instruction {
+    const vdef = getDef(m, sampled_image_id) orelse return null;
+    if (vdef.words.len < 2) return null;
+    var tinst = getDef(m, vdef.words[1]) orelse return null;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(m, tinst.words[2]) orelse return null;
     }
-    return .{ .ctor = "vec3", .swizzle = ".xy" };
+    if (tinst.op != .TypeImage) return null;
+    return tinst;
+}
+fn glslShadowCoordCtor(m: *const ParsedModule, sampled_image_id: u32, coord_id: u32) ShadowCoord {
+    // Leading coord components = spatial coords (by Dim) + array layer (if Arrayed).
+    // 1D=1, 2D=2, Cube=3; Rect/unknown default to a 2D shape. Cube-arrayed shadow
+    // needs a vec4 coord + a SEPARATE ref (samplerCubeArrayShadow takes (vec4, float)),
+    // so the packed vecN(coord, dref) form does not fit -- clamp so we never emit a
+    // 5-wide ctor. Rare and not in the corpus.
+    var leading: u32 = 2; // 2D default
+    if (resolveSampledImageType(m, sampled_image_id)) |img| {
+        if (img.words.len >= 4) {
+            const spatial: u32 = switch (img.words[3]) {
+                0 => 1, // 1D
+                1 => 2, // 2D
+                3 => 3, // Cube
+                else => 2, // Rect/unknown -> 2D-shaped
+            };
+            const arrayed: u32 = if (img.words.len > 5 and img.words[5] == 1) 1 else 0;
+            leading = if (spatial + arrayed > 3) 3 else spatial + arrayed;
+        }
+    }
+    const ctor: []const u8 = switch (leading + 1) {
+        2 => "vec2",
+        3 => "vec3",
+        else => "vec4",
+    };
+    // A scalar coord (1D shadow passed as a bare float) takes no swizzle.
+    if (getDef(m, coord_id)) |d| {
+        if (d.words.len >= 2) {
+            if (getDef(m, d.words[1])) |t| {
+                if (t.op == .TypeFloat) return .{ .ctor = ctor, .swizzle = "" };
+            }
+        }
+    }
+    return .{ .ctor = ctor, .swizzle = shadowSwizzle(leading) };
+}
+
+/// Index of the ConstOffset (image-operand bit 0x8) value word for an
+/// OpImageSampleDref* instruction. Dref occupies words[5] and the image-operands
+/// mask is words[6], so operand values start at words[7]; ConstOffset follows
+/// Bias(1 word)/Lod(1)/Grad(2) in ascending bit order. Returns null when
+/// ConstOffset is absent or its word is missing. (#170)
+fn drefConstOffsetIdx(words: []const u32) ?usize {
+    if (words.len <= 6) return null;
+    const mask = words[6];
+    if (mask & 0x8 == 0) return null;
+    var off: usize = 7;
+    if (mask & 0x1 != 0) off += 1; // Bias
+    if (mask & 0x2 != 0) off += 1; // Lod
+    if (mask & 0x4 != 0) off += 2; // Grad
+    if (off >= words.len) return null;
+    return off;
 }
 
 fn glslInterpQual(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) []const u8 {
@@ -1528,7 +1604,14 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
             // sampler2DArrayShadow, samplerCubeShadow); it is always float, so the
             // u/i-sampler prefixes never combine with it.
             const shadow_suffix: []const u8 = if (tex.shadow) "Shadow" else "";
-            const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{dim_str}) catch "isampler2D" else std.fmt.allocPrint(aa, "sampler{s}{s}", .{ dim_str, shadow_suffix }) catch "sampler2D";
+            // Multisampled samplers insert "MS" between the dim spelling and any
+            // "Array" suffix (sampler2DMS, sampler2DMSArray). GLSL has no 1D/3D/Cube
+            // MS sampler, so this only fires for the valid 2D case; MS storage images
+            // do not exist either, so this is sampler-path only. Built from the raw
+            // tex.dim_str (before the arrayed "Array" suffix) so the order is
+            // dim+MS+Array, matching the GLSL spelling.
+            const ms_dim_str: []const u8 = if (tex.is_ms) (if (tex.arrayed) (std.fmt.allocPrint(aa, "{s}MSArray", .{tex.dim_str}) catch dim_str) else (std.fmt.allocPrint(aa, "{s}MS", .{tex.dim_str}) catch dim_str)) else dim_str;
+            const stype = if (tex.is_uint) std.fmt.allocPrint(aa, "usampler{s}", .{ms_dim_str}) catch "usampler2D" else if (tex.is_int) std.fmt.allocPrint(aa, "isampler{s}", .{ms_dim_str}) catch "isampler2D" else std.fmt.allocPrint(aa, "sampler{s}{s}", .{ ms_dim_str, shadow_suffix }) catch "sampler2D";
             try w.print("layout(binding = {d}) uniform {s} {s}{s};\n", .{ tex_shifted, stype, tex.name, arr });
         }
     }
@@ -1871,6 +1954,11 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
         .Variable, .Function, .FunctionParameter => if (words.len > 2) words[2] else null,
         .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert, .VectorShuffle, .SampledImage, .ImageSampleImplicitLod, .ImageSampleExplicitLod, .ImageFetch, .ImageGather, .ImageQuerySizeLod, .ImageQuerySize, .ImageTexelPointer, .FunctionCall, .CopyObject, .Phi, .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast, .SNegate, .FNegate, .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul, .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod, .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix, .Dot, .Transpose, .OuterProduct, .Select, .LogicalOr, .LogicalAnd, .LogicalNot, .IEqual, .INotEqual, .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual, .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual, .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan, .FUnordLessThanEqual, .FUnordGreaterThanEqual, .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical, .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not, .BitReverse, .BitCount, .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract, .IsNan, .IsInf, .All, .Any, .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine, .DPdxCoarse, .DPdyCoarse, .FwidthCoarse, .VectorExtractDynamic, .ExtInst, .OpImage, .AtomicIAdd, .AtomicISub, .AtomicExchange, .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax, .AtomicAnd, .AtomicOr, .AtomicXor, .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod, .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod, .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples, .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT, .ArrayLength => if (words.len > 2) words[2] else null,
+        // #subgroup-operand: subgroup ops define a result at words[2]; without
+        // this the result was never pre-named, so the emit handler's `orelse "v"`
+        // fallback collided with a user variable and the downstream store dropped
+        // the value. Mirrors common.resultIdFromOp.
+        .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual, .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst, .GroupNonUniformBallot, .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr, .GroupNonUniformShuffle, .GroupNonUniformShuffleXor, .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown, .SubgroupAllKHR, .SubgroupAnyKHR => if (words.len > 2) words[2] else null,
         else => null,
     };
 }
@@ -2132,7 +2220,11 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                         // declaration to a plain sampler2D, which glslang rejects against
                         // the Dref sample/gather calls the body emits.
                         const si_shadow = si_img != null and si_img.?.words.len > 4 and si_img.?.words[4] == 1;
-                        tex.append(alloc, .{ .name = name, .binding = binding, .is_uint = si_uint, .is_int = si_int, .dim_str = si_dim, .array_size = arr_sz, .arrayed = si_arrayed, .shadow = si_shadow }) catch {};
+                        // OpTypeImage MS operand (words[6]) == 1 marks a multisampled image
+                        // (sampler2DMS / sampler2DMSArray). Dropping it degraded the decl to a
+                        // plain sampler2D and made the per-sample texelFetch reads wrong.
+                        const si_ms = si_img != null and si_img.?.words.len > 6 and si_img.?.words[6] == 1;
+                        tex.append(alloc, .{ .name = name, .binding = binding, .is_uint = si_uint, .is_int = si_int, .dim_str = si_dim, .array_size = arr_sz, .arrayed = si_arrayed, .shadow = si_shadow, .is_ms = si_ms }) catch {};
                     },
                     .TypeImage => {
                         const sampled: u32 = if (pei.words.len > 7) pei.words[7] else 0;
@@ -2204,7 +2296,8 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                             break :blk "2D";
                         };
                         const img_arrayed = pei.words.len > 5 and pei.words[5] == 1;
-                        tex.append(alloc, .{ .name = name, .binding = binding, .is_storage = is_storage, .format_str = fmt, .dim_str = dim, .is_uint = is_uint, .is_int = is_int, .array_size = arr_sz, .arrayed = img_arrayed }) catch {};
+                        const img_ms = pei.words.len > 6 and pei.words[6] == 1;
+                        tex.append(alloc, .{ .name = name, .binding = binding, .is_storage = is_storage, .format_str = fmt, .dim_str = dim, .is_uint = is_uint, .is_int = is_int, .array_size = arr_sz, .arrayed = img_arrayed, .is_ms = img_ms }) catch {};
                     },
                     else => {},
                 }
@@ -2237,6 +2330,37 @@ fn glslMemberIsRowMajor(m: *const ParsedModule, struct_id: u32, member_idx: u32)
     return false;
 }
 
+/// True if `type_id` is, or transitively contains (through TypeArray /
+/// TypeRuntimeArray element types or TypeStruct members), a matrix member that
+/// carries `OpMemberDecorate ... RowMajor`. The drill in `emitStructMembers`
+/// otherwise stops at the struct boundary: a RowMajor on a matrix INSIDE a
+/// struct-typed UBO/SSBO block member is dropped, so the bytes are read as the
+/// transpose (silent-wrong). GLSL `layout(row_major)` on a BLOCK member of
+/// struct type propagates into the struct's matrix members (it is valid on
+/// block members, NOT on plain struct members, so the struct forward decl is
+/// left bare). Works for square AND non-square matrices: in GLSL `row_major` is
+/// purely a byte-layout qualifier and indexing stays column-major (matching
+/// SPIR-V), so no transpose or dimension swap is needed.
+fn glslStructTypeNeedsRowMajor(m: *const ParsedModule, type_id: u32) bool {
+    const ti = getDef(m, type_id) orelse return false;
+    switch (ti.op) {
+        .TypeArray, .TypeRuntimeArray => {
+            if (ti.words.len < 3) return false;
+            return glslStructTypeNeedsRowMajor(m, ti.words[2]);
+        },
+        .TypeStruct => {
+            // SPIR-V value struct types are acyclic (a struct cannot contain
+            // itself by value, only via a pointer), so this recursion terminates.
+            for (ti.words[2..], 0..) |member_tid, mi| {
+                if (glslMemberIsRowMajor(m, type_id, @intCast(mi))) return true;
+                if (glslStructTypeNeedsRowMajor(m, member_tid)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
 fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, original_names: bool) !void {
     const inst = getDef(m, struct_id) orelse return;
     if (inst.op != .TypeStruct) return;
@@ -2245,7 +2369,11 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
         const mname: []const u8 = if (original_names) getMemberName(m, struct_id, @intCast(mi), &mbuf) else "";
         // #472-audit: honor RowMajor. Only matrices (incl. arrays of matrices) carry
         // this decoration; a plain member without it stays column-major (the default).
-        const rm: []const u8 = if (glslMemberIsRowMajor(m, struct_id, @intCast(mi))) "layout(row_major) " else "";
+        // A struct-typed block member may itself enclose a RowMajor matrix (the
+        // decoration sits on the inner struct's matrix member); without recursing,
+        // the row-major layout is dropped (silent-wrong transpose read).
+        const rm: []const u8 = if (glslMemberIsRowMajor(m, struct_id, @intCast(mi)) or
+            glslStructTypeNeedsRowMajor(m, mt_id)) "layout(row_major) " else "";
         const mti = getDef(m, mt_id);
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
@@ -3061,6 +3189,25 @@ fn caseTerminatorTargetGLSL(m: *const ParsedModule, label_map: *const std.AutoHa
     return null;
 }
 
+/// #switch-fallthrough: true iff `lbl` is a case/default target of the OpSwitch whose
+/// words are `switch_words` (words[2]=default, words[4,6,...]=case targets). Used to
+/// decide whether a case body's first OpBranch target is a REAL SPIR-V fallthrough edge
+/// (branch to another case/default of THIS switch) -- only then is `break;` omitted. A
+/// branch to the merge, a loop header, or a selection target is NOT a fallthrough edge:
+/// the case is terminal and must `break;`. Mirrors the WGSL/HLSL backends. Ported from
+/// spirv_to_wgsl.zig (isSwitchCaseTarget).
+/// 32-bit selector only: targets are at words[4], words[6], ... (literal,target pairs).
+/// A 64-bit selector uses 2-word literals (targets at words[5], words[9], ...) -- this
+/// matches the case-label EMITTER, which also assumes 32-bit, so the two stay consistent.
+fn isSwitchCaseTargetGLSL(switch_words: []const u32, lbl: u32) bool {
+    if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
+    var k: usize = 4; // words[3] = first case literal, words[4] = first case target
+    while (k < switch_words.len) : (k += 2) {
+        if (switch_words[k] == lbl) return true;
+    }
+    return false;
+}
+
 fn emitBody(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3319,7 +3466,17 @@ fn emitBody(
                 for (phi_decls.items) |pv| {
                     const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
                     const vn = names.get(pv.result_id) orelse "pv";
-                    try w.print("    {s} {s}_phi;\n", .{ rtt, vn });
+                    if (he) {
+                        // Both arms assign it; declare uninitialized.
+                        try w.print("    {s} {s}_phi;\n", .{ rtt, vn });
+                    } else {
+                        // No else arm (short-circuit a && b): the fall-through value is the
+                        // incoming from the header block (in scope before the if); initialize
+                        // to it so the phi is defined when the condition is false. Mirrors MSL.
+                        const false_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        const fvn = exprName(m, names, false_val, alloc);
+                        try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
+                    }
                 }
                 try w.print("    if ({s})\n    {{\n", .{cn});
                 idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
@@ -3376,12 +3533,11 @@ fn emitBody(
                 collectSwitchMergePhis(m, &label_map, mval, &sphis, alloc);
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                 try w.print("    switch ({s}) {{\n", .{sn});
-                if (dl != mval) {
-                    try w.writeAll("    default:\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
-                    try w.writeAll("    break;\n");
-                }
+                // Emit case targets FIRST, then `default` LAST. Emitting default last lets
+                // a case whose body OpBranches to the default label (SPIR-V fallthrough INTO
+                // default) fall through into it, matching spirv-cross. The old order (default
+                // first) made such a case fall off the end of the switch -- silent-wrong
+                // (fallthrough_then_break: sel=0 returned 16 instead of 48). Mirrors HLSL.
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
                     const cv = inst.words[wi];
@@ -3390,15 +3546,23 @@ fn emitBody(
                     try w.print("    case {d}:\n", .{cv});
                     _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
-                    // #switch-fallthrough: emit `break;` only if this case is terminal
-                    // (its body OpBranches to the merge). If it OpBranches to another case
-                    // label (SPIR-V fallthrough chain), omit `break;` so GLSL falls through
-                    // — accumulating like spirv-cross. (The default keeps its unconditional
-                    // break: it is emitted first, so its fallthrough target would be
-                    // ambiguous in emit order.) Mirrors HLSL (#58).
+                    // #switch-fallthrough: omit `break;` ONLY when this case body's first
+                    // OpBranch target is a real case/default label of THIS OpSwitch (a
+                    // SPIR-V fallthrough edge). Otherwise the case is terminal -- OpBranch to
+                    // the merge, a loop header, or a selection target -- and must `break;`.
+                    // The old `t == mval` test treated a loop-header / selection branch as
+                    // fallthrough and dropped the break, so a loop-in-case fell through into
+                    // the next case (loop_in_case: sel=0 returned 100 instead of 3).
+                    // Stricter and safer than the t==mval test. Mirrors HLSL/WGSL.
                     const cterm = caseTerminatorTargetGLSL(m, &label_map, target);
-                    const cterminal = if (cterm) |t| (t == mval) else true;
-                    try w.writeAll(if (cterminal) "    break;\n" else "");
+                    const fallthrough = if (cterm) |t| isSwitchCaseTargetGLSL(inst.words, t) else false;
+                    try w.writeAll(if (!fallthrough) "    break;\n" else "");
+                }
+                if (dl != mval) {
+                    try w.writeAll("    default:\n");
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                    try w.writeAll("    break;\n");
                 }
                 try w.writeAll("    }\n");
                 finalizeSwitchPhis(names, sphis.items, alloc);
@@ -3436,6 +3600,13 @@ fn emitWhileLoop(
     is_frag: bool,
     ovid: ?u32,
 ) anyerror!usize {
+    // #loop-break-on-selection-merge: expose this loop's merge label to emitBlock so a
+    // side-effecting break block (`x = ...; OpBranch <loop-merge>`) emits `break;`
+    // instead of silently dropping it (mandelbrot-loop: loop always ran all iters).
+    // Saved/restored for nested loops (recursive emitBlock -> emitWhileLoop).
+    const saved_lmc = g_loop_merge_ctx;
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl };
+    defer g_loop_merge_ctx = saved_lmc;
     // #413: declare loop-carried phi update temps ABOVE the loop. The top-of-
     // loop carry copy (#237) reads them on every iteration after the first;
     // without the hoist the declaration sits later in the body (and in the
@@ -3833,7 +4004,15 @@ fn emitWhileLoop(
                             if (carried_phis.contains(pv.result_id)) continue;
                             const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
                             const vn = names.get(pv.result_id) orelse "pv";
-                            try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
+                            if (nhe) {
+                                try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
+                            } else {
+                                // No else arm: initialize to the fall-through (header) value so
+                                // the phi is defined when the condition is false. Mirrors MSL.
+                                const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                const fvn = exprName(m, names, false_val, alloc);
+                                try w.print("        {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
+                            }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
@@ -4012,12 +4191,18 @@ fn emitBlock(
                 try w.print("{s}    break;\n", .{indent});
                 break;
             }
-            // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
-            // end-of-branch — otherwise a nested loop is silently dropped (early_return2:
-            // the else branch flows into a for-loop; emitBlock stopped at the OpBranch and
-            // never reached the OpLoopMerge -> emitWhileLoop). Other OpBranches (e.g. a
-            // break to an outer loop's merge) still terminate this block.
             const br_target = if (inst.words.len > 1) inst.words[1] else 0;
+            // #loop-break-on-selection-merge: an OpBranch (from a side-effecting break
+            // block) to the enclosing LOOP's merge is a structured break. Without this the
+            // break is silently dropped (mandelbrot-loop's escape exit). Mirrors MSL.
+            if (g_loop_merge_ctx) |ctx| if (ctx.merge_label == br_target) {
+                try w.print("{s}    break;\n", .{indent});
+                break;
+            };
+            // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
+            // end-of-branch. Otherwise a nested loop is silently dropped (early_return2: the
+            // else branch flows into a for-loop; emitBlock stopped at the OpBranch and never
+            // reached the OpLoopMerge -> emitWhileLoop). Other OpBranches terminate here.
             if (lm.get(br_target)) |hi| {
                 var hi2 = hi + 1;
                 while (hi2 < m.instructions.len and m.instructions[hi2].op == .Phi) : (hi2 += 1) {}
@@ -4050,7 +4235,13 @@ fn emitBlock(
                 for (phi_decls2.items) |pv| {
                     const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
                     const vn = names.get(pv.result_id) orelse "pv";
-                    try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
+                    if (he) {
+                        try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
+                    } else {
+                        const false_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        const fvn = exprName(m, names, false_val, alloc);
+                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, rtt, vn, fvn });
+                    }
                 }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
                 i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
@@ -4160,6 +4351,61 @@ fn emitBlock(
         try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid);
     }
     return i;
+}
+
+/// Lower a subgroup ARITHMETIC op (IAdd/FAdd/IMul/FMul/Min/Max/Bitwise/Logical)
+/// honoring the GroupOperation literal. SPIR-V layout for these ops:
+///   words[1]=ResultType words[2]=Result words[3]=Execution(Scope <id>)
+///   words[4]=GroupOperation literal (0=Reduce, 1=InclusiveScan,
+///            2=ExclusiveScan, 3=ClusteredReduce)
+///   words[5]=Value <id>  words[6]=ClusterSize <id> (ClusteredReduce only)
+/// The old code read words[4] as the value; it is the GroupOperation literal, so
+/// the value silently fell back to "x" AND every variant lowered as Reduce.
+/// GL_KHR_shader_subgroup_arithmetic is regular: subgroup{,Inclusive,Exclusive,
+/// Clustered}{Add,Mul,Min,Max,And,Or,Xor}; the cluster form takes (value, N).
+/// (#subgroup-operand)
+fn glslEmitSubgroupArith(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    inst: Instruction,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    if (inst.words.len < 6) return error.UnsupportedOp;
+    const rtt = try glslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const gop = inst.words[4];
+    const val = names.get(inst.words[5]) orelse "x";
+    // GL_KHR_shader_subgroup_arithmetic stem per op. LogicalAnd/LogicalOr reuse
+    // the integer And/Or stems (matches the prior Reduce-only behavior).
+    const stem: []const u8 = switch (inst.op) {
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd => "Add",
+        .GroupNonUniformIMul, .GroupNonUniformFMul => "Mul",
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => "Min",
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => "Max",
+        .GroupNonUniformBitwiseAnd, .GroupNonUniformLogicalAnd => "And",
+        .GroupNonUniformBitwiseOr, .GroupNonUniformLogicalOr => "Or",
+        .GroupNonUniformBitwiseXor => "Xor",
+        else => return error.UnsupportedOp,
+    };
+    switch (gop) {
+        0 => try w.print("    {s} {s} = subgroup{s}({s});\n", .{ rtt, rn, stem, val }),
+        1 => try w.print("    {s} {s} = subgroupInclusive{s}({s});\n", .{ rtt, rn, stem, val }),
+        2 => try w.print("    {s} {s} = subgroupExclusive{s}({s});\n", .{ rtt, rn, stem, val }),
+        3 => {
+            if (inst.words.len < 7) return error.UnsupportedOp;
+            // words[6] is the ClusterSize Constant <id>, not a literal. The names map
+            // resolves it normally (e.g. "4u"); if it is somehow unnamed, resolve the
+            // constant value rather than emit the <id> number (silent-wrong), else honest-error.
+            const cluster: []const u8 = names.get(inst.words[6]) orelse blk: {
+                const cdef = getDef(m, inst.words[6]) orelse return error.UnsupportedOp;
+                if (cdef.op != .Constant or cdef.words.len < 4) return error.UnsupportedOp;
+                break :blk std.fmt.allocPrint(alloc, "{d}u", .{cdef.words[3]}) catch return error.OutOfMemory;
+            };
+            try w.print("    {s} {s} = subgroupClustered{s}({s}, {s});\n", .{ rtt, rn, stem, val, cluster });
+        },
+        else => return error.UnsupportedOp,
+    }
 }
 
 fn emitInstruction(
@@ -4737,23 +4983,30 @@ fn emitInstruction(
             }
         },
         .ImageSampleDrefImplicitLod => {
-            // Shadow texture: texture(sampler2DShadow, vec3(uv.xy, depth)). The
-            // compare-coord ctor swizzles the coord's leading components (producer-
-            // independent: glslang appends dref to the coord, zioshade keeps it
-            // separate), so vecN(coord.swizzle, dref) is correct for both. The old
-            // hardcoded vec3 was wrong-arity for array/cube shadow. (#GLSL-corpus)
+            // Shadow compare: texture(sampler*Shadow, vecN(coord.leading, dref)). The
+            // ctor width is sampler-dim-aware (see glslShadowCoordCtor) -- a glslang
+            // producer packs the dref INTO the coord, so reading the coord width
+            // double-counts it (vec4 where vec3 is needed). ConstOffset (0x8) ->
+            // native textureOffset. Operand layout: Dref=words[5], mask=words[6],
+            // values from words[7]. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            const sc = glslShadowCoordCtor(m, inst.words[4]);
-            try w.print("    {s} {s} = texture({s}, {s}({s}{s}, {s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, sc.ctor, coord, sc.swizzle, dref });
+            const sc = glslShadowCoordCtor(m, inst.words[3], inst.words[4]);
+            const cmp_coord = try std.fmt.allocPrint(alloc, "{s}({s}{s}, {s})", .{ sc.ctor, coord, sc.swizzle, dref });
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureOffset({s}, {s}, {s});\n", .{ rtt, gname, si, cmp_coord, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, gname, si, cmp_coord });
+            }
         },
         .ImageSampleDrefExplicitLod => {
-            // Shadow texture with explicit LOD: `textureLod(sampler*Shadow, ctor(coord.swizzle, dref), lod)`.
-            // The compare coord ctor is producer-independent (see ImageSampleDrefImplicitLod); the
-            // LOD must be the real operand, not a hardcoded 0. Operand layout: words[5]=Dref,
-            // words[6]=image-operands mask, and the Lod value (bit 0x2) at words[7]. (#170)
+            // Shadow compare with explicit LOD: textureLod(sampler*Shadow, ctor, lod).
+            // The compare-coord ctor is sampler-dim-aware (see ImageSampleDrefImplicitLod).
+            // Lod value at words[7] (bit 0x2; Dref=words[5], mask=words[6]); ConstOffset
+            // (0x8) -> textureLodOffset. The Lod must be the real operand, not 0. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
@@ -4762,8 +5015,14 @@ fn emitInstruction(
                 names.get(inst.words[7]) orelse "0.0"
             else
                 "0.0";
-            const sc = glslShadowCoordCtor(m, inst.words[4]);
-            try w.print("    {s} {s} = textureLod({s}, {s}({s}{s}, {s}), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, sc.ctor, coord, sc.swizzle, dref, lod });
+            const sc = glslShadowCoordCtor(m, inst.words[3], inst.words[4]);
+            const cmp_coord = try std.fmt.allocPrint(alloc, "{s}({s}{s}, {s})", .{ sc.ctor, coord, sc.swizzle, dref });
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureLodOffset({s}, {s}, {s}, {s});\n", .{ rtt, gname, si, cmp_coord, lod, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = textureLod({s}, {s}, {s});\n", .{ rtt, gname, si, cmp_coord, lod });
+            }
         },
         .ImageSampleProjImplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
@@ -4780,19 +5039,38 @@ fn emitInstruction(
             }
         },
         .ImageSampleProjDrefImplicitLod => {
-            // Projected shadow: textureProj(sampler2DShadow, vec4(xy, depth, w))
+            // Projected shadow: textureProj(sampler2DShadow, vec4(xy, depth, w)).
+            // Only 2D projective shadow is faithful here (the vec4 divides xy by w).
+            // ConstOffset (0x8) -> textureProjOffset. Dref=words[5], mask=words[6]. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = textureProj({s}, vec4({s}.xy, {s}, {s}.w));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, coord });
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureProjOffset({s}, vec4({s}.xy, {s}, {s}.w), {s});\n", .{ rtt, gname, si, coord, dref, coord, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = textureProj({s}, vec4({s}.xy, {s}, {s}.w));\n", .{ rtt, gname, si, coord, dref, coord });
+            }
         },
         .ImageSampleProjDrefExplicitLod => {
+            // Projected shadow + explicit LOD. Lod value at words[7] (bit 0x2); the
+            // old code hardcoded 0, silently sampling mip 0. ConstOffset (0x8) ->
+            // textureProjLodOffset. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = textureProjLod({s}, vec4({s}.xy, {s}, {s}.w), 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, coord });
+            const lod: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x2) != 0)
+                names.get(inst.words[7]) orelse "0.0"
+            else
+                "0.0";
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureProjLodOffset({s}, vec4({s}.xy, {s}, {s}.w), {s}, {s});\n", .{ rtt, gname, si, coord, dref, coord, lod, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = textureProjLod({s}, vec4({s}.xy, {s}, {s}.w), {s});\n", .{ rtt, gname, si, coord, dref, coord, lod });
+            }
         },
         .ImageSampleExplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
@@ -4803,7 +5081,14 @@ fn emitInstruction(
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = textureLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0" });
+                    const lod = names.get(inst.words[off]) orelse "0";
+                    // Lod|ConstOffset (textureLodOffset): the const offset follows the
+                    // lod. Dropping it silently samples the un-offset texels. (#170)
+                    if (mask & 0x8 != 0 and off + 1 < inst.words.len) {
+                        try w.print("    {s} {s} = textureLodOffset({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, lod, names.get(inst.words[off + 1]) orelse "ivec2(0)" });
+                    } else {
+                        try w.print("    {s} {s} = textureLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, lod });
+                    }
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
                     const dx = names.get(inst.words[off]) orelse "0";
                     const dy = names.get(inst.words[off + 1]) orelse "0";
@@ -4861,28 +5146,31 @@ fn emitInstruction(
         },
         .ImageFetch => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
-            // Check if the sampled image is a buffer texture (texelFetch takes 2 args for buffers)
-            const is_buffer = blk: {
-                const si_def = getDef(m, inst.words[3]);
-                if (si_def) |sd| {
-                    if (sd.op == .SampledImage and sd.words.len > 2) {
-                        const img_def = getDef(m, sd.words[2]);
-                        if (img_def) |id| {
-                            if (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) break :blk true;
-                        }
-                    }
-                    // Also check direct image reference (OpImage result)
-                    if (sd.op == .OpImage and sd.words.len > 1) {
-                        const img_type_def = getDef(m, sd.words[1]);
-                        if (img_type_def) |id| {
-                            if (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) break :blk true;
-                        }
-                    }
-                }
-                break :blk false;
+            // Resolve the OpTypeImage behind the fetch operand (words[3]) to read Dim
+            // (Buffer=5) and the multisample flag (MS=words[6]). The operand is an
+            // OpSampledImage result or -- the common OpImageFetch shape -- an OpImage
+            // result whose Result Type IS the OpTypeImage.
+            const img_def = blk: {
+                const sd = getDef(m, inst.words[3]) orelse break :blk null;
+                if (sd.op == .SampledImage and sd.words.len > 2) break :blk getDef(m, sd.words[2]);
+                if (sd.op == .OpImage and sd.words.len > 1) break :blk getDef(m, sd.words[1]);
+                break :blk null;
             };
+            const is_buffer = if (img_def) |id| (id.op == .TypeImage and id.words.len > 3 and id.words[3] == 5) else false;
+            const is_ms = if (img_def) |id| (id.op == .TypeImage and id.words.len > 6 and id.words[6] == 1) else false;
             if (is_buffer) {
+                // Buffer: texelFetch takes (sampler, coord) -- no LOD/sample arg.
                 try w.print("    {s} {s} = texelFetch({s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0" });
+            } else if (is_ms) {
+                // Multisampled: texelFetch's 3rd arg is the SAMPLE index (NOT an LOD),
+                // carried by the Sample image operand (mask 0x40, id at words[6]). MS
+                // textures have no mip chain. Without this zioshade hardcoded 0, reading
+                // only sample 0 from every per-sample fetch (silent-wrong). (#imagefetch)
+                const sample: []const u8 = if (inst.words.len > 6 and (inst.words[5] & 0x40) != 0)
+                    names.get(inst.words[6]) orelse "0"
+                else
+                    "0";
+                try w.print("    {s} {s} = texelFetch({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "tex", names.get(inst.words[4]) orelse "0", sample });
             } else {
                 // OpImageFetch: pass the explicit LOD (image-operand Lod bit 0x2, value at
                 // words[6]) instead of hardcoding mip 0. `texelFetch` REQUIRES a lod arg for a
@@ -5163,71 +5451,11 @@ fn emitInstruction(
             const delta = names.get(inst.words[5]) orelse "0";
             try w.print("    {s} {s} = subgroupShuffleDown({s}, {s});\n", .{ rtt, rn, val, delta });
         },
-        .GroupNonUniformIAdd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAdd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFAdd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAdd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformIMul => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMul({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFMul => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMul({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMin({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMax({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseAnd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAnd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseOr => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupOr({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseXor => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupXor({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalAnd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAnd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalOr => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupOr({s});\n", .{ rtt, rn, val });
+        // Subgroup ARITHMETIC ops share one lowering that honors the
+        // GroupOperation literal (Reduce/InclusiveScan/ExclusiveScan/
+        // ClusteredReduce); see glslEmitSubgroupArith for the operand fix.
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr => {
+            try glslEmitSubgroupArith(m, names, inst, w, alloc);
         },
         // SubgroupAllKHR / SubgroupAnyKHR
         .SubgroupAllKHR => {

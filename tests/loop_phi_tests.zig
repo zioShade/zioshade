@@ -727,6 +727,31 @@ test "subpassInputMS honest-errors (MS texture-type modeling deferred)" {
     try std.testing.expectError(error.UnsupportedMultisampledSubpassInput, crossMsl(SUBPASS_INPUT_MS_SPV));
 }
 
+// WGSL port of the same SubpassData fix (#488). WGSL has no implicit subpass read
+// either, so a subpassLoad's OpImageRead (Dim 6) must read at the fragment
+// coordinate (@builtin(position)), not at the (0,0) placeholder. The source SPIR-V
+// does not declare gl_FragCoord (subpassLoad never names it), so the WGSL backend
+// synthesizes a @builtin(position) input. The texture is read-only (a writable
+// storage texture is rejected by naga in fragment stage).
+test "WGSL subpassInput reads at the fragment coordinate, not (0,0)" {
+    const wgsl = try crossWgsl(SUBPASS_INPUT_SPV);
+    defer alloc.free(wgsl);
+    // A @builtin(position) input is synthesized and the read is at its .xy.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "@builtin(position) _fragCoord") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "vec2<i32>(_fragCoord.xy)") != null);
+    // The old (0,0) placeholder read must be gone.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "vec2<i32>(0)") == null);
+    // The subpass texture is read-only (read_write is a naga reject in fragment).
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ", read>") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, ", read_write>") == null);
+}
+
+// WGSL likewise defers MS subpass reads (no multisampled storage texture form); the
+// OpImageRead arm honest-errors via the storageImageShape multisample guard.
+test "WGSL subpassInputMS honest-errors (MS storage texture deferred)" {
+    try std.testing.expectError(error.UnsupportedOp, crossWgsl(SUBPASS_INPUT_MS_SPV));
+}
+
 // ---------------------------------------------------------------------------
 // #for-loop-init (#482 MSL port): no use-before-declaration in a no-OpPhi loop
 // ---------------------------------------------------------------------------

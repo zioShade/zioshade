@@ -310,6 +310,23 @@ fn recordUnsupportedLoopInSwitchCase() error{UnsupportedLoopInSwitchCase} {
     return error.UnsupportedLoopInSwitchCase;
 }
 
+/// Honest-error for a switch nested inside a switch case body. The `.Switch` case-body
+/// replay (default arm at ~6166, case arm at ~6278) does `if (dinst.op == .Switch) break;`
+/// -- it stops at the inner OpSwitch without emitting it OR anything after, so the inner
+/// switch and its trailing case-body instructions are silently DROPPED (nested_switch:
+/// outv stayed 0 instead of 10/11/12/...). The replay cannot construct a nested switch
+/// (it would need a recursive emitter, not emitSimpleInstruction). Fail loud rather than
+/// miscompile. GLSL/MSL/HLSL emit this correctly (emitBlock recurses). Full nested-switch
+/// emission for WGSL is a tracked follow-up. (#wgsl-nested-switch-in-switch-case)
+fn recordUnsupportedNestedSwitchInSwitchCase() error{UnsupportedNestedSwitchInSwitchCase} {
+    last_error_detail = std.fmt.bufPrint(
+        &last_error_detail_buf,
+        "a switch nested inside a switch case body cannot be lowered to WGSL yet (the case-body replay stops at the inner OpSwitch and would silently drop it); flatten the inner switch into an if-chain or hoist it into a helper function",
+        .{},
+    ) catch null;
+    return error.UnsupportedNestedSwitchInSwitchCase;
+}
+
 /// Single source of truth: zioshade's internal GLSL.std.450 opcode number → WGSL
 /// builtin name. Used by BOTH the main emit path and the loop-replay path so the
 /// two cannot drift (they previously had divergent inline switches — the replay
@@ -483,6 +500,9 @@ fn frexpModfField(module: *const ParsedModule, source_id: u32, idx: u32) ?[]cons
 /// whose words are `switch_words` (words[2]=default, words[4,6,…]=case targets). Used to
 /// detect a SPIR-V fallthrough edge — a case body OpBranching to another case label — so
 /// the chain can be duplicated (WGSL removed `fallthrough` from the spec).
+/// 32-bit selector only: targets are at words[4], words[6], ... (literal,target pairs).
+/// A 64-bit selector uses 2-word literals (targets at words[5], words[9], ...) -- this
+/// matches the case-label EMITTER, which also assumes 32-bit, so the two stay consistent.
 fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
     if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
     var k: usize = 4; // words[3] = first case literal, words[4] = first case target
@@ -938,6 +958,23 @@ fn storageImageShape(module: *const ParsedModule, image_value_id: u32) StorageIm
     return .{ .arrayed = inst.words[5] == 1, .ms = inst.words[6] == 1, .spatial = spatial };
 }
 
+/// SPIR-V `Dim` operand of the image behind an image VALUE id (an OpLoad result,
+/// the operand of OpImageRead). Resolves the value's result type and unwraps an
+/// OpTypeSampledImage, mirroring the MSL backend's imageValueDim. Returns 1 (2D)
+/// when it cannot be resolved, matching this backend's 2D default. Dim 6 is
+/// SubpassData (Vulkan input attachments). OpTypeImage layout:
+/// [op, result, sampled_type, DIM, Depth, Arrayed, MS, ...].
+fn imageValueDim(module: *const ParsedModule, image_value_id: u32) u32 {
+    const vdef = getDef(module, image_value_id) orelse return 1;
+    if (vdef.words.len < 2) return 1;
+    var tinst = getDef(module, vdef.words[1]) orelse return 1;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return 1;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 4) return 1;
+    return tinst.words[3];
+}
+
 /// Unwrap every TypeArray / TypeRuntimeArray level of `type_id`, returning the id
 /// of the innermost (non-array) element type. A non-array type is returned
 /// unchanged. Used to reach the block STRUCT behind an `array<Block, N>` pointee:
@@ -1143,12 +1180,28 @@ fn emitDepthCompare(
     const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
     const shape = depthCompareShape(module, inst.words[3]);
     const coord_swz: []const u8 = if (shape.comps == 3) ".xyz" else ".xy";
+    // ConstOffset (image-operand bit 0x8). Dref=words[5], mask=words[6], values
+    // from words[7]; ConstOffset follows Bias/Lod/Grad in ascending bit order.
+    // WGSL textureSampleCompare(Level)'s const-offset arg exists ONLY for
+    // texture_depth_2d (NOT 2d_array/cube/cube_array) -> honest-error otherwise
+    // rather than emit a builtin naga rejects. (#170)
+    var off_suffix: []const u8 = "";
+    const dmask: u32 = if (inst.words.len > 6) inst.words[6] else 0;
+    if (dmask & 0x8 != 0) {
+        if (shape.arrayed or shape.comps == 3) return error.UnsupportedImageOperands;
+        var ow: usize = 7;
+        if (dmask & 0x1 != 0) ow += 1; // Bias
+        if (dmask & 0x2 != 0) ow += 1; // Lod
+        if (dmask & 0x4 != 0) ow += 2; // Grad
+        if (ow >= inst.words.len) return error.UnsupportedImageOperands;
+        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[ow]) orelse "vec2<i32>(0)"});
+    }
     try writeIndentStatic(w, indent);
     if (shape.arrayed) {
         const layer_comp: []const u8 = if (shape.comps == 3) ".w" else ".z";
-        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, coord, layer_comp, dref });
+        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, coord, layer_comp, dref, off_suffix });
     } else {
-        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, {s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, dref });
+        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, {s}{s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, dref, off_suffix });
     }
 }
 
@@ -1871,7 +1924,12 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 // other type, with no variable context) falls back to
                 // `read_write`, matching the Sampled=2 operand. See
                 // wgslStorageTextureType for the texel-format and dim logic.
-                break :blk try wgslStorageTextureType(module, type_id, "read_write", alloc);
+                // SubpassData (Dim 6) is read-only at the fragment position: use
+                // `read` (read_write is rejected by naga in fragment stage). The
+                // binding site forces the same mode; this guards the no-variable
+                // path. (Port of MSL #488.)
+                const fallback_mode: []const u8 = if (dim == 6) "read" else "read_write";
+                break :blk try wgslStorageTextureType(module, type_id, fallback_mode, alloc);
             } else if (is_ms) {
                 // WGSL spells the multisampled 2D texture `texture_multisampled_2d<T>`
                 // (NOT `texture_2d_multisampled<T>`), and has NO multisampled 3D/cube
@@ -2594,6 +2652,49 @@ fn collectAtomicVars(module: *const ParsedModule, out: *std.AutoHashMap(u32, voi
     }
 }
 
+/// Resolve whether `ptr_id` (an OpLoad/OpStore pointer operand) denotes a plain
+/// access to an SSBO struct field that `collectAtomicFields` declared `atomic<T>`.
+/// Such a field's plain OpLoad/OpStore must lower to atomicLoad/atomicStore --
+/// naga rejects `let v = b.x;` on an atomic field: "atomic variables cannot be
+/// accessed directly". Mirrors the index walk in `collectAtomicFields`: the
+/// deepest struct-member access along the AccessChain is the candidate, and if
+/// `(struct_id, member_idx)` is present in `atomic_fields` the access is atomic.
+/// Returns null for a non-AccessChain pointer or a non-atomic field.
+fn resolveAtomicFieldAccess(module: *const ParsedModule, ptr_id: u32, atomic_fields: *const AtomicFieldMap) ?AtomicFieldKind {
+    const ptr_inst = common.getDef(module, ptr_id) orelse return null;
+    if (ptr_inst.op != .AccessChain) return null;
+    if (ptr_inst.words.len < 5) return null; // need base + at least one index
+    const base_id = ptr_inst.words[3];
+
+    var current_type_id: ?u32 = resolvePointee(module, base_id);
+    var last_struct_id: ?u32 = null;
+    var last_member_idx: u32 = 0;
+
+    for (ptr_inst.words[4..]) |index_id| {
+        const tid = current_type_id orelse break;
+        const ti = common.getDef(module, tid) orelse break;
+        switch (ti.op) {
+            .TypeStruct => {
+                const idx_inst = common.getDef(module, index_id) orelse break;
+                if (idx_inst.op != .Constant or idx_inst.words.len < 4) break;
+                const mi = idx_inst.words[3];
+                last_struct_id = tid;
+                last_member_idx = mi;
+                if (mi + 2 < ti.words.len) current_type_id = ti.words[mi + 2] else current_type_id = null;
+            },
+            .TypeArray, .TypeRuntimeArray, .TypeVector, .TypeMatrix => {
+                if (ti.words.len > 2) current_type_id = ti.words[2] else current_type_id = null;
+            },
+            else => break,
+        }
+    }
+
+    if (last_struct_id) |sid| {
+        return atomic_fields.get(.{ .struct_id = sid, .member_idx = last_member_idx });
+    }
+    return null;
+}
+
 /// Classify a uniform struct's array members that need vec4-widening (#170 A2).
 /// `struct_type_id` is the *resolved* pointee struct of a uniform (non-SSBO)
 /// cbuffer. For each member that is a (possibly nested) array whose innermost
@@ -3312,6 +3413,87 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // SubpassData (Vulkan input attachments): a subpassLoad lowers to OpImageRead on
+    // a Dim==6 image whose coordinate is a (0,0) placeholder (Vulkan reads a subpass
+    // attachment implicitly at the current fragment position). WGSL has no implicit
+    // subpass read, so the OpImageRead arm (emitBody) reads at the fragment coordinate
+    // (@builtin(position)). The source SPIR-V often does NOT declare gl_FragCoord
+    // (subpassLoad never names it), so when a subpass read exists we resolve a
+    // fragment-coordinate input here: reuse an existing BuiltIn FragCoord input when
+    // the source declares one, else synthesize one. The name is threaded into
+    // emitBody; if the read is inside a helper, the input is promoted to a
+    // module-scope var<private> so the helper can reference it (WGSL builtins are
+    // entry-param-only). (Port of MSL #488; MS subpass is honest-errored in emitBody
+    // via the storageImageShape multisample guard.)
+    var subpass_fragcoord_name: ?[]const u8 = null;
+    if (is_fragment) {
+        var subpass_found = false;
+        var subpass_in_helper = false;
+        {
+            var cur_fn: u32 = 0;
+            var in_entry = false;
+            for (module.instructions) |inst| {
+                if (inst.op == .Function and inst.words.len >= 3) {
+                    cur_fn = inst.words[2];
+                    in_entry = (module.entry_point_id != null and cur_fn == module.entry_point_id.?);
+                } else if (inst.op == .FunctionEnd) {
+                    cur_fn = 0;
+                    in_entry = false;
+                } else if (inst.op == .ImageRead and inst.words.len > 3 and imageValueDim(&module, inst.words[3]) == 6) {
+                    subpass_found = true;
+                    if (!in_entry) subpass_in_helper = true;
+                }
+            }
+        }
+        if (subpass_found) {
+            // Reuse an existing BuiltIn FragCoord input if the source declares one.
+            var fc_id: ?u32 = null;
+            for (input_vars.items) |iv| {
+                if (iv.builtin) |bi| {
+                    if (bi == .frag_coord) {
+                        fc_id = iv.id;
+                        break;
+                    }
+                }
+            }
+            if (fc_id == null) {
+                // Synthesize a @builtin(position) input. gl_FragCoord is always
+                // vec4f, so reuse a real 32-bit-float vec4 type id from the module
+                // (a fragment shader that reads a subpass attachment always has one
+                // -- its color output or the ImageRead result); honest-error if not.
+                // The synthesized VAR id is only ever a map key (entry-param /
+                // promoted-input / names lookups) -- no consumer calls getDef on a
+                // var id, only on its type id -- so a value past the real id range is
+                // safe and collision-free. Take the max id-sized word as an upper
+                // bound so the synthetic id never collides with a real one.
+                var vec4f_type_id: ?u32 = null;
+                var max_id: u32 = 0;
+                for (module.instructions) |inst| {
+                    for (inst.words[1..]) |word| {
+                        if (word > max_id and word < 0x4000_0000) max_id = word;
+                    }
+                    if (vec4f_type_id == null and inst.op == .TypeVector and inst.words.len >= 4) {
+                        const el = getDef(&module, inst.words[2]) orelse continue;
+                        if (el.op == .TypeFloat and inst.words[3] == 4) vec4f_type_id = inst.words[1];
+                    }
+                }
+                if (vec4f_type_id == null) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "SubpassData read but no vec4f type for the synthesized fragment coordinate", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
+                const synth_id = max_id + 1;
+                fc_id = synth_id;
+                const fc_name = alloc.dupe(u8, "_fragCoord") catch return error.OutOfMemory;
+                if (names.fetchPut(synth_id, fc_name) catch null) |old| alloc.free(old.value);
+                try input_vars.append(arena, .{ .id = synth_id, .type_id = vec4f_type_id.?, .builtin = .frag_coord });
+            }
+            // Promote when a helper reads the subpass attachment, so the helper can
+            // reference the (entry-param-only) builtin via its var<private> bridge.
+            if (subpass_in_helper) promoted_inputs.put(fc_id.?, {}) catch {};
+            subpass_fragcoord_name = names.get(fc_id.?);
+        }
+    }
+
     // Cross-function OUTPUTS (mirror of promoted_inputs): a stage output WRITTEN
     // (or read) inside a non-entry helper references an identifier that, by
     // default, exists only as the entry function's local `var` — naga reject
@@ -3417,11 +3599,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false, .access = "read_write" });
                     },
                     .TypeImage => {
+                        const img_dim = if (pointee_inst.words.len > 3) pointee_inst.words[3] else 1;
                         if (pointee_inst.words.len > 7 and pointee_inst.words[7] == 2) is_storage = true;
                         // readonly/writeonly come from NonWritable/NonReadable on
                         // the VARIABLE (result_id), not the image type, so the
                         // access mode is resolved here where the variable is known.
-                        const access = storageAccessMode(&decorations, result_id);
+                        var access = storageAccessMode(&decorations, result_id);
+                        // SubpassData (Dim 6, Vulkan input attachments) is read-only
+                        // at the fragment position: WGSL has no input-attachment type,
+                        // so a read-only storage texture is the closest faithful form,
+                        // AND `read_write` is rejected by naga in fragment stage. Force
+                        // read-only here (and read at the fragment coordinate in
+                        // emitBody, port of MSL #488).
+                        if (img_dim == 6) {
+                            is_storage = true;
+                            access = "read";
+                        }
                         try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage, .access = access });
                     },
                     .TypeSampler => {
@@ -4245,6 +4438,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
 
+        // Conservative inout split. The single-inout-void return-value idiom
+        // (signature returns the pointee; body returns the local copy; caller
+        // reassigns) is proven faithful, so it is left UNCHANGED. Only route
+        // MULTI-pointer-param (>=2) or NON-void + pointer-param functions
+        // through real WGSL ptr<function> params. For those, the old lowering
+        // emitted value params + a local copy, so inout writes died in the copy
+        // and never reached the caller (e.g. particle_sim dropped every
+        // updateParticle mutation). The pointer routes every OpLoad/OpStore/
+        // AccessChain on the param through the pointer with no hot-path edits.
+        const use_ptr_inout = has_pointer_params and
+            !(inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void"));
+
         // Parameters (words[3..] of TypeFunction)
         var param_count: usize = 0;
         try w.print("fn {s}(", .{func_name});
@@ -4275,12 +4480,27 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 if (pinst.op == .Label) break;
             }
             const p_name = found_name orelse try std.fmt.allocPrint(arena, "p{d}", .{pi});
-            try w.print("{s}: {s}", .{ p_name, pt });
+            if (use_ptr_inout and is_inout) {
+                // Real WGSL pointer param: inout writes reach the caller's
+                // storage directly (naga accepts ptr<function, T>). The body
+                // dereferences via the names-map remap below.
+                try w.print("{s}: ptr<function, {s}>", .{ p_name, pt });
+            } else {
+                try w.print("{s}: {s}", .{ p_name, pt });
+            }
             param_count += 1;
         }
 
         // Determine return type
-        if (has_pointer_params and inout_params.items.len > 0) {
+        if (use_ptr_inout) {
+            // Pointer params propagate inout writes themselves; use the
+            // function's real return type (no synthesized return-value trick).
+            if (std.mem.eql(u8, ret_type, "void")) {
+                try w.writeAll(") {\n");
+            } else {
+                try w.print(") -> {s} {{\n", .{ret_type});
+            }
+        } else if (has_pointer_params and inout_params.items.len > 0) {
             // Need to return modified inout param values
             if (std.mem.eql(u8, ret_type, "void")) {
                 if (inout_params.items.len == 1) {
@@ -4303,12 +4523,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             try w.print(") -> {s} {{\n", .{ret_type});
         }
 
-        // Emit local var declarations for inout params
-        for (inout_params.items) |ip| {
-            const pt = try wgslType(&module, ip.pointee_type_id, &names, arena);
-            const orig_name = names.get(ip.param_id) orelse "";
-            try writeIndentStatic(w, 1);
-            try w.print("var {s}: {s} = {s};\n", .{ ip.local_name, pt, if (orig_name.len > 0) orig_name else "0" });
+        // Emit local var declarations for inout params (single-inout-void path
+        // only; ptr<function> params need no local copy -- the body mutates the
+        // caller's storage through the pointer directly).
+        if (!use_ptr_inout) {
+            for (inout_params.items) |ip| {
+                const pt = try wgslType(&module, ip.pointee_type_id, &names, arena);
+                const orig_name = names.get(ip.param_id) orelse "";
+                try writeIndentStatic(w, 1);
+                try w.print("var {s}: {s} = {s};\n", .{ ip.local_name, pt, if (orig_name.len > 0) orig_name else "0" });
+            }
         }
 
         // Remap pointer param IDs to local var names in the names map
@@ -4319,8 +4543,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (old_name) |n| {
                 try saved_names.append(arena, .{ .id = ip.param_id, .name = n });
             }
-            const local_copy = try alloc.dupe(u8, ip.local_name);
-            if (try names.fetchPut(ip.param_id, local_copy)) |old| alloc.free(old.value);
+            // ptr<function> path: map the param id to (*name) so every OpLoad/
+            // OpStore/AccessChain on it dereferences the pointer (no hot-path
+            // edits). Single-inout-void path keeps the local-copy name.
+            const mapped = if (use_ptr_inout) blk: {
+                const pn = names.get(ip.param_id) orelse ip.local_name;
+                break :blk try std.fmt.allocPrint(alloc, "(*{s})", .{pn});
+            } else try alloc.dupe(u8, ip.local_name);
+            if (try names.fetchPut(ip.param_id, mapped)) |old| alloc.free(old.value);
         }
         defer {
             // Restore original names
@@ -4330,8 +4560,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
 
-        const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, .none);
+        const inout_ret_name: ?[]const u8 = if (!use_ptr_inout and has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, .none, subpass_fragcoord_name);
 
         try w.writeAll("}\n\n");
     }
@@ -5116,7 +5346,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     };
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, early_return_mode);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, early_return_mode, subpass_fragcoord_name);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -5290,7 +5520,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
@@ -5577,6 +5807,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // Don't inline loads from pointers that are Store targets
                         // — they might be overwritten, so we need to capture the current value
                         if (store_targets.contains(ptr_id)) continue;
+                        // #wgsl-atomic-field: a load of an SSBO atomic field must
+                        // NOT be inlined to the bare access expression (e.g. "b.x"):
+                        // the field is declared atomic<T>, so a plain read is
+                        // naga-invalid ("atomic variables cannot be accessed
+                        // directly"). Leave the default result name so the OpLoad
+                        // handler materializes a proper `let vN = atomicLoad(&b.x);`.
+                        if (resolveAtomicFieldAccess(module, ptr_id, atomic_fields) != null) continue;
                         // Only inline if the pointer has a meaningful name and inlining
                         // doesn't create a self-assignment (e.g., let u_time = u_time)
                         const current_name = names.get(result_id) orelse "";
@@ -6139,12 +6376,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // which cannot construct loops, so such a loop would be silently
                         // DROPPED. Honest-error instead of miscompiling. (Full loop-in-case
                         // emission is a tracked follow-up.)
+                        //
+                        // #wgsl-nested-switch-in-switch-case: an OpSwitch between this
+                        // OpSwitch and its merge sits in a case body. The case-body replay
+                        // does `if (dinst.op == .Switch) break;` (default + case arms), so
+                        // it stops at the inner OpSwitch and silently DROPS it plus every
+                        // instruction after it in the case body (nested_switch: outv stayed
+                        // 0). Honest-error instead of miscompiling.
                         {
                             var li: usize = i + 1;
                             while (li < module.instructions.len) : (li += 1) {
                                 const linst = module.instructions[li];
                                 if (linst.op == .Label and linst.words.len > 1 and linst.words[1] == merge_label.?) break;
                                 if (linst.op == .LoopMerge) return recordUnsupportedLoopInSwitchCase();
+                                if (linst.op == .Switch) return recordUnsupportedNestedSwitchInSwitchCase();
                             }
                         }
                         try writeInd(w, indent);
@@ -6801,6 +7046,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // Branch to continue block — skip
                             continue;
                         }
+                        // #loop-break-on-selection-merge: OpBranch to the enclosing loop's
+                        // merge is a structured break from a side-effecting break block (the
+                        // block's side effects were already emitted inline by the main walker
+                        // before this OpBranch). The BranchConditional arms above catch the
+                        // direct / pure-trampoline break; this catches the store-then-branch
+                        // case (mandelbrot-loop on unoptimized SPIR-V). break skips continuing{}.
+                        if (loop_merge_label != null and target == loop_merge_label.?) {
+                            try writeInd(w, indent);
+                            try w.writeAll("break;\n");
+                            continue;
+                        }
                     }
                     // Emit selection phi updates when branching to merge block
                     if (sel_phis.count() > 0) {
@@ -7009,6 +7265,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     try w.print("let {s}: {s} = atomicLoad(&{s});\n", .{ result_name, rt, ptr });
                     continue;
                 }
+                // #wgsl-atomic-field: a plain load of an SSBO struct field that
+                // collectAtomicFields declared atomic<T> also lowers to atomicLoad
+                // (naga: "atomic variables cannot be accessed directly"). The pointer
+                // is an OpAccessChain into the struct, not a direct Workgroup/Private
+                // var. Materialize as a `let` for a single atomic read, like above.
+                if (resolveAtomicFieldAccess(module, inst.words[3], atomic_fields) != null) {
+                    const ac = getDef(module, inst.words[3]) orelse continue;
+                    const af_expr = try buildAccessExpr(module, names, ac.words[3], ac.words[4..], alloc, wrapped_members);
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = atomicLoad(&{s});\n", .{ result_name, rt, af_expr });
+                    alloc.free(af_expr);
+                    continue;
+                }
                 const ptr_inst = getDef(module, inst.words[3]);
                 var is_tex = false;
                 var is_output_load = false;
@@ -7125,6 +7394,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const aptr = names.get(inst.words[1]) orelse "v";
                     try writeInd(w, indent);
                     try w.print("atomicStore(&{s}, {s});\n", .{ aptr, aval });
+                    continue;
+                }
+                // #wgsl-atomic-field: a plain store to an SSBO atomic field lowers
+                // to atomicStore for the same reason as the Workgroup-scalar case.
+                if (resolveAtomicFieldAccess(module, inst.words[1], atomic_fields) != null) {
+                    const ac = getDef(module, inst.words[1]) orelse continue;
+                    const af_expr = try buildAccessExpr(module, names, ac.words[3], ac.words[4..], alloc, wrapped_members);
+                    const aval = names.get(inst.words[2]) orelse "0";
+                    try writeInd(w, indent);
+                    try w.print("atomicStore(&{s}, {s});\n", .{ af_expr, aval });
+                    alloc.free(af_expr);
                     continue;
                 }
                 // #170 (H): a PARTIAL write to one column of a flattened matrix
@@ -7963,12 +8243,38 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
                 var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
                 defer args.deinit(arena);
+                // Mirror the signature emitter's conservative inout split: only
+                // multi-inout or non-void+inout callees take ptr<function> params
+                // (single-inout-void keeps the return-value reassign idiom).
+                const callee_use_ptr_inout = callee_inout_arg_indices.items.len >= 1 and
+                    !(callee_inout_arg_indices.items.len == 1 and std.mem.eql(u8, rt, "void"));
                 for (inst.words[4..], 0..) |arg_id, ai| {
                     if (ai > 0) try args.appendSlice(arena, ", ");
+                    // Prefix inout (pointer) args with & so they bind to the
+                    // ptr<function> params; glslang always passes an OpVariable
+                    // (or AccessChain lvalue), so &<name> is a valid WGSL address.
+                    var is_inout_arg = false;
+                    for (callee_inout_arg_indices.items) |ii| {
+                        if (ii == ai) {
+                            is_inout_arg = true;
+                            break;
+                        }
+                    }
+                    if (callee_use_ptr_inout and is_inout_arg) try args.appendSlice(arena, "&");
                     try args.appendSlice(arena, names.get(arg_id) orelse "0");
                 }
 
-                if (callee_inout_arg_indices.items.len == 1 and std.mem.eql(u8, rt, "void")) {
+                if (callee_use_ptr_inout) {
+                    // Pointer params propagate inout writes themselves; no
+                    // caller-side reassign. Use the callee's real return type.
+                    if (std.mem.eql(u8, rt, "void")) {
+                        try writeInd(w, indent);
+                        try w.print("{s}({s});\n", .{ func_name, args.items });
+                    } else {
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                    }
+                } else if (callee_inout_arg_indices.items.len == 1 and std.mem.eql(u8, rt, "void")) {
                     // Void function with single inout param: caller reassigns
                     // e.g., v16 = out_test_0(40, v16);
                     const inout_idx = callee_inout_arg_indices.items[0];
@@ -8605,8 +8911,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // ProjExplicitLod's LOD (must be 0 for a shadow sample) is dropped:
                 // WGSL has no projective-compare-with-LOD builtin, and the implicit
                 // form already samples the base level for depth textures.
+                // ConstOffset (0x8): the projective depth-2d form keeps WGSL's
+                // textureSampleCompare offset arg. Dref=words[5], mask=words[6]. (#170)
+                var off_suffix: []const u8 = "";
+                {
+                    const pmask: u32 = if (inst.words.len > 6) inst.words[6] else 0;
+                    if (pmask & 0x8 != 0) {
+                        var ow: usize = 7;
+                        if (pmask & 0x1 != 0) ow += 1; // Bias
+                        if (pmask & 0x2 != 0) ow += 1; // Lod
+                        if (pmask & 0x4 != 0) ow += 2; // Grad
+                        if (ow >= inst.words.len) return error.UnsupportedImageOperands;
+                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[ow]) orelse "vec2<i32>(0)"});
+                    }
+                }
                 try writeInd(w, indent);
-                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}{s} / {s}{s}, {s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, dref, coord, last_comp });
+                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}{s} / {s}{s}, {s} / {s}{s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, dref, coord, last_comp, off_suffix });
             },
 
             // ReadClockKHR — shader clock
@@ -8627,14 +8947,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "img";
-                const coord = names.get(inst.words[4]) orelse "uv";
+                // SubpassData (SPIR-V Dim 6 = Vulkan input attachments): the SPIR-V
+                // coordinate operand is a (0,0) placeholder, because Vulkan reads a
+                // subpass attachment implicitly at the current fragment position. WGSL
+                // has no implicit subpass read, so emit the threaded fragment
+                // coordinate (a @builtin(position) name) instead of passing (0,0)
+                // through verbatim -- otherwise every fragment samples the top-left
+                // pixel. (Port of the MSL #488 fix; MS subpass is honest-errored
+                // above by the shape.ms guard.) `subpass_fragcoord_name` is threaded
+                // from the top level, which synthesizes a @builtin(position) input
+                // when the source SPIR-V lacks gl_FragCoord (subpassLoad never names
+                // it); null means this is not a fragment shader with a subpass read.
+                const is_subpass = imageValueDim(module, inst.words[3]) == 6;
+                if (is_subpass and subpass_fragcoord_name == null) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "SubpassData OpImageRead needs the fragment coordinate, but none is available (not a fragment shader?)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 try writeInd(w, indent);
-                if (shape.arrayed) {
+                if (is_subpass) {
+                    try w.print("let {s}: {s} = textureLoad({s}, vec2<i32>({s}.xy));\n", .{ result_name, rt, image, subpass_fragcoord_name.? });
+                } else if (shape.arrayed) {
                     // WGSL takes the array layer as a SEPARATE arg: textureLoad(t, coord.xy, coord.z).
+                    const coord = names.get(inst.words[4]) orelse "uv";
                     const spat: []const u8 = if (shape.spatial == 1) ".x" else ".xy";
                     const layer: []const u8 = if (shape.spatial == 1) ".y" else ".z";
                     try w.print("let {s}: {s} = textureLoad({s}, ({s}){s}, ({s}){s});\n", .{ result_name, rt, image, coord, spat, coord, layer });
                 } else {
+                    const coord = names.get(inst.words[4]) orelse "uv";
                     try w.print("let {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, image, coord });
                 }
             },
@@ -8722,14 +9061,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // uses via barrier()+memoryBarrier()) so storage writes are visible.
             // Over-fencing is safe (a no-op when there's no storage access).
             .ControlBarrier => {
-                try writeInd(w, indent);
-                try w.writeAll("workgroupBarrier();\n");
-                try writeInd(w, indent);
-                try w.writeAll("storageBarrier();\n");
+                // WGSL workgroupBarrier()/storageBarrier() are COMPUTE-stage only. In a
+                // fragment/vertex entry point they are forbidden (naga rejects), and a
+                // control barrier there is a semantic no-op (no cross-invocation sync) --
+                // omit. (#wgsl-barrier-stage)
+                if (module.execution_model == .GLCompute) {
+                    try writeInd(w, indent);
+                    try w.writeAll("workgroupBarrier();\n");
+                    try writeInd(w, indent);
+                    try w.writeAll("storageBarrier();\n");
+                }
             },
             .MemoryBarrier => {
-                try writeInd(w, indent);
-                try w.writeAll("storageBarrier();\n");
+                if (module.execution_model == .GLCompute) {
+                    try writeInd(w, indent);
+                    try w.writeAll("storageBarrier();\n");
+                }
+                // else: storageBarrier is compute-only; a fragment/vertex memory barrier is a no-op.
             },
 
             // Atomic operations

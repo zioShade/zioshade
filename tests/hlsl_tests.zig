@@ -467,10 +467,11 @@ test "HLSL: pack/unpack_half2x16 via f32tof16/f16tof32 (no fabricated intrinsic)
     try assertNotContains(hlsl, "pack_half2x16(");
 }
 
-// OpFma (GLSL.std.450 #50) is contractually a single-rounded fused multiply-add.
-// HLSL `fma` (SM5+) is fused; `mad` is `a*b+c` with no fusion guarantee (may
-// double-round). Guard that zioshade emits `fma(`, not `mad(`.
-test "HLSL: OpFma lowers to fma (fused), not mad" {
+// OpFma (GLSL.std.450 #50) is a fused multiply-add. HLSL's `fma` intrinsic is
+// double-only -- DXC rejects `fma(float,float,float)` at every shader model -- so
+// the only float multiply-add HLSL has is `mad` (a*b+c, no fusion guarantee). The
+// earlier switch to `fma` (#469) was a compile-invalid regression; emit `mad(`.
+test "HLSL: OpFma lowers to mad (HLSL fma is double-only)" {
     const source: [:0]const u8 =
         \\#version 450
         \\#extension GL_EXT_gpu_shader5 : enable
@@ -482,8 +483,8 @@ test "HLSL: OpFma lowers to fma (fused), not mad" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "fma(");
-    try assertNotContains(hlsl, "mad(");
+    try assertContains(hlsl, "mad(");
+    try assertNotContains(hlsl, "fma(");
 }
 
 // Vertex OUTPUT interpolation qualifiers (Flat/Centroid/NoPerspective/Sample) were
@@ -3056,6 +3057,46 @@ test "T31.1b: texelFetch LOD is carried into Load's int3.z, not dropped to 0" {
     try assertNotContains(hlsl, ", 0))");
 }
 
+// OpImageFetch's HLSL `.Load` position ctor must track the texture rank: the
+// position packs (coord components, lod), so 1D -> int2, 2D -> int3,
+// 2DArray/3D -> int4. The non-buffer/non-MS arm used to hardcode int3, which
+// made 1D and 3D/2DArray fetches reject in DXC (wrong ctor arity). (#imagefetch)
+test "hlsl: OpImageFetch Load ctor width tracks texture rank (#imagefetch)" {
+    // 1D -> int2(coord, lod)
+    const src1d =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler1D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = texelFetch(tex, int(gl_FragCoord.x), 2); }
+    ;
+    const h1d = try compileToHlsl(src1d);
+    defer alloc.free(h1d);
+    try assertContains(h1d, ".Load(int2(");
+    try assertNotContains(h1d, ".Load(int3(");
+
+    // 3D -> int4(coord, lod)
+    const src3d =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler3D tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = texelFetch(tex, ivec3(gl_FragCoord.xyz), 2); }
+    ;
+    const h3d = try compileToHlsl(src3d);
+    defer alloc.free(h3d);
+    try assertContains(h3d, ".Load(int4(");
+
+    // 2DArray -> int4(coord3, lod)
+    const srcarr =
+        \\#version 430
+        \\layout(binding = 0) uniform sampler2DArray tex;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() { fragColor = texelFetch(tex, ivec3(gl_FragCoord.xy, 0), 2); }
+    ;
+    const harr = try compileToHlsl(srcarr);
+    defer alloc.free(harr);
+    try assertContains(harr, ".Load(int4(");
+}
+
 test "T31.2: textureLod maps to SampleLevel" {
     const source =
         \\#version 430
@@ -3159,6 +3200,26 @@ test "T31.6: textureProj(sampler2DShadow) divides BOTH coord and Dref, result no
     try std.testing.expect(std.mem.count(u8, hlsl, " / ") >= 2);
     // The compare result must be used, not silently replaced by 0.
     try assertNotContains(hlsl, "o = 0");
+}
+
+// #170: OpImageSampleDrefImplicitLod + ConstOffset -> HLSL .SampleCmp takes the
+// offset as a trailing int2 arg (was dropped, sampling the un-offset texel). The
+// explicit-LOD form's Lod drop is faithful (SampleCmpLevelZero, matching spirv-cross)
+// and is NOT touched here. glslang emits the shadow textureOffset zioshade's
+// frontend honest-errors.
+test "T31.7: DrefImplicitLod ConstOffset -> SampleCmp trailing int2 (#170)" {
+    const spv = try compileToSpirv("dref_implicit_offset_hlsl",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureOffset(shadowTex, vec3(vUV, 0.5), ivec2(1, 2))); }
+    );
+    defer alloc.free(spv);
+    const hlsl = try spirvToHlsl60(spv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, ".SampleCmp(");
+    try assertContains(hlsl, "int2(1, 2)");
 }
 
 // #170: a texture sampled with a Dref (depth-comparison) op must declare a
@@ -12918,6 +12979,52 @@ test "T529.1: mat4x3 and mat3x4 operations" {
     try assertContains(hlsl, "float4");
 }
 
+// Regression for hlsl-matrix-nonsquare. A NON-SQUARE buffer matrix (mat3x4) must
+// be declared `row_major`: HLSL column_major floatCxR would misgroup its buffer
+// bytes when C != R (C columns of R floats vs HLSL's R columns of C floats), and
+// the mul operands must be swapped so HLSL computes the SPIR-V result. Before the
+// fix DXC rejected `mul(float3x4, float3)` -> float3 (dimension mismatch); spirv-cross
+// uses the same row_major + swapped-operand convention for non-square buffers.
+test "T529.2: non-square buffer matrix row_major + swapped mul" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { mat3x4 m; };
+        \\layout(location = 0) in vec3 v;
+        \\void main() {
+        \\    vec4 r = m * v;
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // (A) declaration: non-square buffer matrix is row_major, not bare column_major.
+    try assertContains(hlsl, "row_major float3x4 U_m");
+    // (B) mul swap: the vector is the FIRST operand -- mul(v, <mat>), not mul(<mat>, v).
+    try assertContains(hlsl, "mul(v, ");
+}
+
+test "T529.3: non-square buffer matrix array row_major + swapped mul" {
+    // Same fix through OpAccessChain into an array-of-matrix member
+    // (matrixIsBufferSourced follows AccessChain to the Uniform root).
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { mat3x4 a[4]; };
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 1) in float fi;
+        \\void main() {
+        \\    int idx = int(fi) & 3;
+        \\    vec4 r = a[idx] * v;
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "row_major float3x4 U_a[4]");
+    try assertContains(hlsl, "mul(v, ");
+}
+
 test "T530.1: gl_MaxUniformBindings and constants" {
     // Tests that GLSL max constants compile
     const source =
@@ -13608,6 +13715,120 @@ test "T563.1: subgroup arithmetic add" {
         \\}
     ;
     try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
+}
+
+// #subgroup-operand: OpGroupNonUniformIAdd (and the rest of the subgroup
+// ARITHMETIC family) word layout is [ResultType, Result, Execution(Scope),
+// GroupOperation literal, Value, ClusterSize?]. The old code read words[4]
+// (the GroupOperation literal) as the value, so the value silently fell back
+// to "x" AND every variant lowered as Reduce. Subgroup ops need SPIR-V 1.3, so
+// the frontend path can't build them; hand-assembled SPIR-V feeds a CONSTANT
+// value (42) so the rendered operand is predictable across all three backends.
+test "#subgroup-operand: subgroup arithmetic reads the VALUE operand (words[5]), not the GroupOperation literal" {
+    const spirv = assembleSpirv("subgroup_operand",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformArithmetic
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %SSBO
+        \\OpExecutionMode %main LocalSize 32 1 1
+        \\OpDecorate %SSBO DescriptorSet 0
+        \\OpDecorate %SSBO Binding 0
+        \\OpDecorate %SSBOT BufferBlock
+        \\OpMemberDecorate %SSBOT 0 Offset 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%uint_0 = OpConstant %uint 0
+        \\%uint_42 = OpConstant %uint 42
+        \\%subscope = OpConstant %uint 3
+        \\%SSBOT = OpTypeStruct %uint
+        \\%ptr_ubuf = OpTypePointer Uniform %SSBOT
+        \\%SSBO = OpVariable %ptr_ubuf Uniform
+        \\%ptr_uuint = OpTypePointer Uniform %uint
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%chain = OpAccessChain %ptr_uuint %SSBO %uint_0
+        \\%sum = OpGroupNonUniformIAdd %uint %subscope Reduce %uint_42
+        \\OpStore %chain %sum
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+
+    // HLSL: WaveActiveSum on the VALUE (42u), never the bare "x" fallback.
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "WaveActiveSum(42u)");
+    try assertNotContains(hlsl, "WaveActiveSum(x)");
+
+    // GLSL: subgroupAdd on the VALUE + the arithmetic extension pragma.
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "subgroupAdd(42u)");
+    try assertNotContains(glsl, "subgroupAdd(x)");
+    try assertContains(glsl, "GL_KHR_shader_subgroup_arithmetic");
+
+    // MSL: simd_sum on the VALUE.
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "simd_sum(42u)");
+    try assertNotContains(msl, "simd_sum(x)");
+}
+
+// #subgroup-operand: SubgroupLocalInvocationId (BuiltIn 41) has no native
+// spelling in MSL or HLSL. HLSL must rewrite the OpLoad to WaveGetLaneIndex()
+// (the bare gl_SubgroupInvocationID it emitted before was an undeclared
+// identifier); MSL must add a [[thread_index_in_simdgroup]] kernel parameter;
+// GLSL already spells the builtin but needs GL_KHR_shader_subgroup_basic.
+test "#subgroup-operand: SubgroupLocalInvocationId lowers to a per-backend lane index" {
+    const spirv = assembleSpirv("subgroup_lane",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformArithmetic
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %SSBO %gl_SubgroupInvocationID
+        \\OpName %gl_SubgroupInvocationID "gl_SubgroupInvocationID"
+        \\OpExecutionMode %main LocalSize 32 1 1
+        \\OpDecorate %SSBO DescriptorSet 0
+        \\OpDecorate %SSBO Binding 0
+        \\OpDecorate %SSBOT BufferBlock
+        \\OpMemberDecorate %SSBOT 0 Offset 0
+        \\OpDecorate %gl_SubgroupInvocationID BuiltIn SubgroupLocalInvocationId
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%uint_0 = OpConstant %uint 0
+        \\%subscope = OpConstant %uint 3
+        \\%SSBOT = OpTypeStruct %uint
+        \\%ptr_ubuf = OpTypePointer Uniform %SSBOT
+        \\%SSBO = OpVariable %ptr_ubuf Uniform
+        \\%ptr_uuint = OpTypePointer Uniform %uint
+        \\%ptr_input_uint = OpTypePointer Input %uint
+        \\%gl_SubgroupInvocationID = OpVariable %ptr_input_uint Input
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%lane = OpLoad %uint %gl_SubgroupInvocationID
+        \\%chain = OpAccessChain %ptr_uuint %SSBO %uint_0
+        \\%sum = OpGroupNonUniformIAdd %uint %subscope Reduce %lane
+        \\OpStore %chain %sum
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "WaveGetLaneIndex()");
+    try assertNotContains(hlsl, "gl_SubgroupInvocationID");
+
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "thread_index_in_simdgroup");
+
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "GL_KHR_shader_subgroup_basic");
 }
 
 test "T564.1: compute matrix multiply tiled" {
@@ -15178,14 +15399,17 @@ test "T597.6: whole array-element matrix load (for mul) is NOT transposed" {
     try assertContains(hlsl, "mul(");
 }
 
-test "T597.7: nested-struct row_major matrix is NOT transposed (regression guard)" {
-    // A matrix inside a NESTED struct member never receives the `row_major`
-    // storage qualifier (only top-level block members do), so for a row_major
-    // block it is stored as Mᵀ and reads correctly WITHOUT transpose. The
-    // transpose detector must NOT descend into nested structs — doing so
-    // double-flips and is silent-wrong (it was a regression caught in review).
-    // Round-trip-verified: `a_s.m[0]` reads logical column 0, matching the
-    // spirv-cross oracle.
+test "T597.7: nested-struct row_major matrix carries row_major and transposes the column read" {
+    // A matrix inside a NESTED struct member now receives the `row_major`
+    // storage qualifier in the struct forward decl (hlslEmitOneStructForwardDecl
+    // is on the UBO struct-decl path), so the cbuffer matrix is reconstructed as
+    // the logical M and a COLUMN read must transpose -- the same coupled
+    // (qualifier + transpose) pattern as a top-level row_major member (T597.8).
+    // The two are coupled: a transpose WITHOUT the row_major qualifier
+    // double-flips (reads row 0 instead of column 0 = silent-wrong), so this
+    // guards both together. Numerically equivalent to the spirv-cross oracle
+    // (which emits column_major + an untransposed read): both return logical
+    // column 0 of M.
     const source: [:0]const u8 =
         \\#version 450
         \\struct S { mat4 m; };
@@ -15195,8 +15419,8 @@ test "T597.7: nested-struct row_major matrix is NOT transposed (regression guard
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertNotContains(hlsl, "transpose");
-    try assertContains(hlsl, "a_s.m[0]");
+    try assertContains(hlsl, "row_major float4x4 m");
+    try assertContains(hlsl, "transpose(a_s.m)[0]");
 }
 
 test "T597.8: row_major mat3 carries the qualifier and transposes the column read" {
@@ -15257,6 +15481,28 @@ test "T597.10: dynamic column index into a row_major UBO matrix is transposed" {
     // The matrix sub-expression is transposed and indexed by a non-literal.
     try assertContains(hlsl, "transpose(a_m)[");
     try assertNotContains(hlsl, "transpose(a_m)[0]");
+}
+
+test "T597.11: nested-struct row_major whole-matrix mul keeps the qualifier (decl fix)" {
+    // A whole-matrix load of a row_major matrix nested inside a struct-typed
+    // UBO member feeds `mul(M, v)` and must NOT transpose, but it can only be
+    // correct (a_s.m == M) once the struct forward decl carries `row_major`.
+    // Before the declaration drill reached nested structs, the field was emitted
+    // bare, so the variable held M-transpose and `mul` computed the wrong
+    // transform (silent-wrong). Guards the declaration side of the coupled fix.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct S { mat4 m; };
+        \\layout(binding=0,std140,row_major) uniform A { S s; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.s.m * v; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "row_major float4x4 m");
+    try assertContains(hlsl, "mul(");
+    try assertNotContains(hlsl, "transpose");
 }
 
 test "compute built-ins map to HLSL SV semantics on the entry signature" {
