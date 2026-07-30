@@ -938,6 +938,23 @@ fn storageImageShape(module: *const ParsedModule, image_value_id: u32) StorageIm
     return .{ .arrayed = inst.words[5] == 1, .ms = inst.words[6] == 1, .spatial = spatial };
 }
 
+/// SPIR-V `Dim` operand of the image behind an image VALUE id (an OpLoad result,
+/// the operand of OpImageRead). Resolves the value's result type and unwraps an
+/// OpTypeSampledImage, mirroring the MSL backend's imageValueDim. Returns 1 (2D)
+/// when it cannot be resolved, matching this backend's 2D default. Dim 6 is
+/// SubpassData (Vulkan input attachments). OpTypeImage layout:
+/// [op, result, sampled_type, DIM, Depth, Arrayed, MS, ...].
+fn imageValueDim(module: *const ParsedModule, image_value_id: u32) u32 {
+    const vdef = getDef(module, image_value_id) orelse return 1;
+    if (vdef.words.len < 2) return 1;
+    var tinst = getDef(module, vdef.words[1]) orelse return 1;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return 1;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 4) return 1;
+    return tinst.words[3];
+}
+
 /// Unwrap every TypeArray / TypeRuntimeArray level of `type_id`, returning the id
 /// of the innermost (non-array) element type. A non-array type is returned
 /// unchanged. Used to reach the block STRUCT behind an `array<Block, N>` pointee:
@@ -1871,7 +1888,12 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
                 // other type, with no variable context) falls back to
                 // `read_write`, matching the Sampled=2 operand. See
                 // wgslStorageTextureType for the texel-format and dim logic.
-                break :blk try wgslStorageTextureType(module, type_id, "read_write", alloc);
+                // SubpassData (Dim 6) is read-only at the fragment position: use
+                // `read` (read_write is rejected by naga in fragment stage). The
+                // binding site forces the same mode; this guards the no-variable
+                // path. (Port of MSL #488.)
+                const fallback_mode: []const u8 = if (dim == 6) "read" else "read_write";
+                break :blk try wgslStorageTextureType(module, type_id, fallback_mode, alloc);
             } else if (is_ms) {
                 // WGSL spells the multisampled 2D texture `texture_multisampled_2d<T>`
                 // (NOT `texture_2d_multisampled<T>`), and has NO multisampled 3D/cube
@@ -3312,6 +3334,87 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // SubpassData (Vulkan input attachments): a subpassLoad lowers to OpImageRead on
+    // a Dim==6 image whose coordinate is a (0,0) placeholder (Vulkan reads a subpass
+    // attachment implicitly at the current fragment position). WGSL has no implicit
+    // subpass read, so the OpImageRead arm (emitBody) reads at the fragment coordinate
+    // (@builtin(position)). The source SPIR-V often does NOT declare gl_FragCoord
+    // (subpassLoad never names it), so when a subpass read exists we resolve a
+    // fragment-coordinate input here: reuse an existing BuiltIn FragCoord input when
+    // the source declares one, else synthesize one. The name is threaded into
+    // emitBody; if the read is inside a helper, the input is promoted to a
+    // module-scope var<private> so the helper can reference it (WGSL builtins are
+    // entry-param-only). (Port of MSL #488; MS subpass is honest-errored in emitBody
+    // via the storageImageShape multisample guard.)
+    var subpass_fragcoord_name: ?[]const u8 = null;
+    if (is_fragment) {
+        var subpass_found = false;
+        var subpass_in_helper = false;
+        {
+            var cur_fn: u32 = 0;
+            var in_entry = false;
+            for (module.instructions) |inst| {
+                if (inst.op == .Function and inst.words.len >= 3) {
+                    cur_fn = inst.words[2];
+                    in_entry = (module.entry_point_id != null and cur_fn == module.entry_point_id.?);
+                } else if (inst.op == .FunctionEnd) {
+                    cur_fn = 0;
+                    in_entry = false;
+                } else if (inst.op == .ImageRead and inst.words.len > 3 and imageValueDim(&module, inst.words[3]) == 6) {
+                    subpass_found = true;
+                    if (!in_entry) subpass_in_helper = true;
+                }
+            }
+        }
+        if (subpass_found) {
+            // Reuse an existing BuiltIn FragCoord input if the source declares one.
+            var fc_id: ?u32 = null;
+            for (input_vars.items) |iv| {
+                if (iv.builtin) |bi| {
+                    if (bi == .frag_coord) {
+                        fc_id = iv.id;
+                        break;
+                    }
+                }
+            }
+            if (fc_id == null) {
+                // Synthesize a @builtin(position) input. gl_FragCoord is always
+                // vec4f, so reuse a real 32-bit-float vec4 type id from the module
+                // (a fragment shader that reads a subpass attachment always has one
+                // -- its color output or the ImageRead result); honest-error if not.
+                // The synthesized VAR id is only ever a map key (entry-param /
+                // promoted-input / names lookups) -- no consumer calls getDef on a
+                // var id, only on its type id -- so a value past the real id range is
+                // safe and collision-free. Take the max id-sized word as an upper
+                // bound so the synthetic id never collides with a real one.
+                var vec4f_type_id: ?u32 = null;
+                var max_id: u32 = 0;
+                for (module.instructions) |inst| {
+                    for (inst.words[1..]) |word| {
+                        if (word > max_id and word < 0x4000_0000) max_id = word;
+                    }
+                    if (vec4f_type_id == null and inst.op == .TypeVector and inst.words.len >= 4) {
+                        const el = getDef(&module, inst.words[2]) orelse continue;
+                        if (el.op == .TypeFloat and inst.words[3] == 4) vec4f_type_id = inst.words[1];
+                    }
+                }
+                if (vec4f_type_id == null) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "SubpassData read but no vec4f type for the synthesized fragment coordinate", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
+                const synth_id = max_id + 1;
+                fc_id = synth_id;
+                const fc_name = alloc.dupe(u8, "_fragCoord") catch return error.OutOfMemory;
+                if (names.fetchPut(synth_id, fc_name) catch null) |old| alloc.free(old.value);
+                try input_vars.append(arena, .{ .id = synth_id, .type_id = vec4f_type_id.?, .builtin = .frag_coord });
+            }
+            // Promote when a helper reads the subpass attachment, so the helper can
+            // reference the (entry-param-only) builtin via its var<private> bridge.
+            if (subpass_in_helper) promoted_inputs.put(fc_id.?, {}) catch {};
+            subpass_fragcoord_name = names.get(fc_id.?);
+        }
+    }
+
     // Cross-function OUTPUTS (mirror of promoted_inputs): a stage output WRITTEN
     // (or read) inside a non-entry helper references an identifier that, by
     // default, exists only as the entry function's local `var` — naga reject
@@ -3417,11 +3520,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false, .access = "read_write" });
                     },
                     .TypeImage => {
+                        const img_dim = if (pointee_inst.words.len > 3) pointee_inst.words[3] else 1;
                         if (pointee_inst.words.len > 7 and pointee_inst.words[7] == 2) is_storage = true;
                         // readonly/writeonly come from NonWritable/NonReadable on
                         // the VARIABLE (result_id), not the image type, so the
                         // access mode is resolved here where the variable is known.
-                        const access = storageAccessMode(&decorations, result_id);
+                        var access = storageAccessMode(&decorations, result_id);
+                        // SubpassData (Dim 6, Vulkan input attachments) is read-only
+                        // at the fragment position: WGSL has no input-attachment type,
+                        // so a read-only storage texture is the closest faithful form,
+                        // AND `read_write` is rejected by naga in fragment stage. Force
+                        // read-only here (and read at the fragment coordinate in
+                        // emitBody, port of MSL #488).
+                        if (img_dim == 6) {
+                            is_storage = true;
+                            access = "read";
+                        }
                         try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage, .access = access });
                     },
                     .TypeSampler => {
@@ -4368,7 +4482,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (!use_ptr_inout and has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, .none);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, .none, subpass_fragcoord_name);
 
         try w.writeAll("}\n\n");
     }
@@ -5153,7 +5267,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     };
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, early_return_mode);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, early_return_mode, subpass_fragcoord_name);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -5327,7 +5441,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
@@ -8701,14 +8815,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "img";
-                const coord = names.get(inst.words[4]) orelse "uv";
+                // SubpassData (SPIR-V Dim 6 = Vulkan input attachments): the SPIR-V
+                // coordinate operand is a (0,0) placeholder, because Vulkan reads a
+                // subpass attachment implicitly at the current fragment position. WGSL
+                // has no implicit subpass read, so emit the threaded fragment
+                // coordinate (a @builtin(position) name) instead of passing (0,0)
+                // through verbatim -- otherwise every fragment samples the top-left
+                // pixel. (Port of the MSL #488 fix; MS subpass is honest-errored
+                // above by the shape.ms guard.) `subpass_fragcoord_name` is threaded
+                // from the top level, which synthesizes a @builtin(position) input
+                // when the source SPIR-V lacks gl_FragCoord (subpassLoad never names
+                // it); null means this is not a fragment shader with a subpass read.
+                const is_subpass = imageValueDim(module, inst.words[3]) == 6;
+                if (is_subpass and subpass_fragcoord_name == null) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "SubpassData OpImageRead needs the fragment coordinate, but none is available (not a fragment shader?)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 try writeInd(w, indent);
-                if (shape.arrayed) {
+                if (is_subpass) {
+                    try w.print("let {s}: {s} = textureLoad({s}, vec2<i32>({s}.xy));\n", .{ result_name, rt, image, subpass_fragcoord_name.? });
+                } else if (shape.arrayed) {
                     // WGSL takes the array layer as a SEPARATE arg: textureLoad(t, coord.xy, coord.z).
+                    const coord = names.get(inst.words[4]) orelse "uv";
                     const spat: []const u8 = if (shape.spatial == 1) ".x" else ".xy";
                     const layer: []const u8 = if (shape.spatial == 1) ".y" else ".z";
                     try w.print("let {s}: {s} = textureLoad({s}, ({s}){s}, ({s}){s});\n", .{ result_name, rt, image, coord, spat, coord, layer });
                 } else {
+                    const coord = names.get(inst.words[4]) orelse "uv";
                     try w.print("let {s}: {s} = textureLoad({s}, {s});\n", .{ result_name, rt, image, coord });
                 }
             },
