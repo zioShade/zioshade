@@ -312,7 +312,7 @@ fn recordUnsupportedLoopInSwitchCase() error{UnsupportedLoopInSwitchCase} {
 
 /// Honest-error for a switch nested inside a switch case body. The `.Switch` case-body
 /// replay (default arm at ~6166, case arm at ~6278) does `if (dinst.op == .Switch) break;`
-/// — it stops at the inner OpSwitch without emitting it OR anything after, so the inner
+/// -- it stops at the inner OpSwitch without emitting it OR anything after, so the inner
 /// switch and its trailing case-body instructions are silently DROPPED (nested_switch:
 /// outv stayed 0 instead of 10/11/12/...). The replay cannot construct a nested switch
 /// (it would need a recursive emitter, not emitSimpleInstruction). Fail loud rather than
@@ -500,6 +500,9 @@ fn frexpModfField(module: *const ParsedModule, source_id: u32, idx: u32) ?[]cons
 /// whose words are `switch_words` (words[2]=default, words[4,6,…]=case targets). Used to
 /// detect a SPIR-V fallthrough edge — a case body OpBranching to another case label — so
 /// the chain can be duplicated (WGSL removed `fallthrough` from the spec).
+/// 32-bit selector only: targets are at words[4], words[6], ... (literal,target pairs).
+/// A 64-bit selector uses 2-word literals (targets at words[5], words[9], ...) -- this
+/// matches the case-label EMITTER, which also assumes 32-bit, so the two stay consistent.
 fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
     if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
     var k: usize = 4; // words[3] = first case literal, words[4] = first case target
@@ -7268,7 +7271,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // is an OpAccessChain into the struct, not a direct Workgroup/Private
                 // var. Materialize as a `let` for a single atomic read, like above.
                 if (resolveAtomicFieldAccess(module, inst.words[3], atomic_fields) != null) {
-                    const ac = getDef(module, inst.words[3]).?;
+                    const ac = getDef(module, inst.words[3]) orelse continue;
                     const af_expr = try buildAccessExpr(module, names, ac.words[3], ac.words[4..], alloc, wrapped_members);
                     try writeInd(w, indent);
                     try w.print("let {s}: {s} = atomicLoad(&{s});\n", .{ result_name, rt, af_expr });
@@ -7396,7 +7399,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // #wgsl-atomic-field: a plain store to an SSBO atomic field lowers
                 // to atomicStore for the same reason as the Workgroup-scalar case.
                 if (resolveAtomicFieldAccess(module, inst.words[1], atomic_fields) != null) {
-                    const ac = getDef(module, inst.words[1]).?;
+                    const ac = getDef(module, inst.words[1]) orelse continue;
                     const af_expr = try buildAccessExpr(module, names, ac.words[3], ac.words[4..], alloc, wrapped_members);
                     const aval = names.get(inst.words[2]) orelse "0";
                     try writeInd(w, indent);

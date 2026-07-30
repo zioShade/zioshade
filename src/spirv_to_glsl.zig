@@ -3192,10 +3192,13 @@ fn caseTerminatorTargetGLSL(m: *const ParsedModule, label_map: *const std.AutoHa
 /// #switch-fallthrough: true iff `lbl` is a case/default target of the OpSwitch whose
 /// words are `switch_words` (words[2]=default, words[4,6,...]=case targets). Used to
 /// decide whether a case body's first OpBranch target is a REAL SPIR-V fallthrough edge
-/// (branch to another case/default of THIS switch) — only then is `break;` omitted. A
+/// (branch to another case/default of THIS switch) -- only then is `break;` omitted. A
 /// branch to the merge, a loop header, or a selection target is NOT a fallthrough edge:
 /// the case is terminal and must `break;`. Mirrors the WGSL/HLSL backends. Ported from
 /// spirv_to_wgsl.zig (isSwitchCaseTarget).
+/// 32-bit selector only: targets are at words[4], words[6], ... (literal,target pairs).
+/// A 64-bit selector uses 2-word literals (targets at words[5], words[9], ...) -- this
+/// matches the case-label EMITTER, which also assumes 32-bit, so the two stay consistent.
 fn isSwitchCaseTargetGLSL(switch_words: []const u32, lbl: u32) bool {
     if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
     var k: usize = 4; // words[3] = first case literal, words[4] = first case target
@@ -3533,7 +3536,7 @@ fn emitBody(
                 // Emit case targets FIRST, then `default` LAST. Emitting default last lets
                 // a case whose body OpBranches to the default label (SPIR-V fallthrough INTO
                 // default) fall through into it, matching spirv-cross. The old order (default
-                // first) made such a case fall off the end of the switch — silent-wrong
+                // first) made such a case fall off the end of the switch -- silent-wrong
                 // (fallthrough_then_break: sel=0 returned 16 instead of 48). Mirrors HLSL.
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -3545,8 +3548,8 @@ fn emitBody(
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                     // #switch-fallthrough: omit `break;` ONLY when this case body's first
                     // OpBranch target is a real case/default label of THIS OpSwitch (a
-                    // SPIR-V fallthrough edge). Otherwise the case is terminal — OpBranch to
-                    // the merge, a loop header, or a selection target — and must `break;`.
+                    // SPIR-V fallthrough edge). Otherwise the case is terminal -- OpBranch to
+                    // the merge, a loop header, or a selection target -- and must `break;`.
                     // The old `t == mval` test treated a loop-header / selection branch as
                     // fallthrough and dropped the break, so a loop-in-case fell through into
                     // the next case (loop_in_case: sel=0 returned 100 instead of 3).
@@ -4391,7 +4394,14 @@ fn glslEmitSubgroupArith(
         2 => try w.print("    {s} {s} = subgroupExclusive{s}({s});\n", .{ rtt, rn, stem, val }),
         3 => {
             if (inst.words.len < 7) return error.UnsupportedOp;
-            const cluster: []const u8 = if (names.get(inst.words[6])) |s| s else std.fmt.allocPrint(alloc, "{d}", .{inst.words[6]}) catch "1";
+            // words[6] is the ClusterSize Constant <id>, not a literal. The names map
+            // resolves it normally (e.g. "4u"); if it is somehow unnamed, resolve the
+            // constant value rather than emit the <id> number (silent-wrong), else honest-error.
+            const cluster: []const u8 = names.get(inst.words[6]) orelse blk: {
+                const cdef = getDef(m, inst.words[6]) orelse return error.UnsupportedOp;
+                if (cdef.op != .Constant or cdef.words.len < 4) return error.UnsupportedOp;
+                break :blk std.fmt.allocPrint(alloc, "{d}u", .{cdef.words[3]}) catch return error.OutOfMemory;
+            };
             try w.print("    {s} {s} = subgroupClustered{s}({s}, {s});\n", .{ rtt, rn, stem, val, cluster });
         },
         else => return error.UnsupportedOp,

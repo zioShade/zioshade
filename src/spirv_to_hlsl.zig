@@ -282,10 +282,13 @@ fn caseTerminatorTarget(module: *const ParsedModule, label_map: *const std.AutoH
 /// #switch-fallthrough: true iff `lbl` is a case/default target of the OpSwitch whose
 /// words are `switch_words` (words[2]=default, words[4,6,...]=case targets). Used to
 /// decide whether a case body's first OpBranch target is a REAL SPIR-V fallthrough edge
-/// (branch to another case/default of THIS switch) — only then is `break;` omitted. A
+/// (branch to another case/default of THIS switch) -- only then is `break;` omitted. A
 /// branch to the merge, a loop header, or a selection target is NOT a fallthrough edge:
 /// the case is terminal and must `break;`. Mirrors the GLSL/WGSL backends. Ported from
 /// spirv_to_wgsl.zig (isSwitchCaseTarget).
+/// 32-bit selector only: targets are at words[4], words[6], ... (literal,target pairs).
+/// A 64-bit selector uses 2-word literals (targets at words[5], words[9], ...) -- this
+/// matches the case-label EMITTER, which also assumes 32-bit, so the two stay consistent.
 fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
     if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
     var k: usize = 4; // words[3] = first case literal, words[4] = first case target
@@ -2655,6 +2658,12 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
                     if (matrixIsNonSquare(module, mtid)) return error.UnsupportedRowMajorMatrix;
                     break :blk "row_major ";
                 }
+                // Non-square ColMajor (default) buffer matrix member: declare row_major to
+                // match the mul-operand swap in emitMatrixMulSwapped. The storage modifier
+                // only affects cbuffer packing (local instances keep column_major math), so
+                // this is safe for non-buffer structs and matches emitStructMembers. Square
+                // ColMajor stays bare (WARP-confirmed).
+                if (matrixIsNonSquare(module, mtid)) break :blk "row_major ";
             }
             break :blk "";
         };
@@ -4489,7 +4498,7 @@ fn emitBody(
                 // lets a case whose body OpBranches to the default label (SPIR-V
                 // fallthrough INTO default) fall through into it, matching spirv-cross.
                 // The old order (default first) made such a case fall off the end of the
-                // switch — silent-wrong (fallthrough_then_break: sel=0 -> 16 not 48).
+                // switch -- silent-wrong (fallthrough_then_break: sel=0 -> 16 not 48).
                 // Emit case labels (word 3+: pairs of literal, target)
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -4501,8 +4510,8 @@ fn emitBody(
                     try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
                     // #switch-fallthrough: omit `break;` ONLY when this case body's first
                     // OpBranch target is a real case/default label of THIS OpSwitch (a
-                    // SPIR-V fallthrough edge). Otherwise the case is terminal — OpBranch to
-                    // the merge, a loop header, or a selection target — and must `break;`.
+                    // SPIR-V fallthrough edge). Otherwise the case is terminal -- OpBranch to
+                    // the merge, a loop header, or a selection target -- and must `break;`.
                     // The old `t == ml` test treated a loop-header / selection branch as
                     // fallthrough and dropped the break, so a loop-in-case fell through into
                     // the next case (loop_in_case: sel=0 -> 100 not 3). Stricter and safer
