@@ -2616,6 +2616,49 @@ fn collectAtomicVars(module: *const ParsedModule, out: *std.AutoHashMap(u32, voi
     }
 }
 
+/// Resolve whether `ptr_id` (an OpLoad/OpStore pointer operand) denotes a plain
+/// access to an SSBO struct field that `collectAtomicFields` declared `atomic<T>`.
+/// Such a field's plain OpLoad/OpStore must lower to atomicLoad/atomicStore --
+/// naga rejects `let v = b.x;` on an atomic field: "atomic variables cannot be
+/// accessed directly". Mirrors the index walk in `collectAtomicFields`: the
+/// deepest struct-member access along the AccessChain is the candidate, and if
+/// `(struct_id, member_idx)` is present in `atomic_fields` the access is atomic.
+/// Returns null for a non-AccessChain pointer or a non-atomic field.
+fn resolveAtomicFieldAccess(module: *const ParsedModule, ptr_id: u32, atomic_fields: *const AtomicFieldMap) ?AtomicFieldKind {
+    const ptr_inst = common.getDef(module, ptr_id) orelse return null;
+    if (ptr_inst.op != .AccessChain) return null;
+    if (ptr_inst.words.len < 5) return null; // need base + at least one index
+    const base_id = ptr_inst.words[3];
+
+    var current_type_id: ?u32 = resolvePointee(module, base_id);
+    var last_struct_id: ?u32 = null;
+    var last_member_idx: u32 = 0;
+
+    for (ptr_inst.words[4..]) |index_id| {
+        const tid = current_type_id orelse break;
+        const ti = common.getDef(module, tid) orelse break;
+        switch (ti.op) {
+            .TypeStruct => {
+                const idx_inst = common.getDef(module, index_id) orelse break;
+                if (idx_inst.op != .Constant or idx_inst.words.len < 4) break;
+                const mi = idx_inst.words[3];
+                last_struct_id = tid;
+                last_member_idx = mi;
+                if (mi + 2 < ti.words.len) current_type_id = ti.words[mi + 2] else current_type_id = null;
+            },
+            .TypeArray, .TypeRuntimeArray, .TypeVector, .TypeMatrix => {
+                if (ti.words.len > 2) current_type_id = ti.words[2] else current_type_id = null;
+            },
+            else => break,
+        }
+    }
+
+    if (last_struct_id) |sid| {
+        return atomic_fields.get(.{ .struct_id = sid, .member_idx = last_member_idx });
+    }
+    return null;
+}
+
 /// Classify a uniform struct's array members that need vec4-widening (#170 A2).
 /// `struct_type_id` is the *resolved* pointee struct of a uniform (non-SSBO)
 /// cbuffer. For each member that is a (possibly nested) array whose innermost
@@ -4482,7 +4525,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (!use_ptr_inout and has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, .none, subpass_fragcoord_name);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, .none, subpass_fragcoord_name);
 
         try w.writeAll("}\n\n");
     }
@@ -5267,7 +5310,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     };
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, early_return_mode, subpass_fragcoord_name);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, early_return_mode, subpass_fragcoord_name);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -5441,7 +5484,7 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     var indent: u32 = 1; // base function body indentation (4 spaces)
@@ -5728,6 +5771,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // Don't inline loads from pointers that are Store targets
                         // — they might be overwritten, so we need to capture the current value
                         if (store_targets.contains(ptr_id)) continue;
+                        // #wgsl-atomic-field: a load of an SSBO atomic field must
+                        // NOT be inlined to the bare access expression (e.g. "b.x"):
+                        // the field is declared atomic<T>, so a plain read is
+                        // naga-invalid ("atomic variables cannot be accessed
+                        // directly"). Leave the default result name so the OpLoad
+                        // handler materializes a proper `let vN = atomicLoad(&b.x);`.
+                        if (resolveAtomicFieldAccess(module, ptr_id, atomic_fields) != null) continue;
                         // Only inline if the pointer has a meaningful name and inlining
                         // doesn't create a self-assignment (e.g., let u_time = u_time)
                         const current_name = names.get(result_id) orelse "";
@@ -7171,6 +7221,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     try w.print("let {s}: {s} = atomicLoad(&{s});\n", .{ result_name, rt, ptr });
                     continue;
                 }
+                // #wgsl-atomic-field: a plain load of an SSBO struct field that
+                // collectAtomicFields declared atomic<T> also lowers to atomicLoad
+                // (naga: "atomic variables cannot be accessed directly"). The pointer
+                // is an OpAccessChain into the struct, not a direct Workgroup/Private
+                // var. Materialize as a `let` for a single atomic read, like above.
+                if (resolveAtomicFieldAccess(module, inst.words[3], atomic_fields) != null) {
+                    const ac = getDef(module, inst.words[3]).?;
+                    const af_expr = try buildAccessExpr(module, names, ac.words[3], ac.words[4..], alloc, wrapped_members);
+                    try writeInd(w, indent);
+                    try w.print("let {s}: {s} = atomicLoad(&{s});\n", .{ result_name, rt, af_expr });
+                    alloc.free(af_expr);
+                    continue;
+                }
                 const ptr_inst = getDef(module, inst.words[3]);
                 var is_tex = false;
                 var is_output_load = false;
@@ -7287,6 +7350,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const aptr = names.get(inst.words[1]) orelse "v";
                     try writeInd(w, indent);
                     try w.print("atomicStore(&{s}, {s});\n", .{ aptr, aval });
+                    continue;
+                }
+                // #wgsl-atomic-field: a plain store to an SSBO atomic field lowers
+                // to atomicStore for the same reason as the Workgroup-scalar case.
+                if (resolveAtomicFieldAccess(module, inst.words[1], atomic_fields) != null) {
+                    const ac = getDef(module, inst.words[1]).?;
+                    const af_expr = try buildAccessExpr(module, names, ac.words[3], ac.words[4..], alloc, wrapped_members);
+                    const aval = names.get(inst.words[2]) orelse "0";
+                    try writeInd(w, indent);
+                    try w.print("atomicStore(&{s}, {s});\n", .{ af_expr, aval });
+                    alloc.free(af_expr);
                     continue;
                 }
                 // #170 (H): a PARTIAL write to one column of a flattened matrix
