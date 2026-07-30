@@ -2619,15 +2619,26 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
         // Check for array
         const mt_inst = getDef(module, member_type_id);
 
-        // A row_major matrix member's std140 bytes are the row-major layout of
-        // the logical matrix M. zioshade stores a cbuffer matrix as M (its
-        // mul(M,v) convention requires it), so HLSL must read these bytes with
-        // the `row_major` storage qualifier to reconstruct M. ColMajor stays
-        // bare (HLSL's default is column_major). This is the OPPOSITE keyword to
-        // spirv-cross, whose convention is the transpose of zioshade's. Reject
-        // non-square row_major (needs swapped dims we don't yet emit) — honest
-        // error over silent-wrong. The matrix type id is the member type itself
-        // or, for an array-of-matrix member, the element type.
+        // Storage qualifier for a cbuffer matrix member. SPIR-V's matCxR and
+        // HLSL's floatCxR are TRANSPOSES (SPIR-V counts columns-then-rows; HLSL
+        // counts rows-then-columns), so the column-major byte grouping of the
+        // buffer only reconstructs the logical matrix M in HLSL when C == R.
+        //   * SQUARE ColMajor (SPIR-V default): HLSL column_major floatNxN reads
+        //     the bytes as M -- stays bare (HLSL default is column_major). mul is
+        //     emitted in SPIR-V order (no swap). This is the OPPOSITE keyword to
+        //     spirv-cross (row_major + swapped operands everywhere); both are
+        //     correct for the square case, WARP-confirmed.
+        //   * NON-SQUARE ColMajor: HLSL column_major floatCxR would misgroup the
+        //     bytes (C columns of R floats vs HLSL's R columns of C floats) =
+        //     silent-wrong. Emit row_major: SPIR-V's column-major bytes then
+        //     populate HLSL floatCxR as M^T, and emitMatrixMulSwapped swaps the
+        //     mul operands to compensate -- spirv-cross's convention for
+        //     non-square.
+        //   * Explicit RowMajor: bytes are already row-major of M, so HLSL
+        //     row_major reconstructs M for SQUARE; NON-SQUARE explicit RowMajor
+        //     needs swapped HLSL dims we don't emit -- honest error.
+        // The matrix type id is the member type itself or, for an
+        // array-of-matrix member, the innermost element type.
         const matrix_tid: ?u32 = blk: {
             if (mt_inst) |mi| {
                 if (mi.op == .TypeMatrix) break :blk member_type_id;
@@ -2648,9 +2659,16 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
         const row_major_qual: []const u8 = blk: {
             if (matrix_tid) |mtid| {
                 if (memberIsRowMajor(module, struct_type_id, @intCast(member_idx))) {
+                    // Explicit RowMajor on a non-square matrix needs swapped HLSL
+                    // dims we do not emit -- honest error over silent-wrong.
                     if (matrixIsNonSquare(module, mtid)) return error.UnsupportedRowMajorMatrix;
                     break :blk "row_major ";
                 }
+                // ColMajor (SPIR-V default) on a NON-SQUARE buffer matrix would be
+                // silently misread as column_major (see the comment above); emit
+                // row_major and let emitMatrixMulSwapped swap the mul operands.
+                // Matches spirv-cross for non-square buffer matrices.
+                if (matrixIsNonSquare(module, mtid)) break :blk "row_major ";
             }
             break :blk "";
         };
@@ -7316,10 +7334,13 @@ const UniformMatrixAccess = struct { boundary: usize, matrix_tid: u32 };
 /// (a TypeStruct at index position > 0). Nested-struct matrices are a documented
 /// limitation (their column_major reads remain a pre-existing, separate gap).
 ///
-/// Returns null for a whole-matrix load (no index INTO the matrix) — that feeds
-/// `mul` and must stay untransposed — and for non-square matrices (row_major
-/// non-square is rejected at declaration; non-square column_major is a separate
-/// pre-existing gap).
+/// Returns null for a whole-matrix load (no index INTO the matrix) -- that feeds
+/// `mul` and must stay untransposed -- and for non-square matrices. A non-square
+/// buffer matrix is emitted `row_major` (stored as M^T) by emitStructMembers, so an
+/// HLSL row read `var[i]` already yields column i of M (M^T's row i = M's column i):
+/// no transpose is wanted, and the null return here (raw access) is therefore
+/// CORRECT for non-square. (Explicit row_major non-square is still rejected at
+/// declaration as UnsupportedRowMajorMatrix.)
 fn findUniformMatrixColumnAccess(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32) ?UniformMatrixAccess {
     if (!isUniformBlockVar(module, names, base_id)) return null;
     var cur_type: ?u32 = resolvePointeeType(module, base_id);
@@ -8043,13 +8064,15 @@ fn emitSMod(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     try w.print("    {s} {s} = (({s} % {s}) + {s}) % {s};\n", .{ rt, names.get(inst.words[2]) orelse "v", x, y, y, y });
 }
 /// True if the matrix VALUE `id` is loaded from a buffer-backed variable
-/// (Uniform / PushConstant / StorageBuffer). Such a matrix is declared bare
-/// (HLSL default column_major) and holds the LOGICAL matrix M, so `mul(M, v)` is
-/// already correct and must NOT be swapped. A constructed/local matrix
-/// (OpCompositeConstruct, a constant, or a Function-storage local) is built by
-/// HLSL's row-filling `floatCxR` constructor and therefore stored TRANSPOSED, so
-/// it DOES need the swap. Traces through Load / CopyObject / AccessChain to the
-/// root variable's storage class. (#497)
+/// (Uniform / PushConstant / StorageBuffer). Such a matrix is declared in a cbuffer
+/// and holds the LOGICAL matrix M when SQUARE (bare column_major, so `mul(M, v)` is
+/// already correct and must NOT be swapped); a NON-SQUARE buffer matrix is emitted
+/// `row_major` (stored as M^T) and DOES need the swap -- see emitMatrixMulSwapped,
+/// which combines this predicate with matrixIsNonSquare. A constructed/local matrix
+/// (OpCompositeConstruct, a constant, or a Function-storage local) is built by HLSL's
+/// row-filling `floatCxR` constructor and therefore stored TRANSPOSED, so it DOES need
+/// the swap. Traces through Load / CopyObject / AccessChain to the root variable's
+/// storage class. (#497)
 ///
 /// Known limitation: a uniform matrix first COPIED into a Function-storage local
 /// and then multiplied traces to the Function var and is treated as local (swap).
@@ -8094,12 +8117,16 @@ fn valueTypeIsMatrix(module: *const ParsedModule, id: u32) bool {
 ///   OpMatrixTimesVector(M, v) -> mul(v, M)
 ///   OpVectorTimesMatrix(v, M) -> mul(M, v)
 ///   OpMatrixTimesMatrix(A, B) -> mul(B, A)
-/// A UNIFORM/cbuffer matrix is stored as the logical M (bare column_major), where
-/// `mul(M, v)` is already correct — that path is left byte-unchanged. Construction,
-/// indexing (`m[i]`), transpose() and the spvInverseNxN helper operate on the
-/// stored representation and stay consistent; only the local multiply order
-/// compensates. The local case is confirmed on D3D12 WARP + Metal
-/// (docs/DIFFERENTIAL_PROOF.md, tools/warp). (#497)
+/// A SQUARE UNIFORM/cbuffer matrix is stored as the logical M (bare column_major),
+/// where `mul(M, v)` is already correct -- that path keeps the SPIR-V operand order
+/// (byte-unchanged, WARP-confirmed). A NON-SQUARE UNIFORM/cbuffer matrix is emitted
+/// `row_major` by emitStructMembers (column_major would misgroup its bytes), so HLSL
+/// holds it as M^T -- the SAME transposed convention as a local matrix -- and the mul
+/// operands MUST be swapped. Construction, indexing (`m[i]`), transpose() and the
+/// spvInverseNxN helper operate on the stored representation and stay consistent; only
+/// the multiply order compensates. The local + square-buffer cases are confirmed on
+/// D3D12 WARP + Metal (docs/DIFFERENTIAL_PROOF.md, tools/warp); the non-square-buffer
+/// case matches spirv-cross (row_major + swapped operands) and is DXC-verified. (#497)
 fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     if (inst.words.len < 5) return common.emitCall(module, names, inst, "mul", w, alloc, hlslType);
     const rt = try hlslType(module, inst.words[1], names, alloc);
@@ -8108,12 +8135,22 @@ fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32
     // The matrix operand: MatrixTimesVector -> words[3]; VectorTimesMatrix ->
     // words[4]; MatrixTimesMatrix -> words[3] (use the left matrix's storage).
     const mat_op: u32 = if (valueTypeIsMatrix(module, inst.words[3])) inst.words[3] else inst.words[4];
+    // A non-square buffer matrix is emitted row_major (M^T) by emitStructMembers,
+    // so it uses the SAME transposed convention as a local matrix and the operands
+    // must be swapped. A square buffer matrix stays bare column_major (logical M)
+    // and keeps SPIR-V order. Local/constructed matrices are always transposed.
+    const mat_nonsquare: bool = blk: {
+        const mdef = getDef(module, mat_op) orelse break :blk false;
+        if (mdef.words.len < 2) break :blk false;
+        break :blk matrixIsNonSquare(module, mdef.words[1]);
+    };
+    const keep_order = matrixIsBufferSourced(module, mat_op) and !mat_nonsquare;
     const name = names.get(inst.words[2]) orelse "v";
-    if (matrixIsBufferSourced(module, mat_op)) {
-        // Logical-M storage: keep the SPIR-V operand order.
+    if (keep_order) {
+        // Logical-M storage (square buffer): keep the SPIR-V operand order.
         try w.print("    {s} {s} = mul({s}, {s});\n", .{ rt, name, a, b });
     } else {
-        // Transposed local storage: swap to compensate (matches SPIRV-Cross).
+        // Transposed storage (local, or non-square buffer): swap to compensate.
         try w.print("    {s} {s} = mul({s}, {s});\n", .{ rt, name, b, a });
     }
 }

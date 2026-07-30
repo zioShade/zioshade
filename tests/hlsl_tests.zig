@@ -12978,6 +12978,52 @@ test "T529.1: mat4x3 and mat3x4 operations" {
     try assertContains(hlsl, "float4");
 }
 
+// Regression for hlsl-matrix-nonsquare. A NON-SQUARE buffer matrix (mat3x4) must
+// be declared `row_major`: HLSL column_major floatCxR would misgroup its buffer
+// bytes when C != R (C columns of R floats vs HLSL's R columns of C floats), and
+// the mul operands must be swapped so HLSL computes the SPIR-V result. Before the
+// fix DXC rejected `mul(float3x4, float3)` -> float3 (dimension mismatch); spirv-cross
+// uses the same row_major + swapped-operand convention for non-square buffers.
+test "T529.2: non-square buffer matrix row_major + swapped mul" {
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { mat3x4 m; };
+        \\layout(location = 0) in vec3 v;
+        \\void main() {
+        \\    vec4 r = m * v;
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // (A) declaration: non-square buffer matrix is row_major, not bare column_major.
+    try assertContains(hlsl, "row_major float3x4 U_m");
+    // (B) mul swap: the vector is the FIRST operand -- mul(v, <mat>), not mul(<mat>, v).
+    try assertContains(hlsl, "mul(v, ");
+}
+
+test "T529.3: non-square buffer matrix array row_major + swapped mul" {
+    // Same fix through OpAccessChain into an array-of-matrix member
+    // (matrixIsBufferSourced follows AccessChain to the Uniform root).
+    const source =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(binding = 0) uniform U { mat3x4 a[4]; };
+        \\layout(location = 0) in vec3 v;
+        \\layout(location = 1) in float fi;
+        \\void main() {
+        \\    int idx = int(fi) & 3;
+        \\    vec4 r = a[idx] * v;
+        \\    fragColor = r;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "row_major float3x4 U_a[4]");
+    try assertContains(hlsl, "mul(v, ");
+}
+
 test "T530.1: gl_MaxUniformBindings and constants" {
     // Tests that GLSL max constants compile
     const source =
