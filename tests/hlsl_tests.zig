@@ -15398,14 +15398,17 @@ test "T597.6: whole array-element matrix load (for mul) is NOT transposed" {
     try assertContains(hlsl, "mul(");
 }
 
-test "T597.7: nested-struct row_major matrix is NOT transposed (regression guard)" {
-    // A matrix inside a NESTED struct member never receives the `row_major`
-    // storage qualifier (only top-level block members do), so for a row_major
-    // block it is stored as Mᵀ and reads correctly WITHOUT transpose. The
-    // transpose detector must NOT descend into nested structs — doing so
-    // double-flips and is silent-wrong (it was a regression caught in review).
-    // Round-trip-verified: `a_s.m[0]` reads logical column 0, matching the
-    // spirv-cross oracle.
+test "T597.7: nested-struct row_major matrix carries row_major and transposes the column read" {
+    // A matrix inside a NESTED struct member now receives the `row_major`
+    // storage qualifier in the struct forward decl (hlslEmitOneStructForwardDecl
+    // is on the UBO struct-decl path), so the cbuffer matrix is reconstructed as
+    // the logical M and a COLUMN read must transpose -- the same coupled
+    // (qualifier + transpose) pattern as a top-level row_major member (T597.8).
+    // The two are coupled: a transpose WITHOUT the row_major qualifier
+    // double-flips (reads row 0 instead of column 0 = silent-wrong), so this
+    // guards both together. Numerically equivalent to the spirv-cross oracle
+    // (which emits column_major + an untransposed read): both return logical
+    // column 0 of M.
     const source: [:0]const u8 =
         \\#version 450
         \\struct S { mat4 m; };
@@ -15415,8 +15418,8 @@ test "T597.7: nested-struct row_major matrix is NOT transposed (regression guard
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertNotContains(hlsl, "transpose");
-    try assertContains(hlsl, "a_s.m[0]");
+    try assertContains(hlsl, "row_major float4x4 m");
+    try assertContains(hlsl, "transpose(a_s.m)[0]");
 }
 
 test "T597.8: row_major mat3 carries the qualifier and transposes the column read" {
@@ -15477,6 +15480,28 @@ test "T597.10: dynamic column index into a row_major UBO matrix is transposed" {
     // The matrix sub-expression is transposed and indexed by a non-literal.
     try assertContains(hlsl, "transpose(a_m)[");
     try assertNotContains(hlsl, "transpose(a_m)[0]");
+}
+
+test "T597.11: nested-struct row_major whole-matrix mul keeps the qualifier (decl fix)" {
+    // A whole-matrix load of a row_major matrix nested inside a struct-typed
+    // UBO member feeds `mul(M, v)` and must NOT transpose, but it can only be
+    // correct (a_s.m == M) once the struct forward decl carries `row_major`.
+    // Before the declaration drill reached nested structs, the field was emitted
+    // bare, so the variable held M-transpose and `mul` computed the wrong
+    // transform (silent-wrong). Guards the declaration side of the coupled fix.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct S { mat4 m; };
+        \\layout(binding=0,std140,row_major) uniform A { S s; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main() { o = a.s.m * v; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "row_major float4x4 m");
+    try assertContains(hlsl, "mul(");
+    try assertNotContains(hlsl, "transpose");
 }
 
 test "compute built-ins map to HLSL SV semantics on the entry signature" {

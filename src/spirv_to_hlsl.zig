@@ -2539,7 +2539,37 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
 // ---------------------------------------------------------------------------
 
 fn hlslEmitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    return common.commonEmitStructForwardDecls(module, names, root_type_id, w, alloc, emitted, emitted_names, hlslType, hlslGetMemberName);
+    // Walk the root cbuffer struct's MEMBERS (the root itself is emitted as a
+    // cbuffer body, not a struct) and emit each referenced struct type via the
+    // HLSL-specific decl emitter `hlslEmitOneStructForwardDecl`, which honors a
+    // `row_major` decoration on an inner matrix member. The common emitter
+    // drops that qualifier at the struct boundary (silent-wrong transpose
+    // read), so HLSL cannot share it for UBO struct decls. Mirrors the
+    // commonEmitStructForwardDecls structural walk (unwrap array / runtime-
+    // array / vector / matrix / pointer wrappers to reach a struct member).
+    const inst = getDef(module, root_type_id) orelse return;
+    if (inst.op != .TypeStruct or inst.words.len <= 2) return;
+    for (inst.words[2..]) |mt_id| {
+        var tid = mt_id;
+        while (true) {
+            const ti = getDef(module, tid) orelse break;
+            switch (ti.op) {
+                .TypeArray, .TypeRuntimeArray, .TypeVector, .TypeMatrix => {
+                    if (ti.words.len < 3) break;
+                    tid = ti.words[2];
+                },
+                .TypePointer => {
+                    if (ti.words.len < 4) break;
+                    tid = ti.words[3];
+                },
+                .TypeStruct => {
+                    try hlslEmitOneStructForwardDecl(module, names, tid, w, alloc, emitted, emitted_names);
+                    break;
+                },
+                else => break,
+            }
+        }
+    }
 }
 
 fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
@@ -2578,6 +2608,41 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
 
     try w.print("struct {s}\n{{\n", .{sname});
     for (inst.words[2..], 0..) |mt_id, mi| {
+        // Lifted from emitStructMembers: a row_major matrix member's std140
+        // bytes are the row-major layout of the logical matrix M, and zioshade
+        // stores a cbuffer matrix as M, so a struct field enclosing such a
+        // matrix (the nested-struct UBO case, where this struct is the block
+        // member's type) must carry the `row_major` storage qualifier to
+        // reconstruct M. Without it the qualifier is dropped at the struct
+        // boundary (silent-wrong: HLSL reads Mᵀ where M is meant). The matrix
+        // type is the member itself or, for an array-of-matrix member, the
+        // leaf element. Reject non-square row_major (needs swapped dims we
+        // don't yet emit) -- honest-error over silent-wrong.
+        const matrix_tid: ?u32 = blk: {
+            const mi_inst = getDef(module, mt_id);
+            if (mi_inst) |mi2| {
+                if (mi2.op == .TypeMatrix) break :blk mt_id;
+                if (mi2.op == .TypeArray) {
+                    var cur: Instruction = mi2;
+                    while (cur.op == .TypeArray and cur.words.len > 3) {
+                        const et = getDef(module, cur.words[2]) orelse break;
+                        if (et.op == .TypeMatrix) break :blk cur.words[2];
+                        cur = et;
+                    }
+                }
+            }
+            break :blk null;
+        };
+        const row_major_qual: []const u8 = blk: {
+            if (matrix_tid) |mtid| {
+                if (memberIsRowMajor(module, type_id, @intCast(mi))) {
+                    if (matrixIsNonSquare(module, mtid)) return error.UnsupportedRowMajorMatrix;
+                    break :blk "row_major ";
+                }
+            }
+            break :blk "";
+        };
+
         const mti = common.localGetDef(instructions, id_defs, mt_id);
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
@@ -2589,14 +2654,14 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
                     return error.UnsupportedSpecConstantArraySize;
                 var mname_buf: [32]u8 = undefined;
                 const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-                try w.print("    {s} {s}[{d}];\n", .{ et, mname, lv });
+                try w.print("    {s}{s} {s}[{d}];\n", .{ row_major_qual, et, mname, lv });
                 continue;
             }
         }
         const member_type = try hlslType(module, mt_id, names, alloc);
         var mname_buf: [32]u8 = undefined;
         const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-        try w.print("    {s} {s};\n", .{ member_type, mname });
+        try w.print("    {s}{s} {s};\n", .{ row_major_qual, member_type, mname });
     }
     try w.writeAll("};\n\n");
 }
@@ -7325,14 +7390,14 @@ const UniformMatrixAccess = struct { boundary: usize, matrix_tid: u32 };
 /// COLUMN i — so a column read must be emitted as `transpose(M)[i]`. The matrix
 /// may be the top-level block member OR an array element of it (`a.mats[k][i]`).
 ///
-/// CRITICAL scope: only the TOP-LEVEL block member (selected by `indices[0]`)
-/// receives the `row_major` storage qualifier in `emitStructMembers`, so only
-/// its matrices are stored as the logical M (where transpose is correct). A
-/// matrix inside a NESTED struct (`a.s.m`) is emitted bare, so for a row_major
-/// block it is stored as Mᵀ and reads correctly WITHOUT transpose — transposing
-/// it would be silent-wrong. We therefore refuse to descend into a nested struct
-/// (a TypeStruct at index position > 0). Nested-struct matrices are a documented
-/// limitation (their column_major reads remain a pre-existing, separate gap).
+/// CRITICAL scope: a cbuffer matrix reached through the access chain -- whether a
+/// TOP-LEVEL block member or one nested inside a struct-typed block member
+/// (`a.s.m`, where the inner struct is emitted with its own `row_major` qualifier
+/// by `hlslEmitOneStructForwardDecl`) -- is stored as the logical matrix M, so a
+/// COLUMN read must transpose. Descends through TypeStruct (top-level block AND
+/// nested) and TypeArray like the MSL `findRowMajorMatrix`, instead of bailing at
+/// the first nested struct (the old bail dropped the transpose, so a nested
+/// `row_major` matrix read its rows where SPIR-V selects columns -- silent-wrong).
 ///
 /// Returns null for a whole-matrix load (no index INTO the matrix) -- that feeds
 /// `mul` and must stay untransposed -- and for non-square matrices. A non-square
@@ -7355,10 +7420,9 @@ fn findUniformMatrixColumnAccess(module: *const ParsedModule, names: *std.AutoHa
             return .{ .boundary = i - 1, .matrix_tid = tid };
         }
         if (ti.op == .TypeStruct) {
-            // Only the top-level block struct is qualifier-eligible; bail on any
-            // nested struct (see the doc-comment above — transposing a bare
-            // nested row_major matrix would be silent-wrong).
-            if (i != 0) return null;
+            // Descend through both the top-level block struct AND any nested
+            // struct, so a matrix enclosed in a struct-typed block member is
+            // reached (the qualifier is emitted by hlslEmitOneStructForwardDecl).
             const def = getDef(module, index_id) orelse return null;
             if (def.op != .Constant or def.words.len <= 3) return null;
             const val = def.words[3];

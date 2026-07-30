@@ -2330,6 +2330,37 @@ fn glslMemberIsRowMajor(m: *const ParsedModule, struct_id: u32, member_idx: u32)
     return false;
 }
 
+/// True if `type_id` is, or transitively contains (through TypeArray /
+/// TypeRuntimeArray element types or TypeStruct members), a matrix member that
+/// carries `OpMemberDecorate ... RowMajor`. The drill in `emitStructMembers`
+/// otherwise stops at the struct boundary: a RowMajor on a matrix INSIDE a
+/// struct-typed UBO/SSBO block member is dropped, so the bytes are read as the
+/// transpose (silent-wrong). GLSL `layout(row_major)` on a BLOCK member of
+/// struct type propagates into the struct's matrix members (it is valid on
+/// block members, NOT on plain struct members, so the struct forward decl is
+/// left bare). Works for square AND non-square matrices: in GLSL `row_major` is
+/// purely a byte-layout qualifier and indexing stays column-major (matching
+/// SPIR-V), so no transpose or dimension swap is needed.
+fn glslStructTypeNeedsRowMajor(m: *const ParsedModule, type_id: u32) bool {
+    const ti = getDef(m, type_id) orelse return false;
+    switch (ti.op) {
+        .TypeArray, .TypeRuntimeArray => {
+            if (ti.words.len < 3) return false;
+            return glslStructTypeNeedsRowMajor(m, ti.words[2]);
+        },
+        .TypeStruct => {
+            // SPIR-V value struct types are acyclic (a struct cannot contain
+            // itself by value, only via a pointer), so this recursion terminates.
+            for (ti.words[2..], 0..) |member_tid, mi| {
+                if (glslMemberIsRowMajor(m, type_id, @intCast(mi))) return true;
+                if (glslStructTypeNeedsRowMajor(m, member_tid)) return true;
+            }
+            return false;
+        },
+        else => return false,
+    }
+}
+
 fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), struct_id: u32, cb_name: []const u8, w: anytype, alloc: std.mem.Allocator, original_names: bool) !void {
     const inst = getDef(m, struct_id) orelse return;
     if (inst.op != .TypeStruct) return;
@@ -2338,7 +2369,11 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
         const mname: []const u8 = if (original_names) getMemberName(m, struct_id, @intCast(mi), &mbuf) else "";
         // #472-audit: honor RowMajor. Only matrices (incl. arrays of matrices) carry
         // this decoration; a plain member without it stays column-major (the default).
-        const rm: []const u8 = if (glslMemberIsRowMajor(m, struct_id, @intCast(mi))) "layout(row_major) " else "";
+        // A struct-typed block member may itself enclose a RowMajor matrix (the
+        // decoration sits on the inner struct's matrix member); without recursing,
+        // the row-major layout is dropped (silent-wrong transpose read).
+        const rm: []const u8 = if (glslMemberIsRowMajor(m, struct_id, @intCast(mi)) or
+            glslStructTypeNeedsRowMajor(m, mt_id)) "layout(row_major) " else "";
         const mti = getDef(m, mt_id);
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {

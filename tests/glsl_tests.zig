@@ -118,6 +118,29 @@ test "#472-audit: RowMajor UBO matrix emits layout(row_major), not transposed" {
     try glslValidateOrSkip("rowmajor_ubo", glsl);
 }
 
+// #472-nested: a RowMajor decoration on a matrix INSIDE a struct-typed UBO
+// member must propagate to a `layout(row_major)` on the BLOCK member. The drill
+// in emitStructMembers used to stop at the struct boundary (it only checked the
+// direct member's own decoration), so the qualifier was dropped and the bytes
+// were read as the transpose (silent-wrong). Oracle: spirv-cross emits
+// `layout(row_major) S s;` on the block member (the bare struct forward decl is
+// untouched; the qualifier is valid on a block member, not a plain struct field).
+test "#472-nested: RowMajor on a matrix inside a struct-typed UBO member propagates to layout(row_major)" {
+    const spirv = compileToSpirv("rowmajor_ubo_nested",
+        \\#version 450
+        \\struct S { mat4 m; };
+        \\layout(std140, binding=0, row_major) uniform A { S s; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = a.s.m * v; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "layout(row_major) S");
+    try glslValidateOrSkip("rowmajor_ubo_nested", glsl);
+}
+
 // #475: Workgroup (shared) memory. GLSL REQUIRES `shared` at GLOBAL scope (function-scope
 // `shared` is illegal); zioshade emitted it inside main() AND scanned the wrong range
 // (missed module-scope vars) AND dropped the array suffix. Must emit `shared T name[N];`
