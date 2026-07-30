@@ -6445,12 +6445,11 @@ fn emitBody(
                 g_switch_ctx = .{ .merge_label = mval, .phis = sphis.items };
                 g_switch_chain = if (is_ft) chain_entries.items else null;
                 try w.print("    switch ({s}) {{\n", .{sn});
-                if (dl != mval) {
-                    try w.writeAll("    default: {\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
-                    try w.writeAll("    break;\n    }\n");
-                }
+                // Cases FIRST, default LAST: a case whose body OpBranches to the default
+                // label (SPIR-V fallthrough INTO default) needs default below it in source
+                // order for C-fallthrough to reach it. The old default-first order made
+                // such a case fall off the switch end (fallthrough_then_break: sel=0 lost
+                // the default body). Mirrors spirv-cross + the GLSL/HLSL fix.
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
                     const cv = inst.words[wi];
@@ -6476,6 +6475,12 @@ fn emitBody(
                     }
                     if (!falls_through) try w.writeAll("    break;\n");
                     try w.writeAll("    }\n");
+                }
+                if (dl != mval) {
+                    try w.writeAll("    default: {\n");
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                    try w.writeAll("    break;\n    }\n");
                 }
                 try w.writeAll("    }\n");
                 g_switch_ctx = saved_switch_ctx;
