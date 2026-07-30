@@ -8194,7 +8194,7 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 46 => "lerp", // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
-                50 => "fma", // OpFma: contractually fused multiply-add. HLSL fma (SM5+) -- mad may double-round.
+                50 => "mad", // OpFma: HLSL `fma` is double-only (DXC rejects float fma); use mad. (#469 regression)
                 51 => "frexp", // Frexp (scalar return, pointer out-param)
                 52 => "frexp", // FrexpStruct (struct return - intercepted)
                 53 => "ldexp", // Ldexp

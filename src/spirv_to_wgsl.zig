@@ -8733,14 +8733,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // uses via barrier()+memoryBarrier()) so storage writes are visible.
             // Over-fencing is safe (a no-op when there's no storage access).
             .ControlBarrier => {
-                try writeInd(w, indent);
-                try w.writeAll("workgroupBarrier();\n");
-                try writeInd(w, indent);
-                try w.writeAll("storageBarrier();\n");
+                // WGSL workgroupBarrier()/storageBarrier() are COMPUTE-stage only. In a
+                // fragment/vertex entry point they are forbidden (naga rejects), and a
+                // control barrier there is a semantic no-op (no cross-invocation sync) --
+                // omit. (#wgsl-barrier-stage)
+                if (module.execution_model == .GLCompute) {
+                    try writeInd(w, indent);
+                    try w.writeAll("workgroupBarrier();\n");
+                    try writeInd(w, indent);
+                    try w.writeAll("storageBarrier();\n");
+                }
             },
             .MemoryBarrier => {
-                try writeInd(w, indent);
-                try w.writeAll("storageBarrier();\n");
+                if (module.execution_model == .GLCompute) {
+                    try writeInd(w, indent);
+                    try w.writeAll("storageBarrier();\n");
+                }
+                // else: storageBarrier is compute-only; a fragment/vertex memory barrier is a no-op.
             },
 
             // Atomic operations
