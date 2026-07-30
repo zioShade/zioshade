@@ -233,6 +233,42 @@ test "glsl: OpFRem lowers to the sign-of-dividend truncation form, not mod() (#1
     try glslValidateOrSkip("frem", glsl);
 }
 
+// #170: glslShadowCoordCtor must derive the compare-coord arity from the sampler's
+// OpTypeImage Dim (vec3 for a 2D shadow), NOT the coord width. glslang packs the
+// dref INTO the coord (vec3), so the old coord-width heuristic double-counted it
+// (vec4 where vec3 is needed). glslang is used so the coord is vec3-packed.
+test "glsl: DrefExplicitLod keeps Lod + vec3 compare coord (not vec4) (#170)" {
+    const spv = try compileToSpirv("dref_explicit_lod_glsl",
+        \\#version 450
+        \\#extension GL_EXT_texture_shadow_lod : require
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureLod(shadowTex, vec3(vUV, 0.5), 2.0)); }
+    );
+    defer alloc.free(spv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureLod(shadowTex, vec3(");
+    try assertNotContains(glsl, "textureLod(shadowTex, vec4(");
+}
+
+// #170: OpImageSampleExplicitLod Lod+ConstOffset -> GLSL textureLodOffset (the Lod
+// arm previously emitted a plain textureLod, DROPPING the offset). zioshade's own
+// frontend supports textureLodOffset on a non-shadow sampler.
+test "glsl: textureLodOffset lowers to textureLodOffset, not textureLod (#170)" {
+    const glsl = try compileToGlsl(
+        \\#version 430
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureLodOffset(tex, uv, 1.0, ivec2(3, 4)); }
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureLodOffset(");
+    try assertContains(glsl, "ivec2(3, 4)");
+}
+
 // OpSRem is truncated (sign of the DIVIDEND); GLSL `%` is FLOORED (sign of the divisor --
 // glslang emits OpSMod for GLSL `int %`), so a bare `%` miscompiles OpSRem for opposite-sign
 // operands. GLSL was the lone backend getting this wrong (WGSL/HLSL/MSL `%` is truncated).

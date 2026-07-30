@@ -1052,6 +1052,25 @@ test "wgsl: sampler2DShadow gather emits texture_depth_2d + sampler_comparison" 
     });
 }
 
+// #170: OpImageSampleDrefImplicitLod + ConstOffset -> WGSL textureSampleCompare's
+// trailing const-offset arg (was dropped, sampling the un-offset texel). WGSL's
+// offset overload exists only for texture_depth_2d (cube/arrayed honest-errors).
+// glslang emits the shadow textureOffset zioshade's frontend honest-errors.
+test "wgsl: DrefImplicitLod ConstOffset -> textureSampleCompare vec2<i32> (#170)" {
+    const spv = try compileToSpirv("dref_implicit_offset_wgsl",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureOffset(shadowTex, vec3(vUV, 0.5), ivec2(1, 2))); }
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleCompare(");
+    try assertContains(wgsl, "vec2<i32>(1, 2)");
+}
+
 test "wgsl: sampler2DShadow compare-sample emits texture_depth_2d + sampler_comparison" {
     try runShadowValidTest(.{
         .name = "shadow_sample",

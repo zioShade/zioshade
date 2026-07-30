@@ -802,6 +802,22 @@ fn writeHlslConstOffset(module: *const ParsedModule, w: anytype, offset_id: u32)
     return true;
 }
 
+/// For an OpImageSampleDref* instruction, the ConstOffset (image-operand bit 0x8)
+/// operand ID, or null. Dref occupies words[5] and the image-operands mask is
+/// words[6], so operand values start at words[7]; ConstOffset follows Bias(1)/
+/// Lod(1)/Grad(2) in ascending bit order. (#170)
+fn drefConstOffsetId(words: []const u32) ?u32 {
+    if (words.len <= 6) return null;
+    const mask = words[6];
+    if (mask & 0x8 == 0) return null;
+    var off: usize = 7;
+    if (mask & 0x1 != 0) off += 1; // Bias
+    if (mask & 0x2 != 0) off += 1; // Lod
+    if (mask & 0x4 != 0) off += 2; // Grad
+    if (off >= words.len) return null;
+    return words[off];
+}
+
 /// Number of SPATIAL out-params HLSL GetDimensions takes for the texture behind
 /// `image_value_id` (1D=1, 2D/cube=2, 2DArray/cubeArray=2+1, 3D=3). OpTypeImage layout:
 /// [.., Dim=words[3], Depth, Arrayed=words[5], MS, ..]. Used by QueryLevels/Samples,
@@ -6214,25 +6230,39 @@ fn emitInstruction(
             });
         },
         .ImageSampleDrefImplicitLod => {
-            // Shadow texture: HLSL uses .SampleCmp(sampler, coord, compare)
+            // Shadow texture: HLSL .SampleCmp(sampler, coord, compare [, int2 offset]).
+            // ConstOffset (0x8) is the trailing int2 arg (Dref=words[5], mask=words[6]).
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const parts = splitPair(si);
-            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}, {s});\n", .{
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}, {s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dref,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleDrefExplicitLod => {
+            // Explicit-LOD shadow: SampleCmpLevelZero (HLSL has no lod-bearing compare
+            // sample; LevelZero is the faithful mapping, matching spirv-cross). The Lod
+            // drop is faithful -- NOT a bug. ConstOffset (0x8) -> trailing int2 arg.
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const parts = splitPair(si);
-            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}, {s});\n", .{
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}, {s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dref,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleProjImplicitLod => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
@@ -6299,10 +6329,16 @@ fn emitInstruction(
             // reference by the projective divisor (the coordinate's last component).
             // Emitting the raw Dref would silently compare against the un-projected
             // depth. Matches the spirv-cross oracle `SampleCmp(.., uv/q, dref/q)` and
-            // the WGSL backend's textureSampleCompare lowering. (#170, #470)
-            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{
+            // the WGSL backend's textureSampleCompare lowering. ConstOffset (0x8) ->
+            // trailing int2 arg. (#170, #470)
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}{s}, {s} / {s}{s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref, coord, last_swizzle,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleProjDrefExplicitLod => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
@@ -6324,10 +6360,16 @@ fn emitInstruction(
                 }
                 break :blk ".z";
             } else ".z";
-            // Projective divide applies to the Dref too (see ProjDrefImplicitLod). (#170, #470)
-            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{
+            // Projective divide applies to the Dref too (see ProjDrefImplicitLod).
+            // ConstOffset (0x8) -> trailing int2 arg. (#170, #470)
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}{s}, {s} / {s}{s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref, coord, last_swizzle,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleProjExplicitLod => {
             // Projected explicit LOD: SampleLevel with manual projection. The

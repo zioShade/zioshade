@@ -1160,12 +1160,28 @@ fn emitDepthCompare(
     const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
     const shape = depthCompareShape(module, inst.words[3]);
     const coord_swz: []const u8 = if (shape.comps == 3) ".xyz" else ".xy";
+    // ConstOffset (image-operand bit 0x8). Dref=words[5], mask=words[6], values
+    // from words[7]; ConstOffset follows Bias/Lod/Grad in ascending bit order.
+    // WGSL textureSampleCompare(Level)'s const-offset arg exists ONLY for
+    // texture_depth_2d (NOT 2d_array/cube/cube_array) -> honest-error otherwise
+    // rather than emit a builtin naga rejects. (#170)
+    var off_suffix: []const u8 = "";
+    const dmask: u32 = if (inst.words.len > 6) inst.words[6] else 0;
+    if (dmask & 0x8 != 0) {
+        if (shape.arrayed or shape.comps == 3) return error.UnsupportedImageOperands;
+        var ow: usize = 7;
+        if (dmask & 0x1 != 0) ow += 1; // Bias
+        if (dmask & 0x2 != 0) ow += 1; // Lod
+        if (dmask & 0x4 != 0) ow += 2; // Grad
+        if (ow >= inst.words.len) return error.UnsupportedImageOperands;
+        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[ow]) orelse "vec2<i32>(0)"});
+    }
     try writeIndentStatic(w, indent);
     if (shape.arrayed) {
         const layer_comp: []const u8 = if (shape.comps == 3) ".w" else ".z";
-        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, coord, layer_comp, dref });
+        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, coord, layer_comp, dref, off_suffix });
     } else {
-        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, {s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, dref });
+        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, {s}{s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, dref, off_suffix });
     }
 }
 
@@ -8867,8 +8883,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // ProjExplicitLod's LOD (must be 0 for a shadow sample) is dropped:
                 // WGSL has no projective-compare-with-LOD builtin, and the implicit
                 // form already samples the base level for depth textures.
+                // ConstOffset (0x8): the projective depth-2d form keeps WGSL's
+                // textureSampleCompare offset arg. Dref=words[5], mask=words[6]. (#170)
+                var off_suffix: []const u8 = "";
+                {
+                    const pmask: u32 = if (inst.words.len > 6) inst.words[6] else 0;
+                    if (pmask & 0x8 != 0) {
+                        var ow: usize = 7;
+                        if (pmask & 0x1 != 0) ow += 1; // Bias
+                        if (pmask & 0x2 != 0) ow += 1; // Lod
+                        if (pmask & 0x4 != 0) ow += 2; // Grad
+                        if (ow >= inst.words.len) return error.UnsupportedImageOperands;
+                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[ow]) orelse "vec2<i32>(0)"});
+                    }
+                }
                 try writeInd(w, indent);
-                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}{s} / {s}{s}, {s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, dref, coord, last_comp });
+                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}{s} / {s}{s}, {s} / {s}{s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, dref, coord, last_comp, off_suffix });
             },
 
             // ReadClockKHR — shader clock

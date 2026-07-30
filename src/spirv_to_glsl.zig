@@ -1081,31 +1081,87 @@ fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id:
 /// are mutually exclusive; Flat wins if both are set. Matches spirv-cross. (#475)
 /// Centroid/Sample are orthogonal auxiliary qualifiers — handled separately if added.
 /// GLSL shadow-compare coord constructor + coord swizzle for an OpImageSampleDref*
-/// `coord` operand. The compare coordinate packs the texture coordinate plus the
-/// depth-reference scalar, so it is `vecN(coord.<first N-1>, dref)`. The coord's
-/// first (N-1) components are the texture coordinate regardless of whether the SPIR-V
-/// producer appended the dref to the coord (glslang: vec4 with dref in .w) or kept it
-/// separate (zioshade frontend: vec3) — swizzling `.xyz`/`.xy` takes the texture
-/// coords in both encodings, so `vecN(coord.swizzle, dref)` is producer-independent.
-/// A 2D shadow (vec2 coord) -> vec3(coord.xy, dref); a 2D-array/cube shadow (vec3 or
-/// vec4 coord) -> vec4(coord.xyz, dref).
+/// instruction. The compare coordinate packs the texture coordinate (plus an array
+/// layer, if any) and the depth-reference scalar, so it is `vecN(coord.<leading>, dref)`.
+/// The constructor WIDTH and the leading-component count are derived from the sampler's
+/// OpTypeImage Dim/Arrayed behind the sampled image -- NOT the coord width. A glslang
+/// producer packs the dref INTO the coord (vec3 for a 2D shadow), so reading the coord
+/// width double-counts the dref (a vec4 where vec3 is needed). The leading coord
+/// components are the texture coords in both producer encodings (glslang appends dref;
+/// zioshade keeps it separate), so swizzling them is producer-independent. A 2D shadow
+/// -> vec3(coord.xy, dref); a 2D-array/cube shadow -> vec4(coord.xyz, dref). (#170)
 const ShadowCoord = struct { ctor: []const u8, swizzle: []const u8 };
-fn glslShadowCoordCtor(m: *const ParsedModule, coord_id: u32) ShadowCoord {
-    const def = getDef(m, coord_id) orelse return .{ .ctor = "vec3", .swizzle = ".xy" };
-    if (def.words.len < 2) return .{ .ctor = "vec3", .swizzle = ".xy" };
-    const t = getDef(m, def.words[1]) orelse return .{ .ctor = "vec3", .swizzle = ".xy" };
-    if (t.op == .TypeFloat) return .{ .ctor = "vec2", .swizzle = "" }; // scalar coord (1D shadow)
-    if (t.op == .TypeVector and t.words.len > 3) {
-        // Take up to 3 leading components (a shadow coord never needs more than 3:
-        // 2D-array/cube = xyz); a 4th, if present, is a producer-appended dref to drop.
-        return switch (if (t.words[3] >= 3) @as(u32, 3) else t.words[3]) {
-            1 => .{ .ctor = "vec2", .swizzle = ".x" },
-            2 => .{ .ctor = "vec3", .swizzle = ".xy" },
-            3 => .{ .ctor = "vec4", .swizzle = ".xyz" },
-            else => .{ .ctor = "vec3", .swizzle = ".xy" },
-        };
+fn shadowSwizzle(n: u32) []const u8 {
+    return switch (n) {
+        1 => ".x",
+        2 => ".xy",
+        3 => ".xyz",
+        else => "",
+    };
+}
+/// Resolve the OpTypeImage behind a sampled-image VALUE `id` (an OpSampledImage or
+/// OpLoad result), unwrapping its result type's OpTypeSampledImage wrapper. Mirrors
+/// the MSL backend's imageValueDim resolution. Returns null if unreachable.
+fn resolveSampledImageType(m: *const ParsedModule, sampled_image_id: u32) ?Instruction {
+    const vdef = getDef(m, sampled_image_id) orelse return null;
+    if (vdef.words.len < 2) return null;
+    var tinst = getDef(m, vdef.words[1]) orelse return null;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(m, tinst.words[2]) orelse return null;
     }
-    return .{ .ctor = "vec3", .swizzle = ".xy" };
+    if (tinst.op != .TypeImage) return null;
+    return tinst;
+}
+fn glslShadowCoordCtor(m: *const ParsedModule, sampled_image_id: u32, coord_id: u32) ShadowCoord {
+    // Leading coord components = spatial coords (by Dim) + array layer (if Arrayed).
+    // 1D=1, 2D=2, Cube=3; Rect/unknown default to a 2D shape. Cube-arrayed shadow
+    // needs a vec4 coord + a SEPARATE ref (samplerCubeArrayShadow takes (vec4, float)),
+    // so the packed vecN(coord, dref) form does not fit -- clamp so we never emit a
+    // 5-wide ctor. Rare and not in the corpus.
+    var leading: u32 = 2; // 2D default
+    if (resolveSampledImageType(m, sampled_image_id)) |img| {
+        if (img.words.len >= 4) {
+            const spatial: u32 = switch (img.words[3]) {
+                0 => 1, // 1D
+                1 => 2, // 2D
+                3 => 3, // Cube
+                else => 2, // Rect/unknown -> 2D-shaped
+            };
+            const arrayed: u32 = if (img.words.len > 5 and img.words[5] == 1) 1 else 0;
+            leading = if (spatial + arrayed > 3) 3 else spatial + arrayed;
+        }
+    }
+    const ctor: []const u8 = switch (leading + 1) {
+        2 => "vec2",
+        3 => "vec3",
+        else => "vec4",
+    };
+    // A scalar coord (1D shadow passed as a bare float) takes no swizzle.
+    if (getDef(m, coord_id)) |d| {
+        if (d.words.len >= 2) {
+            if (getDef(m, d.words[1])) |t| {
+                if (t.op == .TypeFloat) return .{ .ctor = ctor, .swizzle = "" };
+            }
+        }
+    }
+    return .{ .ctor = ctor, .swizzle = shadowSwizzle(leading) };
+}
+
+/// Index of the ConstOffset (image-operand bit 0x8) value word for an
+/// OpImageSampleDref* instruction. Dref occupies words[5] and the image-operands
+/// mask is words[6], so operand values start at words[7]; ConstOffset follows
+/// Bias(1 word)/Lod(1)/Grad(2) in ascending bit order. Returns null when
+/// ConstOffset is absent or its word is missing. (#170)
+fn drefConstOffsetIdx(words: []const u32) ?usize {
+    if (words.len <= 6) return null;
+    const mask = words[6];
+    if (mask & 0x8 == 0) return null;
+    var off: usize = 7;
+    if (mask & 0x1 != 0) off += 1; // Bias
+    if (mask & 0x2 != 0) off += 1; // Lod
+    if (mask & 0x4 != 0) off += 2; // Grad
+    if (off >= words.len) return null;
+    return off;
 }
 
 fn glslInterpQual(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32) []const u8 {
@@ -4859,23 +4915,30 @@ fn emitInstruction(
             }
         },
         .ImageSampleDrefImplicitLod => {
-            // Shadow texture: texture(sampler2DShadow, vec3(uv.xy, depth)). The
-            // compare-coord ctor swizzles the coord's leading components (producer-
-            // independent: glslang appends dref to the coord, zioshade keeps it
-            // separate), so vecN(coord.swizzle, dref) is correct for both. The old
-            // hardcoded vec3 was wrong-arity for array/cube shadow. (#GLSL-corpus)
+            // Shadow compare: texture(sampler*Shadow, vecN(coord.leading, dref)). The
+            // ctor width is sampler-dim-aware (see glslShadowCoordCtor) -- a glslang
+            // producer packs the dref INTO the coord, so reading the coord width
+            // double-counts it (vec4 where vec3 is needed). ConstOffset (0x8) ->
+            // native textureOffset. Operand layout: Dref=words[5], mask=words[6],
+            // values from words[7]. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            const sc = glslShadowCoordCtor(m, inst.words[4]);
-            try w.print("    {s} {s} = texture({s}, {s}({s}{s}, {s}));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, sc.ctor, coord, sc.swizzle, dref });
+            const sc = glslShadowCoordCtor(m, inst.words[3], inst.words[4]);
+            const cmp_coord = try std.fmt.allocPrint(alloc, "{s}({s}{s}, {s})", .{ sc.ctor, coord, sc.swizzle, dref });
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureOffset({s}, {s}, {s});\n", .{ rtt, gname, si, cmp_coord, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = texture({s}, {s});\n", .{ rtt, gname, si, cmp_coord });
+            }
         },
         .ImageSampleDrefExplicitLod => {
-            // Shadow texture with explicit LOD: `textureLod(sampler*Shadow, ctor(coord.swizzle, dref), lod)`.
-            // The compare coord ctor is producer-independent (see ImageSampleDrefImplicitLod); the
-            // LOD must be the real operand, not a hardcoded 0. Operand layout: words[5]=Dref,
-            // words[6]=image-operands mask, and the Lod value (bit 0x2) at words[7]. (#170)
+            // Shadow compare with explicit LOD: textureLod(sampler*Shadow, ctor, lod).
+            // The compare-coord ctor is sampler-dim-aware (see ImageSampleDrefImplicitLod).
+            // Lod value at words[7] (bit 0x2; Dref=words[5], mask=words[6]); ConstOffset
+            // (0x8) -> textureLodOffset. The Lod must be the real operand, not 0. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
@@ -4884,8 +4947,14 @@ fn emitInstruction(
                 names.get(inst.words[7]) orelse "0.0"
             else
                 "0.0";
-            const sc = glslShadowCoordCtor(m, inst.words[4]);
-            try w.print("    {s} {s} = textureLod({s}, {s}({s}{s}, {s}), {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, sc.ctor, coord, sc.swizzle, dref, lod });
+            const sc = glslShadowCoordCtor(m, inst.words[3], inst.words[4]);
+            const cmp_coord = try std.fmt.allocPrint(alloc, "{s}({s}{s}, {s})", .{ sc.ctor, coord, sc.swizzle, dref });
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureLodOffset({s}, {s}, {s}, {s});\n", .{ rtt, gname, si, cmp_coord, lod, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = textureLod({s}, {s}, {s});\n", .{ rtt, gname, si, cmp_coord, lod });
+            }
         },
         .ImageSampleProjImplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
@@ -4902,19 +4971,38 @@ fn emitInstruction(
             }
         },
         .ImageSampleProjDrefImplicitLod => {
-            // Projected shadow: textureProj(sampler2DShadow, vec4(xy, depth, w))
+            // Projected shadow: textureProj(sampler2DShadow, vec4(xy, depth, w)).
+            // Only 2D projective shadow is faithful here (the vec4 divides xy by w).
+            // ConstOffset (0x8) -> textureProjOffset. Dref=words[5], mask=words[6]. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = textureProj({s}, vec4({s}.xy, {s}, {s}.w));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, coord });
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureProjOffset({s}, vec4({s}.xy, {s}, {s}.w), {s});\n", .{ rtt, gname, si, coord, dref, coord, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = textureProj({s}, vec4({s}.xy, {s}, {s}.w));\n", .{ rtt, gname, si, coord, dref, coord });
+            }
         },
         .ImageSampleProjDrefExplicitLod => {
+            // Projected shadow + explicit LOD. Lod value at words[7] (bit 0x2); the
+            // old code hardcoded 0, silently sampling mip 0. ConstOffset (0x8) ->
+            // textureProjLodOffset. (#170)
             const rtt = try glslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
-            try w.print("    {s} {s} = textureProjLod({s}, vec4({s}.xy, {s}, {s}.w), 0);\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, dref, coord });
+            const lod: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x2) != 0)
+                names.get(inst.words[7]) orelse "0.0"
+            else
+                "0.0";
+            const gname = names.get(inst.words[2]) orelse "v";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                try w.print("    {s} {s} = textureProjLodOffset({s}, vec4({s}.xy, {s}, {s}.w), {s}, {s});\n", .{ rtt, gname, si, coord, dref, coord, lod, names.get(inst.words[oi]) orelse "ivec2(0)" });
+            } else {
+                try w.print("    {s} {s} = textureProjLod({s}, vec4({s}.xy, {s}, {s}.w), {s});\n", .{ rtt, gname, si, coord, dref, coord, lod });
+            }
         },
         .ImageSampleExplicitLod => {
             const rtt = try glslType(m, inst.words[1], names, alloc);
@@ -4925,7 +5013,14 @@ fn emitInstruction(
                 var off: usize = 6;
                 if (mask & 0x1 != 0) off += 1;
                 if (mask & 0x2 != 0 and off < inst.words.len) {
-                    try w.print("    {s} {s} = textureLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, names.get(inst.words[off]) orelse "0" });
+                    const lod = names.get(inst.words[off]) orelse "0";
+                    // Lod|ConstOffset (textureLodOffset): the const offset follows the
+                    // lod. Dropping it silently samples the un-offset texels. (#170)
+                    if (mask & 0x8 != 0 and off + 1 < inst.words.len) {
+                        try w.print("    {s} {s} = textureLodOffset({s}, {s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, lod, names.get(inst.words[off + 1]) orelse "ivec2(0)" });
+                    } else {
+                        try w.print("    {s} {s} = textureLod({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, coord, lod });
+                    }
                 } else if (mask & 0x4 != 0 and off + 1 < inst.words.len) {
                     const dx = names.get(inst.words[off]) orelse "0";
                     const dy = names.get(inst.words[off + 1]) orelse "0";

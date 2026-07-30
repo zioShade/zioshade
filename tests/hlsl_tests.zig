@@ -3201,6 +3201,26 @@ test "T31.6: textureProj(sampler2DShadow) divides BOTH coord and Dref, result no
     try assertNotContains(hlsl, "o = 0");
 }
 
+// #170: OpImageSampleDrefImplicitLod + ConstOffset -> HLSL .SampleCmp takes the
+// offset as a trailing int2 arg (was dropped, sampling the un-offset texel). The
+// explicit-LOD form's Lod drop is faithful (SampleCmpLevelZero, matching spirv-cross)
+// and is NOT touched here. glslang emits the shadow textureOffset zioshade's
+// frontend honest-errors.
+test "T31.7: DrefImplicitLod ConstOffset -> SampleCmp trailing int2 (#170)" {
+    const spv = try compileToSpirv("dref_implicit_offset_hlsl",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureOffset(shadowTex, vec3(vUV, 0.5), ivec2(1, 2))); }
+    );
+    defer alloc.free(spv);
+    const hlsl = try spirvToHlsl60(spv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, ".SampleCmp(");
+    try assertContains(hlsl, "int2(1, 2)");
+}
+
 // #170: a texture sampled with a Dref (depth-comparison) op must declare a
 // SamplerComparisonState, not a SamplerState. SampleCmp*/GatherCmp reject a plain
 // SamplerState, so emitting the wrong type is a plausible-but-wrong compile failure.

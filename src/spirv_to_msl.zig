@@ -497,6 +497,28 @@ fn imageValueDim(m: *const ParsedModule, image_value_id: u32) u32 {
     return tinst.words[3];
 }
 
+/// SPATIAL coord swizzle (".x"/".xy"/".xyz") for a NON-ARRAYED OpImageSampleDref*
+/// coord operand, by sampler Dim. A glslang producer packs the dref INTO the coord
+/// (vec3 for a 2D shadow), so passing the raw coord to MSL `.sample_compare` (which
+/// wants the spatial rank -- float2 for depth2d) is a type mismatch Metal rejects.
+/// The swizzle takes the leading spatial components; a scalar coord (1D shadow as a
+/// bare float) takes none. Arrayed textures are handled separately
+/// (mslArrayedSampleArgs). (#170)
+fn mslDrefCoordSwizzle(m: *const ParsedModule, sampled_image_id: u32, coord_id: u32) []const u8 {
+    if (getDef(m, coord_id)) |cdef| {
+        if (cdef.words.len >= 2) {
+            if (getDef(m, cdef.words[1])) |t| {
+                if (t.op == .TypeFloat) return ""; // scalar coord (1D shadow)
+            }
+        }
+    }
+    return switch (imageValueDim(m, sampled_image_id)) {
+        0 => ".x", // 1D
+        3 => ".xyz", // Cube
+        else => ".xy", // 2D (and default)
+    };
+}
+
 /// True if an image VALUE (OpLoad result) is multisampled — the OpTypeImage MS
 /// flag (word[6]). Mirrors imageValueDim's resolution (OpLoad -> its type, unwrapping
 /// OpTypeSampledImage). Used to honest-error MS subpass reads (SubpassData + MS),
@@ -526,6 +548,23 @@ fn mslArrayedSampleArgs(alloc: std.mem.Allocator, coord: []const u8, dim: u32) !
         // 2D (and any other) array layout: xy + layer in z.
         else => try std.fmt.allocPrint(alloc, "{s}.xy, uint(rint({s}.z))", .{ coord, coord }),
     };
+}
+
+/// Index of the ConstOffset (image-operand bit 0x8) value word for an
+/// OpImageSampleDref* instruction. Dref occupies words[5] and the image-operands
+/// mask is words[6], so operand values start at words[7]; ConstOffset follows
+/// Bias(1)/Lod(1)/Grad(2) in ascending bit order. Returns null when ConstOffset
+/// is absent or its word is missing. (#170)
+fn drefConstOffsetIdx(words: []const u32) ?usize {
+    if (words.len <= 6) return null;
+    const mask = words[6];
+    if (mask & 0x8 == 0) return null;
+    var off: usize = 7;
+    if (mask & 0x1 != 0) off += 1; // Bias
+    if (mask & 0x2 != 0) off += 1; // Lod
+    if (mask & 0x4 != 0) off += 2; // Grad
+    if (off >= words.len) return null;
+    return off;
 }
 
 /// Render a ConstOffset image operand (an OpConstantComposite of int constants)
@@ -8283,7 +8322,8 @@ fn emitInstruction(
         .ImageSampleDrefImplicitLod => {
             // Shadow texture: MSL uses .sample_compare(compare_sampler, coord, dref).
             // Arrayed: the layer is a SEPARATE arg between coord and dref
-            // (coord.xy, uint(rint(coord.z)), dref) — matching spirv-cross --msl.
+            // (coord.xy, uint(rint(coord.z)), dref) -- matching spirv-cross --msl.
+            // ConstOffset (0x8) -> trailing int2 arg. Dref=words[5], mask=words[6]. (#170)
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             var samp: []const u8 = try std.fmt.allocPrint(alloc, "{s}Smplr", .{si});
@@ -8295,8 +8335,13 @@ fn emitInstruction(
             const coord = if (imageValueIsArrayed(m, inst.words[3]))
                 try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
             else
-                coord_name;
-            try w.print("    {s} {s} = {s}.sample_compare({s}, {s}, {s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, dref });
+                try std.fmt.allocPrint(alloc, "{s}{s}", .{ coord_name, mslDrefCoordSwizzle(m, inst.words[3], inst.words[4]) });
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}, {s}, {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, samp, coord, dref, off_suffix });
         },
         .ImageSampleDrefExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
@@ -8306,8 +8351,20 @@ fn emitInstruction(
             const coord = if (imageValueIsArrayed(m, inst.words[3]))
                 try mslArrayedSampleArgs(alloc, coord_name, imageValueDim(m, inst.words[3]))
             else
-                coord_name;
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s}, level(0));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref });
+                try std.fmt.allocPrint(alloc, "{s}{s}", .{ coord_name, mslDrefCoordSwizzle(m, inst.words[3], inst.words[4]) });
+            // Lod value at words[7] (bit 0x2; Dref=words[5], mask=words[6]); the old
+            // code hardcoded 0, silently sampling mip 0. ConstOffset (0x8) -> trailing
+            // int2 arg after level(). (#170)
+            const lod: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x2) != 0)
+                names.get(inst.words[7]) orelse "0"
+            else
+                "0";
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}, {s}, level({s}){s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, dref, lod, off_suffix });
         },
         .ImageSampleProjImplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
@@ -8329,16 +8386,22 @@ fn emitInstruction(
             }
         },
         .ImageSampleProjDrefImplicitLod => {
-            // Projected shadow: divide xy by the coord's last component, compare depth
+            // Projected shadow: divide xy by the coord's last component, compare depth.
+            // OpImageSampleProjDref divides BOTH coord and Dref by the projective
+            // divisor; emitting the raw Dref silently compares un-projected depth.
+            // Matches the spirv-cross oracle and the WGSL/GLSL lowerings. ConstOffset
+            // (0x8) -> trailing int2 arg. (#170, #470)
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const dvs = projDivisorSwizzle(m, inst.words[4]);
-            // OpImageSampleProjDref divides BOTH coord and Dref by the projective
-            // divisor; emitting the raw Dref silently compares un-projected depth.
-            // Matches the spirv-cross oracle and the WGSL/GLSL lowerings. (#170, #470)
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs });
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s}{s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs, off_suffix });
         },
         .ImageSampleProjDrefExplicitLod => {
             const rtt = try mslType(m, inst.words[1], names, alloc);
@@ -8346,8 +8409,19 @@ fn emitInstruction(
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const dvs = projDivisorSwizzle(m, inst.words[4]);
-            // Projective divide applies to the Dref too (see ProjDrefImplicitLod). (#170, #470)
-            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s}, level(0));\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs });
+            // Projective divide applies to the Dref too (see ProjDrefImplicitLod). Lod
+            // value at words[7] (bit 0x2); was hardcoded 0. ConstOffset (0x8) -> trailing
+            // int2 arg after level(). (#170, #470)
+            const lod: []const u8 = if (inst.words.len > 7 and (inst.words[6] & 0x2) != 0)
+                names.get(inst.words[7]) orelse "0"
+            else
+                "0";
+            var off_suffix: []const u8 = "";
+            if (drefConstOffsetIdx(inst.words)) |oi| {
+                const o = mslConstOffset(m, alloc, inst.words[oi]);
+                if (o.len > 0) off_suffix = std.fmt.allocPrint(alloc, ", {s}", .{o}) catch "";
+            }
+            try w.print("    {s} {s} = {s}.sample_compare({s}Smplr, {s}.xy / {s}{s}, {s} / {s}{s}, level({s}){s});\n", .{ rtt, names.get(inst.words[2]) orelse "v", si, si, coord, coord, dvs, dref, coord, dvs, lod, off_suffix });
         },
         .ImageSampleProjExplicitLod => {
             // Projected explicit LOD: sample with manual projection + lod. Divisor
