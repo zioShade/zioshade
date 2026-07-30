@@ -3638,6 +3638,11 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
         .Variable, .Function, .FunctionParameter => if (words.len > 2) words[2] else null,
         .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert, .VectorShuffle, .SampledImage, .ImageSampleImplicitLod, .ImageSampleExplicitLod, .ImageFetch, .ImageGather, .ImageQuerySizeLod, .ImageQuerySize, .ImageTexelPointer, .FunctionCall, .CopyObject, .Phi, .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast, .SNegate, .FNegate, .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul, .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod, .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix, .Dot, .Transpose, .OuterProduct, .Select, .LogicalOr, .LogicalAnd, .LogicalNot, .IEqual, .INotEqual, .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual, .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual, .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan, .FUnordLessThanEqual, .FUnordGreaterThanEqual, .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical, .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not, .BitReverse, .BitCount, .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract, .IsNan, .IsInf, .All, .Any, .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine, .DPdxCoarse, .DPdyCoarse, .FwidthCoarse, .VectorExtractDynamic, .ExtInst, .OpImage, .AtomicIAdd, .AtomicISub, .AtomicExchange, .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax, .AtomicAnd, .AtomicOr, .AtomicXor, .AtomicCompareExchange, .AtomicFAddEXT, .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod, .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod, .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples, .ImageRead, .ArrayLength => if (words.len > 2) words[2] else null,
+        // #subgroup-operand: subgroup ops define a result at words[2]; without
+        // this the result was never pre-named, so the emit handler's `orelse "v"`
+        // fallback collided with a user variable and the downstream store dropped
+        // the value. Mirrors common.resultIdFromOp.
+        .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual, .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst, .GroupNonUniformBallot, .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr, .GroupNonUniformShuffle, .GroupNonUniformShuffleXor, .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown, .SubgroupAllKHR, .SubgroupAnyKHR => if (words.len > 2) words[2] else null,
         else => null,
     };
 }
@@ -4638,6 +4643,10 @@ fn collectComputeBuiltins(
             @intFromEnum(spirv.BuiltIn.workgroup_id) => .{ .ty = "uint3", .attr = "threadgroup_position_in_grid" },
             @intFromEnum(spirv.BuiltIn.num_workgroups) => .{ .ty = "uint3", .attr = "threadgroups_per_grid" },
             @intFromEnum(spirv.BuiltIn.local_invocation_index) => .{ .ty = "uint", .attr = "thread_index_in_threadgroup" },
+            // #subgroup-operand: SubgroupLocalInvocationId (BuiltIn 41) -> the lane
+            // index within the simdgroup. Without this the body referenced an
+            // undeclared gl_SubgroupInvocationID (MSL has no such builtin).
+            41 => .{ .ty = "uint", .attr = "thread_index_in_simdgroup" },
             else => null,
         };
         if (spec) |s| {
@@ -7392,6 +7401,75 @@ fn emitOrdNotEqual(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
     });
 }
 
+/// Lower a subgroup ARITHMETIC op (IAdd/FAdd/IMul/FMul/Min/Max/Bitwise/Logical)
+/// honoring the GroupOperation literal. SPIR-V layout for these ops:
+///   words[1]=ResultType words[2]=Result words[3]=Execution(Scope <id>)
+///   words[4]=GroupOperation literal (0=Reduce, 1=InclusiveScan,
+///            2=ExclusiveScan, 3=ClusteredReduce)
+///   words[5]=Value <id>  words[6]=ClusterSize <id> (ClusteredReduce only)
+/// The old code read words[4] as the value; it is the GroupOperation literal, so
+/// the value silently fell back to "x" AND every variant lowered as Reduce.
+/// Metal has simd_{sum,product,min,max,and,or,xor} for Reduce, and prefix-inclusive
+/// /exclusive ONLY for sum/product; Min/Max/And/Or/Xor scans and ALL ClusteredReduce
+/// honest-error (no Metal equivalent). (#subgroup-operand)
+fn mslEmitSubgroupArith(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    inst: Instruction,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    if (inst.words.len < 6) return error.UnsupportedOp;
+    const rtt = try mslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const gop = inst.words[4];
+    const val = names.get(inst.words[5]) orelse "x";
+    const Stem = enum { sum, product, min, max, band, bor, bxor, land, lor };
+    const stem: Stem = switch (inst.op) {
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd => .sum,
+        .GroupNonUniformIMul, .GroupNonUniformFMul => .product,
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => .min,
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => .max,
+        .GroupNonUniformBitwiseAnd => .band,
+        .GroupNonUniformBitwiseOr => .bor,
+        .GroupNonUniformBitwiseXor => .bxor,
+        .GroupNonUniformLogicalAnd => .land,
+        .GroupNonUniformLogicalOr => .lor,
+        else => return error.UnsupportedOp,
+    };
+    switch (gop) {
+        0 => { // Reduce
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = simd_sum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = simd_product({s});\n", .{ rtt, rn, val }),
+                .min => try w.print("    {s} {s} = simd_min({s});\n", .{ rtt, rn, val }),
+                .max => try w.print("    {s} {s} = simd_max({s});\n", .{ rtt, rn, val }),
+                .band => try w.print("    {s} {s} = simd_and({s});\n", .{ rtt, rn, val }),
+                .bor => try w.print("    {s} {s} = simd_or({s});\n", .{ rtt, rn, val }),
+                .bxor => try w.print("    {s} {s} = simd_xor({s});\n", .{ rtt, rn, val }),
+                .land => try w.print("    {s} {s} = simd_all({s}) ? true : false;\n", .{ rtt, rn, val }),
+                .lor => try w.print("    {s} {s} = simd_any({s}) ? true : false;\n", .{ rtt, rn, val }),
+            }
+        },
+        1 => { // InclusiveScan: Metal prefix-inclusive only for sum/product
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = simd_prefix_inclusive_sum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = simd_prefix_inclusive_product({s});\n", .{ rtt, rn, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        2 => { // ExclusiveScan: Metal prefix-exclusive only for sum/product
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = simd_prefix_exclusive_sum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = simd_prefix_exclusive_product({s});\n", .{ rtt, rn, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        3 => return error.UnsupportedOp, // ClusteredReduce: no Metal equivalent
+        else => return error.UnsupportedOp,
+    }
+}
+
 fn emitInstruction(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -8745,71 +8823,11 @@ fn emitInstruction(
             const delta = names.get(inst.words[5]) orelse "0";
             try w.print("    {s} {s} = simd_shuffle_down({s}, {s});\n", .{ rtt, rn, val, delta });
         },
-        .GroupNonUniformIAdd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_sum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFAdd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_sum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformIMul => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_product({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFMul => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_product({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_min({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_max({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseAnd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_and({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseOr => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_or({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseXor => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_xor({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalAnd => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_all({s}) ? true : false;\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalOr => {
-            const rtt = try mslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = simd_any({s}) ? true : false;\n", .{ rtt, rn, val });
+        // Subgroup ARITHMETIC ops share one lowering that honors the
+        // GroupOperation literal (Reduce/InclusiveScan/ExclusiveScan/
+        // ClusteredReduce); see mslEmitSubgroupArith for the operand fix.
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr => {
+            try mslEmitSubgroupArith(m, names, inst, w, alloc);
         },
         // SubgroupAllKHR / SubgroupAnyKHR (older extension equivalents)
         .SubgroupAllKHR => {

@@ -5228,6 +5228,78 @@ fn emitOrdNotEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     });
 }
 
+/// Lower a subgroup ARITHMETIC op (IAdd/FAdd/IMul/FMul/Min/Max/Bitwise/Logical)
+/// honoring the GroupOperation literal. SPIR-V layout for these ops:
+///   words[1]=ResultType words[2]=Result words[3]=Execution(Scope <id>)
+///   words[4]=GroupOperation literal (0=Reduce, 1=InclusiveScan,
+///            2=ExclusiveScan, 3=ClusteredReduce)
+///   words[5]=Value <id>  words[6]=ClusterSize <id> (ClusteredReduce only)
+/// The old code read words[4] as the value; it is the GroupOperation literal, so
+/// the value silently fell back to "x" AND every variant lowered as Reduce.
+/// HLSL: Reduce -> WaveActive{Sum,Product,Min,Max,BitAnd,BitOr,BitXor} (and
+/// WaveActiveAllTrue/AnyTrue for the Logical pair). WavePrefix{Sum,Product} are
+/// EXCLUSIVE in HLSL, so InclusiveScan = WavePrefixX(x) {+, *} x and
+/// ExclusiveScan = WavePrefixX(x); no wave prefix exists for Min/Max/And/Or/Xor
+/// (honest-error on their scans), and ClusteredReduce has no HLSL form at all
+/// (honest-error). (#subgroup-operand)
+fn hlslEmitSubgroupArith(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    inst: Instruction,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    if (inst.words.len < 6) return error.UnsupportedOp;
+    const rtt = try hlslType(module, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const gop = inst.words[4];
+    const val = names.get(inst.words[5]) orelse "x";
+    const Stem = enum { sum, product, min, max, band, bor, bxor, land, lor };
+    const stem: Stem = switch (inst.op) {
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd => .sum,
+        .GroupNonUniformIMul, .GroupNonUniformFMul => .product,
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => .min,
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => .max,
+        .GroupNonUniformBitwiseAnd => .band,
+        .GroupNonUniformBitwiseOr => .bor,
+        .GroupNonUniformBitwiseXor => .bxor,
+        .GroupNonUniformLogicalAnd => .land,
+        .GroupNonUniformLogicalOr => .lor,
+        else => return error.UnsupportedOp,
+    };
+    switch (gop) {
+        0 => { // Reduce
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val }),
+                .min => try w.print("    {s} {s} = WaveActiveMin({s});\n", .{ rtt, rn, val }),
+                .max => try w.print("    {s} {s} = WaveActiveMax({s});\n", .{ rtt, rn, val }),
+                .band => try w.print("    {s} {s} = WaveActiveBitAnd({s});\n", .{ rtt, rn, val }),
+                .bor => try w.print("    {s} {s} = WaveActiveBitOr({s});\n", .{ rtt, rn, val }),
+                .bxor => try w.print("    {s} {s} = WaveActiveBitXor({s});\n", .{ rtt, rn, val }),
+                .land => try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{ rtt, rn, val }),
+                .lor => try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{ rtt, rn, val }),
+            }
+        },
+        1 => { // InclusiveScan: WavePrefix is exclusive, so add/mult current value
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = WavePrefixSum({s}) + {s};\n", .{ rtt, rn, val, val }),
+                .product => try w.print("    {s} {s} = WavePrefixProduct({s}) * {s};\n", .{ rtt, rn, val, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        2 => { // ExclusiveScan: WavePrefix is already exclusive
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = WavePrefixSum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = WavePrefixProduct({s});\n", .{ rtt, rn, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        3 => return error.UnsupportedOp, // ClusteredReduce: no HLSL equivalent
+        else => return error.UnsupportedOp,
+    }
+}
+
 fn emitInstruction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5353,7 +5425,12 @@ fn emitInstruction(
             }
 
             // Check if loading gl_HelperInvocation — replace with WaveIsHelperLane()
+            // #subgroup-operand: also rewrite a SubgroupLocalInvocationId
+            // (BuiltIn 41) load to WaveGetLaneIndex() -- HLSL has no
+            // gl_SubgroupInvocationID builtin, so the prior bare reference was
+            // an undeclared identifier (INVALID HLSL).
             var is_helper_invocation = false;
+            var is_subgroup_lane = false;
             if (ptr_inst) |pi| {
                 if (pi.op == .Variable) {
                     const helper_builtin = getDecorationValue(decorations, ptr_id, .built_in);
@@ -5363,12 +5440,16 @@ fn emitInstruction(
                             is_helper_invocation = true;
                             const expr = try std.fmt.allocPrint(alloc, "IsHelperLane()", .{});
                             if (try names.fetchPut(inst.words[2], expr)) |old| alloc.free(old.value);
+                        } else if (@intFromEnum(bi) == 41) {
+                            is_subgroup_lane = true;
+                            const expr = try std.fmt.allocPrint(alloc, "WaveGetLaneIndex()", .{});
+                            if (try names.fetchPut(inst.words[2], expr)) |old| alloc.free(old.value);
                         }
                     }
                 }
             }
-            if (is_helper_invocation) {
-                // Already mapped result to WaveIsHelperLane() expression
+            if (is_helper_invocation or is_subgroup_lane) {
+                // Already mapped result to a Wave*() expression
             } else if (is_output_load) {
                 // Alias the load result to the output variable name (for passing to functions)
                 const alias = try alloc.dupe(u8, ptr_name);
@@ -6825,87 +6906,27 @@ fn emitInstruction(
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const mask = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID ^ {s});\n", .{ rtt, rn, val, mask });
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, WaveGetLaneIndex() ^ {s});\n", .{ rtt, rn, val, mask });
         },
         .GroupNonUniformShuffleUp => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const delta = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID - {s});\n", .{ rtt, rn, val, delta });
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, WaveGetLaneIndex() - {s});\n", .{ rtt, rn, val, delta });
         },
         .GroupNonUniformShuffleDown => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const delta = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID + {s});\n", .{ rtt, rn, val, delta });
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, WaveGetLaneIndex() + {s});\n", .{ rtt, rn, val, delta });
         },
-        .GroupNonUniformIAdd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFAdd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformIMul => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFMul => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveMin({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveMax({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseAnd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitAnd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseOr => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitOr({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseXor => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitXor({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalAnd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalOr => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{ rtt, rn, val });
+        // Subgroup ARITHMETIC ops share one lowering that honors the
+        // GroupOperation literal (Reduce/InclusiveScan/ExclusiveScan/
+        // ClusteredReduce); see hlslEmitSubgroupArith for the operand fix.
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr => {
+            try hlslEmitSubgroupArith(module, names, inst, w, alloc);
         },
         .SubgroupAllKHR => {
             const rn = names.get(inst.words[2]) orelse "v";

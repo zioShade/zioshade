@@ -13610,6 +13610,120 @@ test "T563.1: subgroup arithmetic add" {
     try std.testing.expectError(error.SemanticFailed, zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute }));
 }
 
+// #subgroup-operand: OpGroupNonUniformIAdd (and the rest of the subgroup
+// ARITHMETIC family) word layout is [ResultType, Result, Execution(Scope),
+// GroupOperation literal, Value, ClusterSize?]. The old code read words[4]
+// (the GroupOperation literal) as the value, so the value silently fell back
+// to "x" AND every variant lowered as Reduce. Subgroup ops need SPIR-V 1.3, so
+// the frontend path can't build them; hand-assembled SPIR-V feeds a CONSTANT
+// value (42) so the rendered operand is predictable across all three backends.
+test "#subgroup-operand: subgroup arithmetic reads the VALUE operand (words[5]), not the GroupOperation literal" {
+    const spirv = assembleSpirv("subgroup_operand",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformArithmetic
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %SSBO
+        \\OpExecutionMode %main LocalSize 32 1 1
+        \\OpDecorate %SSBO DescriptorSet 0
+        \\OpDecorate %SSBO Binding 0
+        \\OpDecorate %SSBOT BufferBlock
+        \\OpMemberDecorate %SSBOT 0 Offset 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%uint_0 = OpConstant %uint 0
+        \\%uint_42 = OpConstant %uint 42
+        \\%subscope = OpConstant %uint 3
+        \\%SSBOT = OpTypeStruct %uint
+        \\%ptr_ubuf = OpTypePointer Uniform %SSBOT
+        \\%SSBO = OpVariable %ptr_ubuf Uniform
+        \\%ptr_uuint = OpTypePointer Uniform %uint
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%chain = OpAccessChain %ptr_uuint %SSBO %uint_0
+        \\%sum = OpGroupNonUniformIAdd %uint %subscope Reduce %uint_42
+        \\OpStore %chain %sum
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+
+    // HLSL: WaveActiveSum on the VALUE (42u), never the bare "x" fallback.
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "WaveActiveSum(42u)");
+    try assertNotContains(hlsl, "WaveActiveSum(x)");
+
+    // GLSL: subgroupAdd on the VALUE + the arithmetic extension pragma.
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "subgroupAdd(42u)");
+    try assertNotContains(glsl, "subgroupAdd(x)");
+    try assertContains(glsl, "GL_KHR_shader_subgroup_arithmetic");
+
+    // MSL: simd_sum on the VALUE.
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "simd_sum(42u)");
+    try assertNotContains(msl, "simd_sum(x)");
+}
+
+// #subgroup-operand: SubgroupLocalInvocationId (BuiltIn 41) has no native
+// spelling in MSL or HLSL. HLSL must rewrite the OpLoad to WaveGetLaneIndex()
+// (the bare gl_SubgroupInvocationID it emitted before was an undeclared
+// identifier); MSL must add a [[thread_index_in_simdgroup]] kernel parameter;
+// GLSL already spells the builtin but needs GL_KHR_shader_subgroup_basic.
+test "#subgroup-operand: SubgroupLocalInvocationId lowers to a per-backend lane index" {
+    const spirv = assembleSpirv("subgroup_lane",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformArithmetic
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %SSBO %gl_SubgroupInvocationID
+        \\OpName %gl_SubgroupInvocationID "gl_SubgroupInvocationID"
+        \\OpExecutionMode %main LocalSize 32 1 1
+        \\OpDecorate %SSBO DescriptorSet 0
+        \\OpDecorate %SSBO Binding 0
+        \\OpDecorate %SSBOT BufferBlock
+        \\OpMemberDecorate %SSBOT 0 Offset 0
+        \\OpDecorate %gl_SubgroupInvocationID BuiltIn SubgroupLocalInvocationId
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%uint_0 = OpConstant %uint 0
+        \\%subscope = OpConstant %uint 3
+        \\%SSBOT = OpTypeStruct %uint
+        \\%ptr_ubuf = OpTypePointer Uniform %SSBOT
+        \\%SSBO = OpVariable %ptr_ubuf Uniform
+        \\%ptr_uuint = OpTypePointer Uniform %uint
+        \\%ptr_input_uint = OpTypePointer Input %uint
+        \\%gl_SubgroupInvocationID = OpVariable %ptr_input_uint Input
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%lane = OpLoad %uint %gl_SubgroupInvocationID
+        \\%chain = OpAccessChain %ptr_uuint %SSBO %uint_0
+        \\%sum = OpGroupNonUniformIAdd %uint %subscope Reduce %lane
+        \\OpStore %chain %sum
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "WaveGetLaneIndex()");
+    try assertNotContains(hlsl, "gl_SubgroupInvocationID");
+
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "thread_index_in_simdgroup");
+
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "GL_KHR_shader_subgroup_basic");
+}
+
 test "T564.1: compute matrix multiply tiled" {
     // gl_GlobalInvocationID is uvec3; assigning to uvec2 is a type error.
     // glslangValidator -V rejects this. The flip correctly rejects it.

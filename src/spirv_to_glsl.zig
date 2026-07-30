@@ -275,6 +275,21 @@ fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator
         .{ .token = "dFdyFine", .ext = "GL_ARB_derivative_control" },
         .{ .token = "fwidthCoarse", .ext = "GL_ARB_derivative_control" },
         .{ .token = "fwidthFine", .ext = "GL_ARB_derivative_control" },
+        // #subgroup-operand: subgroup builtins/arithmetic need their KHR pragmas.
+        // basic gates the gl_SubgroupInvocationID builtin; arithmetic gates the
+        // subgroup{Add,Mul,Min,Max,And,Or,Xor} + Inclusive/Exclusive scans;
+        // clustered gates subgroupClustered*. (detected via substring tokens.)
+        .{ .token = "gl_SubgroupInvocationID", .ext = "GL_KHR_shader_subgroup_basic" },
+        .{ .token = "subgroupAdd(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupMul(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupMin(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupMax(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupAnd(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupOr(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupXor(", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupInclusive", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupExclusive", .ext = "GL_KHR_shader_subgroup_arithmetic" },
+        .{ .token = "subgroupClustered", .ext = "GL_KHR_shader_subgroup_clustered" },
     };
     var block = std.ArrayList(u8).initCapacity(alloc, 128) catch return;
     defer block.deinit(alloc);
@@ -1876,6 +1891,11 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
         .Variable, .Function, .FunctionParameter => if (words.len > 2) words[2] else null,
         .Load, .AccessChain, .CompositeConstruct, .CompositeExtract, .CompositeInsert, .VectorShuffle, .SampledImage, .ImageSampleImplicitLod, .ImageSampleExplicitLod, .ImageFetch, .ImageGather, .ImageQuerySizeLod, .ImageQuerySize, .ImageTexelPointer, .FunctionCall, .CopyObject, .Phi, .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert, .Bitcast, .SNegate, .FNegate, .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul, .UDiv, .SDiv, .FDiv, .UMod, .SRem, .SMod, .FRem, .FMod, .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix, .Dot, .Transpose, .OuterProduct, .Select, .LogicalOr, .LogicalAnd, .LogicalNot, .IEqual, .INotEqual, .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual, .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual, .FOrdEqual, .FOrdNotEqual, .FOrdLessThan, .FOrdGreaterThan, .FOrdLessThanEqual, .FOrdGreaterThanEqual, .FUnordEqual, .FUnordNotEqual, .FUnordLessThan, .FUnordGreaterThan, .FUnordLessThanEqual, .FUnordGreaterThanEqual, .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical, .BitwiseOr, .BitwiseXor, .BitwiseAnd, .Not, .BitReverse, .BitCount, .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract, .IsNan, .IsInf, .All, .Any, .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine, .DPdxCoarse, .DPdyCoarse, .FwidthCoarse, .VectorExtractDynamic, .ExtInst, .OpImage, .AtomicIAdd, .AtomicISub, .AtomicExchange, .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax, .AtomicAnd, .AtomicOr, .AtomicXor, .ImageSampleDrefImplicitLod, .ImageSampleDrefExplicitLod, .ImageSampleProjImplicitLod, .ImageSampleProjExplicitLod, .ImageSampleProjDrefImplicitLod, .ImageSampleProjDrefExplicitLod, .ImageDrefGather, .ImageQueryLod, .ImageQueryLevels, .ImageQuerySamples, .ImageRead, .AtomicCompareExchange, .AtomicFAddEXT, .ArrayLength => if (words.len > 2) words[2] else null,
+        // #subgroup-operand: subgroup ops define a result at words[2]; without
+        // this the result was never pre-named, so the emit handler's `orelse "v"`
+        // fallback collided with a user variable and the downstream store dropped
+        // the value. Mirrors common.resultIdFromOp.
+        .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual, .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst, .GroupNonUniformBallot, .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr, .GroupNonUniformShuffle, .GroupNonUniformShuffleXor, .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown, .SubgroupAllKHR, .SubgroupAnyKHR => if (words.len > 2) words[2] else null,
         else => null,
     };
 }
@@ -4204,6 +4224,54 @@ fn emitBlock(
     return i;
 }
 
+/// Lower a subgroup ARITHMETIC op (IAdd/FAdd/IMul/FMul/Min/Max/Bitwise/Logical)
+/// honoring the GroupOperation literal. SPIR-V layout for these ops:
+///   words[1]=ResultType words[2]=Result words[3]=Execution(Scope <id>)
+///   words[4]=GroupOperation literal (0=Reduce, 1=InclusiveScan,
+///            2=ExclusiveScan, 3=ClusteredReduce)
+///   words[5]=Value <id>  words[6]=ClusterSize <id> (ClusteredReduce only)
+/// The old code read words[4] as the value; it is the GroupOperation literal, so
+/// the value silently fell back to "x" AND every variant lowered as Reduce.
+/// GL_KHR_shader_subgroup_arithmetic is regular: subgroup{,Inclusive,Exclusive,
+/// Clustered}{Add,Mul,Min,Max,And,Or,Xor}; the cluster form takes (value, N).
+/// (#subgroup-operand)
+fn glslEmitSubgroupArith(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    inst: Instruction,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    if (inst.words.len < 6) return error.UnsupportedOp;
+    const rtt = try glslType(m, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const gop = inst.words[4];
+    const val = names.get(inst.words[5]) orelse "x";
+    // GL_KHR_shader_subgroup_arithmetic stem per op. LogicalAnd/LogicalOr reuse
+    // the integer And/Or stems (matches the prior Reduce-only behavior).
+    const stem: []const u8 = switch (inst.op) {
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd => "Add",
+        .GroupNonUniformIMul, .GroupNonUniformFMul => "Mul",
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => "Min",
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => "Max",
+        .GroupNonUniformBitwiseAnd, .GroupNonUniformLogicalAnd => "And",
+        .GroupNonUniformBitwiseOr, .GroupNonUniformLogicalOr => "Or",
+        .GroupNonUniformBitwiseXor => "Xor",
+        else => return error.UnsupportedOp,
+    };
+    switch (gop) {
+        0 => try w.print("    {s} {s} = subgroup{s}({s});\n", .{ rtt, rn, stem, val }),
+        1 => try w.print("    {s} {s} = subgroupInclusive{s}({s});\n", .{ rtt, rn, stem, val }),
+        2 => try w.print("    {s} {s} = subgroupExclusive{s}({s});\n", .{ rtt, rn, stem, val }),
+        3 => {
+            if (inst.words.len < 7) return error.UnsupportedOp;
+            const cluster: []const u8 = if (names.get(inst.words[6])) |s| s else std.fmt.allocPrint(alloc, "{d}", .{inst.words[6]}) catch "1";
+            try w.print("    {s} {s} = subgroupClustered{s}({s}, {s});\n", .{ rtt, rn, stem, val, cluster });
+        },
+        else => return error.UnsupportedOp,
+    }
+}
+
 fn emitInstruction(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5205,71 +5273,11 @@ fn emitInstruction(
             const delta = names.get(inst.words[5]) orelse "0";
             try w.print("    {s} {s} = subgroupShuffleDown({s}, {s});\n", .{ rtt, rn, val, delta });
         },
-        .GroupNonUniformIAdd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAdd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFAdd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAdd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformIMul => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMul({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFMul => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMul({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMin({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupMax({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseAnd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAnd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseOr => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupOr({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseXor => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupXor({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalAnd => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupAnd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalOr => {
-            const rtt = try glslType(m, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = subgroupOr({s});\n", .{ rtt, rn, val });
+        // Subgroup ARITHMETIC ops share one lowering that honors the
+        // GroupOperation literal (Reduce/InclusiveScan/ExclusiveScan/
+        // ClusteredReduce); see glslEmitSubgroupArith for the operand fix.
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr => {
+            try glslEmitSubgroupArith(m, names, inst, w, alloc);
         },
         // SubgroupAllKHR / SubgroupAnyKHR
         .SubgroupAllKHR => {
