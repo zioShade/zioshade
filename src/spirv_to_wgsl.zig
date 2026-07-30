@@ -4245,6 +4245,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
 
+        // Conservative inout split. The single-inout-void return-value idiom
+        // (signature returns the pointee; body returns the local copy; caller
+        // reassigns) is proven faithful, so it is left UNCHANGED. Only route
+        // MULTI-pointer-param (>=2) or NON-void + pointer-param functions
+        // through real WGSL ptr<function> params. For those, the old lowering
+        // emitted value params + a local copy, so inout writes died in the copy
+        // and never reached the caller (e.g. particle_sim dropped every
+        // updateParticle mutation). The pointer routes every OpLoad/OpStore/
+        // AccessChain on the param through the pointer with no hot-path edits.
+        const use_ptr_inout = has_pointer_params and
+            !(inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void"));
+
         // Parameters (words[3..] of TypeFunction)
         var param_count: usize = 0;
         try w.print("fn {s}(", .{func_name});
@@ -4275,12 +4287,27 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 if (pinst.op == .Label) break;
             }
             const p_name = found_name orelse try std.fmt.allocPrint(arena, "p{d}", .{pi});
-            try w.print("{s}: {s}", .{ p_name, pt });
+            if (use_ptr_inout and is_inout) {
+                // Real WGSL pointer param: inout writes reach the caller's
+                // storage directly (naga accepts ptr<function, T>). The body
+                // dereferences via the names-map remap below.
+                try w.print("{s}: ptr<function, {s}>", .{ p_name, pt });
+            } else {
+                try w.print("{s}: {s}", .{ p_name, pt });
+            }
             param_count += 1;
         }
 
         // Determine return type
-        if (has_pointer_params and inout_params.items.len > 0) {
+        if (use_ptr_inout) {
+            // Pointer params propagate inout writes themselves; use the
+            // function's real return type (no synthesized return-value trick).
+            if (std.mem.eql(u8, ret_type, "void")) {
+                try w.writeAll(") {\n");
+            } else {
+                try w.print(") -> {s} {{\n", .{ret_type});
+            }
+        } else if (has_pointer_params and inout_params.items.len > 0) {
             // Need to return modified inout param values
             if (std.mem.eql(u8, ret_type, "void")) {
                 if (inout_params.items.len == 1) {
@@ -4303,12 +4330,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             try w.print(") -> {s} {{\n", .{ret_type});
         }
 
-        // Emit local var declarations for inout params
-        for (inout_params.items) |ip| {
-            const pt = try wgslType(&module, ip.pointee_type_id, &names, arena);
-            const orig_name = names.get(ip.param_id) orelse "";
-            try writeIndentStatic(w, 1);
-            try w.print("var {s}: {s} = {s};\n", .{ ip.local_name, pt, if (orig_name.len > 0) orig_name else "0" });
+        // Emit local var declarations for inout params (single-inout-void path
+        // only; ptr<function> params need no local copy -- the body mutates the
+        // caller's storage through the pointer directly).
+        if (!use_ptr_inout) {
+            for (inout_params.items) |ip| {
+                const pt = try wgslType(&module, ip.pointee_type_id, &names, arena);
+                const orig_name = names.get(ip.param_id) orelse "";
+                try writeIndentStatic(w, 1);
+                try w.print("var {s}: {s} = {s};\n", .{ ip.local_name, pt, if (orig_name.len > 0) orig_name else "0" });
+            }
         }
 
         // Remap pointer param IDs to local var names in the names map
@@ -4319,8 +4350,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (old_name) |n| {
                 try saved_names.append(arena, .{ .id = ip.param_id, .name = n });
             }
-            const local_copy = try alloc.dupe(u8, ip.local_name);
-            if (try names.fetchPut(ip.param_id, local_copy)) |old| alloc.free(old.value);
+            // ptr<function> path: map the param id to (*name) so every OpLoad/
+            // OpStore/AccessChain on it dereferences the pointer (no hot-path
+            // edits). Single-inout-void path keeps the local-copy name.
+            const mapped = if (use_ptr_inout) blk: {
+                const pn = names.get(ip.param_id) orelse ip.local_name;
+                break :blk try std.fmt.allocPrint(alloc, "(*{s})", .{pn});
+            } else try alloc.dupe(u8, ip.local_name);
+            if (try names.fetchPut(ip.param_id, mapped)) |old| alloc.free(old.value);
         }
         defer {
             // Restore original names
@@ -4330,7 +4367,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             }
         }
 
-        const inout_ret_name: ?[]const u8 = if (has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
+        const inout_ret_name: ?[]const u8 = if (!use_ptr_inout and has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
         try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, .none);
 
         try w.writeAll("}\n\n");
@@ -7974,12 +8011,38 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
                 var args = std.ArrayList(u8).initCapacity(arena, 64) catch return;
                 defer args.deinit(arena);
+                // Mirror the signature emitter's conservative inout split: only
+                // multi-inout or non-void+inout callees take ptr<function> params
+                // (single-inout-void keeps the return-value reassign idiom).
+                const callee_use_ptr_inout = callee_inout_arg_indices.items.len >= 1 and
+                    !(callee_inout_arg_indices.items.len == 1 and std.mem.eql(u8, rt, "void"));
                 for (inst.words[4..], 0..) |arg_id, ai| {
                     if (ai > 0) try args.appendSlice(arena, ", ");
+                    // Prefix inout (pointer) args with & so they bind to the
+                    // ptr<function> params; glslang always passes an OpVariable
+                    // (or AccessChain lvalue), so &<name> is a valid WGSL address.
+                    var is_inout_arg = false;
+                    for (callee_inout_arg_indices.items) |ii| {
+                        if (ii == ai) {
+                            is_inout_arg = true;
+                            break;
+                        }
+                    }
+                    if (callee_use_ptr_inout and is_inout_arg) try args.appendSlice(arena, "&");
                     try args.appendSlice(arena, names.get(arg_id) orelse "0");
                 }
 
-                if (callee_inout_arg_indices.items.len == 1 and std.mem.eql(u8, rt, "void")) {
+                if (callee_use_ptr_inout) {
+                    // Pointer params propagate inout writes themselves; no
+                    // caller-side reassign. Use the callee's real return type.
+                    if (std.mem.eql(u8, rt, "void")) {
+                        try writeInd(w, indent);
+                        try w.print("{s}({s});\n", .{ func_name, args.items });
+                    } else {
+                        try writeInd(w, indent);
+                        try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, func_name, args.items });
+                    }
+                } else if (callee_inout_arg_indices.items.len == 1 and std.mem.eql(u8, rt, "void")) {
                     // Void function with single inout param: caller reassigns
                     // e.g., v16 = out_test_0(40, v16);
                     const inout_idx = callee_inout_arg_indices.items[0];
