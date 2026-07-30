@@ -900,6 +900,11 @@ threadlocal var g_hoist_stripping: bool = false;
 // operands) — needs GL_EXT_shader_integer_mix (core GLSL mix is genType=float
 // only). Read by spliceRequiredExtensions.
 threadlocal var g_int_mix_needed: bool = false;
+// #loop-break-on-selection-merge: the enclosing loop's merge label, so an
+// OpBranch to it from a side-effecting break block can emit `break;` (mirrors
+// MSL's g_loop_merge_ctx). Set per-loop by emitWhileLoop, saved/restored for nesting.
+const LoopMergeCtx = struct { merge_label: u32 };
+threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
 /// GLSL type name for a loop-phi variable declaration — STATIC strings only (no
 /// allocation), for the scalar/vector types loop phis realistically carry.
@@ -3446,6 +3451,13 @@ fn emitWhileLoop(
     is_frag: bool,
     ovid: ?u32,
 ) anyerror!usize {
+    // #loop-break-on-selection-merge: expose this loop's merge label to emitBlock so a
+    // side-effecting break block (`x = ...; OpBranch <loop-merge>`) emits `break;`
+    // instead of silently dropping it (mandelbrot-loop: loop always ran all iters).
+    // Saved/restored for nested loops (recursive emitBlock -> emitWhileLoop).
+    const saved_lmc = g_loop_merge_ctx;
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl };
+    defer g_loop_merge_ctx = saved_lmc;
     // #413: declare loop-carried phi update temps ABOVE the loop. The top-of-
     // loop carry copy (#237) reads them on every iteration after the first;
     // without the hoist the declaration sits later in the body (and in the
@@ -4030,12 +4042,18 @@ fn emitBlock(
                 try w.print("{s}    break;\n", .{indent});
                 break;
             }
-            // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
-            // end-of-branch — otherwise a nested loop is silently dropped (early_return2:
-            // the else branch flows into a for-loop; emitBlock stopped at the OpBranch and
-            // never reached the OpLoopMerge -> emitWhileLoop). Other OpBranches (e.g. a
-            // break to an outer loop's merge) still terminate this block.
             const br_target = if (inst.words.len > 1) inst.words[1] else 0;
+            // #loop-break-on-selection-merge: an OpBranch (from a side-effecting break
+            // block) to the enclosing LOOP's merge is a structured break. Without this the
+            // break is silently dropped (mandelbrot-loop's escape exit). Mirrors MSL.
+            if (g_loop_merge_ctx) |ctx| if (ctx.merge_label == br_target) {
+                try w.print("{s}    break;\n", .{indent});
+                break;
+            };
+            // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
+            // end-of-branch. Otherwise a nested loop is silently dropped (early_return2: the
+            // else branch flows into a for-loop; emitBlock stopped at the OpBranch and never
+            // reached the OpLoopMerge -> emitWhileLoop). Other OpBranches terminate here.
             if (lm.get(br_target)) |hi| {
                 var hi2 = hi + 1;
                 while (hi2 < m.instructions.len and m.instructions[hi2].op == .Phi) : (hi2 += 1) {}

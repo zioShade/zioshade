@@ -6801,6 +6801,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // Branch to continue block — skip
                             continue;
                         }
+                        // #loop-break-on-selection-merge: OpBranch to the enclosing loop's
+                        // merge is a structured break from a side-effecting break block (the
+                        // block's side effects were already emitted inline by the main walker
+                        // before this OpBranch). The BranchConditional arms above catch the
+                        // direct / pure-trampoline break; this catches the store-then-branch
+                        // case (mandelbrot-loop on unoptimized SPIR-V). break skips continuing{}.
+                        if (loop_merge_label != null and target == loop_merge_label.?) {
+                            try writeInd(w, indent);
+                            try w.writeAll("break;\n");
+                            continue;
+                        }
                     }
                     // Emit selection phi updates when branching to merge block
                     if (sel_phis.count() > 0) {
