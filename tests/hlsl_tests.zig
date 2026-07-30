@@ -467,10 +467,11 @@ test "HLSL: pack/unpack_half2x16 via f32tof16/f16tof32 (no fabricated intrinsic)
     try assertNotContains(hlsl, "pack_half2x16(");
 }
 
-// OpFma (GLSL.std.450 #50) is contractually a single-rounded fused multiply-add.
-// HLSL `fma` (SM5+) is fused; `mad` is `a*b+c` with no fusion guarantee (may
-// double-round). Guard that zioshade emits `fma(`, not `mad(`.
-test "HLSL: OpFma lowers to fma (fused), not mad" {
+// OpFma (GLSL.std.450 #50) is a fused multiply-add. HLSL's `fma` intrinsic is
+// double-only -- DXC rejects `fma(float,float,float)` at every shader model -- so
+// the only float multiply-add HLSL has is `mad` (a*b+c, no fusion guarantee). The
+// earlier switch to `fma` (#469) was a compile-invalid regression; emit `mad(`.
+test "HLSL: OpFma lowers to mad (HLSL fma is double-only)" {
     const source: [:0]const u8 =
         \\#version 450
         \\#extension GL_EXT_gpu_shader5 : enable
@@ -482,8 +483,8 @@ test "HLSL: OpFma lowers to fma (fused), not mad" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "fma(");
-    try assertNotContains(hlsl, "mad(");
+    try assertContains(hlsl, "mad(");
+    try assertNotContains(hlsl, "fma(");
 }
 
 // Vertex OUTPUT interpolation qualifiers (Flat/Centroid/NoPerspective/Sample) were
