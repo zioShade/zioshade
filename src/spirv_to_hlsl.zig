@@ -279,6 +279,25 @@ fn caseTerminatorTarget(module: *const ParsedModule, label_map: *const std.AutoH
     return null;
 }
 
+/// #switch-fallthrough: true iff `lbl` is a case/default target of the OpSwitch whose
+/// words are `switch_words` (words[2]=default, words[4,6,...]=case targets). Used to
+/// decide whether a case body's first OpBranch target is a REAL SPIR-V fallthrough edge
+/// (branch to another case/default of THIS switch) -- only then is `break;` omitted. A
+/// branch to the merge, a loop header, or a selection target is NOT a fallthrough edge:
+/// the case is terminal and must `break;`. Mirrors the GLSL/WGSL backends. Ported from
+/// spirv_to_wgsl.zig (isSwitchCaseTarget).
+/// 32-bit selector only: targets are at words[4], words[6], ... (literal,target pairs).
+/// A 64-bit selector uses 2-word literals (targets at words[5], words[9], ...) -- this
+/// matches the case-label EMITTER, which also assumes 32-bit, so the two stay consistent.
+fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
+    if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
+    var k: usize = 4; // words[3] = first case literal, words[4] = first case target
+    while (k < switch_words.len) : (k += 2) {
+        if (switch_words[k] == lbl) return true;
+    }
+    return false;
+}
+
 fn finalizeSwitchPhisHLSL(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
     for (phis) |phi| {
         const vn = names.get(phi.words[2]) orelse "pv";
@@ -715,6 +734,42 @@ fn sampledImageDim(module: *const ParsedModule, image_value_id: u32) u32 {
     return tinst.words[3];
 }
 
+/// True if the image behind a sampled-image VALUE id is arrayed (OpTypeImage
+/// `Arrayed` operand, words[5] == 1). Mirrors sampledImageDim's resolution
+/// (unwraps OpTypeSampledImage, follows an OpImage's Result Type).
+fn sampledImageIsArrayed(module: *const ParsedModule, image_value_id: u32) bool {
+    const vdef = getDef(module, image_value_id) orelse return false;
+    if (vdef.words.len < 2) return false;
+    var tinst = getDef(module, vdef.words[1]) orelse return false;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return false;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 6) return false;
+    return tinst.words[5] == 1;
+}
+
+/// HLSL `Texture*.Load` position constructor name ("int2"/"int3"/"int4") for an
+/// OpImageFetch on a texture of SPIR-V `dim` + `arrayed`. The .Load position
+/// packs (coord components, lod): spatial 1D=1, 2D/Rect=2, 3D=3, plus 1 for the
+/// array layer if arrayed, plus 1 for the mip level. So 1D -> int2, 2D ->
+/// int3, 2DArray/3D -> int4. Hardcoding int3 made 1D and 3D/2DArray fetches
+/// reject in DXC (wrong ctor arity). Cube is not OpImageFetch-able; falls back
+/// to int3. (#imagefetch)
+fn hlslLoadPositionCtor(dim: u32, arrayed: bool) []const u8 {
+    const spatial: u32 = switch (dim) {
+        0 => 1, // 1D
+        1, 4 => 2, // 2D, Rect
+        2 => 3, // 3D
+        else => 2,
+    };
+    const comps: u32 = spatial + @as(u32, @intFromBool(arrayed)) + 1; // +1 for lod
+    return switch (comps) {
+        2 => "int2",
+        4 => "int4",
+        else => "int3",
+    };
+}
+
 /// Trace a sampling op's image operand back to its underlying uniform texture
 /// Variable id, for per-texture comparison-sampler detection. The operand (words[3]
 /// of an ImageSampleDref*/ImageDrefGather op) may be:
@@ -764,6 +819,22 @@ fn writeHlslConstOffset(module: *const ParsedModule, w: anytype, offset_id: u32)
     }
     w.writeAll(")") catch return false;
     return true;
+}
+
+/// For an OpImageSampleDref* instruction, the ConstOffset (image-operand bit 0x8)
+/// operand ID, or null. Dref occupies words[5] and the image-operands mask is
+/// words[6], so operand values start at words[7]; ConstOffset follows Bias(1)/
+/// Lod(1)/Grad(2) in ascending bit order. (#170)
+fn drefConstOffsetId(words: []const u32) ?u32 {
+    if (words.len <= 6) return null;
+    const mask = words[6];
+    if (mask & 0x8 == 0) return null;
+    var off: usize = 7;
+    if (mask & 0x1 != 0) off += 1; // Bias
+    if (mask & 0x2 != 0) off += 1; // Lod
+    if (mask & 0x4 != 0) off += 2; // Grad
+    if (off >= words.len) return null;
+    return words[off];
 }
 
 /// Number of SPATIAL out-params HLSL GetDimensions takes for the texture behind
@@ -2487,7 +2558,37 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
 // ---------------------------------------------------------------------------
 
 fn hlslEmitStructForwardDecls(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), root_type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
-    return common.commonEmitStructForwardDecls(module, names, root_type_id, w, alloc, emitted, emitted_names, hlslType, hlslGetMemberName);
+    // Walk the root cbuffer struct's MEMBERS (the root itself is emitted as a
+    // cbuffer body, not a struct) and emit each referenced struct type via the
+    // HLSL-specific decl emitter `hlslEmitOneStructForwardDecl`, which honors a
+    // `row_major` decoration on an inner matrix member. The common emitter
+    // drops that qualifier at the struct boundary (silent-wrong transpose
+    // read), so HLSL cannot share it for UBO struct decls. Mirrors the
+    // commonEmitStructForwardDecls structural walk (unwrap array / runtime-
+    // array / vector / matrix / pointer wrappers to reach a struct member).
+    const inst = getDef(module, root_type_id) orelse return;
+    if (inst.op != .TypeStruct or inst.words.len <= 2) return;
+    for (inst.words[2..]) |mt_id| {
+        var tid = mt_id;
+        while (true) {
+            const ti = getDef(module, tid) orelse break;
+            switch (ti.op) {
+                .TypeArray, .TypeRuntimeArray, .TypeVector, .TypeMatrix => {
+                    if (ti.words.len < 3) break;
+                    tid = ti.words[2];
+                },
+                .TypePointer => {
+                    if (ti.words.len < 4) break;
+                    tid = ti.words[3];
+                },
+                .TypeStruct => {
+                    try hlslEmitOneStructForwardDecl(module, names, tid, w, alloc, emitted, emitted_names);
+                    break;
+                },
+                else => break,
+            }
+        }
+    }
 }
 
 fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), type_id: u32, w: anytype, alloc: std.mem.Allocator, emitted: *std.AutoHashMap(u32, void), emitted_names: *std.StringHashMap(void)) !void {
@@ -2526,6 +2627,47 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
 
     try w.print("struct {s}\n{{\n", .{sname});
     for (inst.words[2..], 0..) |mt_id, mi| {
+        // Lifted from emitStructMembers: a row_major matrix member's std140
+        // bytes are the row-major layout of the logical matrix M, and zioshade
+        // stores a cbuffer matrix as M, so a struct field enclosing such a
+        // matrix (the nested-struct UBO case, where this struct is the block
+        // member's type) must carry the `row_major` storage qualifier to
+        // reconstruct M. Without it the qualifier is dropped at the struct
+        // boundary (silent-wrong: HLSL reads Mᵀ where M is meant). The matrix
+        // type is the member itself or, for an array-of-matrix member, the
+        // leaf element. Reject non-square row_major (needs swapped dims we
+        // don't yet emit) -- honest-error over silent-wrong.
+        const matrix_tid: ?u32 = blk: {
+            const mi_inst = getDef(module, mt_id);
+            if (mi_inst) |mi2| {
+                if (mi2.op == .TypeMatrix) break :blk mt_id;
+                if (mi2.op == .TypeArray) {
+                    var cur: Instruction = mi2;
+                    while (cur.op == .TypeArray and cur.words.len > 3) {
+                        const et = getDef(module, cur.words[2]) orelse break;
+                        if (et.op == .TypeMatrix) break :blk cur.words[2];
+                        cur = et;
+                    }
+                }
+            }
+            break :blk null;
+        };
+        const row_major_qual: []const u8 = blk: {
+            if (matrix_tid) |mtid| {
+                if (memberIsRowMajor(module, type_id, @intCast(mi))) {
+                    if (matrixIsNonSquare(module, mtid)) return error.UnsupportedRowMajorMatrix;
+                    break :blk "row_major ";
+                }
+                // Non-square ColMajor (default) buffer matrix member: declare row_major to
+                // match the mul-operand swap in emitMatrixMulSwapped. The storage modifier
+                // only affects cbuffer packing (local instances keep column_major math), so
+                // this is safe for non-buffer structs and matches emitStructMembers. Square
+                // ColMajor stays bare (WARP-confirmed).
+                if (matrixIsNonSquare(module, mtid)) break :blk "row_major ";
+            }
+            break :blk "";
+        };
+
         const mti = common.localGetDef(instructions, id_defs, mt_id);
         if (mti) |mi2| {
             if (mi2.op == .TypeArray and mi2.words.len > 3) {
@@ -2537,14 +2679,14 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
                     return error.UnsupportedSpecConstantArraySize;
                 var mname_buf: [32]u8 = undefined;
                 const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-                try w.print("    {s} {s}[{d}];\n", .{ et, mname, lv });
+                try w.print("    {s}{s} {s}[{d}];\n", .{ row_major_qual, et, mname, lv });
                 continue;
             }
         }
         const member_type = try hlslType(module, mt_id, names, alloc);
         var mname_buf: [32]u8 = undefined;
         const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-        try w.print("    {s} {s};\n", .{ member_type, mname });
+        try w.print("    {s}{s} {s};\n", .{ row_major_qual, member_type, mname });
     }
     try w.writeAll("};\n\n");
 }
@@ -2567,15 +2709,26 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
         // Check for array
         const mt_inst = getDef(module, member_type_id);
 
-        // A row_major matrix member's std140 bytes are the row-major layout of
-        // the logical matrix M. zioshade stores a cbuffer matrix as M (its
-        // mul(M,v) convention requires it), so HLSL must read these bytes with
-        // the `row_major` storage qualifier to reconstruct M. ColMajor stays
-        // bare (HLSL's default is column_major). This is the OPPOSITE keyword to
-        // spirv-cross, whose convention is the transpose of zioshade's. Reject
-        // non-square row_major (needs swapped dims we don't yet emit) — honest
-        // error over silent-wrong. The matrix type id is the member type itself
-        // or, for an array-of-matrix member, the element type.
+        // Storage qualifier for a cbuffer matrix member. SPIR-V's matCxR and
+        // HLSL's floatCxR are TRANSPOSES (SPIR-V counts columns-then-rows; HLSL
+        // counts rows-then-columns), so the column-major byte grouping of the
+        // buffer only reconstructs the logical matrix M in HLSL when C == R.
+        //   * SQUARE ColMajor (SPIR-V default): HLSL column_major floatNxN reads
+        //     the bytes as M -- stays bare (HLSL default is column_major). mul is
+        //     emitted in SPIR-V order (no swap). This is the OPPOSITE keyword to
+        //     spirv-cross (row_major + swapped operands everywhere); both are
+        //     correct for the square case, WARP-confirmed.
+        //   * NON-SQUARE ColMajor: HLSL column_major floatCxR would misgroup the
+        //     bytes (C columns of R floats vs HLSL's R columns of C floats) =
+        //     silent-wrong. Emit row_major: SPIR-V's column-major bytes then
+        //     populate HLSL floatCxR as M^T, and emitMatrixMulSwapped swaps the
+        //     mul operands to compensate -- spirv-cross's convention for
+        //     non-square.
+        //   * Explicit RowMajor: bytes are already row-major of M, so HLSL
+        //     row_major reconstructs M for SQUARE; NON-SQUARE explicit RowMajor
+        //     needs swapped HLSL dims we don't emit -- honest error.
+        // The matrix type id is the member type itself or, for an
+        // array-of-matrix member, the innermost element type.
         const matrix_tid: ?u32 = blk: {
             if (mt_inst) |mi| {
                 if (mi.op == .TypeMatrix) break :blk member_type_id;
@@ -2596,9 +2749,16 @@ fn emitStructMembers(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
         const row_major_qual: []const u8 = blk: {
             if (matrix_tid) |mtid| {
                 if (memberIsRowMajor(module, struct_type_id, @intCast(member_idx))) {
+                    // Explicit RowMajor on a non-square matrix needs swapped HLSL
+                    // dims we do not emit -- honest error over silent-wrong.
                     if (matrixIsNonSquare(module, mtid)) return error.UnsupportedRowMajorMatrix;
                     break :blk "row_major ";
                 }
+                // ColMajor (SPIR-V default) on a NON-SQUARE buffer matrix would be
+                // silently misread as column_major (see the comment above); emit
+                // row_major and let emitMatrixMulSwapped swap the mul operands.
+                // Matches spirv-cross for non-square buffer matrices.
+                if (matrixIsNonSquare(module, mtid)) break :blk "row_major ";
             }
             break :blk "";
         };
@@ -4333,12 +4493,12 @@ fn emitBody(
                 // it, so a `break;` here makes each case independent — matching SPIR-V
                 // semantics, the GLSL backend's is_switch handling, and spirv-cross.
                 // Without it, `case 0:` fell through into `case 1:` (silent-wrong).
-                if (default_label != ml) {
-                    try w.writeAll("    default: {\n");
-                    _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, default_label, w, alloc);
-                    try w.writeAll("    break;\n    }\n");
-                }
+                //
+                // Emit case targets FIRST, then `default` LAST. Emitting default last
+                // lets a case whose body OpBranches to the default label (SPIR-V
+                // fallthrough INTO default) fall through into it, matching spirv-cross.
+                // The old order (default first) made such a case fall off the end of the
+                // switch -- silent-wrong (fallthrough_then_break: sel=0 -> 16 not 48).
                 // Emit case labels (word 3+: pairs of literal, target)
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -4348,15 +4508,23 @@ fn emitBody(
                     try w.print("    case {d}: {{\n", .{case_val});
                     _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
-                    // #switch-fallthrough: emit `break;` only if this case is terminal
-                    // (its body OpBranches to the merge). If it OpBranches to ANOTHER
-                    // case label (SPIR-V fallthrough chain), omit `break;` so HLSL falls
-                    // through to the next case — accumulating like spirv-cross. The
-                    // #472-audit "every case → merge" assumption was wrong for fallthrough
-                    // switches; unconditional `break;` dropped the fallthrough accumulation.
+                    // #switch-fallthrough: omit `break;` ONLY when this case body's first
+                    // OpBranch target is a real case/default label of THIS OpSwitch (a
+                    // SPIR-V fallthrough edge). Otherwise the case is terminal -- OpBranch to
+                    // the merge, a loop header, or a selection target -- and must `break;`.
+                    // The old `t == ml` test treated a loop-header / selection branch as
+                    // fallthrough and dropped the break, so a loop-in-case fell through into
+                    // the next case (loop_in_case: sel=0 -> 100 not 3). Stricter and safer
+                    // than the t==ml test. Mirrors GLSL/WGSL.
                     const term = caseTerminatorTarget(module, &label_map, target_label);
-                    const terminal = if (term) |t| (t == ml) else true;
-                    try w.writeAll(if (terminal) "    break;\n    }\n" else "    }\n");
+                    const fallthrough = if (term) |t| isSwitchCaseTarget(inst.words, t) else false;
+                    try w.writeAll(if (!fallthrough) "    break;\n    }\n" else "    }\n");
+                }
+                if (default_label != ml) {
+                    try w.writeAll("    default: {\n");
+                    _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, default_label, w, alloc);
+                    try w.writeAll("    break;\n    }\n");
                 }
                 try w.writeAll("    }\n");
                 finalizeSwitchPhisHLSL(names, sphis.items, alloc);
@@ -5228,6 +5396,78 @@ fn emitOrdNotEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []c
     });
 }
 
+/// Lower a subgroup ARITHMETIC op (IAdd/FAdd/IMul/FMul/Min/Max/Bitwise/Logical)
+/// honoring the GroupOperation literal. SPIR-V layout for these ops:
+///   words[1]=ResultType words[2]=Result words[3]=Execution(Scope <id>)
+///   words[4]=GroupOperation literal (0=Reduce, 1=InclusiveScan,
+///            2=ExclusiveScan, 3=ClusteredReduce)
+///   words[5]=Value <id>  words[6]=ClusterSize <id> (ClusteredReduce only)
+/// The old code read words[4] as the value; it is the GroupOperation literal, so
+/// the value silently fell back to "x" AND every variant lowered as Reduce.
+/// HLSL: Reduce -> WaveActive{Sum,Product,Min,Max,BitAnd,BitOr,BitXor} (and
+/// WaveActiveAllTrue/AnyTrue for the Logical pair). WavePrefix{Sum,Product} are
+/// EXCLUSIVE in HLSL, so InclusiveScan = WavePrefixX(x) {+, *} x and
+/// ExclusiveScan = WavePrefixX(x); no wave prefix exists for Min/Max/And/Or/Xor
+/// (honest-error on their scans), and ClusteredReduce has no HLSL form at all
+/// (honest-error). (#subgroup-operand)
+fn hlslEmitSubgroupArith(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    inst: Instruction,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    if (inst.words.len < 6) return error.UnsupportedOp;
+    const rtt = try hlslType(module, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const gop = inst.words[4];
+    const val = names.get(inst.words[5]) orelse "x";
+    const Stem = enum { sum, product, min, max, band, bor, bxor, land, lor };
+    const stem: Stem = switch (inst.op) {
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd => .sum,
+        .GroupNonUniformIMul, .GroupNonUniformFMul => .product,
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => .min,
+        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => .max,
+        .GroupNonUniformBitwiseAnd => .band,
+        .GroupNonUniformBitwiseOr => .bor,
+        .GroupNonUniformBitwiseXor => .bxor,
+        .GroupNonUniformLogicalAnd => .land,
+        .GroupNonUniformLogicalOr => .lor,
+        else => return error.UnsupportedOp,
+    };
+    switch (gop) {
+        0 => { // Reduce
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val }),
+                .min => try w.print("    {s} {s} = WaveActiveMin({s});\n", .{ rtt, rn, val }),
+                .max => try w.print("    {s} {s} = WaveActiveMax({s});\n", .{ rtt, rn, val }),
+                .band => try w.print("    {s} {s} = WaveActiveBitAnd({s});\n", .{ rtt, rn, val }),
+                .bor => try w.print("    {s} {s} = WaveActiveBitOr({s});\n", .{ rtt, rn, val }),
+                .bxor => try w.print("    {s} {s} = WaveActiveBitXor({s});\n", .{ rtt, rn, val }),
+                .land => try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{ rtt, rn, val }),
+                .lor => try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{ rtt, rn, val }),
+            }
+        },
+        1 => { // InclusiveScan: WavePrefix is exclusive, so add/mult current value
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = WavePrefixSum({s}) + {s};\n", .{ rtt, rn, val, val }),
+                .product => try w.print("    {s} {s} = WavePrefixProduct({s}) * {s};\n", .{ rtt, rn, val, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        2 => { // ExclusiveScan: WavePrefix is already exclusive
+            switch (stem) {
+                .sum => try w.print("    {s} {s} = WavePrefixSum({s});\n", .{ rtt, rn, val }),
+                .product => try w.print("    {s} {s} = WavePrefixProduct({s});\n", .{ rtt, rn, val }),
+                else => return error.UnsupportedOp,
+            }
+        },
+        3 => return error.UnsupportedOp, // ClusteredReduce: no HLSL equivalent
+        else => return error.UnsupportedOp,
+    }
+}
+
 fn emitInstruction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5353,7 +5593,12 @@ fn emitInstruction(
             }
 
             // Check if loading gl_HelperInvocation — replace with WaveIsHelperLane()
+            // #subgroup-operand: also rewrite a SubgroupLocalInvocationId
+            // (BuiltIn 41) load to WaveGetLaneIndex() -- HLSL has no
+            // gl_SubgroupInvocationID builtin, so the prior bare reference was
+            // an undeclared identifier (INVALID HLSL).
             var is_helper_invocation = false;
+            var is_subgroup_lane = false;
             if (ptr_inst) |pi| {
                 if (pi.op == .Variable) {
                     const helper_builtin = getDecorationValue(decorations, ptr_id, .built_in);
@@ -5363,12 +5608,16 @@ fn emitInstruction(
                             is_helper_invocation = true;
                             const expr = try std.fmt.allocPrint(alloc, "IsHelperLane()", .{});
                             if (try names.fetchPut(inst.words[2], expr)) |old| alloc.free(old.value);
+                        } else if (@intFromEnum(bi) == 41) {
+                            is_subgroup_lane = true;
+                            const expr = try std.fmt.allocPrint(alloc, "WaveGetLaneIndex()", .{});
+                            if (try names.fetchPut(inst.words[2], expr)) |old| alloc.free(old.value);
                         }
                     }
                 }
             }
-            if (is_helper_invocation) {
-                // Already mapped result to WaveIsHelperLane() expression
+            if (is_helper_invocation or is_subgroup_lane) {
+                // Already mapped result to a Wave*() expression
             } else if (is_output_load) {
                 // Alias the load result to the output variable name (for passing to functions)
                 const alias = try alloc.dupe(u8, ptr_name);
@@ -6097,25 +6346,39 @@ fn emitInstruction(
             });
         },
         .ImageSampleDrefImplicitLod => {
-            // Shadow texture: HLSL uses .SampleCmp(sampler, coord, compare)
+            // Shadow texture: HLSL .SampleCmp(sampler, coord, compare [, int2 offset]).
+            // ConstOffset (0x8) is the trailing int2 arg (Dref=words[5], mask=words[6]).
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const parts = splitPair(si);
-            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}, {s});\n", .{
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}, {s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dref,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleDrefExplicitLod => {
+            // Explicit-LOD shadow: SampleCmpLevelZero (HLSL has no lod-bearing compare
+            // sample; LevelZero is the faithful mapping, matching spirv-cross). The Lod
+            // drop is faithful -- NOT a bug. ConstOffset (0x8) -> trailing int2 arg.
             const rt = try hlslType(module, inst.words[1], names, alloc);
             const si = names.get(inst.words[3]) orelse "tex,tex_sampler";
             const coord = names.get(inst.words[4]) orelse "uv";
             const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
             const parts = splitPair(si);
-            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}, {s});\n", .{
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}, {s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, dref,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleProjImplicitLod => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
@@ -6182,10 +6445,16 @@ fn emitInstruction(
             // reference by the projective divisor (the coordinate's last component).
             // Emitting the raw Dref would silently compare against the un-projected
             // depth. Matches the spirv-cross oracle `SampleCmp(.., uv/q, dref/q)` and
-            // the WGSL backend's textureSampleCompare lowering. (#170, #470)
-            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{
+            // the WGSL backend's textureSampleCompare lowering. ConstOffset (0x8) ->
+            // trailing int2 arg. (#170, #470)
+            try w.print("    {s} {s} = {s}.SampleCmp({s}, {s}.xy / {s}{s}, {s} / {s}{s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref, coord, last_swizzle,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleProjDrefExplicitLod => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
@@ -6207,10 +6476,16 @@ fn emitInstruction(
                 }
                 break :blk ".z";
             } else ".z";
-            // Projective divide applies to the Dref too (see ProjDrefImplicitLod). (#170, #470)
-            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}{s}, {s} / {s}{s});\n", .{
+            // Projective divide applies to the Dref too (see ProjDrefImplicitLod).
+            // ConstOffset (0x8) -> trailing int2 arg. (#170, #470)
+            try w.print("    {s} {s} = {s}.SampleCmpLevelZero({s}, {s}.xy / {s}{s}, {s} / {s}{s}", .{
                 rt, names.get(inst.words[2]) orelse "v", parts[0], parts[1], coord, coord, last_swizzle, dref, coord, last_swizzle,
             });
+            if (drefConstOffsetId(inst.words)) |oid| {
+                try w.writeAll(", ");
+                _ = writeHlslConstOffset(module, w, oid);
+            }
+            try w.writeAll(");\n");
         },
         .ImageSampleProjExplicitLod => {
             // Projected explicit LOD: SampleLevel with manual projection. The
@@ -6380,6 +6655,10 @@ fn emitInstruction(
                     rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, sample_idx,
                 });
             } else {
+                // .Load position ctor width tracks the texture rank: 1D -> int2, 2D ->
+                // int3, 2DArray/3D -> int4. Hardcoding int3 made 1D and 3D/2DArray
+                // fetches reject in DXC. (#imagefetch)
+                const pos_ctor = hlslLoadPositionCtor(sampledImageDim(module, inst.words[3]), sampledImageIsArrayed(module, inst.words[3]));
                 // ConstOffset (texelFetchOffset): HLSL Load has no offset arg, so apply
                 // the offset to the coordinate via int math (`coord + offset`) — this is
                 // the unambiguous form (spirv-cross's `.Load(int3, int2)` 2-arg shape
@@ -6401,14 +6680,14 @@ fn emitInstruction(
                     }
                 }
                 if (has_off) {
-                    try w.print("    {s} {s} = {s}.Load(int3({s} + ", .{
-                        rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name,
+                    try w.print("    {s} {s} = {s}.Load({s}({s} + ", .{
+                        rt, names.get(inst.words[2]) orelse "v", tex_name, pos_ctor, coord_name,
                     });
                     _ = writeHlslConstOffset(module, w, off_id);
                     try w.print(", {s}));\n", .{lod_val});
                 } else {
-                    try w.print("    {s} {s} = {s}.Load(int3({s}, {s}));\n", .{
-                        rt, names.get(inst.words[2]) orelse "v", tex_name, coord_name, lod_val,
+                    try w.print("    {s} {s} = {s}.Load({s}({s}, {s}));\n", .{
+                        rt, names.get(inst.words[2]) orelse "v", tex_name, pos_ctor, coord_name, lod_val,
                     });
                 }
             }
@@ -6825,87 +7104,27 @@ fn emitInstruction(
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const mask = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID ^ {s});\n", .{ rtt, rn, val, mask });
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, WaveGetLaneIndex() ^ {s});\n", .{ rtt, rn, val, mask });
         },
         .GroupNonUniformShuffleUp => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const delta = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID - {s});\n", .{ rtt, rn, val, delta });
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, WaveGetLaneIndex() - {s});\n", .{ rtt, rn, val, delta });
         },
         .GroupNonUniformShuffleDown => {
             const rtt = try hlslType(module, inst.words[1], names, alloc);
             const rn = names.get(inst.words[2]) orelse "v";
             const val = names.get(inst.words[4]) orelse "x";
             const delta = names.get(inst.words[5]) orelse "0";
-            try w.print("    {s} {s} = WaveReadLaneAt({s}, gl_SubgroupInvocationID + {s});\n", .{ rtt, rn, val, delta });
+            try w.print("    {s} {s} = WaveReadLaneAt({s}, WaveGetLaneIndex() + {s});\n", .{ rtt, rn, val, delta });
         },
-        .GroupNonUniformIAdd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFAdd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveSum({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformIMul => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformFMul => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveProduct({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveMin({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveMax({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseAnd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitAnd({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseOr => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitOr({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformBitwiseXor => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveBitXor({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalAnd => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAllTrue({s});\n", .{ rtt, rn, val });
-        },
-        .GroupNonUniformLogicalOr => {
-            const rtt = try hlslType(module, inst.words[1], names, alloc);
-            const rn = names.get(inst.words[2]) orelse "v";
-            const val = names.get(inst.words[4]) orelse "x";
-            try w.print("    {s} {s} = WaveActiveAnyTrue({s});\n", .{ rtt, rn, val });
+        // Subgroup ARITHMETIC ops share one lowering that honors the
+        // GroupOperation literal (Reduce/InclusiveScan/ExclusiveScan/
+        // ClusteredReduce); see hlslEmitSubgroupArith for the operand fix.
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul, .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr, .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr => {
+            try hlslEmitSubgroupArith(module, names, inst, w, alloc);
         },
         .SubgroupAllKHR => {
             const rn = names.get(inst.words[2]) orelse "v";
@@ -7204,19 +7423,22 @@ const UniformMatrixAccess = struct { boundary: usize, matrix_tid: u32 };
 /// COLUMN i — so a column read must be emitted as `transpose(M)[i]`. The matrix
 /// may be the top-level block member OR an array element of it (`a.mats[k][i]`).
 ///
-/// CRITICAL scope: only the TOP-LEVEL block member (selected by `indices[0]`)
-/// receives the `row_major` storage qualifier in `emitStructMembers`, so only
-/// its matrices are stored as the logical M (where transpose is correct). A
-/// matrix inside a NESTED struct (`a.s.m`) is emitted bare, so for a row_major
-/// block it is stored as Mᵀ and reads correctly WITHOUT transpose — transposing
-/// it would be silent-wrong. We therefore refuse to descend into a nested struct
-/// (a TypeStruct at index position > 0). Nested-struct matrices are a documented
-/// limitation (their column_major reads remain a pre-existing, separate gap).
+/// CRITICAL scope: a cbuffer matrix reached through the access chain -- whether a
+/// TOP-LEVEL block member or one nested inside a struct-typed block member
+/// (`a.s.m`, where the inner struct is emitted with its own `row_major` qualifier
+/// by `hlslEmitOneStructForwardDecl`) -- is stored as the logical matrix M, so a
+/// COLUMN read must transpose. Descends through TypeStruct (top-level block AND
+/// nested) and TypeArray like the MSL `findRowMajorMatrix`, instead of bailing at
+/// the first nested struct (the old bail dropped the transpose, so a nested
+/// `row_major` matrix read its rows where SPIR-V selects columns -- silent-wrong).
 ///
-/// Returns null for a whole-matrix load (no index INTO the matrix) — that feeds
-/// `mul` and must stay untransposed — and for non-square matrices (row_major
-/// non-square is rejected at declaration; non-square column_major is a separate
-/// pre-existing gap).
+/// Returns null for a whole-matrix load (no index INTO the matrix) -- that feeds
+/// `mul` and must stay untransposed -- and for non-square matrices. A non-square
+/// buffer matrix is emitted `row_major` (stored as M^T) by emitStructMembers, so an
+/// HLSL row read `var[i]` already yields column i of M (M^T's row i = M's column i):
+/// no transpose is wanted, and the null return here (raw access) is therefore
+/// CORRECT for non-square. (Explicit row_major non-square is still rejected at
+/// declaration as UnsupportedRowMajorMatrix.)
 fn findUniformMatrixColumnAccess(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), base_id: u32, indices: []const u32) ?UniformMatrixAccess {
     if (!isUniformBlockVar(module, names, base_id)) return null;
     var cur_type: ?u32 = resolvePointeeType(module, base_id);
@@ -7231,10 +7453,9 @@ fn findUniformMatrixColumnAccess(module: *const ParsedModule, names: *std.AutoHa
             return .{ .boundary = i - 1, .matrix_tid = tid };
         }
         if (ti.op == .TypeStruct) {
-            // Only the top-level block struct is qualifier-eligible; bail on any
-            // nested struct (see the doc-comment above — transposing a bare
-            // nested row_major matrix would be silent-wrong).
-            if (i != 0) return null;
+            // Descend through both the top-level block struct AND any nested
+            // struct, so a matrix enclosed in a struct-typed block member is
+            // reached (the qualifier is emitted by hlslEmitOneStructForwardDecl).
             const def = getDef(module, index_id) orelse return null;
             if (def.op != .Constant or def.words.len <= 3) return null;
             const val = def.words[3];
@@ -7940,13 +8161,15 @@ fn emitSMod(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     try w.print("    {s} {s} = (({s} % {s}) + {s}) % {s};\n", .{ rt, names.get(inst.words[2]) orelse "v", x, y, y, y });
 }
 /// True if the matrix VALUE `id` is loaded from a buffer-backed variable
-/// (Uniform / PushConstant / StorageBuffer). Such a matrix is declared bare
-/// (HLSL default column_major) and holds the LOGICAL matrix M, so `mul(M, v)` is
-/// already correct and must NOT be swapped. A constructed/local matrix
-/// (OpCompositeConstruct, a constant, or a Function-storage local) is built by
-/// HLSL's row-filling `floatCxR` constructor and therefore stored TRANSPOSED, so
-/// it DOES need the swap. Traces through Load / CopyObject / AccessChain to the
-/// root variable's storage class. (#497)
+/// (Uniform / PushConstant / StorageBuffer). Such a matrix is declared in a cbuffer
+/// and holds the LOGICAL matrix M when SQUARE (bare column_major, so `mul(M, v)` is
+/// already correct and must NOT be swapped); a NON-SQUARE buffer matrix is emitted
+/// `row_major` (stored as M^T) and DOES need the swap -- see emitMatrixMulSwapped,
+/// which combines this predicate with matrixIsNonSquare. A constructed/local matrix
+/// (OpCompositeConstruct, a constant, or a Function-storage local) is built by HLSL's
+/// row-filling `floatCxR` constructor and therefore stored TRANSPOSED, so it DOES need
+/// the swap. Traces through Load / CopyObject / AccessChain to the root variable's
+/// storage class. (#497)
 ///
 /// Known limitation: a uniform matrix first COPIED into a Function-storage local
 /// and then multiplied traces to the Function var and is treated as local (swap).
@@ -7991,12 +8214,16 @@ fn valueTypeIsMatrix(module: *const ParsedModule, id: u32) bool {
 ///   OpMatrixTimesVector(M, v) -> mul(v, M)
 ///   OpVectorTimesMatrix(v, M) -> mul(M, v)
 ///   OpMatrixTimesMatrix(A, B) -> mul(B, A)
-/// A UNIFORM/cbuffer matrix is stored as the logical M (bare column_major), where
-/// `mul(M, v)` is already correct — that path is left byte-unchanged. Construction,
-/// indexing (`m[i]`), transpose() and the spvInverseNxN helper operate on the
-/// stored representation and stay consistent; only the local multiply order
-/// compensates. The local case is confirmed on D3D12 WARP + Metal
-/// (docs/DIFFERENTIAL_PROOF.md, tools/warp). (#497)
+/// A SQUARE UNIFORM/cbuffer matrix is stored as the logical M (bare column_major),
+/// where `mul(M, v)` is already correct -- that path keeps the SPIR-V operand order
+/// (byte-unchanged, WARP-confirmed). A NON-SQUARE UNIFORM/cbuffer matrix is emitted
+/// `row_major` by emitStructMembers (column_major would misgroup its bytes), so HLSL
+/// holds it as M^T -- the SAME transposed convention as a local matrix -- and the mul
+/// operands MUST be swapped. Construction, indexing (`m[i]`), transpose() and the
+/// spvInverseNxN helper operate on the stored representation and stay consistent; only
+/// the multiply order compensates. The local + square-buffer cases are confirmed on
+/// D3D12 WARP + Metal (docs/DIFFERENTIAL_PROOF.md, tools/warp); the non-square-buffer
+/// case matches spirv-cross (row_major + swapped operands) and is DXC-verified. (#497)
 fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     if (inst.words.len < 5) return common.emitCall(module, names, inst, "mul", w, alloc, hlslType);
     const rt = try hlslType(module, inst.words[1], names, alloc);
@@ -8005,12 +8232,22 @@ fn emitMatrixMulSwapped(module: *const ParsedModule, names: *std.AutoHashMap(u32
     // The matrix operand: MatrixTimesVector -> words[3]; VectorTimesMatrix ->
     // words[4]; MatrixTimesMatrix -> words[3] (use the left matrix's storage).
     const mat_op: u32 = if (valueTypeIsMatrix(module, inst.words[3])) inst.words[3] else inst.words[4];
+    // A non-square buffer matrix is emitted row_major (M^T) by emitStructMembers,
+    // so it uses the SAME transposed convention as a local matrix and the operands
+    // must be swapped. A square buffer matrix stays bare column_major (logical M)
+    // and keeps SPIR-V order. Local/constructed matrices are always transposed.
+    const mat_nonsquare: bool = blk: {
+        const mdef = getDef(module, mat_op) orelse break :blk false;
+        if (mdef.words.len < 2) break :blk false;
+        break :blk matrixIsNonSquare(module, mdef.words[1]);
+    };
+    const keep_order = matrixIsBufferSourced(module, mat_op) and !mat_nonsquare;
     const name = names.get(inst.words[2]) orelse "v";
-    if (matrixIsBufferSourced(module, mat_op)) {
-        // Logical-M storage: keep the SPIR-V operand order.
+    if (keep_order) {
+        // Logical-M storage (square buffer): keep the SPIR-V operand order.
         try w.print("    {s} {s} = mul({s}, {s});\n", .{ rt, name, a, b });
     } else {
-        // Transposed local storage: swap to compensate (matches SPIRV-Cross).
+        // Transposed storage (local, or non-square buffer): swap to compensate.
         try w.print("    {s} {s} = mul({s}, {s});\n", .{ rt, name, b, a });
     }
 }
@@ -8194,7 +8431,7 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 46 => "lerp", // FMix / mix
                 48 => "step",
                 49 => "smoothstep",
-                50 => "fma", // OpFma: contractually fused multiply-add. HLSL fma (SM5+) -- mad may double-round.
+                50 => "mad", // OpFma: HLSL `fma` is double-only (DXC rejects float fma); use mad. (#469 regression)
                 51 => "frexp", // Frexp (scalar return, pointer out-param)
                 52 => "frexp", // FrexpStruct (struct return - intercepted)
                 53 => "ldexp", // Ldexp

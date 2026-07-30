@@ -118,6 +118,29 @@ test "#472-audit: RowMajor UBO matrix emits layout(row_major), not transposed" {
     try glslValidateOrSkip("rowmajor_ubo", glsl);
 }
 
+// #472-nested: a RowMajor decoration on a matrix INSIDE a struct-typed UBO
+// member must propagate to a `layout(row_major)` on the BLOCK member. The drill
+// in emitStructMembers used to stop at the struct boundary (it only checked the
+// direct member's own decoration), so the qualifier was dropped and the bytes
+// were read as the transpose (silent-wrong). Oracle: spirv-cross emits
+// `layout(row_major) S s;` on the block member (the bare struct forward decl is
+// untouched; the qualifier is valid on a block member, not a plain struct field).
+test "#472-nested: RowMajor on a matrix inside a struct-typed UBO member propagates to layout(row_major)" {
+    const spirv = compileToSpirv("rowmajor_ubo_nested",
+        \\#version 450
+        \\struct S { mat4 m; };
+        \\layout(std140, binding=0, row_major) uniform A { S s; } a;
+        \\layout(location=0) in vec4 v;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = a.s.m * v; }
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "layout(row_major) S");
+    try glslValidateOrSkip("rowmajor_ubo_nested", glsl);
+}
+
 // #475: Workgroup (shared) memory. GLSL REQUIRES `shared` at GLOBAL scope (function-scope
 // `shared` is illegal); zioshade emitted it inside main() AND scanned the wrong range
 // (missed module-scope vars) AND dropped the array suffix. Must emit `shared T name[N];`
@@ -231,6 +254,42 @@ test "glsl: OpFRem lowers to the sign-of-dividend truncation form, not mod() (#1
     try assertContains(glsl, "trunc(");
     try assertNotContains(glsl, "mod("); // must NOT reuse the sign-of-divisor mod()
     try glslValidateOrSkip("frem", glsl);
+}
+
+// #170: glslShadowCoordCtor must derive the compare-coord arity from the sampler's
+// OpTypeImage Dim (vec3 for a 2D shadow), NOT the coord width. glslang packs the
+// dref INTO the coord (vec3), so the old coord-width heuristic double-counted it
+// (vec4 where vec3 is needed). glslang is used so the coord is vec3-packed.
+test "glsl: DrefExplicitLod keeps Lod + vec3 compare coord (not vec4) (#170)" {
+    const spv = try compileToSpirv("dref_explicit_lod_glsl",
+        \\#version 450
+        \\#extension GL_EXT_texture_shadow_lod : require
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureLod(shadowTex, vec3(vUV, 0.5), 2.0)); }
+    );
+    defer alloc.free(spv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spv, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureLod(shadowTex, vec3(");
+    try assertNotContains(glsl, "textureLod(shadowTex, vec4(");
+}
+
+// #170: OpImageSampleExplicitLod Lod+ConstOffset -> GLSL textureLodOffset (the Lod
+// arm previously emitted a plain textureLod, DROPPING the offset). zioshade's own
+// frontend supports textureLodOffset on a non-shadow sampler.
+test "glsl: textureLodOffset lowers to textureLodOffset, not textureLod (#170)" {
+    const glsl = try compileToGlsl(
+        \\#version 430
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 uv;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = textureLodOffset(tex, uv, 1.0, ivec2(3, 4)); }
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "textureLodOffset(");
+    try assertContains(glsl, "ivec2(3, 4)");
 }
 
 // OpSRem is truncated (sign of the DIVIDEND); GLSL `%` is FLOORED (sign of the divisor --
@@ -395,6 +454,27 @@ test "glsl: OpImageFetch passes the explicit LOD, not a hardcoded 0 (#170)" {
     try assertContains(glsl, "texelFetch(");
     try assertContains(glsl, ", lod)"); // the real LOD operand, not a literal 0
     try glslValidateOrSkip("imagefetch-lod", glsl);
+}
+
+// OpImageFetch on a multisampled texture (sampler2DMS) must (a) keep the MS
+// spelling in the declaration (sampler2DMS, not sampler2D) and (b) carry the
+// Sample image-operand as texelFetch's 3rd arg (the sample index), not drop it
+// to 0. Dropping either made every per-sample fetch silently read sample 0.
+// (#imagefetch)
+test "glsl: OpImageFetch on sampler2DMS keeps the MS decl and the sample index (#imagefetch)" {
+    const glsl = try compileToGlsl(
+        \\#version 450
+        \\layout(binding = 0) uniform sampler2DMS tex;
+        \\layout(location = 0) flat in int samp;
+        \\layout(location = 1) in vec2 uv;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = texelFetch(tex, ivec2(uv), samp); }
+    );
+    defer alloc.free(glsl);
+    try assertContains(glsl, "sampler2DMS"); // MS spelling preserved (was sampler2D)
+    try assertContains(glsl, "texelFetch(");
+    try assertContains(glsl, ", samp)"); // sample index carried (was hardcoded 0)
+    try glslValidateOrSkip("imagefetch-ms", glsl);
 }
 
 // OpImageSampleImplicitLod must carry a ConstOffset image-operand as GLSL `textureOffset`,

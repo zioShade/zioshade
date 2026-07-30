@@ -1,0 +1,33 @@
+#version 450
+layout(local_size_x = 1) in;
+
+struct Inner { uint a; uint b; };
+
+// coherent: every plain member access below is a coherent read/write, which
+// glslang lowers to OpAccessChain + plain OpLoad/OpStore. The atomicAdd ops mark
+// these members as atomic<T> in WGSL, so the plain load/store MUST lower to
+// atomicLoad/atomicStore (naga: "atomic variables cannot be accessed directly").
+layout(std430, binding = 0) coherent buffer B {
+    uint x;
+    Inner s;
+    uint arr[4];
+} b;
+
+layout(std430, binding = 1) writeonly buffer O { uvec4 o; };
+
+void main() {
+    atomicAdd(b.x, 1u);
+    atomicAdd(b.s.b, 1u);
+    atomicAdd(b.arr[2], 1u);
+
+    // Regression: plain load AND store of an SSBO atomic field, covering a
+    // scalar field, a nested-struct field, and an array element.
+    uint r0 = b.x;
+    b.x = 7u;
+    uint r1 = b.s.b;
+    b.s.b = 7u;
+    uint r2 = b.arr[2];
+    b.arr[2] = 7u;
+
+    o = uvec4(r0 + r1 + r2, 0, 0, 0);
+}

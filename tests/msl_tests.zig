@@ -859,6 +859,46 @@ test "MSL: textureOffset/textureLodOffset carry the ConstOffset (int2 arg)" {
     try assertContains(msl, "int2(3, 4)"); // textureLodOffset (ExplicitLod)
 }
 
+// #170: OpImageSampleDrefExplicitLod must carry the Lod operand as MSL `level(lod)`,
+// NOT hardcode `level(0)`. glslang packs the dref INTO the coord (vec3 for a 2D
+// shadow), so the raw coord must also be swizzled to its spatial rank (.xy) for
+// .sample_compare -- passing the packed vec3 is a type mismatch Metal rejects.
+// glslang is used because zioshade's frontend emits the Dref as a separate operand.
+test "MSL: DrefExplicitLod keeps Lod + swizzles the packed shadow coord (#170)" {
+    const spv = try compileToSpirv("dref_explicit_lod_msl",
+        \\#version 450
+        \\#extension GL_EXT_texture_shadow_lod : require
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureLod(shadowTex, vec3(vUV, 0.5), 2.0)); }
+    );
+    defer alloc.free(spv);
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, ".sample_compare(");
+    try assertContains(msl, "level("); // Lod operand preserved
+    try assertNotContains(msl, "level(0)"); // NOT the old hardcoded mip 0
+}
+
+// #170: OpImageSampleDrefImplicitLod + ConstOffset -> the int2 offset is a trailing
+// arg to .sample_compare (was dropped, sampling the un-offset texel). glslang emits
+// the shadow textureOffset that zioshade's frontend honest-errors.
+test "MSL: DrefImplicitLod carries ConstOffset (trailing int2 arg) (#170)" {
+    const spv = try compileToSpirv("dref_implicit_offset_msl",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(textureOffset(shadowTex, vec3(vUV, 0.5), ivec2(1, 2))); }
+    );
+    defer alloc.free(spv);
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, ".sample_compare(");
+    try assertContains(msl, "int2(1, 2)");
+}
+
 // ---------------------------------------------------------------------------
 // T5: MSL built-in functions
 // ---------------------------------------------------------------------------
