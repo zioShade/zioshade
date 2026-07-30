@@ -310,6 +310,23 @@ fn recordUnsupportedLoopInSwitchCase() error{UnsupportedLoopInSwitchCase} {
     return error.UnsupportedLoopInSwitchCase;
 }
 
+/// Honest-error for a switch nested inside a switch case body. The `.Switch` case-body
+/// replay (default arm at ~6166, case arm at ~6278) does `if (dinst.op == .Switch) break;`
+/// — it stops at the inner OpSwitch without emitting it OR anything after, so the inner
+/// switch and its trailing case-body instructions are silently DROPPED (nested_switch:
+/// outv stayed 0 instead of 10/11/12/...). The replay cannot construct a nested switch
+/// (it would need a recursive emitter, not emitSimpleInstruction). Fail loud rather than
+/// miscompile. GLSL/MSL/HLSL emit this correctly (emitBlock recurses). Full nested-switch
+/// emission for WGSL is a tracked follow-up. (#wgsl-nested-switch-in-switch-case)
+fn recordUnsupportedNestedSwitchInSwitchCase() error{UnsupportedNestedSwitchInSwitchCase} {
+    last_error_detail = std.fmt.bufPrint(
+        &last_error_detail_buf,
+        "a switch nested inside a switch case body cannot be lowered to WGSL yet (the case-body replay stops at the inner OpSwitch and would silently drop it); flatten the inner switch into an if-chain or hoist it into a helper function",
+        .{},
+    ) catch null;
+    return error.UnsupportedNestedSwitchInSwitchCase;
+}
+
 /// Single source of truth: zioshade's internal GLSL.std.450 opcode number → WGSL
 /// builtin name. Used by BOTH the main emit path and the loop-replay path so the
 /// two cannot drift (they previously had divergent inline switches — the replay
@@ -6356,12 +6373,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // which cannot construct loops, so such a loop would be silently
                         // DROPPED. Honest-error instead of miscompiling. (Full loop-in-case
                         // emission is a tracked follow-up.)
+                        //
+                        // #wgsl-nested-switch-in-switch-case: an OpSwitch between this
+                        // OpSwitch and its merge sits in a case body. The case-body replay
+                        // does `if (dinst.op == .Switch) break;` (default + case arms), so
+                        // it stops at the inner OpSwitch and silently DROPS it plus every
+                        // instruction after it in the case body (nested_switch: outv stayed
+                        // 0). Honest-error instead of miscompiling.
                         {
                             var li: usize = i + 1;
                             while (li < module.instructions.len) : (li += 1) {
                                 const linst = module.instructions[li];
                                 if (linst.op == .Label and linst.words.len > 1 and linst.words[1] == merge_label.?) break;
                                 if (linst.op == .LoopMerge) return recordUnsupportedLoopInSwitchCase();
+                                if (linst.op == .Switch) return recordUnsupportedNestedSwitchInSwitchCase();
                             }
                         }
                         try writeInd(w, indent);

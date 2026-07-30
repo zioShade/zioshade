@@ -2338,11 +2338,16 @@ test "wgsl: CompositeExtract/Select in loop-replay path do not leak opcode names
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "Select(") == null);
 }
 
-test "wgsl: nested switch does not leak OpSelectionMerge as a value" {
-    // A nested switch drives the switch/loop replay path. OpSelectionMerge (a
-    // structured-control-flow hint with no result id) must be skipped there, not
-    // emitted as `let v = SelectionMerge();` (which naga rejects: "no definition
-    // in scope for identifier: SelectionMerge").
+test "wgsl: nested switch in a switch case body honest-errors (no silent drop)" {
+    // A nested switch in a switch case body drives the case-body replay path, which
+    // walks case-body instructions via the limited emitSimpleInstruction emitter and
+    // does `if (dinst.op == .Switch) break;` — so it would STOP at the inner OpSwitch
+    // and silently DROP the inner switch plus every instruction after it in the case
+    // body (verified: case 1 left its output unchanged). That is silent-wrong. The
+    // pre-scan now detects any OpSwitch between the outer OpSwitch and its merge and
+    // honest-errors (UnsupportedNestedSwitchInSwitchCase) instead of miscompiling.
+    // GLSL/MSL/HLSL emit nested switches correctly (emitBlock recurses); full
+    // nested-switch emission for WGSL is a tracked follow-up. (#wgsl-nested-switch)
     const source =
         \\#version 450
         \\layout(location = 0) out vec4 fragColor;
@@ -2366,10 +2371,7 @@ test "wgsl: nested switch does not leak OpSelectionMerge as a value" {
     ;
     const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
-    defer alloc.free(wgsl);
-    try std.testing.expect(std.mem.indexOf(u8, wgsl, "SelectionMerge") == null);
-    try std.testing.expect(std.mem.indexOf(u8, wgsl, "LoopMerge") == null);
+    try std.testing.expectError(error.UnsupportedNestedSwitchInSwitchCase, zioshade.spirvToWGSL(alloc, spirv, .{}));
 }
 
 test "wgsl: QCOM block-match errors honestly (WGSL has no QCOM image ops)" {

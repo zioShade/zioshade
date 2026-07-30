@@ -3189,6 +3189,22 @@ fn caseTerminatorTargetGLSL(m: *const ParsedModule, label_map: *const std.AutoHa
     return null;
 }
 
+/// #switch-fallthrough: true iff `lbl` is a case/default target of the OpSwitch whose
+/// words are `switch_words` (words[2]=default, words[4,6,...]=case targets). Used to
+/// decide whether a case body's first OpBranch target is a REAL SPIR-V fallthrough edge
+/// (branch to another case/default of THIS switch) — only then is `break;` omitted. A
+/// branch to the merge, a loop header, or a selection target is NOT a fallthrough edge:
+/// the case is terminal and must `break;`. Mirrors the WGSL/HLSL backends. Ported from
+/// spirv_to_wgsl.zig (isSwitchCaseTarget).
+fn isSwitchCaseTargetGLSL(switch_words: []const u32, lbl: u32) bool {
+    if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
+    var k: usize = 4; // words[3] = first case literal, words[4] = first case target
+    while (k < switch_words.len) : (k += 2) {
+        if (switch_words[k] == lbl) return true;
+    }
+    return false;
+}
+
 fn emitBody(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3514,12 +3530,11 @@ fn emitBody(
                 collectSwitchMergePhis(m, &label_map, mval, &sphis, alloc);
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                 try w.print("    switch ({s}) {{\n", .{sn});
-                if (dl != mval) {
-                    try w.writeAll("    default:\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
-                    try w.writeAll("    break;\n");
-                }
+                // Emit case targets FIRST, then `default` LAST. Emitting default last lets
+                // a case whose body OpBranches to the default label (SPIR-V fallthrough INTO
+                // default) fall through into it, matching spirv-cross. The old order (default
+                // first) made such a case fall off the end of the switch — silent-wrong
+                // (fallthrough_then_break: sel=0 returned 16 instead of 48). Mirrors HLSL.
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
                     const cv = inst.words[wi];
@@ -3528,15 +3543,23 @@ fn emitBody(
                     try w.print("    case {d}:\n", .{cv});
                     _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
-                    // #switch-fallthrough: emit `break;` only if this case is terminal
-                    // (its body OpBranches to the merge). If it OpBranches to another case
-                    // label (SPIR-V fallthrough chain), omit `break;` so GLSL falls through
-                    // — accumulating like spirv-cross. (The default keeps its unconditional
-                    // break: it is emitted first, so its fallthrough target would be
-                    // ambiguous in emit order.) Mirrors HLSL (#58).
+                    // #switch-fallthrough: omit `break;` ONLY when this case body's first
+                    // OpBranch target is a real case/default label of THIS OpSwitch (a
+                    // SPIR-V fallthrough edge). Otherwise the case is terminal — OpBranch to
+                    // the merge, a loop header, or a selection target — and must `break;`.
+                    // The old `t == mval` test treated a loop-header / selection branch as
+                    // fallthrough and dropped the break, so a loop-in-case fell through into
+                    // the next case (loop_in_case: sel=0 returned 100 instead of 3).
+                    // Stricter and safer than the t==mval test. Mirrors HLSL/WGSL.
                     const cterm = caseTerminatorTargetGLSL(m, &label_map, target);
-                    const cterminal = if (cterm) |t| (t == mval) else true;
-                    try w.writeAll(if (cterminal) "    break;\n" else "");
+                    const fallthrough = if (cterm) |t| isSwitchCaseTargetGLSL(inst.words, t) else false;
+                    try w.writeAll(if (!fallthrough) "    break;\n" else "");
+                }
+                if (dl != mval) {
+                    try w.writeAll("    default:\n");
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
+                    try w.writeAll("    break;\n");
                 }
                 try w.writeAll("    }\n");
                 finalizeSwitchPhis(names, sphis.items, alloc);

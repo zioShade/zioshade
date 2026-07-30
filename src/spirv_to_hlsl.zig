@@ -279,6 +279,22 @@ fn caseTerminatorTarget(module: *const ParsedModule, label_map: *const std.AutoH
     return null;
 }
 
+/// #switch-fallthrough: true iff `lbl` is a case/default target of the OpSwitch whose
+/// words are `switch_words` (words[2]=default, words[4,6,...]=case targets). Used to
+/// decide whether a case body's first OpBranch target is a REAL SPIR-V fallthrough edge
+/// (branch to another case/default of THIS switch) — only then is `break;` omitted. A
+/// branch to the merge, a loop header, or a selection target is NOT a fallthrough edge:
+/// the case is terminal and must `break;`. Mirrors the GLSL/WGSL backends. Ported from
+/// spirv_to_wgsl.zig (isSwitchCaseTarget).
+fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
+    if (switch_words.len >= 3 and switch_words[2] == lbl) return true; // default target
+    var k: usize = 4; // words[3] = first case literal, words[4] = first case target
+    while (k < switch_words.len) : (k += 2) {
+        if (switch_words[k] == lbl) return true;
+    }
+    return false;
+}
+
 fn finalizeSwitchPhisHLSL(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
     for (phis) |phi| {
         const vn = names.get(phi.words[2]) orelse "pv";
@@ -4468,12 +4484,12 @@ fn emitBody(
                 // it, so a `break;` here makes each case independent — matching SPIR-V
                 // semantics, the GLSL backend's is_switch handling, and spirv-cross.
                 // Without it, `case 0:` fell through into `case 1:` (silent-wrong).
-                if (default_label != ml) {
-                    try w.writeAll("    default: {\n");
-                    _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
-                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, default_label, w, alloc);
-                    try w.writeAll("    break;\n    }\n");
-                }
+                //
+                // Emit case targets FIRST, then `default` LAST. Emitting default last
+                // lets a case whose body OpBranches to the default label (SPIR-V
+                // fallthrough INTO default) fall through into it, matching spirv-cross.
+                // The old order (default first) made such a case fall off the end of the
+                // switch — silent-wrong (fallthrough_then_break: sel=0 -> 16 not 48).
                 // Emit case labels (word 3+: pairs of literal, target)
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
@@ -4483,15 +4499,23 @@ fn emitBody(
                     try w.print("    case {d}: {{\n", .{case_val});
                     _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
-                    // #switch-fallthrough: emit `break;` only if this case is terminal
-                    // (its body OpBranches to the merge). If it OpBranches to ANOTHER
-                    // case label (SPIR-V fallthrough chain), omit `break;` so HLSL falls
-                    // through to the next case — accumulating like spirv-cross. The
-                    // #472-audit "every case → merge" assumption was wrong for fallthrough
-                    // switches; unconditional `break;` dropped the fallthrough accumulation.
+                    // #switch-fallthrough: omit `break;` ONLY when this case body's first
+                    // OpBranch target is a real case/default label of THIS OpSwitch (a
+                    // SPIR-V fallthrough edge). Otherwise the case is terminal — OpBranch to
+                    // the merge, a loop header, or a selection target — and must `break;`.
+                    // The old `t == ml` test treated a loop-header / selection branch as
+                    // fallthrough and dropped the break, so a loop-in-case fell through into
+                    // the next case (loop_in_case: sel=0 -> 100 not 3). Stricter and safer
+                    // than the t==ml test. Mirrors GLSL/WGSL.
                     const term = caseTerminatorTarget(module, &label_map, target_label);
-                    const terminal = if (term) |t| (t == ml) else true;
-                    try w.writeAll(if (terminal) "    break;\n    }\n" else "    }\n");
+                    const fallthrough = if (term) |t| isSwitchCaseTarget(inst.words, t) else false;
+                    try w.writeAll(if (!fallthrough) "    break;\n    }\n" else "    }\n");
+                }
+                if (default_label != ml) {
+                    try w.writeAll("    default: {\n");
+                    _ = try emitBlock(module, names, decorations, default_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
+                    try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, default_label, w, alloc);
+                    try w.writeAll("    break;\n    }\n");
                 }
                 try w.writeAll("    }\n");
                 finalizeSwitchPhisHLSL(names, sphis.items, alloc);
