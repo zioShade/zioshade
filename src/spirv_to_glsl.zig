@@ -3319,7 +3319,17 @@ fn emitBody(
                 for (phi_decls.items) |pv| {
                     const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
                     const vn = names.get(pv.result_id) orelse "pv";
-                    try w.print("    {s} {s}_phi;\n", .{ rtt, vn });
+                    if (he) {
+                        // Both arms assign it; declare uninitialized.
+                        try w.print("    {s} {s}_phi;\n", .{ rtt, vn });
+                    } else {
+                        // No else arm (short-circuit a && b): the fall-through value is the
+                        // incoming from the header block (in scope before the if); initialize
+                        // to it so the phi is defined when the condition is false. Mirrors MSL.
+                        const false_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        const fvn = exprName(m, names, false_val, alloc);
+                        try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
+                    }
                 }
                 try w.print("    if ({s})\n    {{\n", .{cn});
                 idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
@@ -3833,7 +3843,15 @@ fn emitWhileLoop(
                             if (carried_phis.contains(pv.result_id)) continue;
                             const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
                             const vn = names.get(pv.result_id) orelse "pv";
-                            try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
+                            if (nhe) {
+                                try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
+                            } else {
+                                // No else arm: initialize to the fall-through (header) value so
+                                // the phi is defined when the condition is false. Mirrors MSL.
+                                const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                const fvn = exprName(m, names, false_val, alloc);
+                                try w.print("        {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
+                            }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
@@ -4050,7 +4068,13 @@ fn emitBlock(
                 for (phi_decls2.items) |pv| {
                     const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
                     const vn = names.get(pv.result_id) orelse "pv";
-                    try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
+                    if (he) {
+                        try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
+                    } else {
+                        const false_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        const fvn = exprName(m, names, false_val, alloc);
+                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, rtt, vn, fvn });
+                    }
                 }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
                 i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
