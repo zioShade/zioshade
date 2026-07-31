@@ -3705,3 +3705,20 @@ test "#GLSL-corpus: separate sampler as function param honest-errors" {
     defer alloc.free(spirv);
     try std.testing.expectError(error.UnsupportedSeparateSamplers, zioshade.spirvToGLSL(alloc, spirv, .{ .version = 430 }));
 }
+
+test "e54.4: standalone BuiltIn Position output maps to predefined gl_Position" {
+    // HLSL-origin SPIR-V (glslang's HLSL frontend) names its Position OUTPUT via OpName
+    // ("@entryPointOutput.gl_Position"). zioshade must alias it to the predefined
+    // gl_Position so the body stores to a declared identifier -- the declaration pass
+    // treats builtins as predefined and skips them, so emitting the OpName produces a
+    // use-without-declaration (glslang rejects: undeclared identifier). Input builtins
+    // (VertexIndex/InstanceIndex) were already aliased; this guards the output path.
+    const spv_bytes = @embedFile("arbitrary_spirv/vert.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 430 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "gl_Position");
+    try assertNotContains(glsl, "_entryPointOutput");
+}

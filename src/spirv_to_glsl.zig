@@ -3124,6 +3124,51 @@ fn emitFunction(
                 }
             }
         }
+
+        // OUTPUT built-in vars (gl_Position, gl_FragDepth, gl_Layer, ...) are likewise
+        // predefined in GLSL; alias them by name so the body stores to the GLSL builtin
+        // instead of an undeclared OpName. Without this, an HLSL-origin module that
+        // names its Position output via OpName emits `_entryPointOutput_gl_Position = v;`
+        // -- a use with no declaration (the declaration pass treats builtins as predefined
+        // and skips them). Mirrors the input loop above. (e54.4: arbitrary SPIR-V
+        // uses-without-declaration.)
+        for (output_var_ids.items) |ovid| {
+            // A gl_PerVertex-style interface BLOCK carries BuiltIn on its members
+            // (OpMemberDecorate), not the variable. Guard explicitly to match the
+            // declaration pass (emitModuleGlobals) and stay safe if a producer ever
+            // puts BuiltIn on the block var itself -- without this, the instance would
+            // be renamed to gl_Position and member access would break.
+            if (isBuiltinBlockVar(m, names, ovid)) continue;
+            const ov_name = names.get(ovid) orelse continue;
+            const obuiltin = getDecVal(decs, ovid, .built_in);
+            if (obuiltin) |obi| {
+                const obuiltin_name: []const u8 = switch (@as(spirv.BuiltIn, @enumFromInt(obi))) {
+                    .position => "gl_Position",
+                    .point_size => "gl_PointSize",
+                    .clip_distance => "gl_ClipDistance",
+                    .cull_distance => "gl_CullDistance",
+                    .frag_depth => "gl_FragDepth",
+                    .layer => "gl_Layer",
+                    .viewport_index => "gl_ViewportIndex",
+                    // Any other BuiltIn on an OUTPUT is not one zioshade maps to a
+                    // predefined GLSL name. Keeping the OpName would silently reproduce
+                    // the bug this loop fixes: the declaration pass (emitModuleGlobals)
+                    // skips EVERY BuiltIn-decorated Output assuming it is predefined, so
+                    // an unmapped builtin would stay a use-without-declaration. Refuse
+                    // loudly instead (mandate: correct output or honest error). Known
+                    // GLSL-predefined-but-unmapped outputs (safe extension points):
+                    //   tess_level_outer -> gl_TessLevelOuter
+                    //   tess_level_inner -> gl_TessLevelInner
+                    //   primitive_id -> gl_PrimitiveID
+                    //   primitive_shading_rate_ext -> gl_PrimitiveShadingRateEXT
+                    else => return error.CrossCompileUnsupported,
+                };
+                if (!std.mem.eql(u8, ov_name, obuiltin_name)) {
+                    const a = alloc.dupe(u8, obuiltin_name) catch continue;
+                    if (names.fetchPut(ovid, a) catch null) |old| alloc.free(old.value);
+                }
+            }
+        }
     }
 
     try w.writeAll(")\n{\n");
