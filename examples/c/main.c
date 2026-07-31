@@ -88,9 +88,48 @@ int main(void) {
     }
 
     // -----------------------------------------------------------------------
+    // SPIR-V -> MSL (Metal) and -> WGSL (WebGPU).
+    //
+    // The C ABI exposes all four backends (HLSL above, plus MSL, GLSL, WGSL). WGSL
+    // is the one spirv-cross has no backend for at all -- a structural reason to
+    // reach for zioshade from a WebGPU-facing C/C++ host. This exercises both so the
+    // smoke test covers the full backend set (and the free helpers per backend).
+    // -----------------------------------------------------------------------
+    char* msl = NULL;
+    size_t msl_len = 0;
+    st = zioshade_to_msl(spirv_words, spirv_word_count, /*metal_version=*/0,
+                         /*argument_buffers=*/0, /*entry_point=*/NULL, &msl, &msl_len);
+    if (st != ZIOSHADE_OK) {
+        const char* msg = zioshade_last_error_message();
+        fprintf(stderr, "zioshade_to_msl failed (status=%d): %s\n",
+                (int)st, msg ? msg : "(no message)");
+        zioshade_free_str(hlsl);
+        zioshade_free_u32(spirv_words);
+        return 3;
+    }
+    printf("cross-compiled to %zu bytes of MSL\n", msl_len);
+
+    char* wgsl = NULL;
+    size_t wgsl_len = 0;
+    st = zioshade_to_wgsl(spirv_words, spirv_word_count, /*entry_point=*/NULL,
+                          &wgsl, &wgsl_len);
+    if (st != ZIOSHADE_OK) {
+        const char* msg = zioshade_last_error_message();
+        fprintf(stderr, "zioshade_to_wgsl failed (status=%d): %s\n",
+                (int)st, msg ? msg : "(no message)");
+        zioshade_free_str(hlsl);
+        zioshade_free_str(msl);
+        zioshade_free_u32(spirv_words);
+        return 4;
+    }
+    printf("cross-compiled to %zu bytes of WGSL\n", wgsl_len);
+
+    // -----------------------------------------------------------------------
     // Release owned buffers.
     // -----------------------------------------------------------------------
     zioshade_free_str(hlsl);
+    zioshade_free_str(msl);
+    zioshade_free_str(wgsl);
     zioshade_free_u32(spirv_words);
 
     // NULL-free smoke test: must be a no-op, not a crash.
