@@ -4642,11 +4642,13 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
         var it = replacements.iterator();
         while (it.next()) |entry| {
             var cur = entry.value_ptr.*;
+            // Follow the replacement chain to its terminal root. Bounded by `bound`
+            // (the SPIR-V id ceiling) -- a strict upper bound on any chain length and
+            // a cycle break; identity folds are a DAG (result -> already-defined
+            // operand), so this never trips in practice.
             var guard: u32 = 0;
-            while (replacements.get(cur)) |next| {
-                cur = next;
-                guard += 1;
-                if (guard > bound) break; // cycle safety (not expected for SSA identity folds)
+            while (guard < bound) : (guard += 1) {
+                    cur = replacements.get(cur) orelse break;
             }
             entry.value_ptr.* = cur; // in-place value mutation; no rehash -> safe during iteration
         }
