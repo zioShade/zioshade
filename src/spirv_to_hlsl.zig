@@ -345,17 +345,43 @@ const ParsedModule = struct {
 /// never-plausible-but-wrong failure this project refuses; fail loud instead. (G10.)
 fn isSubgroupOp(op: spirv.Op) bool {
     return switch (op) {
-        .SubgroupAllKHR, .SubgroupAnyKHR, .SubgroupAllEqualKHR,
-        .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual,
-        .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst, .GroupNonUniformBallot,
-        .GroupNonUniformInverseBallot, .GroupNonUniformBallotBitExtract, .GroupNonUniformBallotBitCount,
-        .GroupNonUniformBallotFindLSB, .GroupNonUniformBallotFindMSB, .GroupNonUniformShuffle,
-        .GroupNonUniformShuffleXor, .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown,
-        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul,
-        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax,
-        .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr,
-        .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr,
-        .GroupNonUniformLogicalXor, .GroupNonUniformQuadBroadcast, .GroupNonUniformQuadSwap,
+        .SubgroupAllKHR,
+        .SubgroupAnyKHR,
+        .SubgroupAllEqualKHR,
+        .GroupNonUniformElect,
+        .GroupNonUniformAll,
+        .GroupNonUniformAny,
+        .GroupNonUniformAllEqual,
+        .GroupNonUniformBroadcast,
+        .GroupNonUniformBroadcastFirst,
+        .GroupNonUniformBallot,
+        .GroupNonUniformInverseBallot,
+        .GroupNonUniformBallotBitExtract,
+        .GroupNonUniformBallotBitCount,
+        .GroupNonUniformBallotFindLSB,
+        .GroupNonUniformBallotFindMSB,
+        .GroupNonUniformShuffle,
+        .GroupNonUniformShuffleXor,
+        .GroupNonUniformShuffleUp,
+        .GroupNonUniformShuffleDown,
+        .GroupNonUniformIAdd,
+        .GroupNonUniformFAdd,
+        .GroupNonUniformIMul,
+        .GroupNonUniformFMul,
+        .GroupNonUniformSMin,
+        .GroupNonUniformUMin,
+        .GroupNonUniformFMin,
+        .GroupNonUniformSMax,
+        .GroupNonUniformUMax,
+        .GroupNonUniformFMax,
+        .GroupNonUniformBitwiseAnd,
+        .GroupNonUniformBitwiseOr,
+        .GroupNonUniformBitwiseXor,
+        .GroupNonUniformLogicalAnd,
+        .GroupNonUniformLogicalOr,
+        .GroupNonUniformLogicalXor,
+        .GroupNonUniformQuadBroadcast,
+        .GroupNonUniformQuadSwap,
         .GroupNonUniformRotate,
         => true, // -> HLSL Wave* (SM 6.0+)
         else => false,
@@ -364,10 +390,17 @@ fn isSubgroupOp(op: spirv.Op) bool {
 
 fn isRayTracingOp(op: spirv.Op) bool {
     return switch (op) {
-        .TraceRayKHR, .ReportIntersectionKHR, .IgnoreIntersectionKHR, .TerminateRayKHR,
-        .ExecuteCallableKHR, .RayQueryInitializeKHR, .RayQueryProceedKHR,
-        .RayQueryGetIntersectionTypeKHR, .RayQueryGetIntersectionTriangleVertexPositionsKHR,
-        .TypeAccelerationStructureKHR, .TypeRayQueryKHR,
+        .TraceRayKHR,
+        .ReportIntersectionKHR,
+        .IgnoreIntersectionKHR,
+        .TerminateRayKHR,
+        .ExecuteCallableKHR,
+        .RayQueryInitializeKHR,
+        .RayQueryProceedKHR,
+        .RayQueryGetIntersectionTypeKHR,
+        .RayQueryGetIntersectionTriangleVertexPositionsKHR,
+        .TypeAccelerationStructureKHR,
+        .TypeRayQueryKHR,
         => true, // -> DXR / RayQuery (SM 6.1+ / 6.3+)
         else => false,
     };
@@ -398,8 +431,14 @@ fn requireMinShaderModel(module: ParsedModule, shader_model: u32) !void {
         }
     }
     switch (module.execution_model) {
-        .MeshEXT, .TaskEXT, // mesh/task: SM 6.5+
-        .RayGenerationKHR, .IntersectionKHR, .AnyHitKHR, .ClosestHitKHR, .MissKHR, .CallableKHR, // DXR: SM 6.1+
+        .MeshEXT,
+        .TaskEXT, // mesh/task: SM 6.5+
+        .RayGenerationKHR,
+        .IntersectionKHR,
+        .AnyHitKHR,
+        .ClosestHitKHR,
+        .MissKHR,
+        .CallableKHR, // DXR: SM 6.1+
         => return error.RequiresShaderModel60,
         else => {},
     }
