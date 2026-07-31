@@ -3144,7 +3144,13 @@ fn emitFunction(
                     .frag_depth => "gl_FragDepth",
                     .layer => "gl_Layer",
                     .viewport_index => "gl_ViewportIndex",
-                    else => ov_name,
+                    // Any other BuiltIn on an OUTPUT is not one zioshade maps to a
+                    // predefined GLSL name. Keeping the OpName would silently reproduce
+                    // the bug this loop fixes: the declaration pass (emitModuleGlobals)
+                    // skips EVERY BuiltIn-decorated Output assuming it is predefined, so
+                    // an unmapped builtin would stay a use-without-declaration. Refuse
+                    // loudly instead (mandate: correct output or honest error).
+                    else => return error.CrossCompileUnsupported,
                 };
                 if (!std.mem.eql(u8, ov_name, obuiltin_name)) {
                     const a = alloc.dupe(u8, obuiltin_name) catch continue;
