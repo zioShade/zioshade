@@ -280,6 +280,14 @@ generate-outputs:
 status:
     @bash tools/gen_status.sh
 
+# regenerate docs/COVERAGE_MATRIX.md -- per-backend SPIR-V opcode/capability coverage,
+# computed statically from the code + the empirical reach of the real SPIR-V fixtures.
+# Bounds the correctness scope (which Op opcodes each backend handles vs the modelled
+# universe) so it is measurable, not corpus-implicit. See tools/coverage_matrix.sh.
+coverage-matrix:
+    @bash tools/coverage_matrix.sh > docs/COVERAGE_MATRIX.md
+    @echo "docs/COVERAGE_MATRIX.md regenerated (run 'bash tools/coverage_matrix.sh' to preview)"
+
 # ── fuzzing ──────────────────────────────────────────────────────────
 
 # run the structured-GLSL fuzzer (ReleaseFast). Default 100k iters; override:
