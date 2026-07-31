@@ -59,7 +59,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
 | spirv-val conformance | Reference | 2102 PASS / 0 FP-regression / 13 XFAIL (honest rejections), exits 0; counts in `docs/STATUS.md` | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
-| Error diagnostics | Rich (line, column, context) | Basic (error enum, no location) | ❌ Gap |
+| Error diagnostics | Rich (line, column, context) | Line/column via `compileToSPIRVWithDiagnostics` + CLI (`path:line:col: error: msg`); messages terse, late-stage (codegen/backend) errors lack source lines | ⚠️ Partial |
 
 ### 1.3 Cross-Compiler (replaces SPIRV-Cross)
 
@@ -272,7 +272,7 @@ wintty compiles ~10 shaders at startup:
 |---|-----|--------|--------|
 | G1 | **Reflection API** | Without this, consumers must hardcode bindings/inputs/outputs. SPIRV-Cross's most-used feature after cross-compilation. **Done (#171 Batch A + #177):** array/matrix strides, row/col-major, runtime arrays, `block_size`, readonly/writeonly, nested-struct recursion, per-member/-resource Coherent/Volatile/Restrict, and JSON serialization (`reflect --json` / `reflection.toJson`, mirroring `spirv-cross --reflect`) - all read back from decorations, never recomputed. | Large (new module, ~2,000 lines) |
 | G2 | **Robust pre-compiled SPIR-V consumption** | Backends assume zioshade-generated SPIR-V structure. Need to handle arbitrary SPIR-V from glslang, DXC, etc. | Medium (defensive parsing, edge cases) |
-| G3 | **Diagnostic quality** | Line/column tracking through the pipeline. Currently errors are opaque enums. | Medium (source mapping throughout) |
+| ~~G3~~ | ~~**Diagnostic quality**~~ | ✅ **DONE (core).** Source line/column flows lexer -> parser (AST `loc`) -> semantic (`RecordedDiag{message,line,column}` via `diag_sink`) -> `compileToSPIRVWithDiagnostics` (`Diagnostic{kind,line,column,message,path}`). The CLI prints glslang-style `path:line:col: kind: msg` (e.g. `3:18: error: UndeclaredIdentifier: undeclared_var`). **Remaining:** late-stage codegen / cross-compiler-backend errors operate on SPIR-V (post-source) and fall back to the phase category without a source line; messages are terse. Richer messages + post-SPIR-V source mapping are follow-ups. | ~~Medium~~ |
 
 ### Tier 2: Important (needed for projects beyond wintty)
 
@@ -300,7 +300,7 @@ wintty compiles ~10 shaders at startup:
 
 ### Priority Order for Closing Gaps
 
-1. **G3 (Diagnostics)** - Quick win, high impact for developer experience. Track source locations through parser→semantic→codegen.
+1. ~~**G3 (Diagnostics)**~~ - ✅ DONE (core): line/column tracking through lexer/parser/semantic, surfaced via `compileToSPIRVWithDiagnostics` + the CLI (`path:line:col: error: msg`). Remaining: richer messages + codegen/backend source mapping.
 
 2. ~~**G4 (GLSL version flexibility)**~~ - ✅ DONE (#169). Selectable desktop version 330–460 with honest-error on unsupported / ESSL.
 
