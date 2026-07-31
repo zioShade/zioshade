@@ -3745,3 +3745,20 @@ test "e54.4: OpMemberName bytes are sanitized (HLSL @data anonymous member)" {
     try assertNotContains(wgsl, "@data"); // @group/@binding are legit; only the bad member must be gone
     try assertContains(wgsl, "_data");
 }
+
+test "e54.4: module-scope OpUndef folds to a zero literal (not undeclared)" {
+    // undef_used_undeclared.spv has module-scope OpUndef values used in OpPhi,
+    // OpSLessThan, and OpBranchConditional. Every emit switch only visits module-scope
+    // OpVariable, so the undef ids were named but never declared -> undeclared
+    // identifier. The fix folds OpUndef to a zero literal in collectNames (mirroring
+    // OpConstantNull), so the uses resolve inline. (HLSL in-body case covered by the
+    // cfg.comp test above.)
+    const spv_bytes = @embedFile("arbitrary_spirv/undef_used_undeclared.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 450 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "int(0)"); // the folded module-scope int undef
+    try assertContains(glsl, "bool(0)"); // the folded module-scope bool undef
+}

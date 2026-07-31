@@ -1996,7 +1996,12 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
             if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value);
             continue;
         }
-        if (inst.op == .ConstantNull and inst.words.len > 2) {
+        // OpUndef (module-scope, per SPIR-V spec) is named by collectNames but every
+        // emit switch only visits module-scope OpVariable, so it was referenced at use
+        // sites with no declaration -> undeclared identifier. Fold it to a zero literal
+        // inline, exactly like OpConstantNull (a semantically identical zero-of-type),
+        // so each use site resolves to the literal. Matches spirv-cross (zero-inits undef).
+        if ((inst.op == .ConstantNull or inst.op == .Undef) and inst.words.len > 2) {
             const tn = glslType(m, inst.words[1], names, alloc) catch "float";
             const l = std.fmt.allocPrint(alloc, "{s}(0)", .{tn}) catch continue;
             if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value);
