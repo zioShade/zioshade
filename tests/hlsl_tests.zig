@@ -528,6 +528,25 @@ test "HLSL: SM 5.0 down-compile via glslang (gl_PerVertex interface block)" {
     try assertNotContains(hlsl50, ": SV_Position");
 }
 
+test "HLSL: helper_invocation honest-errors at SM 5.0 (RequiresShaderModel60)" {
+    // gl_HelperInvocation lowers to WaveIsHelperLane (SM 6.0+). At --shader-model 50 it
+    // must refuse rather than emit HLSL invalid for SM 5.0 (the never-plausible-but-wrong
+    // failure). The same requireMinShaderModel gate covers OpGroupNonUniform* (subgroup/
+    // Wave) at SM < 6.0, SV_Barycentrics at < 6.1, and mesh/task execution models at < 6.5.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out float o;
+        \\void main() { o = gl_HelperInvocation ? 1.0 : 0.0; }
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try std.testing.expectError(error.RequiresShaderModel60, zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 50 }));
+    // At SM 6.0 the Wave op is valid: no error, and the helper-lane call is emitted.
+    const hlsl60 = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl60);
+    try assertContains(hlsl60, "HelperLane");
+}
+
 // Vertex OUTPUT interpolation qualifiers (Flat/Centroid/NoPerspective/Sample) were
 // DROPPED from VS_OUTPUT — silent plausible-wrong (the gate's glslang compile
 // passes, but a `flat int` gets interpolated, a `noperspective` float gets
