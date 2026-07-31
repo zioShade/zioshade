@@ -4648,7 +4648,7 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
             // operand), so this never trips in practice.
             var guard: u32 = 0;
             while (guard < bound) : (guard += 1) {
-                    cur = replacements.get(cur) orelse break;
+                cur = replacements.get(cur) orelse break;
             }
             entry.value_ptr.* = cur; // in-place value mutation; no rehash -> safe during iteration
         }
