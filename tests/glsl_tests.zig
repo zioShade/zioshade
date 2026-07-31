@@ -3737,4 +3737,11 @@ test "e54.4: OpMemberName bytes are sanitized (HLSL @data anonymous member)" {
     defer alloc.free(glsl);
     try assertNotContains(glsl, "@"); // the raw '@' must not survive
     try assertContains(glsl, "_data"); // sanitized member name
+
+    // The fix is in shared commonGetMemberName, so confirm the WGSL path is sanitized
+    // too (comp.spv WGSL is valid in the sweep; lock that against future refactors).
+    const wgsl = try zioshade.spirvToWGSL(alloc, words, .{});
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, "@data"); // @group/@binding are legit; only the bad member must be gone
+    try assertContains(wgsl, "_data");
 }
