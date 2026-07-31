@@ -327,6 +327,14 @@ fuzz count="100000":
 fuzz-million:
     {{zig}} build fuzz -Doptimize=ReleaseFast -- --count 1000000 --seed 1
 
+# e54.4: arbitrary-SPIR-V backend validity sweep. Validity-checks zioshade's emitted
+# MSL/HLSL/GLSL/WGSL on ARBITRARY .spv input (external SPIR-V, not GLSL source), with
+# spirv-cross discrimination. NOT in `ci`: it is a bug-finder that currently surfaces
+# known open bugs (beads zioshade-e54.4 children). Exits non-zero while any remain.
+spv-validity:
+    {{zig}} build cli
+    tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
+
 # ── benchmarks ───────────────────────────────────────────────────────
 
 # run wintty shader benchmark (ReleaseFast, 50 iterations)

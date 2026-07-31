@@ -149,6 +149,12 @@ on a real Metal GPU:
   spirv-fuzz-style equivalent-program oracle.
 - `just coverage-matrix` -- per-backend opcode/capability coverage (scope is bounded, not
   corpus-implicit). `just reduce` -- spirv-reduce a failing SPIR-V to a minimal repro.
+- `tools/spv_input_validity_sweep.sh` (e54.4) -- the ARBITRARY-SPIR-V analog of the
+  GLSL-source validity sweeps: feeds `.spv` binaries (not GLSL source, so it exercises
+  consumption of external SPIR-V from glslang/DXC/spirv-opt) through all four backends and
+  compile-checks each emission (glslang/naga/Metal/dxc), spirv-cross-discriminated. The
+  GLSL-source sweeps only ever exercised zioshade's own frontend output; this one gates
+  robust arbitrary-SPIR-V consumption. Not in `just ci` while known bugs are open.
 
 Always `PROVE_FULL=1 just prove` before claiming correctness (the default is a 1/25 sample).
 
