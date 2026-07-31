@@ -4631,6 +4631,29 @@ pub fn algebraicSimpl(alloc: std.mem.Allocator, words: []const u32) error{OutOfM
 
     if (replacements.count() == 0) return words;
 
+    // Phase 3.6: Transitively close the replacement map. An identity chain like
+    // ((x+0)*1)|0 yields B->A, C->B, D->C; a single-level operand substitution in
+    // Phase 4 (`replacements.get(w) orelse w`) then leaves a use pointing at an
+    // eliminated intermediate (D's user resolves to C, which is itself deleted),
+    // emitting a dangling SPIR-V id (spirv-val: "ID has not been defined"). Resolve
+    // every key to its ultimate non-replaced target so an eliminated intermediate is
+    // never left referenced. (Found by the r2d.5 metamorphic oracle.)
+    {
+        var it = replacements.iterator();
+        while (it.next()) |entry| {
+            var cur = entry.value_ptr.*;
+            // Follow the replacement chain to its terminal root. Bounded by `bound`
+            // (the SPIR-V id ceiling) -- a strict upper bound on any chain length and
+            // a cycle break; identity folds are a DAG (result -> already-defined
+            // operand), so this never trips in practice.
+            var guard: u32 = 0;
+            while (guard < bound) : (guard += 1) {
+                    cur = replacements.get(cur) orelse break;
+            }
+            entry.value_ptr.* = cur; // in-place value mutation; no rehash -> safe during iteration
+        }
+    }
+
     // Phase 4: Rewrite
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
     result.appendSliceAssumeCapacity(words[0..5]);

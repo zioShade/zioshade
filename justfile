@@ -288,6 +288,24 @@ coverage-matrix:
     @bash tools/coverage_matrix.sh > docs/COVERAGE_MATRIX.md
     @echo "docs/COVERAGE_MATRIX.md regenerated (run 'bash tools/coverage_matrix.sh' to preview)"
 
+# integer-corpus UB-free contract guard (r2d.4): machine-check that no corpus shader
+# contains OpUndef or an integer div/mod by constant 0 / INT_MIN-by-minus-1. Variable
+# divisors that are runtime-guarded (e.g. gcd's Euclid loop) are INFO, not failures.
+# This is what makes `just prove-integer` an airtight "any DIFFER is a real bug" claim.
+# See tests/integer_corpus/README.md for the full contract (incl. what is NOT UB:
+# integer add/mul/sub wrap is defined in SPIR-V).
+ub-check:
+    @bash tools/integer_corpus_ub_check.sh
+
+# Metamorphic equivalence oracle (r2d.5): for each pair of PROVABLY-equivalent GLSL
+# programs in tests/integer_corpus/metamorphic/, cross-compile both with zioshade's MSL
+# backend and render-diff on Metal. The two must render identically (the rewrite preserves
+# integer semantics). A DIFFER is a guaranteed zioshade miscompilation -- the operand-level
+# class differential-testing ACROSS compilers cannot reach. Pass 1 is curated pairs;
+# spirv-fuzz-style auto-generation is pass 2. macOS/Metal only.
+metamorphic:
+    @bash tools/metamorphic_check.sh
+
 # ── fuzzing ──────────────────────────────────────────────────────────
 
 # run the structured-GLSL fuzzer (ReleaseFast). Default 100k iters; override:
