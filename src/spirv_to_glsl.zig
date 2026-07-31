@@ -3133,6 +3133,12 @@ fn emitFunction(
         // and skips them). Mirrors the input loop above. (e54.4: arbitrary SPIR-V
         // uses-without-declaration.)
         for (output_var_ids.items) |ovid| {
+            // A gl_PerVertex-style interface BLOCK carries BuiltIn on its members
+            // (OpMemberDecorate), not the variable. Guard explicitly to match the
+            // declaration pass (emitModuleGlobals) and stay safe if a producer ever
+            // puts BuiltIn on the block var itself -- without this, the instance would
+            // be renamed to gl_Position and member access would break.
+            if (isBuiltinBlockVar(m, names, ovid)) continue;
             const ov_name = names.get(ovid) orelse continue;
             const obuiltin = getDecVal(decs, ovid, .built_in);
             if (obuiltin) |obi| {
@@ -3149,7 +3155,12 @@ fn emitFunction(
                     // the bug this loop fixes: the declaration pass (emitModuleGlobals)
                     // skips EVERY BuiltIn-decorated Output assuming it is predefined, so
                     // an unmapped builtin would stay a use-without-declaration. Refuse
-                    // loudly instead (mandate: correct output or honest error).
+                    // loudly instead (mandate: correct output or honest error). Known
+                    // GLSL-predefined-but-unmapped outputs (safe extension points):
+                    //   tess_level_outer -> gl_TessLevelOuter
+                    //   tess_level_inner -> gl_TessLevelInner
+                    //   primitive_id -> gl_PrimitiveID
+                    //   primitive_shading_rate_ext -> gl_PrimitiveShadingRateEXT
                     else => return error.CrossCompileUnsupported,
                 };
                 if (!std.mem.eql(u8, ov_name, obuiltin_name)) {
