@@ -338,6 +338,73 @@ const ParsedModule = struct {
     }
 };
 
+/// Honest-error when the module uses a feature the selected Shader Model cannot express.
+/// SPIR-V carries no target-SM notion, so without this the HLSL backend would emit
+/// Wave/subgroup (SM 6.0+), SV_Barycentrics (6.1+), or mesh/task (6.5+) source under
+/// `shader_model < 6.x` -- HLSL invalid for the requested SM. That is the
+/// never-plausible-but-wrong failure this project refuses; fail loud instead. (G10.)
+fn isSubgroupOp(op: spirv.Op) bool {
+    return switch (op) {
+        .SubgroupAllKHR, .SubgroupAnyKHR, .SubgroupAllEqualKHR,
+        .GroupNonUniformElect, .GroupNonUniformAll, .GroupNonUniformAny, .GroupNonUniformAllEqual,
+        .GroupNonUniformBroadcast, .GroupNonUniformBroadcastFirst, .GroupNonUniformBallot,
+        .GroupNonUniformInverseBallot, .GroupNonUniformBallotBitExtract, .GroupNonUniformBallotBitCount,
+        .GroupNonUniformBallotFindLSB, .GroupNonUniformBallotFindMSB, .GroupNonUniformShuffle,
+        .GroupNonUniformShuffleXor, .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown,
+        .GroupNonUniformIAdd, .GroupNonUniformFAdd, .GroupNonUniformIMul, .GroupNonUniformFMul,
+        .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin, .GroupNonUniformSMax,
+        .GroupNonUniformUMax, .GroupNonUniformFMax, .GroupNonUniformBitwiseAnd, .GroupNonUniformBitwiseOr,
+        .GroupNonUniformBitwiseXor, .GroupNonUniformLogicalAnd, .GroupNonUniformLogicalOr,
+        .GroupNonUniformLogicalXor, .GroupNonUniformQuadBroadcast, .GroupNonUniformQuadSwap,
+        .GroupNonUniformRotate,
+        => true, // -> HLSL Wave* (SM 6.0+)
+        else => false,
+    };
+}
+
+fn isRayTracingOp(op: spirv.Op) bool {
+    return switch (op) {
+        .TraceRayKHR, .ReportIntersectionKHR, .IgnoreIntersectionKHR, .TerminateRayKHR,
+        .ExecuteCallableKHR, .RayQueryInitializeKHR, .RayQueryProceedKHR,
+        .RayQueryGetIntersectionTypeKHR, .RayQueryGetIntersectionTriangleVertexPositionsKHR,
+        .TypeAccelerationStructureKHR, .TypeRayQueryKHR,
+        => true, // -> DXR / RayQuery (SM 6.1+ / 6.3+)
+        else => false,
+    };
+}
+
+/// G10: the SM 5.0 down-compile path. Refuse SM 6.0+-only constructs at
+/// `shader_model < 60` (SM 5.0): they have no SM 5.0 form, and SPIR-V carries no
+/// target-SM notion, so emitting them would produce HLSL invalid for SM 5.0 (the
+/// never-plausible-but-wrong failure). Covers subgroup/Wave ops, helper_invocation
+/// (-> IsHelperLane), SV_Barycentrics, raytracing (DXR entry models + TraceRay/RayQuery
+/// ops), and mesh/task (entry models + EmitMeshTasksEXT). At SM 6.0+ (the default) it
+/// is a no-op. The 6.0 threshold is deliberately conservative: SV_Barycentrics is
+/// strictly 6.1 and mesh/task 6.5, but gating those at the SM 6.0 default would break
+/// existing usage -- a precise per-feature min-SM compare is future work.
+/// TODO(e54.6): replace this flat < 60 gate with `min_required_sm` per feature
+/// (subgroup/helper 60, barycentric 61, RT 61, mesh/task 65) once default/usage is sorted.
+fn requireMinShaderModel(module: ParsedModule, shader_model: u32) !void {
+    if (shader_model >= 60) return;
+    const built_in_decoration = @intFromEnum(spirv.Decoration.built_in);
+    for (module.instructions) |inst| {
+        if (isSubgroupOp(inst.op)) return error.RequiresShaderModel60;
+        if (isRayTracingOp(inst.op)) return error.RequiresShaderModel60;
+        if (inst.op == .EmitMeshTasksEXT) return error.RequiresShaderModel60; // -> DispatchMesh (SM 6.5+)
+        if (inst.op == .Decorate and inst.words.len >= 4 and inst.words[2] == built_in_decoration) {
+            const bi: spirv.BuiltIn = @enumFromInt(inst.words[3]);
+            if (bi == .helper_invocation or bi == .bary_coord_khr or bi == .bary_coord_no_persp_khr)
+                return error.RequiresShaderModel60; // IsHelperLane / SV_Barycentrics
+        }
+    }
+    switch (module.execution_model) {
+        .MeshEXT, .TaskEXT, // mesh/task: SM 6.5+
+        .RayGenerationKHR, .IntersectionKHR, .AnyHitKHR, .ClosestHitKHR, .MissKHR, .CallableKHR, // DXR: SM 6.1+
+        => return error.RequiresShaderModel60,
+        else => {},
+    }
+}
+
 fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     if (words.len < 5) return error.InvalidSpirv;
     if (words[0] != spirv.MAGIC) return error.InvalidSpirvMagic;
@@ -1215,6 +1282,11 @@ pub fn spirvToHLSL(
     defer if (_norm) |n| alloc.free(n);
     var module = try parseModule(alloc, _norm orelse spirv_words);
     defer module.deinit(alloc);
+
+    // G10: refuse SM 6.x-only features (subgroup/Wave, SV_Barycentrics, mesh/task) when
+    // targeting an older Shader Model -- otherwise the backend emits HLSL invalid for the
+    // requested SM (the never-plausible-but-wrong failure). Fail loud.
+    try requireMinShaderModel(module, options.shader_model);
 
     // Descriptor sampler/image ARRAYS (`uniform sampler2D tex[4]`) are not yet
     // supported by the HLSL backend (the Texture/SamplerState split needs the
