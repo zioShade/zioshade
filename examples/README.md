@@ -6,6 +6,7 @@ End-to-end programs that link against the public `zioshade` module.
 |---|---|
 | [`glsl_to_hlsl.zig`](glsl_to_hlsl.zig) | Minimal GLSL → SPIR-V → HLSL pipeline, prints the HLSL source. |
 | [`reflect_uniforms.zig`](reflect_uniforms.zig) | Compile a GLSL fragment shader, reflect the UBOs and samplers. |
+| [`c/main.c`](c/main.c) | C consumer of the C ABI: GLSL → SPIR-V → HLSL/MSL/WGSL, and the M7.3 CI smoke test (`zig build c-lib` + `zig build run-c-example`). |
 
 ## Build & run
 
