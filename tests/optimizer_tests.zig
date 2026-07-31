@@ -278,6 +278,47 @@ test "optimizer: algebraic simplification x*0=0 (INTEGER — valid, no NaN/Inf)"
     try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(zioshade.spirv.Op.IMul)));
 }
 
+test "optimizer: identity chain ((x+0)*1)|0 folds without a dangling id (r2d.5)" {
+    // A composed integer identity must fold all the way through to the underlying
+    // value. Pre-fix, algebraicSimpl built a single-level replacement map
+    // (B->A, C->B, D->C) and Phase 4 substituted operands one level, so a use of the
+    // chain resolved to an ELIMINATED intermediate -> a dangling SPIR-V id
+    // (spirv-val: "ID has not been defined") and the backends emitted an undeclared
+    // reference. Found by the metamorphic oracle (`just metamorphic`, identity pair),
+    // which guards it end-to-end; this test pins the fold at the SPIR-V layer.
+    const source =
+        \\#version 450
+        \\out vec4 FragColor;
+        \\void main() {
+        \\    int x = int(gl_FragCoord.x) ^ int(gl_FragCoord.y);
+        \\    int c = ((x + 0) * 1) | 0;
+        \\    FragColor = vec4(float(c & 255) / 255.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    // The |0 identity is eliminated (no other bitwise-or in this shader).
+    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(zioshade.spirv.Op.BitwiseOr)));
+    // The `c & 255` operand must resolve to the LIVE OpBitwiseXor result (x), not a
+    // dangling eliminated id. Scan instructions to correlate the two.
+    var pos: usize = 5;
+    var and_operand: ?u32 = null;
+    var xor_result: ?u32 = null;
+    while (pos + 1 < spirv.len) {
+        const hdr = spirv[pos];
+        const wc: u32 = hdr >> 16;
+        const op: u16 = @truncate(hdr & 0xFFFF);
+        if (wc == 0) break;
+        if (pos + wc > spirv.len) break;
+        if (op == @intFromEnum(zioshade.spirv.Op.BitwiseAnd) and wc >= 5) and_operand = spirv[pos + 3];
+        if (op == @intFromEnum(zioshade.spirv.Op.BitwiseXor) and wc >= 4) xor_result = spirv[pos + 2];
+        pos += wc;
+    }
+    try std.testing.expect(xor_result != null); // underlying x preserved
+    try std.testing.expect(and_operand != null);
+    try std.testing.expectEqual(xor_result.?, and_operand.?); // & references the live xor, not a dangling id
+}
+
 test "optimizer: inline trivial functions" {
     const source =
         \\#version 450
