@@ -288,6 +288,15 @@ coverage-matrix:
     @bash tools/coverage_matrix.sh > docs/COVERAGE_MATRIX.md
     @echo "docs/COVERAGE_MATRIX.md regenerated (run 'bash tools/coverage_matrix.sh' to preview)"
 
+# integer-corpus UB-free contract guard (r2d.4): machine-check that no corpus shader
+# contains OpUndef or an integer div/mod by constant 0 / INT_MIN-by-minus-1. Variable
+# divisors that are runtime-guarded (e.g. gcd's Euclid loop) are INFO, not failures.
+# This is what makes `just prove-integer` an airtight "any DIFFER is a real bug" claim.
+# See tests/integer_corpus/README.md for the full contract (incl. what is NOT UB:
+# integer add/mul/sub wrap is defined in SPIR-V).
+ub-check:
+    @bash tools/integer_corpus_ub_check.sh
+
 # ── fuzzing ──────────────────────────────────────────────────────────
 
 # run the structured-GLSL fuzzer (ReleaseFast). Default 100k iters; override:
