@@ -366,7 +366,29 @@ fn isUniformVar(m: *const ParsedModule, id: u32) bool {
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
         // PushConstant blocks are emitted as UBO-style `constant T& name_1`
         // buffers (#483), so member access qualifies through the same `_1` path.
-        return sc == .Uniform or sc == .PushConstant;
+        if (sc == .PushConstant) return true;
+        if (sc == .Uniform) {
+            // An old-style SSBO (Uniform + BufferBlock on the pointee struct) is
+            // emitted as `device T& name` (NOT the `constant T& name_1` UBO form).
+            // Flagging it here would make the body emitter apply the `_1` UBO
+            // qualifier to a `device` reference -> undeclared identifier. Modern
+            // SSBOs (StorageBuffer class) already return false above.
+            if (resolvePointee(m, id)) |ptid| {
+                if (hasBufferBlockDec(m, ptid)) return false;
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+/// True if struct type `type_id` carries a BufferBlock decoration (old-style SSBO).
+/// Linear scan -- isUniformVar / writeAccessExpr have no `decs` map in scope.
+fn hasBufferBlockDec(m: *const ParsedModule, type_id: u32) bool {
+    const bb = @intFromEnum(spirv.Decoration.buffer_block);
+    for (m.instructions) |inst| {
+        if (inst.op == .Decorate and inst.words.len >= 3 and
+            inst.words[1] == type_id and inst.words[2] == bb) return true;
     }
     return false;
 }
@@ -2932,8 +2954,13 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
         if (inst.op == .Variable and inst.words.len >= 4) {
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
             const rid = inst.words[2];
-            // SSBOs use StorageBuffer storage class (SPIR-V 1.3+) or Uniform + BufferBlock decoration
-            const is_ssbo = sc == .StorageBuffer or (sc == .Uniform and hasDec(&decs, rid, .buffer_block));
+            // SSBOs use StorageBuffer storage class (SPIR-V 1.3+) or Uniform + BufferBlock
+            // decoration. BufferBlock decorates the struct TYPE (SPIR-V spec), not the
+            // variable, so resolve the pointee and check it there -- checking the
+            // variable id always missed old-style Uniform+BufferBlock SSBOs.
+            const pointee_type = resolvePointee(&module, rid);
+            const is_ssbo = sc == .StorageBuffer or
+                (sc == .Uniform and pointee_type != null and hasDec(&decs, pointee_type.?, .buffer_block));
             if (!is_ssbo) continue;
             const binding = getDecVal(&decs, rid, .binding) orelse continue;
             const set = getDecVal(&decs, rid, .descriptor_set) orelse 0;
@@ -3896,7 +3923,7 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
         switch (sc) {
             .Uniform => {
                 const binding = getDecVal(decs, rid, .binding) orelse 0;
-                if (hasDec(decs, rid, .buffer_block)) {
+                if (hasDec(decs, pt, .buffer_block)) {
                     // SSBO (Uniform + BufferBlock): shares the MSL buffer index space.
                     trackBinding(&max_buf_binding, binding);
                     continue;
