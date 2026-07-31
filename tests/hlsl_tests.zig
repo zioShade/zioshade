@@ -207,11 +207,12 @@ test "#475: LocalSizeId resolves spec-constant defaults to numthreads" {
 // cfg.comp regression: an OpStore whose value operand is an OpUndef result. The
 // zioshade frontend emits this shape when it folds dead loops over uninitialized
 // locals (e.g. `float h; for(...) h+=10; data = h;` -> `data = undef`). The OpUndef
-// result id is referenced by the store, so it MUST be declared like any other value;
-// previously the HLSL backend skipped OpUndef and emitted `data = vN;` for an
-// undeclared id (glslang: "unknown variable" -> INVALID HLSL, gate failure on
-// cfg.comp). Now it declares a zero-initialized local, matching the MSL backend.
-test "cfg.comp: OpUndef value stored to an SSBO is declared (not an unknown variable)" {
+// result id is referenced by the store, so it must resolve to a real value; previously
+// the HLSL backend skipped OpUndef and emitted `data = vN;` for an undeclared id
+// (glslang: "unknown variable" -> INVALID HLSL, gate failure on cfg.comp). Now OpUndef
+// is folded to a zero literal inline (in collectNames, mirroring OpConstantNull), so
+// the store uses the literal directly. Matches spirv-cross (zero-inits undef).
+test "cfg.comp: OpUndef stored to an SSBO is folded to a zero literal (not an unknown variable)" {
     const spirv = assembleSpirv("undefstore",
         \\OpCapability Shader
         \\OpMemoryModel Logical GLSL450
@@ -241,8 +242,8 @@ test "cfg.comp: OpUndef value stored to an SSBO is declared (not an unknown vari
     defer alloc.free(spirv);
     const hlsl = try spirvToHlsl60(spirv);
     defer alloc.free(hlsl);
-    // The OpUndef result is declared with zero-initialization before the store.
-    try assertContains(hlsl, "= {};");
+    // The OpUndef result is folded to a zero literal inline at the store.
+    try assertContains(hlsl, "((float)0)");
 }
 
 // #170 OpFUnordEqual: unordered-equal is TRUE on a NaN operand (ordered == is false

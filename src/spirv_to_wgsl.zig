@@ -2074,6 +2074,28 @@ fn collectDecorations(alloc: std.mem.Allocator, module: *const ParsedModule, dec
 fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8)) void {
     common.collectNames(alloc, module, names);
 
+    // OpUndef (module-scope, per SPIR-V spec) is named by common.collectNames but
+    // every emit switch only visits module-scope OpVariable, so it was referenced at
+    // use sites with no declaration -> undeclared identifier. Fold it to a zero
+    // literal inline (the other backends fold the semantically identical OpConstantNull;
+    // WGSL has no ConstantNull fold, so this is its own block). The in-body `.Undef =>`
+    // arm is a no-op; the value is inlined here. Matches spirv-cross (zero-inits undef).
+    for (module.instructions) |inst| {
+        if (inst.op != .Undef or inst.words.len <= 2) continue;
+        const ti = getDef(module, inst.words[1]);
+        const z: []const u8 = if (ti) |t| switch (t.op) {
+            .TypeInt => std.fmt.allocPrint(alloc, "0", .{}) catch continue,
+            .TypeFloat => std.fmt.allocPrint(alloc, "0.0", .{}) catch continue,
+            .TypeBool => std.fmt.allocPrint(alloc, "false", .{}) catch continue,
+            .TypeVector, .TypeMatrix => blk: {
+                const tn = wgslType(module, inst.words[1], names, alloc) catch "vec4f";
+                break :blk std.fmt.allocPrint(alloc, "{s}()", .{tn}) catch continue;
+            },
+            else => std.fmt.allocPrint(alloc, "0", .{}) catch continue,
+        } else std.fmt.allocPrint(alloc, "0", .{}) catch continue;
+        if (names.fetchPut(inst.words[2], z) catch null) |old| alloc.free(old.value);
+    }
+
     // Post-process: rename OpName-sourced identifiers that collide with WGSL
     // reserved words. Struct member names (OpMemberName) are handled
     // separately by getMemberName.
@@ -8431,15 +8453,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // return and accepts the function without a trailing terminator. (#170)
             .Unreachable => {},
 
-            // Undef — zero-initialize
-            .Undef => {
-                if (inst.words.len > 2) {
-                    const rt = try wgslType(module, inst.words[1], names, arena);
-                    const rn = names.get(inst.words[2]) orelse "v";
-                    try writeInd(w, indent);
-                    try w.print("var {s}: {s}; // undef\n", .{ rn, rt });
-                }
-            },
+            // OpUndef is folded to a zero literal in collectNames; emit nothing here.
+            .Undef => {},
 
             // Nop
             .Nop => {},
