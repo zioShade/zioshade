@@ -3722,3 +3722,26 @@ test "e54.4: standalone BuiltIn Position output maps to predefined gl_Position" 
     try assertContains(glsl, "gl_Position");
     try assertNotContains(glsl, "_entryPointOutput");
 }
+
+test "e54.4: OpMemberName bytes are sanitized (HLSL @data anonymous member)" {
+    // The HLSL frontend names an anonymous RWStructuredBuffer member "@data" (the @
+    // flags compiler-generated). OpName (variable names) are routed through sanitizeName;
+    // OpMemberName must be too, or the raw "@data" reaches the page as an invalid /
+    // undeclared identifier in every backend. The fix lives in commonGetMemberName
+    // (shared), so validating the GLSL path covers WGSL/MSL too.
+    const spv_bytes = @embedFile("arbitrary_spirv/comp.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 450 });
+    defer alloc.free(glsl);
+    try assertNotContains(glsl, "@"); // the raw '@' must not survive
+    try assertContains(glsl, "_data"); // sanitized member name
+
+    // The fix is in shared commonGetMemberName, so confirm the WGSL path is sanitized
+    // too (comp.spv WGSL is valid in the sweep; lock that against future refactors).
+    const wgsl = try zioshade.spirvToWGSL(alloc, words, .{});
+    defer alloc.free(wgsl);
+    try assertNotContains(wgsl, "@data"); // @group/@binding are legit; only the bad member must be gone
+    try assertContains(wgsl, "_data");
+}
