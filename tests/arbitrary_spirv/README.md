@@ -16,9 +16,9 @@ just spv-validity
 
 | File | Producer | Stage | Bug class (beads) |
 |---|---|---|---|
-| `temp_0012.spv` | spirv-reduce | Fragment | `OpUndef` values used in control flow but never declared (`v5`/`v6`) -> undeclared identifier in GLSL/WGSL/MSL. spirv-cross zero-inits. |
+| `undef_used_undeclared.spv` | spirv-reduce | Fragment | `OpUndef` values used in control flow but never declared (`v5`/`v6`) -> undeclared identifier in GLSL/WGSL/MSL. spirv-cross zero-inits. |
 | `vert.spv` | glslang | Vertex | Output interface variable (`_entryPointOutput_gl_Position`) used but its declaration dropped. |
-| `comp.spv` | glslang | Compute | Compute-resource decoration mis-emitted: stray `@` token in GLSL, invalid `@data` attribute in WGSL. |
+| `comp.spv` | glslang | Compute | Compute-resource decoration mis-emitted: stray `@` token in GLSL, `@data: array<u32>` in WGSL, and `uint @data[1]` in MSL (same root cause). |
 
 These are the gate's fixtures: a fix for a class must turn its file(s) from INVALID to valid
 (spirv-cross-discriminated for MSL/HLSL) in the sweep. A file is intentionally kept here
