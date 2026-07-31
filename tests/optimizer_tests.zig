@@ -297,10 +297,13 @@ test "optimizer: identity chain ((x+0)*1)|0 folds without a dangling id (r2d.5)"
     ;
     const spirv = try compileFrag(source);
     defer alloc.free(spirv);
-    // The |0 identity is eliminated (no other bitwise-or in this shader).
-    try std.testing.expectEqual(@as(u32, 0), countOpcode(spirv, @intFromEnum(zioshade.spirv.Op.BitwiseOr)));
-    // The `c & 255` operand must resolve to the LIVE OpBitwiseXor result (x), not a
-    // dangling eliminated id. Scan instructions to correlate the two.
+    // The load-bearing check: the `c & 255` operand must resolve to the LIVE
+    // OpBitwiseXor result (x), not a dangling eliminated id. Pre-fix the operand was
+    // the eliminated intermediate, so xor_result != and_operand and this fails.
+    // (We do NOT assert the identity ops are gone via countOpcode -- that is
+    // non-load-bearing: the |0 folded both pre- and post-fix, and countOpcode scans
+    // every word's low-16 bits, not just instruction headers. The id correlation is
+    // the faithful regression signal.)
     var pos: usize = 5;
     var and_operand: ?u32 = null;
     var xor_result: ?u32 = null;

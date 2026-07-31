@@ -29,7 +29,10 @@ INTMIN="-2147483648"
 TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
 fails=0
 
-for src in tests/integer_corpus/*.frag; do
+# Cover the whole corpus tree: top-level + the metamorphic/ pair members. The
+# contract claims "every shader in this directory", and a metamorphic pair member
+# with UB would turn a DIFFER into a UB artifact, not a proven bug.
+for src in tests/integer_corpus/*.frag tests/integer_corpus/metamorphic/*.frag; do
   if ! "$CLI" compile "$src" -o "$TMP" 2>/dev/null; then
     echo "FAIL $(basename "$src"): compile failed"; fails=$((fails+1)); continue
   fi
@@ -39,9 +42,14 @@ for src in tests/integer_corpus/*.frag; do
   # awk prints FAIL/INFO lines directly; its exit code (1 only on a real FAIL) drives the count.
   if ! printf '%s\n' "$dis" | awk -v SHADER="$(basename "$src")" -v INTMIN="$INTMIN" '
     function strip(s){ sub(/^%/,"",s); return s }
-    # OpConstant (plain or %id = assign form); trailing-space anchor excludes Composite/Null/Bool
+    # spirv-dis default emits the `%id = OpConstant %type value` form (next line); this
+    # plain `OpConstant %type %id value` form only appears with non-default output. Keep
+    # both for safety (trailing-space anchor excludes Composite/Null/Bool).
     /^[[:space:]]*OpConstant /                  { id=strip($3); val=$4;   constv[id]=val }
     /^[[:space:]]*%[A-Za-z0-9_]+ = OpConstant / { id=strip($1); val=$NF;  constv[id]=val }
+    # NoSignedWrap/NoUnsignedWrap decorations make integer wrap UB -- their presence
+    # silently invalidates the "wrapping is defined" basis of the contract.
+    /NoSignedWrap|NoUnsignedWrap/ { print "FAIL " SHADER ": NoSignedWrap/NoUnsignedWrap decoration present -- integer wrap becomes UB, invalidating the contract: " $0; bad=1 }
     {
       op = ($2 == "=") ? $3 : $1
       if (op == "OpSDiv" || op == "OpUDiv" || op == "OpSMod" || op == "OpUMod" || op == "OpSRem") {

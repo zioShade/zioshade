@@ -33,8 +33,17 @@ FP nondeterminism. The contract is what makes `any DIFFER == bug` airtight.
   satisfy the contract — all backends wrap identically. (This corrects the common
   C-trained intuition that "integer overflow is UB"; in SPIR-V shaders it is not,
   except the signed-division case above.) `NoSignedWrap`/`NoUnsignedWrap`
-  decorations would make wrapping UB, but zioshade's frontend does not decorate
-  these corpus computations with them.
+  decorations would make wrapping UB; `tools/integer_corpus_ub_check.sh` now FAILS if
+  any such decoration is present, so a future frontend change adding them cannot
+  silently invalidate the contract.
+- **Metal/C++ signed-overflow caveat (render layer).** SPIR-V defines integer wrap,
+  but MSL is C++-derived and signed overflow is technically UB at the *language* layer.
+  The render-equality claim therefore holds *differentially* -- on Apple GPU hardware
+  that wraps deterministically, which is the regime this corpus targets. The curated
+  metamorphic pairs use non-overflowing ranges (e.g. `x` in [0,31] for `x*8`), so the
+  metamorphic oracle never relies on this; only the few corpus shaders that can
+  overflow (`collatz`, `fib_mod`, `int_product`) lean on identical hardware wrap
+  across backends on the same device.
 - **`OpFMod` / `OpFRem` with a nonzero divisor** — defined (this is float, not int).
 - **Shifts by a count < the operand width** — defined. (Shift >= width would be UB;
   every shift here is bounded: `i < 16` for 32-bit, etc.)
@@ -43,11 +52,12 @@ FP nondeterminism. The contract is what makes `any DIFFER == bug` airtight.
 
 Two checks keep the contract honest; both must stay green:
 
-1. **`tools/integer_corpus_ub_check.sh`** — compiles each shader to SPIR-V and
-   statically asserts the machine-checkable invariants: no `OpUndef`, and every
-   division/modulo instruction's divisor resolves to a nonzero constant (and no
-   `INT_MIN / -1`). Run: `bash tools/integer_corpus_ub_check.sh` (exit nonzero on
-   any violation). This automates the div-by-zero and uninit-`OpUndef` classes.
+1. **`tools/integer_corpus_ub_check.sh`** — compiles every `.frag` under
+   `tests/integer_corpus/` (top-level **and** the `metamorphic/` pair members) to
+   SPIR-V and statically asserts the machine-checkable invariants: no `OpUndef`, no
+   integer div/mod whose divisor resolves to constant 0 or `INT_MIN/-1`, and no
+   `NoSignedWrap`/`NoUnsignedWrap` decoration. Run: `just ub-check` (exit nonzero on
+   any violation).
 2. **Manual review at add-time** for the classes a static check cannot fully
    decide: out-of-bounds dynamic indexing and uninitialized-variable reads that do
    not go through `OpUndef`. The per-shader table below is that review, recorded.
@@ -68,6 +78,14 @@ Two checks keep the contract honest; both must stay green:
 | `nested_int_loop` | `i*j`, `total +=` | mul/add wrap = defined; small bounded loops |
 | `parity` | shifts/xor | shift counts `< 16`; no div/mod |
 | `step_bands` | `int(x) / 32` | divisor is constant `32 != 0`; not `-1`, so no `INT_MIN/-1` |
+
+### Metamorphic pairs (`metamorphic/*.frag`)
+
+The 10 shaders in `metamorphic/` (5 equivalent pairs exercised by `just metamorphic`)
+are UB-free by construction: no division/modulo (so no div-by-zero), no `OpUndef`, and
+non-overflowing integer ranges (`x` in [0,31] for `mulshift`'s `x*8`, etc.). They are
+covered by `just ub-check` (recursive), so the oracle's "DIFFER = guaranteed bug"
+claim holds for both members of every pair.
 
 When adding a shader to this corpus, add a row here and confirm both enforcement
 checks pass. A shader that needs division must use a constant-nonzero divisor or
