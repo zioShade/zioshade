@@ -63,6 +63,10 @@ for a silent-wrong is a regression even if a test appears to pass.
 
 ## Where things live
 
+For the full module map, the frontend/optimizer/backend pipelines, the optimizer pass
+order, and how to extend (add an opcode / regression test / optimizer pass), see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
 - `src/` -- frontend (`parser.zig`, `semantic.zig`), SPIR-V codegen (`codegen.zig`),
   optimizer (`compact_ids_passes.zig`), and backends (`spirv_to_hlsl.zig`,
   `spirv_to_msl.zig`, `spirv_to_glsl.zig`, `spirv_to_wgsl.zig`), plus `compat.zig`.
