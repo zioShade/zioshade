@@ -2087,7 +2087,7 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
             .TypeInt => std.fmt.allocPrint(alloc, "0", .{}) catch continue,
             .TypeFloat => std.fmt.allocPrint(alloc, "0.0", .{}) catch continue,
             .TypeBool => std.fmt.allocPrint(alloc, "false", .{}) catch continue,
-            .TypeVector, .TypeMatrix => blk: {
+            .TypeVector, .TypeMatrix, .TypeStruct, .TypeArray, .TypeRuntimeArray => blk: {
                 const tn = wgslType(module, inst.words[1], names, alloc) catch "vec4f";
                 break :blk std.fmt.allocPrint(alloc, "{s}()", .{tn}) catch continue;
             },
@@ -2124,6 +2124,8 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
             .SpecConstantFalse,
             .SpecConstantComposite,
             .SpecConstantOp,
+            .Undef, // collectNames folds OpUndef to a zero literal (e.g. "false"); the
+            // keyword-rename below must not append '_' to that literal.
             => continue,
             else => {},
         }
