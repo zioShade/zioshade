@@ -297,6 +297,15 @@ coverage-matrix:
 ub-check:
     @bash tools/integer_corpus_ub_check.sh
 
+# Metamorphic equivalence oracle (r2d.5): for each pair of PROVABLY-equivalent GLSL
+# programs in tests/integer_corpus/metamorphic/, cross-compile both with zioshade's MSL
+# backend and render-diff on Metal. The two must render identically (the rewrite preserves
+# integer semantics). A DIFFER is a guaranteed zioshade miscompilation -- the operand-level
+# class differential-testing ACROSS compilers cannot reach. Pass 1 is curated pairs;
+# spirv-fuzz-style auto-generation is pass 2. macOS/Metal only.
+metamorphic:
+    @bash tools/metamorphic_check.sh
+
 # ── fuzzing ──────────────────────────────────────────────────────────
 
 # run the structured-GLSL fuzzer (ReleaseFast). Default 100k iters; override:
