@@ -683,7 +683,8 @@ pub fn spirvToGLSL(
 }
 
 /// Cross-compile SPIR-V binary to HLSL source.
-/// Targets Shader Model 6.0 with entry point named `main`.
+/// Targets Shader Model 6.0 by default (entry point `main`); pass `.shader_model = 50`
+/// for the SM 5.0 down-compile path (position semantic only -- see IMPLEMENTATION_STATUS G10).
 pub fn spirvToHLSL(
     alloc: std.mem.Allocator,
     spirv_words: []const u32,
