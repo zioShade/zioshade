@@ -338,6 +338,36 @@ const ParsedModule = struct {
     }
 };
 
+/// Honest-error when the module uses a feature the selected Shader Model cannot express.
+/// SPIR-V carries no target-SM notion, so without this the HLSL backend would emit
+/// Wave/subgroup (SM 6.0+), SV_Barycentrics (6.1+), or mesh/task (6.5+) source under
+/// `shader_model < 6.x` -- HLSL invalid for the requested SM. That is the
+/// never-plausible-but-wrong failure this project refuses; fail loud instead. (G10.)
+fn requireMinShaderModel(module: ParsedModule, shader_model: u32) !void {
+    // G10: the SM 5.0 down-compile path. SM 6.0+-only constructs -- subgroup/Wave ops,
+    // helper_invocation (-> WaveIsHelperLane), SV_Barycentrics, and mesh/task entry
+    // models -- have no SM 5.0 form. SPIR-V carries no target-SM notion, so emitting them
+    // under shader_model < 60 would produce HLSL invalid for SM 5.0 (the
+    // never-plausible-but-wrong failure). Refuse loud. At SM 6.0+ (the default) everything
+    // passes unchanged. (Barycentric is strictly 6.1 and mesh/task 6.5; this gate is
+    // deliberately conservative at 6.0 -- a finer per-feature split can come later.)
+    if (shader_model >= 60) return;
+    const built_in_decoration = @intFromEnum(spirv.Decoration.built_in);
+    for (module.instructions) |inst| {
+        const opv: u32 = @intFromEnum(inst.op);
+        // OpGroupNonUniform* (spec 333-366) + the KHR subgroup aliases -> Wave* (SM 6.0+).
+        if ((opv >= 333 and opv <= 366) or opv == 4428 or opv == 4429 or opv == 4430 or opv == 4432)
+            return error.RequiresShaderModel60;
+        if (inst.op == .Decorate and inst.words.len >= 4 and inst.words[2] == built_in_decoration) {
+            const bi: spirv.BuiltIn = @enumFromInt(inst.words[3]);
+            if (bi == .helper_invocation or bi == .bary_coord_khr or bi == .bary_coord_no_persp_khr)
+                return error.RequiresShaderModel60; // WaveIsHelperLane / SV_Barycentrics
+        }
+    }
+    if (module.execution_model == .MeshEXT or module.execution_model == .TaskEXT)
+        return error.RequiresShaderModel60; // mesh/task -> SM 6.5+
+}
+
 fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     if (words.len < 5) return error.InvalidSpirv;
     if (words[0] != spirv.MAGIC) return error.InvalidSpirvMagic;
@@ -1215,6 +1245,11 @@ pub fn spirvToHLSL(
     defer if (_norm) |n| alloc.free(n);
     var module = try parseModule(alloc, _norm orelse spirv_words);
     defer module.deinit(alloc);
+
+    // G10: refuse SM 6.x-only features (subgroup/Wave, SV_Barycentrics, mesh/task) when
+    // targeting an older Shader Model -- otherwise the backend emits HLSL invalid for the
+    // requested SM (the never-plausible-but-wrong failure). Fail loud.
+    try requireMinShaderModel(module, options.shader_model);
 
     // Descriptor sampler/image ARRAYS (`uniform sampler2D tex[4]`) are not yet
     // supported by the HLSL backend (the Texture/SamplerState split needs the
