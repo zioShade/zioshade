@@ -306,6 +306,15 @@ ub-check:
 metamorphic:
     @bash tools/metamorphic_check.sh
 
+# Minimize a failing SPIR-V (one zioshade cross-compiles wrongly) to a minimal repro via
+# spirv-reduce (r2d.6). Ad-hoc debugging tool -- when the fuzzer or a prove/render hit
+# surfaces a failing shader, this shrinks a large module to a small one for the bug report.
+# Usage: just reduce <input.spv> <mode>   (modes: crash-msl|crash-glsl|crash-hlsl|crash-wgsl|reject-glsl|reject-wgsl)
+# For the custom-interestingness escape hatch or spirv-reduce opts (--step-limit=N), run
+# tools/reduce.sh directly: `bash tools/reduce.sh <input.spv> custom <script> --step-limit=N`
+reduce input mode:
+    @bash tools/reduce.sh {{input}} {{mode}}
+
 # ── fuzzing ──────────────────────────────────────────────────────────
 
 # run the structured-GLSL fuzzer (ReleaseFast). Default 100k iters; override:
