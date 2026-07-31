@@ -5633,3 +5633,19 @@ test "regression: stage-in struct threaded into vertex helpers" {
 // NOTE: multi-dim array struct member regression (mat2x3 var[3][4]) is verified
 // by the GLSL gate (read-from-row-major-array.vert). The MSL backend has a separate
 // mslWidenedElementType limitation for multi-dim arrays in blocks; not tested here.
+
+test "e54.4: written SSBO emits as device (not read-only constant) in MSL" {
+    // An old-style SSBO (Uniform + BufferBlock on the pointee STRUCT) that the shader
+    // WRITES must be `device T& name` (writable), not `constant T& name_1` (read-only
+    // UBO). BufferBlock decorates the struct TYPE per spec, not the variable; checking
+    // it on the variable id missed these, so they were classified as UBOs and Metal
+    // rejected the store ("cannot assign to const-qualified type"). comp.spv is HLSL-origin.
+    const spv_bytes = @embedFile("arbitrary_spirv/comp.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    const msl = try zioshade.spirvToMSL(alloc, words, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "device SSBO"); // writable storage buffer
+    try assertNotContains(msl, "constant SSBO"); // not the read-only UBO form
+}
