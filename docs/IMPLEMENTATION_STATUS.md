@@ -65,7 +65,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 
 | Capability | SPIRV-Cross | zioshade | Status |
 |------------|-------------|--------|--------|
-| HLSL output | SM 5.0+ | SM 5.0 / 6.0 (`--shader-model`) | ✅ DXC validates 47/51 at SM 6.0 |
+| HLSL output | SM 5.0+ | SM 6.0 (DXC-validated); SM 5.0 down-compile partial (`--shader-model 50`, POSITION only, not validated -- see G10) | ✅ DXC validates 47/51 at SM 6.0 |
 | MSL output | 2.0+ | Metal 2.0+ | ✅ |
 | GLSL output | 110, 140, 150, 300 es, 330, 410, 430, 450, 460 | 330, 400, 410, 420, 430 (default), 440, 450, 460 | ✅ Selectable desktop range; 420pack guard + location gating at < 420 / 330; honest-error on unsupported version & ESSL (#169) |
 | WGSL output | ✅ | ✅ | ✅ naga-validated; stage I/O **interface blocks** (in + out), cross-function I/O, frexp/modf struct-return, loop phi, passthrough-return, scalar geometric builtins, vector shifts, array-element/struct construction all naga-clean. Honest-errors the genuinely-unrepresentable: recursion, multisample/sampler arrays, layer/viewport/clip-cull/point-size built-ins, dual-source blending, ARM tensors, ray queries, geometry/tess stages |
@@ -289,7 +289,7 @@ wintty compiles ~10 shaders at startup:
 | # | Gap | Impact | Effort |
 |---|-----|--------|--------|
 | G9 | **More GLSL extensions** | Only 9 parsed. Full glslang supports 100+. Low priority unless specific project needs them. | Small each, large total |
-| ~~G10~~ | ~~**HLSL SM 5.0**~~ | ✅ **DONE (down-compile).** `--shader-model 50` emits SM 5.0 (vertex `POSITION` vs `SV_Position` at SM 6.0; `posSemantic` branches on `shader_model`). Regression test in `tests/hlsl_tests.zig`. **Caveat / follow-up:** SM 6.0+-only constructs (Wave/subgroup intrinsics, `SV_Barycentrics`) are not yet gated at SM 5.0 -- a shader using them under `--shader-model 50` would emit HLSL invalid for SM 5.0. Honest-error gating is the remaining work. | ~~Small~~ |
+| G10 | **HLSL SM 5.0** | ⏳ **PARTIAL (down-compile only).** `--shader-model 50` emits the SM 5.0 position semantic (vertex `POSITION` vs `SV_Position`; `posSemantic` branches on `shader_model`). Regression-tested in `tests/hlsl_tests.zig` (zioshade-frontend and glslang `gl_PerVertex` forms). **NOT done:** (1) no honest-error gating of SM 6.0+-only constructs -- a shader using Wave/subgroup (SM 6.0+), `SV_Barycentrics` (6.1+), or mesh/task stages (6.5+) under `--shader-model 50` still emits HLSL invalid for SM 5.0; (2) no DXC validation at SM 5.0 (the 47/51 figure is SM 6.0). Honest-error gating + SM 5.0 validation are the remaining work. | Medium |
 | G11 | **Row-major / column-major matrix layout** | Basic handling. Full SPIRV-Cross has explicit layout management. | Medium |
 | G12 | **Multi-entry-point support** | Some SPIR-V modules have multiple entry points. | Small |
 | G13 | **Copy-memory optimization** | Disabled due to correctness issues. Would save one instruction per struct copy. | Hard (fundamental DCE interaction) |

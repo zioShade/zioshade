@@ -96,7 +96,7 @@ This is a **workflow win, not an algorithm win**: most of the gap is process-spa
 ## Features
 
 - **GLSL to SPIR-V**: GLSL 330-460 to SPIR-V 1.0-1.6
-- **SPIR-V to HLSL / GLSL / MSL / WGSL**: cross-compile to HLSL (SM 5.0 or 6.0 via `--shader-model`), GLSL 430, MSL 2.0+, and WGSL (shallow coverage, see status doc)
+- **SPIR-V to HLSL / GLSL / MSL / WGSL**: cross-compile to HLSL (SM 6.0; partial SM 5.0 down-compile via `--shader-model`, see [IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) G10), GLSL 430, MSL 2.0+, and WGSL (shallow coverage, see status doc)
 - **Reflection**: enumerate uniform buffers, inputs/outputs, samplers from SPIR-V (partial, no full descriptor metadata)
 - **Kernel fusion / SPIR-V linking**: merge multiple compute shaders or SPIR-V modules
 - **Shadertoy support**: one-shot API for Shadertoy-style fragment shaders
