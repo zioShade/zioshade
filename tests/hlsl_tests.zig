@@ -487,6 +487,27 @@ test "HLSL: OpFma lowers to mad (HLSL fma is double-only)" {
     try assertNotContains(hlsl, "fma(");
 }
 
+test "HLSL: shader_model 50 emits POSITION, 60 emits SV_Position (DX11 down-compile)" {
+    // The down-compile path (M5.1): SM<6.0 spells gl_Position as `POSITION`, SM6.0+ as
+    // `SV_Position`. DX11 / SM 5.0 targets need POSITION. --shader-model selects it.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) in vec2 aPos;
+        \\void main() { gl_Position = vec4(aPos, 0.0, 1.0); }
+    ;
+    const spv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spv);
+
+    const hlsl50 = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 50 });
+    defer alloc.free(hlsl50);
+    try assertContains(hlsl50, ": POSITION");
+    try assertNotContains(hlsl50, ": SV_Position");
+
+    const hlsl60 = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl60);
+    try assertContains(hlsl60, ": SV_Position");
+}
+
 // Vertex OUTPUT interpolation qualifiers (Flat/Centroid/NoPerspective/Sample) were
 // DROPPED from VS_OUTPUT — silent plausible-wrong (the gate's glslang compile
 // passes, but a `flat int` gets interpolated, a `noperspective` float gets
