@@ -3746,10 +3746,12 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
             if (names.fetchPut(inst.words[2], l) catch null) |old| alloc.free(old.value);
             continue;
         }
-        if (inst.op == .ConstantNull and inst.words.len > 2) {
+        if ((inst.op == .ConstantNull or inst.op == .Undef) and inst.words.len > 2) {
             // OpConstantNull = the zero value for its type (spirv-opt -O produces
-            // these for default/else values). Resolve inline so it's never given a
-            // sequential `vNN` name that would be undeclared.
+            // these for default/else values). OpUndef is the same idea (a module-scope
+            // undef that every emit switch misses -> undeclared at use sites). Resolve
+            // both inline to a zero literal so neither gets a sequential `vNN` name.
+            // Matches spirv-cross (zero-inits undef).
             const vt = mslType(m, inst.words[1], names, alloc) catch "float";
             const zero: []const u8 = if (vt.len > 0 and vt[vt.len - 1] >= '0' and vt[vt.len - 1] <= '9')
                 std.fmt.allocPrint(alloc, "{s}(0)", .{vt}) catch continue
@@ -7744,14 +7746,10 @@ fn emitInstruction(
             try writeResolvePointer(m, names, inst.words[1], false, w);
             try w.print(" = {s};\n", .{on});
         },
-        .Undef => {
-            // OpUndef: declare with default initialization
-            if (inst.words.len >= 3) {
-                const rtt = mslValueType(m, inst.words[1], names, alloc) catch try mslType(m, inst.words[1], names, alloc);
-                const rn = names.get(inst.words[2]) orelse "v";
-                try w.print("    {s} {s} = {{}};\n", .{ rtt, rn });
-            }
-        },
+        // OpUndef is folded to a zero literal in collectNames (module-scope undef
+        // bypasses this switch entirely; this no-op covers any non-standard in-body
+        // OpUndef, whose value the fold already inlined at its use sites).
+        .Undef => {},
         .CopyObject => {
             if (inst.words.len < 4) return;
             const sn = names.get(inst.words[3]) orelse "0";

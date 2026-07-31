@@ -2094,7 +2094,10 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
             continue;
         }
         // OpConstantNull = zero value for the type (spirv-opt -O produces these).
-        if (inst.op == .ConstantNull and inst.words.len > 2) {
+        // OpUndef too: a module-scope undef that every emit switch misses (only
+        // module-scope OpVariable is visited) -> undeclared at use sites. Fold both
+        // inline to a zero literal; matches spirv-cross (zero-inits undef).
+        if ((inst.op == .ConstantNull or inst.op == .Undef) and inst.words.len > 2) {
             const tn = hlslType(module, inst.words[1], names, alloc) catch "float";
             const lit = std.fmt.allocPrint(alloc, "(({s})0)", .{tn}) catch continue;
             if (names.fetchPut(inst.words[2], lit) catch null) |old| alloc.free(old.value);
@@ -7259,13 +7262,10 @@ fn emitInstruction(
         // (glslang: "unknown variable") -- INVALID HLSL. Zero-init is a sound lowering
         // of undef here: the source reads an uninitialized variable, so any value is
         // defensible and zero is the HLSL conventional default.
-        .Undef => {
-            if (inst.words.len >= 3) {
-                const rtt = hlslType(module, inst.words[1], names, alloc) catch "float";
-                const rn = names.get(inst.words[2]) orelse "v";
-                try w.print("    {s} {s} = {{}};\n", .{ rtt, rn });
-            }
-        },
+        // OpUndef is folded to a zero literal in collectNames (module-scope undef
+        // bypasses this switch; this no-op covers any non-standard in-body OpUndef,
+        // whose value the fold already inlined at its use sites).
+        .Undef => {},
         .Function, .FunctionParameter, .FunctionEnd => {},
         .Source, .Name, .MemberName => {},
         .Nop => {},
