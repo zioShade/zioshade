@@ -7543,3 +7543,36 @@ test "WGSL switch fallthrough duplicates the chain (no invalid `fallthrough`)" {
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "fallthrough") == null); // removed from WGSL
     try nagaValidateOrSkip(wgsl, "switch-fallthrough");
 }
+
+test "#511 follow-up: OpName'd bool OpUndef folds to `false`, not keyword-renamed `false_`" {
+    // The OpUndef fold sets names[undef_id] = "false" for a bool undef. The OpName
+    // keyword-rename post-process would append '_' to that literal ("false_" -> an
+    // undeclared identifier at the use site) unless .Undef is in its skip-list (it is,
+    // matching the constant opcodes whose names collectNames also overwrites).
+    const spirv = assembleSpirv("undef_bool_opname",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main"
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpName %b "x"
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%bool = OpTypeBool
+        \\%main = OpFunction %void None %voidfn
+        \\%entry = OpLabel
+        \\%b = OpUndef %bool
+        \\OpSelectionMerge %merge None
+        \\OpBranchConditional %b %taken %merge
+        \\%taken = OpLabel
+        \\OpBranch %merge
+        \\%merge = OpLabel
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "false"); // the folded bool undef literal
+    try assertNotContains(wgsl, "false_"); // not keyword-renamed to an undeclared id
+    try nagaValidateOrSkip(wgsl, "undef_bool_opname");
+}
