@@ -3124,6 +3124,34 @@ fn emitFunction(
                 }
             }
         }
+
+        // OUTPUT built-in vars (gl_Position, gl_FragDepth, gl_Layer, ...) are likewise
+        // predefined in GLSL; alias them by name so the body stores to the GLSL builtin
+        // instead of an undeclared OpName. Without this, an HLSL-origin module that
+        // names its Position output via OpName emits `_entryPointOutput_gl_Position = v;`
+        // -- a use with no declaration (the declaration pass treats builtins as predefined
+        // and skips them). Mirrors the input loop above. (e54.4: arbitrary SPIR-V
+        // uses-without-declaration.)
+        for (output_var_ids.items) |ovid| {
+            const ov_name = names.get(ovid) orelse continue;
+            const obuiltin = getDecVal(decs, ovid, .built_in);
+            if (obuiltin) |obi| {
+                const obuiltin_name: []const u8 = switch (@as(spirv.BuiltIn, @enumFromInt(obi))) {
+                    .position => "gl_Position",
+                    .point_size => "gl_PointSize",
+                    .clip_distance => "gl_ClipDistance",
+                    .cull_distance => "gl_CullDistance",
+                    .frag_depth => "gl_FragDepth",
+                    .layer => "gl_Layer",
+                    .viewport_index => "gl_ViewportIndex",
+                    else => ov_name,
+                };
+                if (!std.mem.eql(u8, ov_name, obuiltin_name)) {
+                    const a = alloc.dupe(u8, obuiltin_name) catch continue;
+                    if (names.fetchPut(ovid, a) catch null) |old| alloc.free(old.value);
+                }
+            }
+        }
     }
 
     try w.writeAll(")\n{\n");
