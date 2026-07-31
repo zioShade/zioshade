@@ -1294,14 +1294,17 @@ test "compileToSPIRVWithDiagnostics reports error location" {
         .{ .stage = .fragment },
         &diags,
     );
-    // This may succeed due to error tolerance, so just verify the API works
     if (result) |words| {
         defer alloc.free(words);
-    } else |_| {
-        // If it failed, verify diagnostics were recorded
-        if (diags.items.len > 0) {
-            try std.testing.expect(diags.items[0].message.len > 0);
-        }
+    } else |_| {}
+
+    // Whether analysis tolerated the error (SPIR-V + a recorded diagnostic) or
+    // failed outright, ANY diagnostic recorded for the undeclared identifier must
+    // carry its source location (line 2 = the `void main` line), not a bare 0:0.
+    if (diags.items.len > 0) {
+        try std.testing.expect(diags.items[0].message.len > 0);
+        try std.testing.expectEqual(@as(u32, 2), diags.items[0].line);
+        try std.testing.expect(diags.items[0].column > 0);
     }
 }
 
