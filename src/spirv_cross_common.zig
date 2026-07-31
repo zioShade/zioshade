@@ -1263,6 +1263,17 @@ pub fn commonGetMemberName(instructions: anytype, struct_id: u32, member_idx: u3
                     }
                 }
             }
+            // Sanitize in place: OpMemberName bytes can contain chars that are
+            // invalid in every target-language identifier. The HLSL frontend, for
+            // example, writes "@data" for an anonymous RWStructuredBuffer member (the
+            // @ flags compiler-generated). Variable names (OpName) are already routed
+            // through sanitizeName; member names must be too, or they reach the page
+            // verbatim and become invalid/undeclared identifiers downstream. Invalid
+            // chars map 1:1 to '_' (no buffer growth, so in place on the same buf).
+            for (buf[0..name_len]) |*c| switch (c.*) {
+                'a'...'z', 'A'...'Z', '0'...'9', '_' => {},
+                else => c.* = '_',
+            };
             if (name_len > 0) return buf[0..name_len];
         }
     }
