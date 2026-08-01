@@ -36,8 +36,9 @@
 #
 # Gate signal = INVALID (real bug) or any CRASH. Oracle-limit, inconclusive, and
 # honest-error (zioshade refused to emit) are reported but not fatal: honest-error is
-# the mandate working as designed. NOT wired to `just ci` while known bugs are open
-# (beads zioshade-e54.4); run via `just spv-validity`.
+# the mandate working as designed. Wired into `just ci` and GitHub Actions (Linux:
+# GLSL complete-oracle + WGSL via naga; MSL/HLSL skip gracefully where their compilers
+# are absent -- never a false fail). INVALID=0 as of eee5886 (PRs #506-519).
 #
 # Usage: tools/spv_input_validity_sweep.sh [dir]
 #   dir  directory of .spv binaries  (default: tests/arbitrary_spirv)
@@ -55,7 +56,20 @@ command -v spirv-cross >/dev/null || { echo "error: spirv-cross not on PATH (MSL
 command -v spirv-dis >/dev/null || { echo "error: spirv-dis not on PATH (stage detection)"; exit 2; }
 
 HAVE_NAGA=0; command -v naga >/dev/null && HAVE_NAGA=1
-HAVE_METAL=0; command -v swiftc >/dev/null && HAVE_METAL=1
+# swiftc ships on Linux too WITHOUT the Metal framework, so `command -v swiftc` alone
+# would false-positive HAVE_METAL there and crash the MslCompileCheck build (no
+# `import Metal`) -- the plausible-but-wrong anti-pattern this gate exists to prevent.
+# Probe the ACTUAL capability by building MslCompileCheck (which imports Metal): success
+# => Metal is present (and $CHECK is ready); failure => MSL skips gracefully. Mirrors the
+# DXC binary-probe below (test the real tool, not a proxy for it).
+HAVE_METAL=0
+if command -v swiftc >/dev/null 2>&1; then
+  if [ ! -x "$CHECK" ] || [ tools/MslCompileCheck.swift -nt "$CHECK" ]; then
+    swiftc -O tools/MslCompileCheck.swift -o "$CHECK" >/dev/null 2>&1 && HAVE_METAL=1
+  else
+    HAVE_METAL=1   # cached build from a prior Metal-present run
+  fi
+fi
 # DXC ships no macOS build; tools/hlsl_validity_sweep.sh runs /opt/dxc/bin/dxc in the
 # `dxc-oracle` container (it needs LD_LIBRARY_PATH=/opt/dxc/lib; it is NOT on PATH).
 # Probe the BINARY itself, not just the container: a running container whose dxc isn't
@@ -65,12 +79,6 @@ HAVE_METAL=0; command -v swiftc >/dev/null && HAVE_METAL=1
 # in non-interactive bash, so `dxc --help` would always silently fail too.
 HAVE_DXC=0
 docker exec -e LD_LIBRARY_PATH=/opt/dxc/lib "$CONTAINER" /opt/dxc/bin/dxc --version >/dev/null 2>&1 && HAVE_DXC=1
-
-if [ "$HAVE_METAL" = 1 ]; then
-  if [ ! -x "$CHECK" ] || [ tools/MslCompileCheck.swift -nt "$CHECK" ]; then
-    swiftc -O tools/MslCompileCheck.swift -o "$CHECK" || { echo "error: failed to build MslCompileCheck"; exit 2; }
-  fi
-fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
