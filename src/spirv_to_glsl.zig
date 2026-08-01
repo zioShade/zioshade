@@ -324,13 +324,51 @@ fn spliceRequiredExtensions(output: *std.ArrayList(u8), alloc: std.mem.Allocator
 
 fn sanitizeName(alloc: std.mem.Allocator, name: []const u8) ![]const u8 {
     var buf = try std.ArrayList(u8).initCapacity(alloc, name.len);
+    // No-op after a successful toOwnedSlice (which empties the list); reclaims
+    // the backing allocation on the append / toOwnedSlice error paths.
+    defer buf.deinit(alloc);
     for (name) |c| {
         switch (c) {
             'a'...'z', 'A'...'Z', '0'...'9', '_' => buf.appendAssumeCapacity(c),
             else => buf.appendAssumeCapacity('_'),
         }
     }
+    // A sanitized OpName can collide with a GLSL reserved word -- e.g. a shader
+    // naming a function parameter `input` -- which glslang rejects ("Reserved
+    // word"). Append `_` so the emitted identifier is always legal. The rename
+    // is consistent (every use of the id resolves through the same names map)
+    // and `X_` is itself a legal, non-reserved identifier.
+    // Scope: this covers id names only -- struct member names take a separate
+    // path (commonGetMemberName) and are not mangled, so a reserved-word member
+    // still yields loud-invalid GLSL. Two ids can still collide (e.g. `input`
+    // -> `input_` next to an existing `input_`); that sanitize-to-same-string
+    // collision class is pre-existing (any `a-b`/`a_b` pair already hit it) and
+    // is tracked separately for a value-dedup fix needing render-diff verify.
+    if (isGlslReservedWord(buf.items)) try buf.append(alloc, '_');
     return buf.toOwnedSlice(alloc);
+}
+
+fn isGlslReservedWord(s: []const u8) bool {
+    const reserved = [_][]const u8{
+        // statement / control-flow keywords
+        "if",        "else",      "for",      "while",     "do",            "switch",
+        "case",      "default",   "break",    "continue",  "return",        "discard",
+        // scalar / vector / matrix type keywords
+        "void",      "bool",      "int",      "uint",      "float",         "double",
+        "vec2",      "vec3",      "vec4",     "ivec2",     "ivec3",         "ivec4",
+        "uvec2",     "uvec3",     "uvec4",    "bvec2",     "bvec3",         "bvec4",
+        "dvec2",     "dvec3",     "dvec4",    "mat2",      "mat3",          "mat4",
+        // qualifier / storage-class / memory keywords
+        "const",     "in",        "out",      "inout",     "uniform",       "varying",
+        "attribute", "centroid",  "flat",     "smooth",    "noperspective", "patch",
+        "sample",    "invariant", "precise",  "layout",    "buffer",        "shared",
+        "coherent",  "restrict",  "readonly", "writeonly", "volatile",
+        // literals, struct, and reserved words (input/output trip glslang)
+             "true",
+        "false",     "struct",    "input",    "output",    "atomic_uint",   "subroutine",
+    };
+    for (reserved) |r| if (std.mem.eql(u8, r, s)) return true;
+    return false;
 }
 fn isUniformVar(m: *const ParsedModule, id: u32) bool {
     const inst = getDef(m, id) orelse return false;
