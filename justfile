@@ -336,6 +336,16 @@ spv-validity:
     {{zig}} build cli
     tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
 
+# r2d.2: CTS ingestion credibility sweep. Feeds the vendored GraphicsFuzz corpus
+# (SPIRV-Tools' fuzz seeds, tests/cts/graphicsfuzz) straight through the binary-ingestion
+# path and reports, per backend, ok / invalid-output / honest-error / CRASH. NON-GATING
+# credibility report: invalid-output is expected breadth; the ONLY gate is a NEW crash
+# (count exceeding tests/cts/baseline.txt). GLSL complete-oracle (glslang) + WGSL candidate
+# (naga); MSL/HLSL skip gracefully. Surfaces mandate-violation crashes on broad real SPIR-V.
+cts-ingestion:
+    {{zig}} build cli
+    tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz
+
 # ── benchmarks ───────────────────────────────────────────────────────
 
 # run wintty shader benchmark (ReleaseFast, 50 iterations)
@@ -357,7 +367,7 @@ check:
 # ── full CI pipeline ─────────────────────────────────────────────────
 
 # run everything CI would run (incl. backend oracle differentials)
-ci: test test-hlsl validate-dxc validate-metal strict-gate oracle-diff spv-validity
+ci: test test-hlsl validate-dxc validate-metal strict-gate oracle-diff spv-validity cts-ingestion
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED — all gates green"
