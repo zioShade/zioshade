@@ -830,6 +830,15 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
-    std.debug.print("error: cross-compilation failed: {s}\n", .{@errorName(err)});
+    // WGSL honest-errors (UnsupportedOp / UnsupportedExtInst) carry a precise reason in
+    // spirv_to_wgsl.last_error_detail (which construct is unrepresentable / which GLSL.std.450
+    // instruction has no mapping). Surface it so the refusal is actionable instead of a bare
+    // error name. Gated to WGSL errors so a stale detail can't leak into a non-WGSL error.
+    const wgsl_detail: ?[]const u8 = if (err == error.UnsupportedOp or err == error.UnsupportedExtInst) zioshade.wgslLastErrorDetail() else null;
+    if (wgsl_detail) |d| {
+        std.debug.print("error: cross-compilation failed: {s}: {s}\n", .{ @errorName(err), d });
+    } else {
+        std.debug.print("error: cross-compilation failed: {s}\n", .{@errorName(err)});
+    }
     std.process.exit(1);
 }
