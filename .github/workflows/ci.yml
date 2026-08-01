@@ -108,7 +108,13 @@ jobs:
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
-          use-cache: true
+          # The Windows leg installs the Vulkan SDK (for spirv-val), and that
+          # makes the post-step @actions/cache save fall back from the system
+          # bsdtar to its pure-JS tar, which recurses over the ~1.3GB .zig-cache
+          # tree and overflows the V8 stack ("Maximum call stack size exceeded")
+          # -- failing the whole job even though the conformance suite passed.
+          # The cache only ever shortens a cold compile, so skip it on Windows.
+          use-cache: ${{ runner.os != 'Windows' }}
 
       # spirv-val is all the conformance suite needs. The distro spirv-tools
       # package ships it, so we skip the full LunarG Vulkan SDK (whose apt repo
