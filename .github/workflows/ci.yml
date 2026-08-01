@@ -172,6 +172,40 @@ jobs:
       - name: Run arbitrary-SPIR-V validity sweep
         run: bash tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
 
+  # CTS ingestion credibility sweep (r2d.2). Broad-corpus counterpart of the gating
+  # spv-validity job: feeds the vendored GraphicsFuzz corpus (SPIRV-Tools' fuzz seeds,
+  # committed at tests/cts/graphicsfuzz) through the binary-ingestion path and reports
+  # per-backend ok / invalid-output / honest-error / CRASH. NON-GATING on invalid-output
+  # (expected breadth); GATES on a NEW crash (count > tests/cts/baseline.txt) -- a crash
+  # on valid input is a mandate violation. GLSL complete-oracle (glslang) + WGSL candidate
+  # (naga 30.0.0); MSL/HLSL skip gracefully.
+  cts-ingestion:
+    name: CTS ingestion credibility (GLSL + WGSL)
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          use-cache: true
+
+      - name: Install oracle validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools spirv-tools
+
+      - name: Install naga (WGSL oracle)
+        run: cargo install naga-cli --version 30.0.0
+
+      - name: Build CLI
+        run: zig build cli
+
+      - name: Run CTS ingestion sweep
+        run: bash tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz
+
   fuzz-smoke:
     name: fuzz smoke (5k iterations)
     needs: build-test
