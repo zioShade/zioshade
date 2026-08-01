@@ -329,8 +329,9 @@ fuzz-million:
 
 # e54.4: arbitrary-SPIR-V backend validity sweep. Validity-checks zioshade's emitted
 # MSL/HLSL/GLSL/WGSL on ARBITRARY .spv input (external SPIR-V, not GLSL source), with
-# spirv-cross discrimination. NOT in `ci`: it is a bug-finder that currently surfaces
-# known open bugs (beads zioshade-e54.4 children). Exits non-zero while any remain.
+# spirv-cross discrimination. Now green (INVALID=0, PRs #506-519) and wired into both
+# `ci` (local) and GitHub Actions (Linux: GLSL complete-oracle + WGSL via naga; MSL/
+# HLSL skip gracefully -- environmental). Exits non-zero on any regression.
 spv-validity:
     {{zig}} build cli
     tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
@@ -356,7 +357,7 @@ check:
 # ── full CI pipeline ─────────────────────────────────────────────────
 
 # run everything CI would run (incl. backend oracle differentials)
-ci: test test-hlsl validate-dxc validate-metal strict-gate oracle-diff
+ci: test test-hlsl validate-dxc validate-metal strict-gate oracle-diff spv-validity
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED — all gates green"

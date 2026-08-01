@@ -133,6 +133,45 @@ jobs:
       - name: Run conformance suite
         run: zig build conformance --summary all
 
+  # Arbitrary-SPIR-V backend validity sweep (e54.4.4). Feeds EXTERNAL .spv binaries
+  # (not GLSL source) straight through the backends and compile-checks each emitted
+  # backend source with its ecosystem reference compiler. GLSL is the COMPLETE oracle
+  # (glslangValidator accepts/rejects definitively); WGSL via naga is a CANDIDATE
+  # oracle. MSL (Metal) and HLSL (DXC container) are environmental and skip GRACEFULLY
+  # on Linux by design -- the sweep never false-fails on a missing optional oracle.
+  # Guards the e54.4 + S1 fixes (PRs #506-519) against silent regression on arbitrary
+  # SPIR-V, the exact plausible-but-wrong class this project exists to prevent.
+  # INVALID is 0 as of eee5886; this job turns that into a non-regression gate.
+  spv-validity:
+    name: arbitrary-SPIR-V validity (GLSL + WGSL)
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          use-cache: true
+
+      - name: Install oracle validators
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y glslang-tools spirv-tools spirv-cross
+
+      # naga has no prebuilt binary; cargo compiles it (Rust is preinstalled on
+      # ubuntu-latest). Pinned to 30.0.0 -- the version the corpus is green against --
+      # so an upstream naga WGSL-validation change can't false-red this gate.
+      - name: Install naga (WGSL oracle)
+        run: cargo install naga-cli --version 30.0.0
+
+      - name: Build CLI
+        run: zig build cli
+
+      - name: Run arbitrary-SPIR-V validity sweep
+        run: bash tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
+
   fuzz-smoke:
     name: fuzz smoke (5k iterations)
     needs: build-test
