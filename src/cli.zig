@@ -183,6 +183,7 @@ fn run() !void {
     // Publish parsed --spec-const overrides for compileWithDiagsOrExit to apply.
     cli_spec_overrides = spec_overrides.items;
     cli_resource_bindings = bind_overrides.items;
+    cli_input_path = input; // stamp path:line:col onto compile diagnostics
 
     if (std.mem.eql(u8, command, "compile")) {
         const source = try readInput(alloc, input_path, use_stdin);
@@ -581,6 +582,11 @@ var cli_spec_overrides: []const zioshade.SpecOverride = &.{};
 const BindOverride = struct { set: u32, binding: u32, reg: u32 };
 var cli_resource_bindings: []const BindOverride = &.{};
 
+/// Resolved input path (or "stdin") for the current CLI invocation, published by `main`
+/// so compileWithDiagsOrExit can stamp `path:line:col` onto diagnostics. Module-scope for
+/// the same single-threaded-CLI reason as cli_spec_overrides above.
+var cli_input_path: []const u8 = "";
+
 /// Build the HLSL `resource_bindings` slice from the CLI `--bind` overrides.
 fn hlslBindings(alloc: std.mem.Allocator) []const zioshade.ResourceBinding {
     if (cli_resource_bindings.len == 0) return &.{};
@@ -621,7 +627,10 @@ fn compileWithDiagsOrExit(
         // back to the bare error-name line when nothing more specific exists,
         // instead of always dumping a redundant `error: <Name> (<detail>)`.
         if (diags.items.len > 0) {
-            for (diags.items) |d| printDiagnostic(d);
+            for (diags.items) |*d| {
+                d.path = cli_input_path;
+                printDiagnostic(d.*);
+            }
             std.process.exit(1);
         }
         compileErr(e);
