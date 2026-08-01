@@ -1,0 +1,13 @@
+# CTS ingestion sweep crash baseline (tests/cts/graphicsfuzz corpus).
+# One line per backend: <backend> <crash_count>. tools/cts_ingestion_sweep.sh FAILS if a
+# backend's CURRENT crash count EXCEEDS the value here (a new crash on valid input is a
+# mandate violation -- silent wrong). invalid-output and honest-error counts are non-gating
+# (breadth) and intentionally NOT tracked here. When a crash is fixed, lower the count.
+#
+# Count-based (not file-based): a fix + a different new crash at the same count would pass
+# silently; a file-level baseline is a future refinement.
+#
+# glsl 1 = graphicsfuzz_032.spv: stack-exhaustion (runaway recursion in the GLSL emit
+#          chain) -- tracked beads bug, root-cause TBD in a focused cycle.
+glsl 1
+wgsl 0
