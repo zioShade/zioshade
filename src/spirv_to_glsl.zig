@@ -1930,6 +1930,19 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
                 glslSpecConstantDefault(&module, inst.words[5], 1),
             };
         }
+        // OpExecutionModeId (331): id-operand form. LocalSizeId here carries spec-constant
+        // RESULT IDs (the valid form for compute). Resolve via common.specConstantDefault
+        // (evaluates OpSpecConstantOp, e.g. SC*2, incl. plain OpConstant operands) so
+        // layout(local_size_x=...) emits the intended workgroup size instead of silently
+        // 1x1x1. (e54.4.8 cross-backend S3; #514 fixed WGSL.)
+        if (inst.op == .ExecutionModeId and inst.words.len >= 6) {
+            const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
+            if (mode == .LocalSizeId) module.local_size = .{
+                common.specConstantDefault(&module, inst.words[3], 1),
+                common.specConstantDefault(&module, inst.words[4], 1),
+                common.specConstantDefault(&module, inst.words[5], 1),
+            };
+        }
     }
     return module;
 }

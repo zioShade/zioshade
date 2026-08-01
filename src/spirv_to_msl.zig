@@ -3680,6 +3680,20 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
             const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
             if (mode == .LocalSize and inst.words.len >= 6) module.local_size = .{ inst.words[3], inst.words[4], inst.words[5] };
         }
+        // OpExecutionModeId (331): id-operand form. LocalSizeId here carries spec-constant
+        // RESULT IDs (the valid form for compute). Resolve via common.specConstantDefault
+        // (evaluates OpSpecConstantOp, e.g. SC*2, incl. plain OpConstant operands) so the
+        // workgroup size is the intended one instead of silently 1x1x1. MSL had NO
+        // LocalSizeId handling at all before this (even plain OpSpecConstant was ignored).
+        // (e54.4.8 cross-backend S3; #514 fixed WGSL.)
+        if (inst.op == .ExecutionModeId and inst.words.len >= 6) {
+            const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
+            if (mode == .LocalSizeId) module.local_size = .{
+                common.specConstantDefault(&module, inst.words[3], 1),
+                common.specConstantDefault(&module, inst.words[4], 1),
+                common.specConstantDefault(&module, inst.words[5], 1),
+            };
+        }
     }
     return module;
 }
