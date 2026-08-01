@@ -243,7 +243,7 @@ fn collectSwitchChainPhis(m: *const ParsedModule, switch_inst: Instruction, merg
 }
 fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
-        const t = mslValueType(m, phi.words[1], names, alloc) catch "float";
+        const t = try mslValueType(m, phi.words[1], names, alloc);
         const vn = names.get(phi.words[2]) orelse "pv"; // already renamed to {orig}_phi by finalizeSwitchPhis (called before decl)
         try w.print("    {s} {s};\n", .{ t, vn });
     }
@@ -1459,10 +1459,10 @@ fn checkUnsupportedMslFeatures(m: *const ParsedModule) !void {
 /// MSL type for uniform buffer struct members.
 /// Uses packed_float3 instead of float3 to match SPIR-V offset layout.
 fn mslPackedType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(m, type_id) orelse return "float4";
+    const inst = getDef(m, type_id) orelse return error.UnsupportedOpcode;
     if (inst.op == .TypeVector) {
         const count = inst.words[3];
-        const scalar = mslType(m, inst.words[2], names, alloc) catch "float";
+        const scalar = try mslType(m, inst.words[2], names, alloc);
         // 3-component vectors need packed_ prefix for tight packing in UBO structs
         if (count == 3) {
             if (std.mem.eql(u8, scalar, "float")) return "packed_float3";
@@ -1773,14 +1773,14 @@ fn tryEmitLoopPhiDeclMSL(m: *const ParsedModule, names: *std.AutoHashMap(u32, []
 }
 
 fn mslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(m, type_id) orelse return "float4";
+    const inst = getDef(m, type_id) orelse return error.UnsupportedOpcode;
     return switch (inst.op) {
         .TypeVoid => "void",
         .TypeBool => "bool",
         .TypeInt => if (inst.words.len > 3 and inst.words[3] != 0) "int" else "uint",
         .TypeFloat => if (inst.words.len > 2 and inst.words[2] == 16) "half" else "float",
         .TypeVector => {
-            const scalar = mslType(m, inst.words[2], names, alloc) catch "float";
+            const scalar = try mslType(m, inst.words[2], names, alloc);
             const count = inst.words[3];
             if (std.mem.eql(u8, scalar, "float")) {
                 if (count >= 1 and count <= 4) return ([_][]const u8{ "", "float", "float2", "float3", "float4" })[count];
@@ -1813,9 +1813,9 @@ fn mslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []
             return std.fmt.allocPrint(alloc, "float{d}x{d}", .{ cols, rows });
         },
         .TypeArray, .TypeRuntimeArray => mslType(m, inst.words[2], names, alloc),
-        .TypePointer => if (inst.words.len > 3) mslType(m, inst.words[3], names, alloc) else "float4",
+        .TypePointer => if (inst.words.len > 3) mslType(m, inst.words[3], names, alloc) else return error.UnsupportedOpcode,
         .TypeStruct => names.get(type_id) orelse "Struct",
-        else => "float4",
+        else => return error.UnsupportedOpcode,
     };
 }
 
@@ -3501,7 +3501,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                     inner = getDef(&module, elem_id);
                 } else break;
             }
-            const base_type = mslType(&module, elem_id, &names, aa) catch "float";
+            const base_type = try mslType(&module, elem_id, &names, aa);
             try w.print("constant {s} {s}", .{ base_type, name });
             for (dims.items) |d| try w.print("[{d}]", .{d});
             try w.writeAll(" = ");
@@ -5009,7 +5009,7 @@ fn emitStructMembers(m: *const ParsedModule, names: *std.AutoHashMap(u32, []cons
                     else
                         mslPackedType(m, elem_type_id, names, alloc);
                     if (widened) |w_ok| break :blk w_ok else |_| {}
-                    break :blk mslType(m, elem_type_id, names, alloc) catch "float";
+                    break :blk try mslType(m, elem_type_id, names, alloc);
                 };
                 try w.print("    {s} {s}[1];\n", .{ et, mname });
                 continue;
@@ -6396,7 +6396,7 @@ fn emitBody(
                 defer mphis.deinit(alloc);
                 collectMergePhis(m, &label_map, mval, &mphis, alloc);
                 for (mphis.items) |pv| {
-                    const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
+                    const t = try mslValueType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
                         // Both arms assign it; declare uninitialized.
@@ -6472,7 +6472,7 @@ fn emitBody(
                 }
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                 for (chain_entries.items) |ce| {
-                    const t = mslValueType(m, ce.phi.words[1], names, alloc) catch "float";
+                    const t = try mslValueType(m, ce.phi.words[1], names, alloc);
                     const vn = names.get(ce.phi.words[2]) orelse "pv";
                     try w.print("    {s} {s};\n", .{ t, vn });
                 }
@@ -6768,7 +6768,7 @@ fn emitWhileLoopMSL(
     // the loop) + rename its result id so the generic OpPhi handler does not
     // re-alias it to a single incoming.
     for (loop_mphis.items) |phi| {
-        const t = mslValueType(m, phi.words[1], names, alloc) catch "float";
+        const t = try mslValueType(m, phi.words[1], names, alloc);
         const lm_name = std.fmt.allocPrint(alloc, "v{d}_lm", .{phi.words[2]}) catch "vlm";
         if (names.fetchPut(phi.words[2], lm_name) catch null) |old| alloc.free(old.value);
         try w.print("    {s} {s};\n", .{ t, lm_name });
@@ -7123,7 +7123,7 @@ fn emitWhileLoopMSL(
                                     try w.print("        {s} = {s};\n", .{ vn, mslExprName(m, names, false_val, alloc) });
                                 }
                             } else {
-                                const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
+                                const t = try mslValueType(m, pv.type_id, names, alloc);
                                 if (nhe) {
                                     try w.print("        {s} {s}_phi;\n", .{ t, vn });
                                 } else {
@@ -7393,7 +7393,7 @@ fn emitBlock(
                 defer mphis.deinit(alloc);
                 collectMergePhis(m, lm, nmv, &mphis, alloc);
                 for (mphis.items) |pv| {
-                    const t = mslValueType(m, pv.type_id, names, alloc) catch "float";
+                    const t = try mslValueType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
                         try w.print("{s}    {s} {s}_phi;\n", .{ indent, t, vn });
