@@ -130,6 +130,22 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
                 module.mesh_max_primitives = inst.words[3];
             }
         }
+        // OpExecutionModeId (331): the id-operand form. LocalSizeId here carries
+        // spec-constant RESULT IDs (the valid form -- OpExecutionMode cannot take id
+        // operands, so the LocalSizeId arm above only ever fires on invalid input).
+        // Resolve each to its default (specConstantDefault now also evaluates
+        // OpSpecConstantOp, e.g. SC*2) so the backends emit the intended workgroup
+        // size instead of silently dispatching 1x1x1.
+        if (inst.op == .ExecutionModeId and inst.words.len >= 6) {
+            const mode: spirv.ExecutionMode = @enumFromInt(inst.words[2]);
+            if (mode == .LocalSizeId) {
+                module.local_size = .{
+                    specConstantDefault(&module, inst.words[3], 1),
+                    specConstantDefault(&module, inst.words[4], 1),
+                    specConstantDefault(&module, inst.words[5], 1),
+                };
+            }
+        }
     }
 
     return module;
@@ -408,9 +424,48 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
 /// `fallback` if `id` is not an OpSpecConstant (shouldn't happen for valid SPIR-V).
 /// (#475)
 pub fn specConstantDefault(module: *const ParsedModule, id: u32, fallback: u32) u32 {
+    return specConstantDefaultRec(module, id, fallback, 0);
+}
+
+/// Resolve the default value of a specialization constant id, evaluating an
+/// `OpSpecConstantOp` (e.g. `SC * 2` for a workgroup size) to its concrete default
+/// by recursively resolving operands and applying the op. Previously only plain
+/// `OpSpecConstant` was handled, so an `OpSpecConstantOp` fell back to `fallback`
+/// (e.g. a LocalSizeId workgroup size silently became 1x1x1 -- a silent miscompile).
+/// `depth` guards against a malformed cyclic OpSpecConstantOp chain (valid SPIR-V is
+/// acyclic, so this is defensive); the DAG depth is bounded so recursion terminates.
+fn specConstantDefaultRec(module: *const ParsedModule, id: u32, fallback: u32, depth: u32) u32 {
+    if (depth > 32) return fallback;
     const def = getDef(module, id) orelse return fallback;
-    if (def.op != .SpecConstant or def.words.len <= 3) return fallback;
-    return def.words[3];
+    if (def.op == .SpecConstant and def.words.len > 3) return def.words[3];
+    if (def.op != .SpecConstantOp or def.words.len <= 4) return fallback;
+    // OpSpecConstantOp layout: [type, result, opcode, operand-ids...].
+    const op: spirv.Op = @enumFromInt(def.words[3]);
+    const ops = def.words[4..];
+    const a = specConstantDefaultRec(module, ops[0], fallback, depth + 1);
+    const b = if (ops.len > 1) specConstantDefaultRec(module, ops[1], fallback, depth + 1) else 0;
+    const si_a: i32 = @bitCast(a);
+    const si_b: i32 = @bitCast(b);
+    return switch (op) {
+        .Not => ~a,
+        .IAdd => a +% b,
+        .ISub => a -% b,
+        .IMul => a *% b,
+        .UDiv => if (b == 0) fallback else a / b,
+        .SDiv => if (b == 0) fallback else @bitCast(@divTrunc(si_a, si_b)),
+        .UMod => if (b == 0) fallback else a % b,
+        .SRem => if (b == 0) fallback else @bitCast(@rem(si_a, si_b)),
+        .SMod => if (b == 0) fallback else @bitCast(@mod(si_a, si_b)),
+        .ShiftLeftLogical => a << @intCast(b & 31),
+        .ShiftRightLogical => a >> @intCast(b & 31),
+        .ShiftRightArithmetic => @bitCast(si_a >> @intCast(b & 31)),
+        .BitwiseOr => a | b,
+        .BitwiseXor => a ^ b,
+        .BitwiseAnd => a & b,
+        // Opcodes not evaluated here (vector/comparison/conversion -- atypical for a
+        // workgroup-dim expression) fall back; a wrong default is safer than a guess.
+        else => fallback,
+    };
 }
 
 /// True if a struct type carries `Block` or `BufferBlock` — a UBO/SSBO interface

@@ -194,6 +194,7 @@ pub const Op = enum(u16) {
     SubgroupAnyKHR = 4429,
     SubgroupAllEqualKHR = 4430,
     // GroupNonUniform operations (Vulkan 1.1+)
+    ExecutionModeId = 331,
     GroupNonUniformElect = 333,
     GroupNonUniformAll = 334,
     GroupNonUniformAny = 335,
@@ -638,4 +639,5 @@ test "opcode values match SPIR-V spec" {
     try std.testing.expectEqual(@as(u16, 164), @intFromEnum(Op.LogicalEqual));
     try std.testing.expectEqual(@as(u16, 165), @intFromEnum(Op.LogicalNotEqual));
     try std.testing.expectEqual(@as(u16, 116), @intFromEnum(Op.QuantizeToF16));
+    try std.testing.expectEqual(@as(u16, 331), @intFromEnum(Op.ExecutionModeId));
 }
