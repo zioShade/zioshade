@@ -16555,3 +16555,30 @@ test "#499: HLSL declares spec-constant ternary (OpSelect) result" {
     try assertContains(hlsl, "static bool ");
     try assertContains(hlsl, "static uint f = ");
 }
+
+test "S3: OpExecutionModeId LocalSizeId with OpSpecConstantOp -> [numthreads(8,1,1)]" {
+    // Cross-backend S3 (e54.4.8): HLSL's parseModule now handles OpExecutionModeId
+    // LocalSizeId (resolving spec-constant operand ids via common.specConstantDefault,
+    // which evaluates OpSpecConstantOp incl. plain OpConstant operands). wg = sc(4) * two(2).
+    const spirv = assembleSpirv("spec_const_op_localsize_hlsl",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main"
+        \\OpExecutionModeId %main LocalSizeId %wg %one %one
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%one = OpSpecConstant %uint 1
+        \\%two = OpConstant %uint 2
+        \\%sc = OpSpecConstant %uint 4
+        \\%wg = OpSpecConstantOp %uint IMul %sc %two
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "[numthreads(8, 1, 1)]"); // sc(4) * two(OpConstant 2) = 8, NOT 1
+}
