@@ -920,6 +920,8 @@ threadlocal var g_int_mix_needed: bool = false;
 // MSL's g_loop_merge_ctx). Set per-loop by emitWhileLoop, saved/restored for nesting.
 const LoopMergeCtx = struct { merge_label: u32 };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
+const max_emit_while_depth: u32 = 256;
+threadlocal var g_ewl_depth: u32 = 0;
 
 /// GLSL type name for a loop-phi variable declaration — STATIC strings only (no
 /// allocation), for the scalar/vector types loop phis realistically carry.
@@ -3352,6 +3354,7 @@ fn emitBody(
         g_deferred_hdr = null;
         g_loop_hoists = null;
         g_hoisted_ids = null;
+        g_ewl_depth = 0;
     }
     {
         var li = func_idx + 1;
@@ -3667,6 +3670,16 @@ fn emitWhileLoop(
     // side-effecting break block (`x = ...; OpBranch <loop-merge>`) emits `break;`
     // instead of silently dropping it (mandelbrot-loop: loop always ran all iters).
     // Saved/restored for nested loops (recursive emitBlock -> emitWhileLoop).
+    // Bound the emitWhileLoop self-recursion (nested-loop re-entry, line ~3978). On some
+    // valid-but-pathological loop structures (e.g. a self-referential LoopMerge the body
+    // re-enters) the recursion does not advance and exhausts the stack -> SIGSEGV, a
+    // silent mandate violation. Refuse loudly instead. Real shaders nest loops far below
+    // this (GraphicsFuzz/real apps < 100); the bound is a safety net, not a capability
+    // limit. The crash itself is fixed; a proper loop-lowering fix (compile these
+    // shaders correctly rather than honest-error) is a separate follow-up.
+    g_ewl_depth += 1;
+    defer g_ewl_depth -= 1;
+    if (g_ewl_depth > max_emit_while_depth) return error.CrossCompileUnsupported;
     const saved_lmc = g_loop_merge_ctx;
     g_loop_merge_ctx = .{ .merge_label = merge_lbl };
     defer g_loop_merge_ctx = saved_lmc;

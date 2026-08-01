@@ -7,7 +7,9 @@
 # Count-based (not file-based): a fix + a different new crash at the same count would pass
 # silently; a file-level baseline is a future refinement.
 #
-# glsl 1 = graphicsfuzz_032.spv: stack-exhaustion (runaway recursion in the GLSL emit
-#          chain) -- tracked beads bug, root-cause TBD in a focused cycle.
-glsl 1
+# glsl 0 = graphicsfuzz_032.spv crash FIXED (emitWhileLoop depth-bound -> honest-error, PR
+#          #522). It now refuses loudly instead of stack-exhausting. The deeper loop-
+#          lowering fix (handle the cyclic/self-referential LoopMerge correctly rather than
+#          refusing) is a follow-up; the GLSL invalid-output=54 breadth is separate triage.
+glsl 0
 wgsl 0
