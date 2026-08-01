@@ -36,8 +36,9 @@
 #
 # Gate signal = INVALID (real bug) or any CRASH. Oracle-limit, inconclusive, and
 # honest-error (zioshade refused to emit) are reported but not fatal: honest-error is
-# the mandate working as designed. NOT wired to `just ci` while known bugs are open
-# (beads zioshade-e54.4); run via `just spv-validity`.
+# the mandate working as designed. Wired into `just ci` and GitHub Actions (Linux:
+# GLSL complete-oracle + WGSL via naga; MSL/HLSL skip gracefully where their compilers
+# are absent -- never a false fail). INVALID=0 as of eee5886 (PRs #506-519).
 #
 # Usage: tools/spv_input_validity_sweep.sh [dir]
 #   dir  directory of .spv binaries  (default: tests/arbitrary_spirv)
