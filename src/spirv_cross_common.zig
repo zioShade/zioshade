@@ -437,7 +437,7 @@ pub fn specConstantDefault(module: *const ParsedModule, id: u32, fallback: u32) 
 fn specConstantDefaultRec(module: *const ParsedModule, id: u32, fallback: u32, depth: u32) u32 {
     if (depth > 32) return fallback;
     const def = getDef(module, id) orelse return fallback;
-    if (def.op == .SpecConstant and def.words.len > 3) return def.words[3];
+    if ((def.op == .SpecConstant or def.op == .Constant) and def.words.len > 3) return def.words[3];
     if (def.op != .SpecConstantOp or def.words.len <= 4) return fallback;
     // OpSpecConstantOp layout: [type, result, opcode, operand-ids...].
     const op: spirv.Op = @enumFromInt(def.words[3]);
@@ -446,24 +446,28 @@ fn specConstantDefaultRec(module: *const ParsedModule, id: u32, fallback: u32, d
     const b = if (ops.len > 1) specConstantDefaultRec(module, ops[1], fallback, depth + 1) else 0;
     const si_a: i32 = @bitCast(a);
     const si_b: i32 = @bitCast(b);
+    const int_min_neg_one = (si_a == std.math.minInt(i32) and si_b == -1);
     return switch (op) {
         .Not => ~a,
+        .SNegate => @bitCast(-%si_a),
+        // Width conversion; for a workgroup dim (positive) the value is unchanged.
+        .UConvert, .SConvert => a,
         .IAdd => a +% b,
         .ISub => a -% b,
         .IMul => a *% b,
         .UDiv => if (b == 0) fallback else a / b,
-        .SDiv => if (b == 0) fallback else @bitCast(@divTrunc(si_a, si_b)),
+        .SDiv => if (b == 0 or int_min_neg_one) fallback else @bitCast(@divTrunc(si_a, si_b)),
         .UMod => if (b == 0) fallback else a % b,
-        .SRem => if (b == 0) fallback else @bitCast(@rem(si_a, si_b)),
-        .SMod => if (b == 0) fallback else @bitCast(@mod(si_a, si_b)),
+        .SRem => if (b == 0 or int_min_neg_one) fallback else @bitCast(@rem(si_a, si_b)),
+        .SMod => if (b == 0 or int_min_neg_one) fallback else @bitCast(@mod(si_a, si_b)),
         .ShiftLeftLogical => a << @intCast(b & 31),
         .ShiftRightLogical => a >> @intCast(b & 31),
         .ShiftRightArithmetic => @bitCast(si_a >> @intCast(b & 31)),
         .BitwiseOr => a | b,
         .BitwiseXor => a ^ b,
         .BitwiseAnd => a & b,
-        // Opcodes not evaluated here (vector/comparison/conversion -- atypical for a
-        // workgroup-dim expression) fall back; a wrong default is safer than a guess.
+        // Opcodes not evaluated here (vector/comparison -- atypical for a workgroup-dim
+        // expression) fall back; a wrong default is safer than a guess.
         else => fallback,
     };
 }
