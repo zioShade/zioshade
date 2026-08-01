@@ -423,7 +423,7 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
 /// resolve LocalSizeId operands to concrete workgroup dimensions. Falls back to
 /// `fallback` if `id` is not an OpSpecConstant (shouldn't happen for valid SPIR-V).
 /// (#475)
-pub fn specConstantDefault(module: *const ParsedModule, id: u32, fallback: u32) u32 {
+pub fn specConstantDefault(module: anytype, id: u32, fallback: u32) u32 {
     return specConstantDefaultRec(module, id, fallback, 0);
 }
 
@@ -434,9 +434,9 @@ pub fn specConstantDefault(module: *const ParsedModule, id: u32, fallback: u32) 
 /// (e.g. a LocalSizeId workgroup size silently became 1x1x1 -- a silent miscompile).
 /// `depth` guards against a malformed cyclic OpSpecConstantOp chain (valid SPIR-V is
 /// acyclic, so this is defensive); the DAG depth is bounded so recursion terminates.
-fn specConstantDefaultRec(module: *const ParsedModule, id: u32, fallback: u32, depth: u32) u32 {
+fn specConstantDefaultRec(module: anytype, id: u32, fallback: u32, depth: u32) u32 {
     if (depth > 32) return fallback;
-    const def = getDef(module, id) orelse return fallback;
+    const def = localGetDef(module.instructions, module.id_defs, id) orelse return fallback;
     if ((def.op == .SpecConstant or def.op == .Constant) and def.words.len > 3) return def.words[3];
     if (def.op != .SpecConstantOp or def.words.len <= 4) return fallback;
     // OpSpecConstantOp layout: [type, result, opcode, operand-ids...].
