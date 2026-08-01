@@ -4150,17 +4150,27 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Emit textures and samplers. Group sampler + texture pairs.
-    // 1:1 (set,binding) -> @group=set, @binding=binding. A combined sampler2D's paired
-    // sampler sits at @binding(binding+1) in the same group; if that collides with a real
-    // descriptor, naga rejects the duplicate @binding (loud, not silent) -- the old
-    // binding*2+set encoding + a silent-renumber dedup masked this (silent miscompile for
-    // set>=2). binding_shift applies to @binding only; @group is the SPIR-V descriptor set.
+    // 1:1 (set,binding) -> @group=set, @binding=binding. binding_shift applies to
+    // @binding only; @group is the SPIR-V descriptor set. Real descriptors (cbuffers,
+    // textures, standalone samplers) keep their 1:1 (set,binding) and never collide
+    // (SPIR-V gives each a unique slot). A combined sampler2D's paired SAMPLER is an
+    // INVENTED resource (no SPIR-V binding): under 1:1 its natural binding+1 can collide
+    // with the next texture (two adjacent sampler2D at binding 0,1), so place each
+    // invented sampler at the first free binding in its set -- neither silently renumbering
+    // real descriptors (the old dedup's silent miscompile) nor leaving a duplicate @binding
+    // (a loud reject for a COMMON multi-texture shader).
     var sampler_names = std.ArrayList(struct { name: []const u8, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    const SlotKey = struct { set: u32, binding: u32 };
+    var used_slots = std.AutoHashMap(SlotKey, void).init(arena);
+    for (cbuffers.items) |cb| {
+        if (!cb.is_push_constant) used_slots.put(.{ .set = cb.set, .binding = cb.binding }, {}) catch {};
+    }
+    for (textures.items) |tex| used_slots.put(.{ .set = tex.set, .binding = tex.binding }, {}) catch {};
+    for (samplers.items) |samp| used_slots.put(.{ .set = samp.set, .binding = samp.binding }, {}) catch {};
 
     for (textures.items) |tex| {
         const group = tex.set;
         const binding = common.applyBindingShift(tex.binding, options.binding_shift);
-        const sampler_binding = common.applyBindingShift(tex.binding + 1, options.binding_shift);
         // Arrayed depth textures (sampler2DArrayShadow / samplerCubeArrayShadow)
         // are emitted as texture_depth_2d_array / texture_depth_cube_array (see
         // wgslType) and the compare-sample handlers pass the array layer as a
@@ -4185,7 +4195,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             // textureGatherCompare typecheck; a plain `sampler` is silent-wrong.
             const sampler_name = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex.name});
             const sampler_kind: []const u8 = if (imageTypeIsDepth(&module, tex.image_type_id)) "sampler_comparison" else "sampler";
-            try sampler_names.append(arena, .{ .name = sampler_name, .binding = tex.binding + 1 });
+            // First free binding in this set for the invented paired sampler.
+            var sb: u32 = tex.binding + 1;
+            while (used_slots.contains(.{ .set = tex.set, .binding = sb })) : (sb += 1) {}
+            used_slots.put(.{ .set = tex.set, .binding = sb }, {}) catch {};
+            try sampler_names.append(arena, .{ .name = sampler_name, .binding = sb });
+            const sampler_binding = common.applyBindingShift(sb, options.binding_shift);
             try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, sampler_binding, sampler_name, sampler_kind });
         }
     }
