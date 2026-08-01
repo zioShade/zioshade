@@ -2201,7 +2201,18 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
             .Uniform => {
                 if (hasDec(decs, rid, .buffer_block) or structHasBufferBlock(m, pt)) continue;
                 const binding = getDecVal(decs, rid, .binding) orelse 0;
-                cb.append(alloc, .{ .name = names.get(rid) orelse "Globals", .type_id = pt, .binding = binding }) catch {};
+                // GLSL uniform blocks need a non-empty instance (and block-type) name; an unnamed
+                // SPIR-V instance (OpName "") yields cb.name = "" -> an anonymous block AND, across
+                // multiple blocks, colliding `{name}_1` instances. Synthesize a stable name (struct
+                // type name, else binding-derived) and publish it back into `names` so the block
+                // declaration AND every body reference (buildAccessExpr's `{p}_1.{p}_m{idx}`) agree.
+                const ub_inst_nm: []const u8 = blk: {
+                    if (names.get(rid)) |n| if (n.len > 0) break :blk n;
+                    if (names.get(pt)) |tn| if (tn.len > 0) break :blk tn;
+                    break :blk std.fmt.allocPrint(alloc, "_ub{d}", .{binding}) catch "_ub";
+                };
+                names.put(rid, ub_inst_nm) catch {};
+                cb.append(alloc, .{ .name = ub_inst_nm, .type_id = pt, .binding = binding }) catch {};
             },
             .UniformConstant => {
                 var pei = getDef(m, pt) orelse continue;
