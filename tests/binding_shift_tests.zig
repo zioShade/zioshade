@@ -58,18 +58,17 @@ test "binding_shift: MSL binding=2 with shift=-1 emits [[buffer(1)]]" {
 }
 
 test "binding_shift: WGSL @binding is shifted" {
-    // The WGSL backend re-encodes set+binding as `binding*2 + set` to derive
-    // @group=binding/2. For set=0 binding=2 that produces an internal binding
-    // of 4, which is what shows up in @binding(N). Apply shift -3 to land on
-    // @binding(1).
+    // The WGSL backend maps descriptors 1:1: @group=set, @binding=binding. For
+    // set=0 binding=2 that is @binding(2). binding_shift applies to @binding only
+    // (@group stays = set); shift -1 lands @binding(2) -> @binding(1).
     const spv = try zioshade.compileToSPIRV(alloc, SHADER_BINDING_2, .{ .stage = .fragment });
     defer alloc.free(spv);
 
     const baseline = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(baseline);
-    try assertContains(baseline, "@binding(4)");
+    try assertContains(baseline, "@binding(2)");
 
-    const shifted = try zioshade.spirvToWGSL(alloc, spv, .{ .binding_shift = -3 });
+    const shifted = try zioshade.spirvToWGSL(alloc, spv, .{ .binding_shift = -1 });
     defer alloc.free(shifted);
     try assertContains(shifted, "@binding(1)");
 }

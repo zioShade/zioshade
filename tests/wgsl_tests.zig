@@ -7576,3 +7576,45 @@ test "#511 follow-up: OpName'd bool OpUndef folds to `false`, not keyword-rename
     try assertNotContains(wgsl, "false_"); // not keyword-renamed to an undeclared id
     try nagaValidateOrSkip(wgsl, "undef_bool_opname");
 }
+
+test "e54.4.6: WGSL 1:1 binding -- no collision for (set0,b1)+(set2,b0)" {
+    // The old binding*2+set encoding made (set=0,binding=N+1) and (set=2,binding=N)
+    // collide (both -> 2N+2); the dedup silently renumbered one, so @group/@binding no
+    // longer matched host intent (silent miscompile, invisible to naga). Under 1:1
+    // (group=set, binding=binding) they stay distinct.
+    const spirv = assembleSpirv("wgsl_binding_collision",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %A %B
+        \\OpExecutionMode %main LocalSize 1 1 1
+        \\OpDecorate %A DescriptorSet 0
+        \\OpDecorate %A Binding 1
+        \\OpDecorate %B DescriptorSet 2
+        \\OpDecorate %B Binding 0
+        \\OpDecorate %BT BufferBlock
+        \\OpMemberDecorate %BT 0 Offset 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%uint_0 = OpConstant %uint 0
+        \\%BT = OpTypeStruct %uint
+        \\%ptr_ubuf = OpTypePointer Uniform %BT
+        \\%A = OpVariable %ptr_ubuf Uniform
+        \\%B = OpVariable %ptr_ubuf Uniform
+        \\%ptr_uint = OpTypePointer Uniform %uint
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%ca = OpAccessChain %ptr_uint %A %uint_0
+        \\%cb = OpAccessChain %ptr_uint %B %uint_0
+        \\%va = OpLoad %uint %ca
+        \\OpStore %cb %va
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "@group(0) @binding(1)"); // A: set=0, binding=1
+    try assertContains(wgsl, "@group(2) @binding(0)"); // B: set=2, binding=0 (NOT renumbered)
+    try nagaValidateOrSkip(wgsl, "wgsl_binding_collision");
+}
