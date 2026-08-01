@@ -3969,6 +3969,43 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Under the 1:1 (set,binding) encoding, real SPIR-V descriptors each have a unique
+    // slot, so they never collide. A duplicate @group/@binding here means the INPUT
+    // itself collides -- e.g. a loose uniform (no layout(binding=), defaults to 0)
+    // synthesized into the _Globals block colliding with an explicit-binding resource,
+    // or two resources at the same (set,binding). WGSL requires a unique @group/@binding
+    // per var, so this is unrepresentable: honest-error rather than emit invalid WGSL
+    // (a duplicate @binding naga rejects). (The old binding*2+set dedup silently
+    // renumbered these -> @binding no longer matched host intent, a silent miscompile.)
+    {
+        var seen_slots = std.AutoHashMap(u64, void).init(arena);
+        const dup = blk: {
+            for (cbuffers.items) |cb| {
+                const b = common.applyBindingShift(cb.binding, options.binding_shift);
+                const key = (@as(u64, cb.set) << 32) | @as(u64, b);
+                if (seen_slots.contains(key)) break :blk true;
+                seen_slots.put(key, {}) catch {};
+            }
+            for (textures.items) |tex| {
+                const b = common.applyBindingShift(tex.binding, options.binding_shift);
+                const key = (@as(u64, tex.set) << 32) | @as(u64, b);
+                if (seen_slots.contains(key)) break :blk true;
+                seen_slots.put(key, {}) catch {};
+            }
+            for (samplers.items) |samp| {
+                const b = common.applyBindingShift(samp.binding, options.binding_shift);
+                const key = (@as(u64, samp.set) << 32) | @as(u64, b);
+                if (seen_slots.contains(key)) break :blk true;
+                seen_slots.put(key, {}) catch {};
+            }
+            break :blk false;
+        };
+        if (dup) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL requires a unique @group/@binding per resource; the input has descriptors that collide under the 1:1 (set,binding) map (e.g. a loose uniform without layout(binding=) or an explicit duplicate binding)", .{}) catch null;
+            return error.UnsupportedOp;
+        }
+    }
+
     // Track uniform arrays wrapped in vec4 structs (for alignment)
     var wrapped_uniform_arrays = std.AutoHashMap(u32, void).init(arena);
 
