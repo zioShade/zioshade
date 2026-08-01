@@ -177,7 +177,7 @@ fn emitMergePhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u3
     for (mphis) |pv| {
         // #false-loop-init: a carried phi was already declared before the loop; skip.
         if (g_carried_phis_h) |cp| if (cp.contains(pv.result_id)) continue;
-        const t = hlslType(module, pv.type_id, names, alloc) catch "float";
+        const t = try hlslType(module, pv.type_id, names, alloc);
         const vn = names.get(pv.result_id) orelse "pv";
         if (has_else) {
             try w.print("{s}    {s} {s}_phi;\n", .{ indent, t, vn });
@@ -241,7 +241,7 @@ fn collectSwitchMergePhisHLSL(module: *const ParsedModule, label_map: *const std
 }
 fn emitSwitchPhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
-        const t = hlslType(module, phi.words[1], names, alloc) catch "float";
+        const t = try hlslType(module, phi.words[1], names, alloc);
         const vn = names.get(phi.words[2]) orelse "pv";
         try w.print("    {s} {s}_phi;\n", .{ t, vn }); // all cases assign, so uninitialized
     }
@@ -2619,7 +2619,7 @@ fn hlslGetArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8
 }
 
 fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(module, type_id) orelse return "float4";
+    const inst = getDef(module, type_id) orelse return error.UnsupportedOpcode;
     switch (inst.op) {
         .TypeVoid => return "void",
         .TypeBool => return "bool",
@@ -2675,10 +2675,16 @@ fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
         .TypeRuntimeArray => return try hlslType(module, inst.words[2], names, alloc),
         .TypePointer => {
             if (inst.words.len > 3) return try hlslType(module, inst.words[3], names, alloc);
-            return "float4";
+            return error.UnsupportedOpcode;
         },
         .TypeStruct => return hlslSafeName(names.get(type_id) orelse "Struct"),
-        else => return "float4",
+        // Texture/sampler types: HLSL declares real resources (Texture2D, SamplerState,
+        // etc.) via the dedicated resource path, but hlslType is also called for a
+        // texture-typed local/param in some paths. Return float4 (the pre-existing
+        // fallback) so common sampler2D shaders don't false-error; the exotic-type
+        // silent-wrong (accel-structure -> float4) is still caught by the else below.
+        .TypeImage, .TypeSampler, .TypeSampledImage => return "float4",
+        else => return error.UnsupportedOpcode,
     }
 }
 
@@ -4993,7 +4999,7 @@ fn emitWhileLoopHLSL(
                 if (pinst.op != .Phi or pinst.words.len < 3) continue;
                 const rid = pinst.words[2];
                 if (!cont_refs.contains(rid) or carried_phis.contains(rid)) continue;
-                const rtt = hlslType(module, pinst.words[1], names, alloc) catch "float";
+                const rtt = try hlslType(module, pinst.words[1], names, alloc);
                 const vn = names.get(rid) orelse continue;
                 const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                 try w.print("    {s} {s};\n", .{ rtt, phi_name });
@@ -6330,7 +6336,7 @@ fn emitInstruction(
             };
             const arg = if (inst.words.len > 3) names.get(inst.words[3]) orelse "0" else "0";
             const result = if (inst.words.len > 2) names.get(inst.words[2]) orelse "v" else "v";
-            const rt = if (inst.words.len > 1) hlslType(module, inst.words[1], names, alloc) catch "float" else "float";
+            const rt = if (inst.words.len > 1) try hlslType(module, inst.words[1], names, alloc) else "float";
             try w.print("    {s} {s} = abs({s}({s})) + abs({s}({s}));\n", .{ rt, result, dx, arg, dy, arg });
         },
 
