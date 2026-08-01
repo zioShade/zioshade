@@ -7618,3 +7618,33 @@ test "e54.4.6: WGSL 1:1 binding -- no collision for (set0,b1)+(set2,b0)" {
     try assertContains(wgsl, "@group(2) @binding(0)"); // B: set=2, binding=0 (NOT renumbered)
     try nagaValidateOrSkip(wgsl, "wgsl_binding_collision");
 }
+
+test "S3: OpExecutionModeId LocalSizeId with OpSpecConstantOp -> correct workgroup size" {
+    // OpSpecConstantOp (e.g. SC*2) for a LocalSizeId workgroup dim was silently lowered
+    // to 1x1x1: specConstantDefault rejected OpSpecConstantOp (only OpSpecConstant), AND
+    // OpExecutionModeId (331) wasn't even in the Op enum so its LocalSizeId was never
+    // parsed. Both fixed: specConstantDefault now evaluates OpSpecConstantOp recursively,
+    // and parseModule handles OpExecutionModeId LocalSizeId. wg = sc(4) * two(2) = 8.
+    // (HLSL/GLSL/MSL have their own parseModules + resolution -- cross-backend follow-up.)
+    const spirv = assembleSpirv("spec_const_op_localsize",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main"
+        \\OpExecutionModeId %main LocalSizeId %wg %one %one
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%one = OpSpecConstant %uint 1
+        \\%two = OpSpecConstant %uint 2
+        \\%sc = OpSpecConstant %uint 4
+        \\%wg = OpSpecConstantOp %uint IMul %sc %two
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "workgroup_size(8"); // sc(4) * two(2) = 8, NOT 1
+}
