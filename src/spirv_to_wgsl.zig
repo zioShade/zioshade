@@ -9868,6 +9868,13 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
                 try w.print("let {s}: {s} = ({s} != {s}(0.0)) & ({s} * 2.0 == {s});\n", .{ result_name, rt, x, op_type, x, x });
             }
         },
+        // LogicalNot — mirror the main emitBody arm exactly (`let r: T = !x`). The replay
+        // path re-emits this when a `!x` lands in a deferred loop/switch replay range.
+        .LogicalNot => {
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = !{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "true" });
+        },
         .ExtInst => {
             // Handle GLSL.std.450 extended instructions in switch replay
             if (inst.words.len > 4) {
