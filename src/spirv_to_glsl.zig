@@ -2902,6 +2902,23 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         const gptr = getDef(m, ginst.words[1]) orelse continue;
         if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
         const gpointee = gptr.words[3];
+        // A Private global whose value type is a user struct (e.g. `Foo obj;`)
+        // needs the struct declared first. Unwrap one array level to the element
+        // (`Foo arr[N];`) and emit the struct definition if not already declared
+        // -- resource/IO blocks are declared upstream, and emitted_structs dedups
+        // against those, so this is a no-op for structs already in scope (zero
+        // regression on shaders whose struct was declared via another path).
+        {
+            var vt = gpointee;
+            if (getDef(m, vt)) |vd0| {
+                if (vd0.op == .TypeArray and vd0.words.len > 2) vt = vd0.words[2];
+            }
+            if (getDef(m, vt)) |vd| {
+                if (vd.op == .TypeStruct) {
+                    emitOneStructForwardDecl(m, names, vt, w, alloc, emitted_structs, emitted_names) catch {};
+                }
+            }
+        }
         if (getDef(m, gpointee)) |pd| {
             if (pd.op == .TypeArray and pd.words.len > 3) {
                 const et = try glslType(m, pd.words[2], names, alloc);
