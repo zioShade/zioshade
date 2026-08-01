@@ -1813,7 +1813,7 @@ fn writeIndentStatic(w: anytype, depth: u32) !void {
 }
 
 fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(module, type_id) orelse return "vec4f";
+    const inst = getDef(module, type_id) orelse return error.UnsupportedOp;
     return switch (inst.op) {
         .TypeVoid => "void",
         .TypeBool => "bool",
@@ -1954,7 +1954,7 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             }
         },
         .TypeSampledImage => if (inst.words.len > 2) try wgslType(module, inst.words[2], names, alloc) else "texture_2d<f32>",
-        else => "vec4f",
+        else => return error.UnsupportedOp,
     };
 }
 
@@ -3659,7 +3659,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         if (sc != .Private) continue;
         const result_id = inst.words[2];
         const name = names.get(result_id) orelse continue;
-        const rt = wgslType(&module, inst.words[1], &names, arena) catch continue;
+        const rt = try wgslType(&module, inst.words[1], &names, arena);
         // Check if this Private var is actually used. A direct OpLoad reads a
         // scalar/struct global; an OpAccessChain rooted at the var reads an
         // element (`arr[i]` for a const array). Both count as "used" — missing
@@ -3739,7 +3739,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (getDef(&module, iv.type_id)) |pi| {
                 if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
             }
-            const rt = wgslType(&module, actual_type, &names, arena) catch continue;
+            const rt = try wgslType(&module, actual_type, &names, arena);
             try w.print("var<private> {s}: {s};\n", .{ name, rt });
         }
     }
@@ -3754,7 +3754,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         if (getDef(&module, actual_type)) |pi| {
             if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
         }
-        const rt = wgslType(&module, actual_type, &names, arena) catch unreachable;
+        const rt = try wgslType(&module, actual_type, &names, arena);
         try w.print("var<private> {s}: {s};\n", .{ name, rt });
     }
 
