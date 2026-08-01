@@ -437,9 +437,8 @@ pub const WgslCompileOptions = struct {
     /// Shift all descriptor bindings by this amount. -1 remaps binding=1 → @binding(0).
     /// Negative results clamp to 0. Mirrors `HlslCompileOptions.binding_shift`.
     ///
-    /// Note: WGSL's @group is derived from the binding number (group = binding/2);
-    /// the shift is applied before the group derivation, so a non-trivial shift
-    /// can also change @group values.
+    /// Applied to @binding only; @group is the SPIR-V descriptor set (1:1), so a
+    /// shift never changes @group.
     binding_shift: i32 = 0,
 };
 
@@ -2958,7 +2957,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             last_error_detail = std.fmt.bufPrint(
                 &last_error_detail_buf,
                 "WGSL has no '{s}' entry point (WGSL supports only vertex/fragment/compute)",
-                .{@tagName(module.execution_model)},
+                .{std.enums.tagName(spirv.ExecutionModel, module.execution_model) orelse "unknown"},
             ) catch null;
             return error.UnsupportedStage;
         },
@@ -3553,17 +3552,17 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Collect cbuffers and textures
-    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, binding: u32, is_ssbo: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, set: u32, binding: u32, is_ssbo: bool, is_push_constant: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // `access` is the WGSL storage-texture access mode (read / write /
     // read_write) resolved from the variable's NonWritable/NonReadable
     // decorations; it is only consulted when `is_storage` is true.
-    var textures = std.ArrayList(struct { name: []const u8, binding: u32, image_type_id: u32, is_storage: bool, access: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var textures = std.ArrayList(struct { name: []const u8, set: u32, binding: u32, image_type_id: u32, is_storage: bool, access: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // Standalone Vulkan separate samplers (GLSL `uniform sampler uS;` — a bare
     // OpTypeSampler in UniformConstant, combined with a separate texture at each
     // `sampler2D(tex, samp)` call site). These have no implicit texture partner,
     // so unlike a combined sampler2D they were dropped here and never declared
     // (`var uS: sampler;`), leaving call args referencing an undeclared name.
-    var samplers = std.ArrayList(struct { name: []const u8, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var samplers = std.ArrayList(struct { name: []const u8, set: u32, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
 
     for (module.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
@@ -3588,28 +3587,28 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // a read-only uniform and emitted `var<uniform>`, making a store
                 // `bufs[i].x = …` a naga reject = silent-wrong. (#170)
                 const is_ssbo = hasDec(&decorations, arrayElementType(&module, pointee_type), .buffer_block);
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = is_ssbo, .result_id = result_id });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = set, .binding = binding, .is_ssbo = is_ssbo, .is_push_constant = false, .result_id = result_id });
             },
             .StorageBuffer => {
                 const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
                 const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "buffer";
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = binding * 2 + set, .is_ssbo = true, .result_id = result_id });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = set, .binding = binding, .is_ssbo = true, .is_push_constant = false, .result_id = result_id });
             },
             .PushConstant => {
-                // WGSL has NO push_constant address space (naga 29.0.3 rejects both
+                // WGSL has NO push_constant address space (naga rejects both
                 // `var<push_constant>` and `enable push_constant`). The representable
                 // lowering is a plain uniform buffer. Push constants carry no
-                // Binding/DescriptorSet decoration, so we INVENT one: default to
-                // binding 0. The binding-dedup pass below resolves collisions by
-                // keeping the first-emitted entry at its binding and bumping later
-                // colliders. NOTE: because this binding is fabricated (and dedup may
-                // renumber colliders), the WGSL @binding here is NOT guaranteed to
-                // match any original GLSL set/binding when push constants are present.
-                // Mirroring the .Uniform arm reuses all downstream machinery (struct
-                // forward-decls, name-collision rename, `push.value0` access chains).
+                // Binding/DescriptorSet decoration, so we INVENT a slot. With the 1:1
+                // (set,binding) encoding (the silent-renumber dedup is gone), the
+                // push-constant is placed AFTER the collection loop at
+                // @group(max_real_set+1) @binding(0) -- a group no real descriptor
+                // uses, so it never collides and its slot is deterministic (no longer
+                // renumbered). Mirroring the .Uniform arm reuses all downstream
+                // machinery (struct forward-decls, name-collision rename, `push.value0`
+                // access chains).
                 const name = names.get(result_id) orelse "push";
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .binding = 0, .is_ssbo = false, .result_id = result_id });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = 0, .binding = 0, .is_ssbo = false, .is_push_constant = true, .result_id = result_id });
             },
             .UniformConstant => {
                 const pointee_inst = getDef(&module, pointee_type) orelse continue;
@@ -3620,7 +3619,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 switch (pointee_inst.op) {
                     .TypeSampledImage => {
                         const img_type_id = if (pointee_inst.words.len > 2) pointee_inst.words[2] else pointee_type;
-                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = img_type_id, .is_storage = false, .access = "read_write" });
+                        try textures.append(arena, .{ .name = name, .set = set, .binding = binding, .image_type_id = img_type_id, .is_storage = false, .access = "read_write" });
                     },
                     .TypeImage => {
                         const img_dim = if (pointee_inst.words.len > 3) pointee_inst.words[3] else 1;
@@ -3639,10 +3638,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                             is_storage = true;
                             access = "read";
                         }
-                        try textures.append(arena, .{ .name = name, .binding = binding * 2 + set, .image_type_id = pointee_type, .is_storage = is_storage, .access = access });
+                        try textures.append(arena, .{ .name = name, .set = set, .binding = binding, .image_type_id = pointee_type, .is_storage = is_storage, .access = access });
                     },
                     .TypeSampler => {
-                        try samplers.append(arena, .{ .name = name, .binding = binding * 2 + set });
+                        try samplers.append(arena, .{ .name = name, .set = set, .binding = binding });
                     },
                     else => continue,
                 }
@@ -3951,28 +3950,22 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
-    // Deduplicate bindings: auto-assign sequential bindings when multiple uniforms collide.
-    // The first entry (ci == 0) always keeps its binding; only LATER entries that collide
-    // with an already-seen binding are bumped to the next free slot. So whichever block is
-    // emitted first keeps binding 0 (e.g. a push-constant block fabricated at binding 0 keeps
-    // it iff it is emitted before any real UBO that also claims 0).
-    // CAVEAT: WGSL binding numbers are therefore NOT guaranteed to match the original GLSL
-    // set/binding when push constants are present (WGSL has no push_constant address space, so
-    // a binding is invented) or when two declarations collide (the later one is renumbered).
+    // Place invented push-constant buffers (WGSL has no push_constant address space;
+    // zioshade lowers them to a uniform buffer with an invented slot) at a dedicated
+    // @group no real descriptor uses, so the slot is deterministic and never collides.
+    // The old code used a silent-renumber dedup across ALL cbuffers, which made the WGSL
+    // @binding NOT match the host's set/binding intent -- a silent miscompile for set>=2
+    // ((set=0,binding=N+1) and (set=2,binding=N) collided). Real descriptors now keep their
+    // 1:1 (set,binding); only the invented push-constant gets a synthesized group.
     {
-        var seen_bindings = std.AutoHashMap(u32, void).init(arena);
-        var next_binding: u32 = 0;
-        for (cbuffers.items, 0..) |*cb, ci| {
-            if (ci > 0) {
-                // Check if this binding was already used
-                if (seen_bindings.contains(cb.binding)) {
-                    // Find next available binding
-                    while (seen_bindings.contains(next_binding)) : (next_binding += 1) {}
-                    cb.binding = next_binding;
-                    next_binding += 1;
-                }
-            }
-            try seen_bindings.put(cb.binding, {});
+        var max_set: u32 = 0;
+        for (cbuffers.items) |cb| {
+            if (!cb.is_push_constant) max_set = @max(max_set, cb.set);
+        }
+        for (textures.items) |tex| max_set = @max(max_set, tex.set);
+        for (samplers.items) |samp| max_set = @max(max_set, samp.set);
+        for (cbuffers.items) |*cb| {
+            if (cb.is_push_constant) cb.set = max_set + 1;
         }
     }
 
@@ -3986,9 +3979,8 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
 
     // Emit uniform buffers
     for (cbuffers.items) |cb| {
-        const shifted_cb_binding = common.applyBindingShift(cb.binding, options.binding_shift);
-        const group = @divFloor(shifted_cb_binding, 2);
-        const binding = shifted_cb_binding;
+        const group = cb.set;
+        const binding = common.applyBindingShift(cb.binding, options.binding_shift);
         const type_name = blk: {
             // Resolve pointer type to pointee type
             const ptr_inst = getDef(&module, cb.type_id);
@@ -4157,35 +4149,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
-    // Emit textures and samplers
-    // Group sampler + texture pairs
-    // Deduplicate bindings against cbuffers
+    // Emit textures and samplers. Group sampler + texture pairs.
+    // 1:1 (set,binding) -> @group=set, @binding=binding. A combined sampler2D's paired
+    // sampler sits at @binding(binding+1) in the same group; if that collides with a real
+    // descriptor, naga rejects the duplicate @binding (loud, not silent) -- the old
+    // binding*2+set encoding + a silent-renumber dedup masked this (silent miscompile for
+    // set>=2). binding_shift applies to @binding only; @group is the SPIR-V descriptor set.
     var sampler_names = std.ArrayList(struct { name: []const u8, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
-    // Collect used bindings from cbuffers
-    var used_tex_bindings = std.AutoHashMap(u32, void).init(arena);
-    for (cbuffers.items) |cb| {
-        used_tex_bindings.put(cb.binding, {}) catch {};
-    }
-    var next_tex_binding: u32 = 0;
 
     for (textures.items) |tex| {
-        var tex_binding = tex.binding;
-        // Avoid collision with cbuffers
-        if (used_tex_bindings.contains(tex_binding)) {
-            while (used_tex_bindings.contains(next_tex_binding)) : (next_tex_binding += 1) {}
-            tex_binding = next_tex_binding;
-            next_tex_binding += 1;
-        }
-        used_tex_bindings.put(tex_binding, {}) catch {};
-        used_tex_bindings.put(tex_binding + 1, {}) catch {}; // sampler slot
-        // Apply user-requested binding shift after collision resolution. The
-        // group is derived from the shifted binding so a non-zero shift can
-        // move @group as well, which is the desired behaviour for descriptor
-        // remapping.
-        const shifted_tex = common.applyBindingShift(tex_binding, options.binding_shift);
-        const shifted_sampler = common.applyBindingShift(tex_binding + 1, options.binding_shift);
-        const group = @divFloor(shifted_tex, 2);
-        const binding = shifted_tex;
+        const group = tex.set;
+        const binding = common.applyBindingShift(tex.binding, options.binding_shift);
+        const sampler_binding = common.applyBindingShift(tex.binding + 1, options.binding_shift);
         // Arrayed depth textures (sampler2DArrayShadow / samplerCubeArrayShadow)
         // are emitted as texture_depth_2d_array / texture_depth_cube_array (see
         // wgslType) and the compare-sample handlers pass the array layer as a
@@ -4211,26 +4186,19 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             const sampler_name = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex.name});
             const sampler_kind: []const u8 = if (imageTypeIsDepth(&module, tex.image_type_id)) "sampler_comparison" else "sampler";
             try sampler_names.append(arena, .{ .name = sampler_name, .binding = tex.binding + 1 });
-            try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, shifted_sampler, sampler_name, sampler_kind });
+            try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, sampler_binding, sampler_name, sampler_kind });
         }
     }
 
     // Emit standalone Vulkan separate samplers (`var uS: sampler;`). Each is
     // combined with a texture at the `sampler2D(tex, samp)` call site, where the
     // sample handlers resolve the sampler argument from the OpSampledImage's
-    // sampler operand (see resolveSamplerArg). Bindings are allocated from the
-    // same collision-avoiding pool as textures so they never alias.
+    // sampler operand (see resolveSamplerArg). 1:1 (set,binding) -> @group=set,
+    // @binding=binding.
     for (samplers.items) |samp| {
-        var b = samp.binding;
-        if (used_tex_bindings.contains(b)) {
-            while (used_tex_bindings.contains(next_tex_binding)) : (next_tex_binding += 1) {}
-            b = next_tex_binding;
-            next_tex_binding += 1;
-        }
-        used_tex_bindings.put(b, {}) catch {};
-        const shifted = common.applyBindingShift(b, options.binding_shift);
-        const group = @divFloor(shifted, 2);
-        try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, shifted, samp.name });
+        const group = samp.set;
+        const binding = common.applyBindingShift(samp.binding, options.binding_shift);
+        try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, binding, samp.name });
     }
 
     // Emit specialization constants as `@id(N) override NAME: TYPE = DEFAULT;`.
@@ -4990,7 +4958,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // arm rather than emitting an invalid `@builtin(primitive_id)`. (#170)
                 .sample_id => "sample_index",
                 else => {
-                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no @builtin for input '{s}'", .{@tagName(bi)}) catch null;
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no @builtin for input '{s}'", .{std.enums.tagName(spirv.BuiltIn, bi) orelse "unknown"}) catch null;
                     return error.UnsupportedOp;
                 },
             };
