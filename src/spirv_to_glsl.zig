@@ -822,7 +822,7 @@ fn getArraySuffix(m: *const ParsedModule, ptr_type_id: u32) ![]const u8 {
 }
 
 fn glslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(m, type_id) orelse return "vec4";
+    const inst = getDef(m, type_id) orelse return error.CrossCompileUnsupported;
     return switch (inst.op) {
         .TypeVoid => "void",
         .TypeBool => "bool",
@@ -852,9 +852,9 @@ fn glslType(m: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, [
             return std.fmt.allocPrint(alloc, "mat{d}x{d}", .{ cols, rows });
         },
         .TypeArray, .TypeRuntimeArray => try glslType(m, inst.words[2], names, alloc),
-        .TypePointer => if (inst.words.len > 3) try glslType(m, inst.words[3], names, alloc) else "vec4",
+        .TypePointer => if (inst.words.len > 3) try glslType(m, inst.words[3], names, alloc) else return error.CrossCompileUnsupported,
         .TypeStruct => names.get(type_id) orelse "Struct",
-        else => "vec4",
+        else => return error.CrossCompileUnsupported,
     };
 }
 
@@ -1478,12 +1478,12 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
                         elem_id = inn.words[2];
                     } else break;
                 }
-                const elem_tn = glslType(&module, elem_id, &names, aa) catch return error.OutOfMemory;
+                const elem_tn = try glslType(&module, elem_id, &names, aa);
                 try w.print("uniform {s} {s}", .{ elem_tn, cb.name });
                 for (dims.items) |d| try w.writeAll(d);
                 try w.writeAll(";\n\n");
             } else {
-                const tn = glslType(&module, cb.type_id, &names, aa) catch return error.OutOfMemory;
+                const tn = try glslType(&module, cb.type_id, &names, aa);
                 try w.print("uniform {s} {s};\n\n", .{ tn, cb.name });
             }
             continue;
@@ -2853,7 +2853,7 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
         const gpointee = gptr.words[3];
         if (getDef(m, gpointee)) |pd| {
             if (pd.op == .TypeArray and pd.words.len > 3) {
-                const et = glslType(m, pd.words[2], names, alloc) catch continue;
+                const et = try glslType(m, pd.words[2], names, alloc);
                 const li = getDef(m, pd.words[3]);
                 const lv: u32 = if (li) |l| (if (l.words.len > 3) l.words[3] else 1) else 1;
                 try w.print("{s} {s}[{d}];\n", .{ et, gname, lv });
@@ -2861,7 +2861,7 @@ fn emitModuleGlobals(m: *const ParsedModule, decs: *const std.AutoHashMap(u32, s
                 continue;
             }
         }
-        const gt = glslType(m, gpointee, names, alloc) catch continue;
+        const gt = try glslType(m, gpointee, names, alloc);
         if (ginst.words.len >= 5) {
             const init_name = exprName(m, names, ginst.words[4], alloc);
             try w.print("{s} {s} = {s};\n", .{ gt, gname, init_name });
@@ -3527,7 +3527,7 @@ fn emitBody(
                     }
                 }
                 for (phi_decls.items) |pv| {
-                    const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
+                    const rtt = try glslType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
                         // Both arms assign it; declare uninitialized.
@@ -3877,7 +3877,7 @@ fn emitWhileLoop(
                 if (pinst.op != .Phi or pinst.words.len < 3) continue;
                 const rid = pinst.words[2];
                 if (!cont_refs.contains(rid) or carried_phis.contains(rid)) continue;
-                const rtt = glslType(m, pinst.words[1], names, alloc) catch "float";
+                const rtt = try glslType(m, pinst.words[1], names, alloc);
                 const vn = names.get(rid) orelse continue;
                 const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                 try w.print("    {s} {s};\n", .{ rtt, phi_name });
@@ -4065,7 +4065,7 @@ fn emitWhileLoop(
                             // A loop-carried phi was already declared at loop top and
                             // renamed to its `_phi` var; don't re-declare it body-local.
                             if (carried_phis.contains(pv.result_id)) continue;
-                            const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
+                            const rtt = try glslType(m, pv.type_id, names, alloc);
                             const vn = names.get(pv.result_id) orelse "pv";
                             if (nhe) {
                                 try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
@@ -4296,7 +4296,7 @@ fn emitBlock(
                     }
                 }
                 for (phi_decls2.items) |pv| {
-                    const rtt = glslType(m, pv.type_id, names, alloc) catch "float";
+                    const rtt = try glslType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
                         try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
