@@ -16,7 +16,7 @@ const DecorationEntry = common.DecorationEntry;
 /// (76) has no WGSL equivalent"). Backed by a threadlocal buffer; valid until
 /// the next `spirvToWGSL` call on the same thread. Reset at `spirvToWGSL` entry.
 pub threadlocal var last_error_detail: ?[]const u8 = null;
-threadlocal var last_error_detail_buf: [192]u8 = undefined;
+threadlocal var last_error_detail_buf: [384]u8 = undefined;
 
 /// Emit-once tracking for the generated `spvInverseN` matrix-inverse helpers.
 /// WGSL has no `inverse` builtin (naga: "no definition in scope"), so GLSL
@@ -1813,7 +1813,10 @@ fn writeIndentStatic(w: anytype, depth: u32) !void {
 }
 
 fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(module, type_id) orelse return error.UnsupportedOp;
+    const inst = getDef(module, type_id) orelse {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unresolved type id {d}", .{type_id}) catch null;
+        return error.UnsupportedOp;
+    };
     return switch (inst.op) {
         .TypeVoid => "void",
         .TypeBool => "bool",
@@ -1954,7 +1957,10 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
             }
         },
         .TypeSampledImage => if (inst.words.len > 2) try wgslType(module, inst.words[2], names, alloc) else "texture_2d<f32>",
-        else => return error.UnsupportedOp,
+        else => {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported type opcode '{s}'", .{@tagName(inst.op)}) catch null;
+            return error.UnsupportedOp;
+        },
     };
 }
 
@@ -1968,7 +1974,10 @@ fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u
 /// language feature, so honoring the qualifier keeps the output as portable as
 /// the source allows.
 fn wgslStorageTextureType(module: *const ParsedModule, image_type_id: u32, access_mode: []const u8, alloc: std.mem.Allocator) ![]const u8 {
-    const inst = getDef(module, image_type_id) orelse return error.UnsupportedOp;
+    const inst = getDef(module, image_type_id) orelse {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unresolved storage-texture image type id {d}", .{image_type_id}) catch null;
+        return error.UnsupportedOp;
+    };
     const dim = if (inst.words.len > 3) inst.words[3] else 1;
     const sampled_type_id = inst.words[2];
     const arrayed_nondepth = inst.words.len > 5 and inst.words[5] == 1;
@@ -9069,7 +9078,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // returning u32 (matching the uint result type). words[3]=struct (block-var)
             // pointer, words[4]=runtime-array member index. (#294)
             .ArrayLength => {
-                if (inst.words.len < 5) return error.UnsupportedOp;
+                if (inst.words.len < 5) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: malformed OpArrayLength (needs >= 5 words)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 const rt = try wgslType(module, inst.words[1], names, arena); // u32
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const buf_name = names.get(inst.words[3]) orelse "buf";
@@ -9083,7 +9095,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // Can't resolve the struct member name (malformed/external SPIR-V) →
                 // honest-error rather than emit `arrayLength(&buf.arr)` against a
                 // nonexistent member (naga would reject it).
-                if (struct_id == 0) return error.UnsupportedOp;
+                if (struct_id == 0) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: OpArrayLength needs a runtime-array struct member", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
                 var mbuf: [32]u8 = undefined;
                 const member_name = getMemberName(module, struct_id, member_idx, &mbuf);
                 try writeInd(w, indent);
@@ -9227,8 +9242,14 @@ fn emitOuterProduct(module: *const ParsedModule, names: *std.AutoHashMap(u32, []
     const u = names.get(inst.words[3]) orelse "u";
     const v = names.get(inst.words[4]) orelse "v";
     // Column count = the result matrix's column count = v's component count.
-    const mt = getDef(module, inst.words[1]) orelse return error.UnsupportedOp;
-    if (mt.op != .TypeMatrix or mt.words.len < 4) return error.UnsupportedOp;
+    const mt = getDef(module, inst.words[1]) orelse {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: matrix-from-vector result type {d} unresolved", .{inst.words[1]}) catch null;
+        return error.UnsupportedOp;
+    };
+    if (mt.op != .TypeMatrix or mt.words.len < 4) {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: matrix-from-vector expected a TypeMatrix result", .{}) catch null;
+        return error.UnsupportedOp;
+    }
     const cols = mt.words[3];
     var buf = std.ArrayList(u8).initCapacity(arena, 96) catch return error.OutOfMemory;
     defer buf.deinit(arena);
