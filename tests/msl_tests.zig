@@ -5649,3 +5649,24 @@ test "e54.4: written SSBO emits as device (not read-only constant) in MSL" {
     try assertContains(msl, "device SSBO"); // writable storage buffer
     try assertNotContains(msl, "constant SSBO"); // not the read-only UBO form
 }
+
+test "cgv: MSL -- two structs sharing one OpName get distinct mangled decls (no silent-wrong)" {
+    // struct_dedup_collision.spv: two OpTypeStruct both OpName'd "S" with
+    // different layouts. MSL's struct emitter delegates to the common helper,
+    // which dedups by name -- without the #cgv pre-pass the second struct's real
+    // layout is dropped and its uses compile against the first (v11._m2
+    // references a non-existent member -> invalid MSL / silent-wrong byte
+    // binding). After the fix both S and S_1 are declared with their own layouts.
+    const spv_bytes = @embedFile("fixtures/struct_dedup_collision.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const msl = try zioshade.spirvToMSL(alloc, words, .{});
+    defer alloc.free(msl);
+    // Both structs declared under distinct names; the second's 4-float layout
+    // (member _m2, absent from the first's {float4 _m0}) must be present.
+    try assertContains(msl, "struct S\n{");
+    try assertContains(msl, "struct S_1\n{");
+    try assertContains(msl, "float _m2;");
+}
