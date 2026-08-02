@@ -1208,6 +1208,53 @@ pub fn commonEmitOneStructForwardDecl(
     }
 }
 
+/// Identity name-sanitizer for backends that emit struct OpNames verbatim
+/// (GLSL). Passed to commonPrewriteUniqueStructNames; pairs with the HLSL
+/// backend's hlslSafeName on that side.
+pub fn commonPassthroughName(name: []const u8) []const u8 {
+    return name;
+}
+
+/// Prewrite a unique emitted name for every OpTypeStruct into `names` BEFORE any
+/// struct forward-decl emission. The forward-decl emitter dedups by NAME, so two
+/// distinct structs sharing one OpName would otherwise collapse: the second's
+/// real layout is dropped and its uses compile against the first -- silently
+/// binding the wrong bytes (plausible-but-wrong, #zm0). This pass mangles
+/// colliding names `S -> S_1 -> S_2` (matching spirv-cross) so every distinct
+/// type keeps its own declaration. `sanitize_fn(name)` returns the target-
+/// language form of a name (identity for GLSL, hlslSafeName for HLSL); mangling
+/// runs on the sanitized form so two raw names that sanitize equal also split.
+/// Only colliding types are mutated in `names` -- the common non-colliding path
+/// is untouched. Run ONCE, after collectNames and before the first struct
+/// forward-decl emission.
+pub fn commonPrewriteUniqueStructNames(
+    instructions: anytype,
+    names: *std.AutoHashMap(u32, []const u8),
+    alloc: std.mem.Allocator,
+    comptime sanitize_fn: anytype,
+) void {
+    var taken = std.StringHashMap(void).init(alloc);
+    defer taken.deinit();
+    for (instructions) |inst| {
+        if (inst.op != .TypeStruct) continue;
+        const tid = resultIdFromOp(inst.op, inst.words) orelse continue;
+        const base = sanitize_fn(names.get(tid) orelse "Struct");
+        if (taken.get(base) == null) {
+            taken.put(base, {}) catch {};
+            continue;
+        }
+        var n: u32 = 1;
+        while (true) : (n += 1) {
+            const cand = std.fmt.allocPrint(alloc, "{s}_{d}", .{ base, n }) catch break;
+            if (taken.get(cand) == null) {
+                taken.put(cand, {}) catch {};
+                names.put(tid, cand) catch {};
+                break;
+            }
+        }
+    }
+}
+
 /// Get array dimension suffix for a pointer type. E.g., "[4]" or "[2][3]" for multi-dim.
 /// HLSL uses multi_dim=true to unwrap nested TypeArray layers.
 /// Takes instruction slice + id_defs to work across different ParsedModule types.

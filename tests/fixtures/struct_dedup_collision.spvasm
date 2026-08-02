@@ -1,0 +1,53 @@
+; Minimal deterministic reproducer for zioshade-zm0: two OpTypeStruct sharing
+; one OpName "S" with DIFFERENT layouts. Legal SPIR-V (OpName is a debug name;
+; two types may share it). spirv-cross handles it (mangles the second to S_1).
+;
+; Before the #zm0 fix, zioshade's struct forward-decl emitter dedups by NAME, so
+; the second struct's real layout is DROPPED and uses compile against the first's
+; -> plausible-but-wrong byte binding (or, for this in-member-count shape, an
+; undeclared-member compile error). After the fix, both S and S_1 are declared.
+;
+; db holds {f,f,f,f}; we write 7.0 into its member 2 and output it.
+; spirv-cross reference: outColor = (7,7,7,1).
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor
+OpExecutionMode %main OriginUpperLeft
+
+OpName %main "main"
+OpName %DA "S"
+OpName %DB "S"
+
+OpDecorate %outColor Location 0
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%v4f = OpTypeVector %float 4
+%ptr_v4_out = OpTypePointer Output %v4f
+%ptr_float_func = OpTypePointer Function %float
+
+%int_2 = OpConstant %int 2
+%float_1 = OpConstant %float 1
+%float_7 = OpConstant %float 7
+
+%DA = OpTypeStruct %v4f
+%DB = OpTypeStruct %float %float %float %float
+
+%ptr_DA = OpTypePointer Function %DA
+%ptr_DB = OpTypePointer Function %DB
+
+%outColor = OpVariable %ptr_v4_out Output
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%da = OpVariable %ptr_DA Function
+%db = OpVariable %ptr_DB Function
+%pz = OpAccessChain %ptr_float_func %db %int_2
+OpStore %pz %float_7
+%ld = OpLoad %float %pz
+%cc = OpCompositeConstruct %v4f %ld %ld %ld %float_1
+OpStore %outColor %cc
+OpReturn
+OpFunctionEnd

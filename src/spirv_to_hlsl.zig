@@ -1387,6 +1387,12 @@ pub fn spirvToHLSL(
 
     // Phase 1: collect names, decorations
     collectNames(aa, &module, &names);
+    // Prewrite unique struct names BEFORE any forward-decl emission so two
+    // distinct structs sharing one OpName don't collapse (the forward-decl
+    // emitter dedups by name and would drop the second's real layout, leaving
+    // uses to silently bind the wrong bytes -- #zm0). Mangling runs on the
+    // hlslSafeName form so two raw names that sanitize equal also split.
+    common.commonPrewriteUniqueStructNames(module.instructions, &names, aa, hlslSafeName);
     // Alias const-initialised Private globals to their promoted const (Design A).
     hlslAliasConstInitializedPrivateVars(aa, &module, &names);
 
