@@ -1,0 +1,44 @@
+; Minimal deterministic reproducer for zioshade-sid: two VARIABLE ids whose
+; OpNames SANITIZE to the same emitted string -- one global (Input) one
+; function-local -- so the local silently SHADOWS the global.
+;   %g : Input global, OpName "a_b"  -> sanitizeName -> "a_b"
+;   %l : Function local, OpName "a-b" -> sanitizeName -> "a_b"  (dash -> _)
+; Both become "a_b" -> the function-local shadows the global -> OpLoad %g reads
+; the local instead of the input (plausible-but-wrong). spirv-cross shares the
+; collision, so this is verified by name-distinctness + known semantics (load %g
+; must read %g), not an oracle render-MATCH. After the #sid fix the local is
+; mangled to "a_b_1" and the shadow is gone.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %g %outColor
+OpExecutionMode %main OriginUpperLeft
+
+OpName %main "main"
+OpName %g "a_b"
+OpName %l "a-b"
+
+OpDecorate %g Location 0
+OpDecorate %outColor Location 1
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%v4f = OpTypeVector %float 4
+%ptr_float_in = OpTypePointer Input %float
+%ptr_v4_out = OpTypePointer Output %v4f
+%ptr_float_func = OpTypePointer Function %float
+
+%float_2 = OpConstant %float 2
+
+%g = OpVariable %ptr_float_in Input
+%outColor = OpVariable %ptr_v4_out Output
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%l = OpVariable %ptr_float_func Function
+OpStore %l %float_2
+%ld = OpLoad %float %g
+%cc = OpCompositeConstruct %v4f %ld %ld %ld %float_2
+OpStore %outColor %cc
+OpReturn
+OpFunctionEnd

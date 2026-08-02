@@ -3793,3 +3793,30 @@ test "zm0: two structs sharing one OpName get distinct mangled decls (no silent-
     try assertContains(hlsl, "struct S_1\n{");
     try assertContains(hlsl, "float _m2;");
 }
+
+test "sid: a function-local variable shadowing a global's name gets mangled (no silent-wrong)" {
+    // value_dedup_collision.spv: Input global OpName "a_b" + Function local
+    // OpName "a-b" -> both sanitize to "a_b". The local would silently shadow
+    // the global (OpLoad %g reads the local instead of the input -- plausible-
+    // but-wrong). spirv-cross shares the collision, so this is verified by name
+    // distinctness (local mangled to a_b_1) + known semantics, not oracle-MATCH.
+    // The fix is SCOPE-AWARE: only function-local-vs-global collisions mangle --
+    // type/variable overlaps (e.g. a UBO block + its instance both "Globals")
+    // are left to the backends' block naming.
+    const spv_bytes = @embedFile("fixtures/value_dedup_collision.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 450 });
+    defer alloc.free(glsl);
+    // Input keeps "a_b"; the colliding local must be mangled ("a_b_1") so it
+    // cannot shadow -- the load then reads the input. Pre-fix both collapse to
+    // "a_b" and "a_b_1" is absent (shadow -> silent-wrong).
+    try assertContains(glsl, "in float a_b;");
+    try assertContains(glsl, "a_b_1");
+
+    const hlsl = try zioshade.spirvToHLSL(alloc, words, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "a_b_1");
+}

@@ -1445,6 +1445,12 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // (the array ConstantComposite is already declared as a global `const`), so
     // `arr[i]` resolves to the literal instead of an undeclared variable (Design A).
     common.aliasConstInitializedPrivateVars(aa, &module, &names);
+    // Mangle function-local variables whose name collides with a GLOBAL
+    // variable's (the only collision that silently shadows -- #sid). Scope-aware:
+    // leaves type/variable + same-scope collisions alone (a broad all-OpName
+    // pass regressed those). Runs after aliasConst so a const-aliased Private
+    // global (whose uses resolve to the literal) doesn't present a shadowing name.
+    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa);
     try collectDecorations(aa, &module, &decs);
 
     var cbuffers = std.ArrayList(CbufferDecl).initCapacity(aa, 0) catch return error.OutOfMemory;

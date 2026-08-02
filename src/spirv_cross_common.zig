@@ -1255,6 +1255,56 @@ pub fn commonPrewriteUniqueStructNames(
     }
 }
 
+/// For each FUNCTION-LOCAL OpVariable whose emitted name collides with a
+/// GLOBAL OpVariable's emitted name, mangle the local (`a_b -> a_b_1`) so it
+/// cannot silently shadow the global (#sid). A function-local that shares an
+/// emitted name with a global shadows it within the function, so an `OpLoad` of
+/// the global reads the local instead -- plausible-but-wrong.
+///
+/// SCOPE-AWARE (the point): ONLY the function-local-vs-global collision causes
+/// a silent shadow, so ONLY that is mangled. Same-scope local/local collisions
+/// are loud redefinitions the target compiler catches; type/type and
+/// type/variable name overlaps (e.g. a UBO struct type and its instance
+/// variable both `OpName "Globals"`) are handled by the backends' existing
+/// block naming and must be left alone. A broader all-OpName uniqueness pass
+/// regressed exactly those (it mangled the harmless type/variable overlap and
+/// broke block instance naming) -- see the #sid notes.
+///
+/// Run ONCE after collectNames (and after the struct-name pre-pass). Only
+/// colliding function-local ids are mutated.
+pub fn commonPrewriteUniqueLocalVarNames(
+    instructions: anytype,
+    names: *std.AutoHashMap(u32, []const u8),
+    alloc: std.mem.Allocator,
+) void {
+    // Names already claimed by global (non-Function) variables. A function-local
+    // colliding with any of these would shadow the global; it also doubles as the
+    // "already-mangled" set so two colliding locals get distinct suffixes.
+    var claimed = std.StringHashMap(void).init(alloc);
+    defer claimed.deinit();
+    for (instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) == .Function) continue;
+        if (names.get(inst.words[2])) |nm| claimed.put(nm, {}) catch {};
+    }
+    for (instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Function) continue;
+        const vid = inst.words[2];
+        const base = names.get(vid) orelse continue;
+        if (claimed.get(base) == null) continue; // no collision with a global -> untouched
+        var n: u32 = 1;
+        while (true) : (n += 1) {
+            const cand = std.fmt.allocPrint(alloc, "{s}_{d}", .{ base, n }) catch break;
+            if (claimed.get(cand) == null) {
+                names.put(vid, cand) catch {};
+                claimed.put(cand, {}) catch {};
+                break;
+            }
+        }
+    }
+}
+
 /// Get array dimension suffix for a pointer type. E.g., "[4]" or "[2][3]" for multi-dim.
 /// HLSL uses multi_dim=true to unwrap nested TypeArray layers.
 /// Takes instruction slice + id_defs to work across different ParsedModule types.

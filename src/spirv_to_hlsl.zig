@@ -1395,6 +1395,10 @@ pub fn spirvToHLSL(
     common.commonPrewriteUniqueStructNames(module.instructions, &names, aa, hlslSafeName);
     // Alias const-initialised Private globals to their promoted const (Design A).
     hlslAliasConstInitializedPrivateVars(aa, &module, &names);
+    // Mangle function-local variables whose name collides with a GLOBAL
+    // variable's (the only collision that silently shadows -- #sid). Scope-aware:
+    // leaves type/variable + same-scope collisions alone.
+    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa);
 
     // Rename HLSL-reserved keyword names (line, register, etc.)
     {
