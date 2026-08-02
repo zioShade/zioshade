@@ -43,6 +43,9 @@ command -v spirv-dis >/dev/null || { echo "error: spirv-dis not on PATH (stage d
 # Ported from cts_ingestion_sweep.sh: a CRASH on valid input is a mandate
 # violation and must NOT be counted as an honest skip (which is what this tool
 # existed to discriminate). stderr is captured (not discarded) so it can classify.
+# NOTE: callers MUST capture rc in a variable (`cmd ...; rc=$?`) BEFORE the
+# surrounding `if !`/pipeline clobbers $? -- otherwise rc is always 0 here and
+# the rc>128 (signal) arm is dead (only the stderr-grep arm would fire).
 is_crash() {
   local errfile=$1 rc=$2
   [ "$rc" -gt 128 ] && return 0
@@ -57,9 +60,9 @@ glslang_stage() {
   esac
 }
 
-ANY_CRASH=0
+ANY_ZS_CRASH=0   # zioshade-owned stage crashed -> mandate violation -> exit 1
 check_one() {
-  local spv="$1" name gs d
+  local spv="$1" name gs d rc
   name=$(basename "$spv" .spv)
   gs=$(glslang_stage "$spv")
   [ -z "$gs" ] && { echo "skip-stage"; return; }
@@ -68,17 +71,24 @@ check_one() {
   [ "$gs" != "frag" ] && { echo "skip-stage"; return; }
   d="$SHARE/$name"
 
-  if ! spirv-cross --msl "$spv" > "$d.ref.msl" 2>"$d.ref.err"; then
-    if is_crash "$d.ref.err" $?; then ANY_CRASH=1; echo "CRASH-crossmsl"; else echo "skip-crossmsl"; fi; return
+  # spirv-cross/glslang are ORACLES -- their crash is reported but NOT fatal
+  # (zioshade is blameless for its oracles' stability). Only CRASH-zglsl (a
+  # zioshade-owned stage) fails the run.
+  spirv-cross --msl "$spv" > "$d.ref.msl" 2>"$d.ref.err"; rc=$?
+  if [ $rc -ne 0 ]; then
+    if is_crash "$d.ref.err" "$rc"; then echo "CRASH-crossmsl"; else echo "skip-crossmsl"; fi; return
   fi
-  if ! "$CLI" glsl "$spv" > "$d.z.glsl" 2>"$d.zglsl.err"; then
-    if is_crash "$d.zglsl.err" $?; then ANY_CRASH=1; echo "CRASH-zglsl"; else echo "skip-zglsl"; fi; return
+  "$CLI" glsl "$spv" > "$d.z.glsl" 2>"$d.zglsl.err"; rc=$?
+  if [ $rc -ne 0 ]; then
+    if is_crash "$d.zglsl.err" "$rc"; then ANY_ZS_CRASH=1; echo "CRASH-zglsl"; else echo "skip-zglsl"; fi; return
   fi
-  if ! glslangValidator -V -S "$gs" "$d.z.glsl" -o "$d.z.spv" >"$d.zg.err" 2>&1; then
-    if is_crash "$d.zg.err" $?; then ANY_CRASH=1; echo "CRASH-zglslang"; else echo "skip-zglslang"; fi; return
+  glslangValidator -V -S "$gs" "$d.z.glsl" -o "$d.z.spv" >"$d.zg.err" 2>&1; rc=$?
+  if [ $rc -ne 0 ]; then
+    if is_crash "$d.zg.err" "$rc"; then echo "CRASH-zglslang"; else echo "skip-zglslang"; fi; return
   fi
-  if ! spirv-cross --msl "$d.z.spv" > "$d.z.msl" 2>"$d.zcm.err"; then
-    if is_crash "$d.zcm.err" $?; then ANY_CRASH=1; echo "CRASH-zcrossmsl"; else echo "skip-zcrossmsl"; fi; return
+  spirv-cross --msl "$d.z.spv" > "$d.z.msl" 2>"$d.zcm.err"; rc=$?
+  if [ $rc -ne 0 ]; then
+    if is_crash "$d.zcm.err" "$rc"; then echo "CRASH-zcrossmsl"; else echo "skip-zcrossmsl"; fi; return
   fi
   local o; o=$("$SC" "$d.z.msl" "$d.ref.msl" "${d}_r" 2>&1)
   printf '%s' "$o" | grep -q '^MATCH' && { echo "MATCH"; return; }
@@ -103,4 +113,4 @@ for k in MATCH "EDGE(fast-math-fp)" DIFFER skip-binding skip-stage skip-crossmsl
          CRASH-zglsl CRASH-crossmsl CRASH-zglslang CRASH-zcrossmsl; do
   echo "  $k: ${C[$k]:-0}"
 done
-[ "$ANY_CRASH" -eq 0 ] || { echo "FAIL: a stage crashed (mandate violation)"; exit 1; }
+[ "$ANY_ZS_CRASH" -eq 0 ] || { echo "FAIL: a zioshade stage crashed (mandate violation)"; exit 1; }
