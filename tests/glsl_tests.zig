@@ -3762,3 +3762,34 @@ test "e54.4: module-scope OpUndef folds to a zero literal (not undeclared)" {
     try assertContains(glsl, "int(0)"); // the folded module-scope int undef
     try assertContains(glsl, "bool(0)"); // the folded module-scope bool undef
 }
+
+test "zm0: two structs sharing one OpName get distinct mangled decls (no silent-wrong)" {
+    // struct_dedup_collision.spv: two OpTypeStruct both OpName'd "S" with
+    // different layouts. GLSL source can't express this (redefinition), so feed
+    // the binary directly. Before the #zm0 fix the forward-decl emitter dedups
+    // by NAME and drops the second struct's real layout, so its uses compile
+    // against the first -> plausible-but-wrong byte binding (mandate violation);
+    // for this in-member-count shape it surfaces as an undeclared member. After
+    // the fix, both S and S_1 are declared with their own layouts.
+    const spv_bytes = @embedFile("fixtures/struct_dedup_collision.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 450 });
+    defer alloc.free(glsl);
+    // Both structs declared under distinct names; the second's 4-float layout
+    // (member m2, absent from the first's {vec4 m0}) must be present.
+    try assertContains(glsl, "struct S\n{");
+    try assertContains(glsl, "struct S_1\n{");
+    try assertContains(glsl, "float m2;");
+
+    // The shared pre-pass also covers the HLSL backend (which otherwise has its
+    // own parallel name-dedup path); assert it mangles too. HLSL member names
+    // are _m-prefixed.
+    const hlsl = try zioshade.spirvToHLSL(alloc, words, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "struct S\n{");
+    try assertContains(hlsl, "struct S_1\n{");
+    try assertContains(hlsl, "float _m2;");
+}
