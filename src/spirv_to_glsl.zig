@@ -1436,6 +1436,11 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     defer decs.deinit();
 
     collectNames(aa, &module, &names);
+    // Prewrite unique struct names BEFORE any forward-decl emission so two
+    // distinct structs sharing one OpName don't collapse (the forward-decl
+    // emitter dedups by name and would drop the second's real layout, leaving
+    // uses to silently bind the wrong bytes -- #zm0).
+    common.commonPrewriteUniqueStructNames(module.instructions, &names, aa, common.commonPassthroughName);
     // Alias const-initialised Private globals to their promoted const literal
     // (the array ConstantComposite is already declared as a global `const`), so
     // `arr[i]` resolves to the literal instead of an undeclared variable (Design A).
