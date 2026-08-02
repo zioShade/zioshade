@@ -1255,6 +1255,93 @@ pub fn commonPrewriteUniqueStructNames(
     }
 }
 
+/// For each FUNCTION-SCOPE id -- an `OpVariable` in the Function storage class,
+/// or an `OpFunctionParameter` -- whose emitted name collides with a GLOBAL
+/// variable's emitted name, mangle the local/param (`a_b -> a_b_1`) so it
+/// cannot silently shadow the global (#sid). A function-scope id sharing a
+/// global's name shadows it within the function, so an `OpLoad` of the global
+/// reads the local/param instead -- plausible-but-wrong.
+///
+/// SCOPE-AWARE (the point): ONLY function-scope-vs-global collisions cause a
+/// silent shadow, so ONLY those are mangled. Same-scope local/local collisions
+/// are loud redefinitions the target compiler catches; type/type and
+/// type/variable name overlaps (e.g. a UBO struct type and its instance both
+/// `OpName "Globals"`) are handled by the backends' existing block naming and
+/// are left alone. A broader all-OpName uniqueness pass regressed exactly those.
+///
+/// BLOCK-INSTANCE EXCLUSION: a UBO/SSBO instance variable (Uniform /
+/// StorageBuffer, pointee a block-decorated struct) is emitted under a
+/// block-naming-mangled name (e.g. `Globals_1`), NOT its raw OpName -- so a
+/// function-local sharing the block's raw OpName does NOT shadow it. Such
+/// instances are excluded from the collision set; without this, the local would
+/// be mangled INTO the block-naming suffix space and collide with the instance.
+///
+/// Run ONCE after collectNames (and after the struct-name pre-pass). Only
+/// colliding function-scope ids are mutated.
+pub fn commonPrewriteUniqueLocalVarNames(
+    instructions: anytype,
+    names: *std.AutoHashMap(u32, []const u8),
+    alloc: std.mem.Allocator,
+) void {
+    // block-decorated struct type ids, and pointer-type id -> pointee type id
+    // (to test whether a variable is a block instance).
+    var block_types = std.AutoHashMap(u32, void).init(alloc);
+    defer block_types.deinit();
+    var pointee_of = std.AutoHashMap(u32, u32).init(alloc);
+    defer pointee_of.deinit();
+    for (instructions) |inst| {
+        switch (inst.op) {
+            .Decorate => if (inst.words.len >= 3) {
+                const dec = @as(spirv.Decoration, @enumFromInt(inst.words[2]));
+                if (dec == .block or dec == .buffer_block) block_types.put(inst.words[1], {}) catch {};
+            },
+            .TypePointer => if (inst.words.len >= 4) pointee_of.put(inst.words[1], inst.words[3]) catch {},
+            else => {},
+        }
+    }
+
+    // Names claimed by global (non-Function) variables, EXCLUDING block instances
+    // (block-named -> a function-local with the block's raw OpName does not shadow).
+    var claimed = std.StringHashMap(void).init(alloc);
+    defer claimed.deinit();
+    for (instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) == .Function) continue;
+        if (pointee_of.get(inst.words[1])) |pointee| {
+            if (block_types.contains(pointee)) continue;
+        }
+        if (names.get(inst.words[2])) |nm| claimed.put(nm, {}) catch {};
+    }
+
+    // Mangle function-scope ids (Function-class OpVariable or OpFunctionParameter)
+    // whose name collides with a claimed global. (0 is never a valid SPIR-V id.)
+    for (instructions) |inst| {
+        const vid: u32 = blk: {
+            switch (inst.op) {
+                .Variable => {
+                    if (inst.words.len < 4) break :blk 0;
+                    if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Function) break :blk 0;
+                    break :blk inst.words[2];
+                },
+                .FunctionParameter => break :blk if (inst.words.len >= 3) inst.words[2] else 0,
+                else => break :blk 0,
+            }
+        };
+        if (vid == 0) continue;
+        const base = names.get(vid) orelse continue;
+        if (claimed.get(base) == null) continue; // no collision -> untouched
+        var n: u32 = 1;
+        while (true) : (n += 1) {
+            const cand = std.fmt.allocPrint(alloc, "{s}_{d}", .{ base, n }) catch break;
+            if (claimed.get(cand) == null) {
+                names.put(vid, cand) catch {};
+                claimed.put(cand, {}) catch {}; // claim -> two colliding locals differ
+                break;
+            }
+        }
+    }
+}
+
 /// Get array dimension suffix for a pointer type. E.g., "[4]" or "[2][3]" for multi-dim.
 /// HLSL uses multi_dim=true to unwrap nested TypeArray layers.
 /// Takes instruction slice + id_defs to work across different ParsedModule types.
