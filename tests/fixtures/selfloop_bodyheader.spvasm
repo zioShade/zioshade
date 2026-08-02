@@ -2,7 +2,7 @@
 ; Loop header %hdr IS the continue target (OpLoopMerge %merge %hdr -> continue==header),
 ; and the body (load acc / add / store) sits IN the header before the LoopMerge.
 ; acc accumulates i over the loop; output = float(acc). In-bounds, no chaos, hand-computable.
-;   do { acc += i; } while(++i < 10)  -> acc = 0+1+...+10 = 55 -> outColor = (55,55,55,1)
+;   do { acc += i; } while(i++ < 10)  -> acc = 0+1+...+10 = 55 -> outColor = (55,55,55,1)
 OpCapability Shader
 OpMemoryModel Logical GLSL450
 OpEntryPoint Fragment %main "main" %outColor
@@ -21,7 +21,6 @@ OpDecorate %outColor Location 0
 %int_0 = OpConstant %int 0
 %int_1 = OpConstant %int 1
 %int_10 = OpConstant %int 10
-%float_0 = OpConstant %float 0
 %float_1 = OpConstant %float 1
 
 %outColor = OpVariable %ptr_v4_out Output

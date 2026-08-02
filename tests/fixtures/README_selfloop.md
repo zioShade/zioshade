@@ -3,7 +3,7 @@
 A clean, in-bounds, hand-computable fragment shader exercising the
 **self-loop-with-body-in-header** pattern: `OpLoopMerge %merge %hdr` where the
 continue target IS the loop header (`%hdr`), and the loop body sits IN the
-header before the OpLoopMerge. Equivalent to `do { acc += i; } while(++i < 10)`
+header before the OpLoopMerge. Equivalent to `do { acc += i; } while(i++ < 10)`
 -> acc = 0+1+...+10 = 55 -> outColor = (55,55,55,1).
 
 ## Status (known issue, fully traced)
