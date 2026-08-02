@@ -2613,6 +2613,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     defer decs.deinit();
 
     collectNames(aa, &module, &names);
+    // Prewrite unique struct names BEFORE any forward-decl emission so two
+    // distinct structs sharing one OpName don't collapse (the common forward-decl
+    // emitter dedups by name and would drop the second's real layout -> uses bind
+    // the wrong bytes, #zm0 / #cgv). MSL's struct emitter delegates to the common
+    // helper, so -- like GLSL/HLSL -- it just needs this pre-pass call.
+    common.commonPrewriteUniqueStructNames(module.instructions, &names, aa, common.commonPassthroughName);
     try collectDecorations(aa, &module, &decs);
 
     // Honest-error: a plain (non-Block, non-builtin) STRUCT vertex output isn't flattened
