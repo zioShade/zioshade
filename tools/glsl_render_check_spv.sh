@@ -105,7 +105,7 @@ DIR=${1:-tests/cts/graphicsfuzz}
 shopt -s nullglob
 for f in "$DIR"/*.spv; do
   v=$(check_one "$f"); key=${v%% *}; bump "$key"
-  case "$v" in CRASH*) echo "$(basename "$f" .spv).spv: $v";; esac
+  case "$v" in DIFFER*|CRASH*) echo "$(basename "$f" .spv).spv: $v";; esac
 done
 echo ""
 echo "=== GLSL render proxy (.spv) coverage: $DIR ==="
