@@ -3011,14 +3011,22 @@ pub fn mergeNonEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
             if (from != from_label) continue;
         } else continue;
 
+        // Not best-effort: `mergeable` deletes the block's OpLabel while
+        // `merge_map` is what redirects branches and OpPhi parents to the
+        // surviving predecessor. Dropping the map entry would delete the label
+        // but leave references to it, which is invalid SPIR-V. Record the map
+        // entry first so the two can never disagree.
+        try merge_map.put(alloc, to_label, from_label);
         mergeable.set(to_label);
-        merge_map.put(alloc, to_label, from_label) catch {};
     }
 
     if (mergeable.count() == 0) return words;
 
     // Build new binary
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    // Every `catch return words` below abandons this list; a defer covers them
+    // all, and is a no-op after the toOwnedSlice at the end empties it.
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]);
 
     pos = 5;
@@ -3116,10 +3124,7 @@ pub fn mergeNonEmptyBlocks(alloc: std.mem.Allocator, words: []const u32) error{O
         pos = ie;
     }
 
-    if (result.items.len == words.len) {
-        result.deinit(alloc);
-        return words;
-    }
+    if (result.items.len == words.len) return words;
 
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce_result = deadCodeElim(alloc, nw) catch return nw;
@@ -7088,7 +7093,12 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
             const vid = kp.*;
             const sc = store_count.get(vid) orelse 0;
             if (sc != 1 or unsafe_vars.isSet(vid)) {
-                to_remove.append(alloc, vid) catch {};
+                // Not best-effort: this list disqualifies a variable from being
+                // forwarded. Dropping an entry leaves an unsafe variable in
+                // const_store_val, so the pass forwards its value and deletes
+                // its store anyway. That changes the emitted bytes and is a
+                // silent miscompile, not a missed optimization.
+                try to_remove.append(alloc, vid);
             }
         }
         for (to_remove.items) |vid| {
@@ -12000,8 +12010,14 @@ pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{Out
             const cond = words[pos + 1];
             const true_label = words[pos + 2];
             const false_label = words[pos + 3];
+            // Not best-effort: these two maps must agree. `fold_positions`
+            // rewrites the OpBranchConditional into an OpBranch and
+            // `merge_positions` deletes the OpSelectionMerge that headed it.
+            // Losing either one alone emits an OpSelectionMerge followed by an
+            // OpBranch, or a bare OpBranchConditional whose merge is gone, both
+            // of which are invalid structured control flow.
             if (cond == true_id) {
-                fold_positions.put(alloc, pos, true_label) catch {};
+                try fold_positions.put(alloc, pos, true_label);
                 // Find associated SelectionMerge (should be just before this in the same block)
                 // Walk backwards from this position to find SelectionMerge
                 var pp: u32 = prev_pos;
@@ -12011,13 +12027,13 @@ pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{Out
                     const pop: u16 = @truncate(ph & 0xFFFF);
                     if (pw == 0) break;
                     if (pop == 247) { // OpSelectionMerge
-                        merge_positions.put(alloc, pp, {}) catch {};
+                        try merge_positions.put(alloc, pp, {});
                         break;
                     }
                     pp += pw;
                 }
             } else if (cond == false_id) {
-                fold_positions.put(alloc, pos, false_label) catch {};
+                try fold_positions.put(alloc, pos, false_label);
                 var pp: u32 = prev_pos;
                 while (pp < pos) {
                     const ph = words[pp];
@@ -12025,7 +12041,7 @@ pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{Out
                     const pop: u16 = @truncate(ph & 0xFFFF);
                     if (pw == 0) break;
                     if (pop == 247) { // OpSelectionMerge
-                        merge_positions.put(alloc, pp, {}) catch {};
+                        try merge_positions.put(alloc, pp, {});
                         break;
                     }
                     pp += pw;
@@ -12045,6 +12061,9 @@ pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     // Phase 3: Rewrite — remove SelectionMerge, replace OpBranchConditional with OpBranch
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    // Every `catch return words` below abandons this list; a defer covers them
+    // all, and is a no-op after the toOwnedSlice at the end empties it.
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]);
 
     pos = 5;
@@ -12073,10 +12092,7 @@ pub fn foldConstBranches(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
 
-    if (result.items.len == words.len) {
-        result.deinit(alloc);
-        return words;
-    }
+    if (result.items.len == words.len) return words;
     return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
 }
 
