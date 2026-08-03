@@ -1446,6 +1446,11 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
     };
     var edits = std.ArrayListUnmanaged(Edit).empty;
     defer edits.deinit(alloc);
+    // Relocated OpVariable words are owned by the edit list; free them on every
+    // exit path, including the ones an allocation failure introduces.
+    defer {
+        for (edits.items) |e| if (e.var_words.len > 0) alloc.free(@constCast(e.var_words));
+    }
 
     var pos: u32 = 5;
     while (pos < words.len) {
@@ -1534,6 +1539,7 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
         if (is_target and !entry_has_phi) {
             // Collect OpVariable instructions in the entry block (to relocate).
             var var_list = std.ArrayListUnmanaged(u32).empty;
+            defer var_list.deinit(alloc);
             var bp = fp + lwc;
             while (bp < words.len) {
                 const bwc: u32 = words[bp] >> 16;
@@ -1541,7 +1547,7 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
                 if (bwc == 0) break;
                 if (bop == 248) break; // next block
                 if (bop == 59) { // OpVariable
-                    var_list.appendSlice(alloc, words[bp .. bp + bwc]) catch {};
+                    try var_list.appendSlice(alloc, words[bp .. bp + bwc]);
                 }
                 // Stop at the block terminator.
                 if (bop == 249 or bop == 250 or bop == 251 or bop == 253 or
@@ -1551,8 +1557,9 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
                 }
                 bp += bwc;
             }
-            const var_words = var_list.toOwnedSlice(alloc) catch &.{};
-            edits.append(alloc, .{ .entry_label = entry_label, .new_label = bound, .var_words = var_words }) catch {};
+            const var_words = try var_list.toOwnedSlice(alloc);
+            errdefer alloc.free(var_words);
+            try edits.append(alloc, .{ .entry_label = entry_label, .new_label = bound, .var_words = var_words });
             bound += 1;
         }
         pos = ie;
@@ -1563,10 +1570,8 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
     // Pass 2: rebuild. For each entry OpLabel that needs a pre-header, emit the new
     // pre-header (OpLabel + relocated OpVariables + OpBranch to old entry) BEFORE it,
     // and drop the relocated OpVariables from the old entry block.
-    var result = std.ArrayList(u32).initCapacity(alloc, words.len + edits.items.len * 6) catch {
-        for (edits.items) |e| if (e.var_words.len > 0) alloc.free(@constCast(e.var_words));
-        return words;
-    };
+    var result = try std.ArrayList(u32).initCapacity(alloc, words.len + edits.items.len * 6);
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]);
     result.items[3] = bound;
 
@@ -1577,12 +1582,12 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
         const wc: u32 = words[pos] >> 16;
         const op: u16 = @truncate(words[pos] & 0xFFFF);
         if (wc == 0) {
-            result.appendSlice(alloc, words[pos..]) catch {};
+            try result.appendSlice(alloc, words[pos..]);
             break;
         }
         const ie = pos + wc;
         if (ie > words.len) {
-            result.appendSlice(alloc, words[pos..]) catch {};
+            try result.appendSlice(alloc, words[pos..]);
             break;
         }
 
@@ -1599,16 +1604,16 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
             if (matched) |idx| {
                 const e = edits.items[idx];
                 // Emit pre-header block.
-                result.appendSlice(alloc, &.{ (2 << 16) | 248, e.new_label }) catch {}; // OpLabel new
-                if (e.var_words.len > 0) result.appendSlice(alloc, e.var_words) catch {};
-                result.appendSlice(alloc, &.{ (2 << 16) | 249, e.entry_label }) catch {}; // OpBranch entry
+                try result.appendSlice(alloc, &.{ (2 << 16) | 248, e.new_label }); // OpLabel new
+                if (e.var_words.len > 0) try result.appendSlice(alloc, e.var_words);
+                try result.appendSlice(alloc, &.{ (2 << 16) | 249, e.entry_label }); // OpBranch entry
                 // Emit the original entry OpLabel; mark that we must drop its vars.
-                result.appendSlice(alloc, words[pos..ie]) catch {};
+                try result.appendSlice(alloc, words[pos..ie]);
                 active_drop = idx;
                 pos = ie;
                 continue;
             }
-            result.appendSlice(alloc, words[pos..ie]) catch {};
+            try result.appendSlice(alloc, words[pos..ie]);
             pos = ie;
             continue;
         }
@@ -1625,12 +1630,11 @@ pub fn ensureLoopPreheader(alloc: std.mem.Allocator, words: []const u32) error{O
             active_drop = null;
         }
 
-        result.appendSlice(alloc, words[pos..ie]) catch {};
+        try result.appendSlice(alloc, words[pos..ie]);
         pos = ie;
     }
 
-    for (edits.items) |e| if (e.var_words.len > 0) alloc.free(@constCast(e.var_words));
-    return result.toOwnedSlice(alloc) catch words;
+    return try result.toOwnedSlice(alloc);
 }
 
 /// Dead loop elimination: remove loops whose bodies have no observable side effects
@@ -2118,6 +2122,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
 
     // Remove dead loop bodies: replace header with Label + OpBranch to merge, skip everything until merge
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]);
     pos = 5;
     var in_dead_loop = false;
@@ -2156,10 +2161,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         result.appendSlice(alloc, words[pos..ie]) catch return words;
         pos = ie;
     }
-    if (result.items.len == words.len) {
-        result.deinit(alloc);
-        return words;
-    }
+    if (result.items.len == words.len) return words;
 
     // Phase 4.5: Fix OpPhi instructions that reference labels inside eliminated loops
     // When a dead loop is removed, its labels are gone but OpPhi entries may still reference them.
@@ -2185,6 +2187,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     }
     if (removed_labels.count() > 0) {
         var fixed = std.ArrayList(u32).initCapacity(alloc, result.items.len) catch return words;
+        errdefer fixed.deinit(alloc);
         fixed.appendSliceAssumeCapacity(result.items[0..5]);
         var fp: u32 = 5;
         while (fp < result.items.len) {
@@ -2197,11 +2200,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             if (fop == 245 and fwc >= 5) {
                 const phi_type = result.items[fp + 1];
                 const phi_result = result.items[fp + 2];
-                var phi_buf = std.ArrayListUnmanaged(u32).initCapacity(alloc, fwc) catch {
-                    fixed.appendSlice(alloc, result.items[fp..fie]) catch {};
-                    fp = fie;
-                    continue;
-                };
+                var phi_buf = try std.ArrayListUnmanaged(u32).initCapacity(alloc, fwc);
                 defer phi_buf.deinit(alloc);
                 phi_buf.appendAssumeCapacity(phi_type);
                 phi_buf.appendAssumeCapacity(phi_result);
@@ -2216,11 +2215,11 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 }
                 if (phi_buf.items.len >= 5) {
                     const new_wc: u32 = @intCast(phi_buf.items.len);
-                    fixed.append(alloc, (new_wc << 16) | 245) catch return words;
-                    fixed.appendSlice(alloc, phi_buf.items[1..]) catch return words;
+                    try fixed.append(alloc, (new_wc << 16) | 245);
+                    try fixed.appendSlice(alloc, phi_buf.items[1..]);
                 }
             } else {
-                fixed.appendSlice(alloc, result.items[fp..fie]) catch return words;
+                try fixed.appendSlice(alloc, result.items[fp..fie]);
             }
             fp = fie;
         }
@@ -2228,7 +2227,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
         result = fixed;
     }
 
-    const nw = result.toOwnedSlice(alloc) catch return words;
+    const nw = try result.toOwnedSlice(alloc);
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
     return dce;
