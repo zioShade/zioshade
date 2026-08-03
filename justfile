@@ -152,6 +152,13 @@ prove-3oracle frags="--dir tests/spirv-cross":
 wgsl-naga:
     @bash tools/wgsl_naga_sweep.sh
 
+# two-oracle WGSL validity sweep (r2d.1): every fixture -> zioshade WGSL, then validated
+# by BOTH naga AND tint (Chrome's WGSL compiler, auto-downloaded). TINT-REJECT or
+# NAGA-REJECT (one oracle accepts what the other rejects) are real bug leads. Report-only;
+# run on demand, not in `ci`.
+wgsl-tint:
+    @bash tools/wgsl_tint_sweep.sh
+
 # GLSL/WGSL render proxies: re-compile the backend's output to SPIR-V (glslang/naga) ->
 # spirv-cross MSL -> render-diff on Metal vs the render-proven MSL_ref. MATCH = the
 # backend's output is render-correct (as glslang/naga parse it); single-oracle proxy.
