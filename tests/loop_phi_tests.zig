@@ -565,6 +565,23 @@ test "MSL lowers a self-loop with body-in-header (#selfloop)" {
     }
 }
 
+// Reversed-polarity twin of SELFLOOP_BODYHEADER_SPV (back-edge BranchConditional targets
+// swapped: true->merge=break, false->header=continue; cond negated so semantics are
+// identical, acc = 55). spirv-cross lowers it; zioshade honest-errors it in ALL backends:
+// the normal-polarity exit path is the only place the self-loop phi back-edge update is
+// emitted, so a reversed back-edge would silently drop it -> the counter never advances
+// -> infinite loop (valid output, oracle-accepted = silent-wrong). GLSL/MSL guard via
+// back-edge polarity; WGSL + HLSL guard on the self-loop shape. This locks the honest-
+// error so it cannot regress to silent-wrong (the hole PR #544 review found in WGSL).
+const SELFLOOP_REVERSED_SPV = @embedFile("fixtures/selfloop_reversed.spv");
+
+test "all backends honest-error a reversed-polarity self-loop (#selfloop)" {
+    try std.testing.expectError(error.CrossCompileUnsupported, crossGlsl(SELFLOOP_REVERSED_SPV));
+    try std.testing.expectError(error.CrossCompileUnsupported, crossMsl(SELFLOOP_REVERSED_SPV));
+    try std.testing.expectError(error.CrossCompileUnsupported, crossWgsl(SELFLOOP_REVERSED_SPV));
+    try std.testing.expectError(error.CrossCompileUnsupported, crossHlsl(SELFLOOP_REVERSED_SPV));
+}
+
 // #wgsl-else-clobber: an if/else whose THEN-branch contains a nested (no-else) if was
 // silently mis-emitted — opening the nested if overwrote the enclosing if's
 // pending_false_label to null, so the enclosing then-block's terminating OpBranch never

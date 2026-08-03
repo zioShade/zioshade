@@ -6925,6 +6925,25 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const condition = names.get(inst.words[1]) orelse "true";
                     const true_label = inst.words[2];
                     const false_label = inst.words[3];
+                    // #selfloop: a reversed-polarity self-loop back-edge
+                    // (OpBranchConditional %cond %merge %hdr -- true->merge=break,
+                    // false->header=continue) is NOT handled by the normal-polarity exit
+                    // path below (which is the only place the self-loop phi back-edge
+                    // update is emitted); it would silently drop the update -> the counter
+                    // never advances -> infinite loop (valid WGSL, naga-accepted = silent-
+                    // wrong, a regression vs the pre-override naga-reject). GLSL/MSL
+                    // honest-error this; mirror them. Precise: requires cont == header
+                    // (self-loop), true->merge (break on true), false->header (continue).
+                    // A normal loop has cont != header; a normal-polarity self-loop has
+                    // true->header, so neither trips this.
+                    if (in_loop and loop_merge_label != null and loop_continue_label != null and
+                        loop_header_label != null and
+                        loop_continue_label.? == loop_header_label.? and
+                        true_label == loop_merge_label.? and
+                        false_label == loop_header_label.?)
+                    {
+                        return error.CrossCompileUnsupported;
+                    }
                     // Check if this is a loop exit condition (BranchConditional in loop header)
                     if (in_loop and loop_merge_label != null and false_label == loop_merge_label.? and pending_merge == null) {
                         // Loop condition: if (!cond) { break; }
