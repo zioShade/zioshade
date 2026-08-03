@@ -578,6 +578,33 @@ pub fn build(b: *std.Build) void {
     const opt_test_step = b.step("test-opt", "Run optimizer regression tests");
     opt_test_step.dependOn(&run_opt_tests.step);
 
+    // Truncated-instruction negative fixtures (per-opcode minimum word count)
+    const trunc_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/truncated_spirv_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    trunc_test_mod.addImport("zioshade", zioshade_mod);
+    trunc_test_mod.addAnonymousImport("truncated_accesschain_spv", .{
+        .root_source_file = b.path("src/testdata/truncated_accesschain.spv"),
+    });
+    trunc_test_mod.addAnonymousImport("truncated_vectorshuffle_spv", .{
+        .root_source_file = b.path("src/testdata/truncated_vectorshuffle.spv"),
+    });
+    trunc_test_mod.addAnonymousImport("truncated_functioncall_spv", .{
+        .root_source_file = b.path("src/testdata/truncated_functioncall.spv"),
+    });
+    trunc_test_mod.addAnonymousImport("valid_module_spv", .{
+        .root_source_file = b.path("tests/cts/graphicsfuzz/graphicsfuzz_001.spv"),
+    });
+    const run_trunc_tests = b.addRunArtifact(b.addTest(.{
+        .name = "truncated-spirv-tests",
+        .root_module = trunc_test_mod,
+    }));
+    test_step.dependOn(&run_trunc_tests.step);
+    const trunc_test_step = b.step("test-truncated", "Run truncated-instruction negative fixture tests");
+    trunc_test_step.dependOn(&run_trunc_tests.step);
+
     // Loop-counter (OpPhi) cross-backend correctness tests
     const loopphi_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/loop_phi_tests.zig"),

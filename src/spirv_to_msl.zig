@@ -3664,6 +3664,9 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     const bound = if (words.len > 3) words[3] else 0;
     if (bound > words.len) return error.InvalidSpirv;
     const id_defs = try alloc.alloc(?usize, bound);
+    // The parse loop below can reject a malformed instruction; without this the
+    // id table leaks on every rejected module.
+    errdefer alloc.free(id_defs);
     @memset(id_defs, null);
     var i: usize = 5;
     while (i < words.len) {
