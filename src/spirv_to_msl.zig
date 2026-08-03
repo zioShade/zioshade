@@ -2662,6 +2662,13 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // so promotion (or in-place brace init for mutated locals) is mandatory —
     // otherwise the index reads an undeclared identifier (silent-wrong).
     common.aliasConstInitializedPrivateVars(aa, &module, &names);
+    // Mangle function-scope ids (Function-class OpVariable or OpFunctionParameter)
+    // whose name collides with a GLOBAL OpVariable's -- the only collision that
+    // silently shadows (#sid / #cuj). Scope-aware + block-instance-excluded (MSL
+    // also block-names UBO instances as Globals_1, so the exclusion fits). Without
+    // this, two same-named ids (e.g. a Private global + a function-local both
+    // "a_b") emit a redefinition (invalid MSL). Runs after aliasConst.
+    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa, true);
     for (module.instructions) |inst| {
         if (inst.op != .Variable) continue;
         const info = analyzeLocalConstArray(&module, inst) orelse continue;
