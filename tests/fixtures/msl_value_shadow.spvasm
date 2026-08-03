@@ -1,0 +1,40 @@
+; Minimal deterministic reproducer for zioshade-cuj: the MSL value-name shadow.
+; A Private global and a Function local whose OpNames sanitize to the same string:
+;   %g : Private global, OpName "a_b"
+;   %l : Function local, OpName "a-b"  (dash -> _ -> "a_b")
+; Both become "a_b". Unlike GLSL/HLSL (where an Input global is bare-named),
+; MSL namespaces Input/Output into stage-in/out structs (in.a_b), so the MSL
+; shadow needs a BARE-NAMED global -- a Private global, which MSL emits as a
+; function-scope `float a_b;`. Without the fix, zioshade emits TWO `float a_b;`
+; (the Private global + the function local) -> a redefinition Metal rejects
+; (zioshade returns rc=0 on invalid MSL). After the #cuj fix the local is
+; mangled to "a_b_1" and the global is read correctly (1.0).
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor %g
+OpExecutionMode %main OriginUpperLeft
+OpName %main "main"
+OpName %g "a_b"
+OpName %l "a-b"
+OpDecorate %outColor Location 0
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%v4f = OpTypeVector %float 4
+%ptr_v4_out = OpTypePointer Output %v4f
+%ptr_float_private = OpTypePointer Private %float
+%ptr_float_func = OpTypePointer Function %float
+%float_1 = OpConstant %float 1
+%float_2 = OpConstant %float 2
+%g = OpVariable %ptr_float_private Private
+%outColor = OpVariable %ptr_v4_out Output
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%l = OpVariable %ptr_float_func Function
+OpStore %g %float_1
+OpStore %l %float_2
+%ld = OpLoad %float %g
+%cc = OpCompositeConstruct %v4f %ld %ld %ld %float_2
+OpStore %outColor %cc
+OpReturn
+OpFunctionEnd
