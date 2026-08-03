@@ -38,6 +38,311 @@ pub const ParsedModule = struct {
     }
 };
 
+/// Minimum total word count (including the opcode/word-count header word) that
+/// the SPIR-V specification requires for each opcode we model. Returns null for
+/// opcodes with no fixed minimum beyond 1, which are accepted as-is.
+///
+/// This is the single choke point for input-length validation. Backend emit
+/// arms index `inst.words[2]`, `inst.words[3]`, `inst.words[4..]` and so on
+/// without a per-arm guard; roughly 96 arms across the four backends do this.
+/// Enforcing the spec minimum once here turns a truncated instruction into a
+/// loud `error.InvalidSpirvTruncated` instead of an out-of-bounds read.
+///
+/// Opcodes with a variable trailing operand list (OpAccessChain's indices,
+/// OpVectorShuffle's components, OpFunctionCall's arguments) get the minimum
+/// that excludes the variable tail. Opcodes whose minimum could not be
+/// established with confidence from the specification are deliberately absent:
+/// null preserves today's behavior, which is the safe direction.
+///
+/// When a new opcode arm is added to any emit switch and it indexes
+/// `inst.words[>=3]`, its minimum belongs here.
+pub fn minWordCount(op: spirv.Op) ?u16 {
+    return switch (op) {
+        // No operands.
+        .Nop,
+        .FunctionEnd,
+        .Kill,
+        .Return,
+        .Unreachable,
+        .EmitVertex,
+        .EndPrimitive,
+        .BeginInvocationInterlockEXT,
+        .EndInvocationInterlockEXT,
+        .IgnoreIntersectionKHR,
+        .TerminateRayKHR,
+        => 1,
+
+        // One operand.
+        .Capability,
+        .Extension,
+        .TypeVoid,
+        .TypeBool,
+        .TypeSampler,
+        .TypeAccelerationStructureKHR,
+        .TypeRayQueryKHR,
+        .Label,
+        .Branch,
+        .ReturnValue,
+        => 2,
+
+        // Two operands.
+        .Source,
+        .Name,
+        .MemoryModel,
+        .ExtInstImport,
+        .ExecutionMode,
+        .ExecutionModeId,
+        .TypeFloat,
+        .TypeSampledImage,
+        .TypeRuntimeArray,
+        .TypeStruct,
+        .TypeForwardPointer,
+        .ConstantTrue,
+        .ConstantFalse,
+        .ConstantComposite,
+        .ConstantNull,
+        .SpecConstantTrue,
+        .SpecConstantFalse,
+        .SpecConstantComposite,
+        .Undef,
+        .FunctionParameter,
+        .TypeFunction,
+        .Store,
+        .CopyMemory,
+        .CompositeConstruct,
+        .Decorate,
+        .Phi,
+        .SelectionMerge,
+        .Switch,
+        .MemoryBarrier,
+        .SetMeshOutputsEXT,
+        .ExecuteCallableKHR,
+        => 3,
+
+        // Three operands.
+        .EntryPoint,
+        .MemberName,
+        .MemberDecorate,
+        .TypeInt,
+        .TypeVector,
+        .TypeMatrix,
+        .TypeArray,
+        .TypePointer,
+        .Constant,
+        .SpecConstant,
+        .SpecConstantOp,
+        .Variable,
+        .Load,
+        .CopyObject,
+        .CopyLogical,
+        .AccessChain,
+        .FunctionCall,
+        .CompositeExtract,
+        .OpImage,
+        .ImageWrite,
+        .ImageQuerySize,
+        .ImageQueryLevels,
+        .ImageQuerySamples,
+        .Transpose,
+        .LoopMerge,
+        .BranchConditional,
+        .ControlBarrier,
+        .EmitMeshTasksEXT,
+        .ReadClockKHR,
+        // Unary value ops: result type, result, operand.
+        .ConvertFToU,
+        .ConvertFToS,
+        .ConvertSToF,
+        .ConvertUToF,
+        .UConvert,
+        .SConvert,
+        .FConvert,
+        .QuantizeToF16,
+        .Bitcast,
+        .SNegate,
+        .FNegate,
+        .Not,
+        .LogicalNot,
+        .IsNan,
+        .IsInf,
+        .All,
+        .Any,
+        .BitReverse,
+        .BitCount,
+        .DPdx,
+        .DPdy,
+        .Fwidth,
+        .DPdxFine,
+        .DPdyFine,
+        .FwidthFine,
+        .DPdxCoarse,
+        .DPdyCoarse,
+        .FwidthCoarse,
+        .SubgroupAllKHR,
+        .SubgroupAnyKHR,
+        .SubgroupAllEqualKHR,
+        .GroupNonUniformElect,
+        => 4,
+
+        // Four operands.
+        .Function,
+        .ArrayLength,
+        .VectorShuffle,
+        .CompositeInsert,
+        .VectorExtractDynamic,
+        .SampledImage,
+        .ImageSampleImplicitLod,
+        .ImageSampleExplicitLod,
+        .ImageSampleProjImplicitLod,
+        .ImageSampleProjExplicitLod,
+        .ImageFetch,
+        .ImageRead,
+        .ImageQuerySizeLod,
+        .ImageQueryLod,
+        .ExtInst,
+        .ReportIntersectionKHR,
+        .RayQueryProceedKHR,
+        // Binary value ops: result type, result, operand 1, operand 2.
+        .IAdd,
+        .FAdd,
+        .ISub,
+        .FSub,
+        .IMul,
+        .FMul,
+        .UDiv,
+        .SDiv,
+        .FDiv,
+        .UMod,
+        .SRem,
+        .SMod,
+        .FRem,
+        .FMod,
+        .VectorTimesScalar,
+        .MatrixTimesScalar,
+        .VectorTimesMatrix,
+        .MatrixTimesVector,
+        .MatrixTimesMatrix,
+        .OuterProduct,
+        .Dot,
+        .LogicalEqual,
+        .LogicalNotEqual,
+        .LogicalOr,
+        .LogicalAnd,
+        .IEqual,
+        .INotEqual,
+        .UGreaterThan,
+        .SGreaterThan,
+        .UGreaterThanEqual,
+        .SGreaterThanEqual,
+        .ULessThan,
+        .SLessThan,
+        .ULessThanEqual,
+        .SLessThanEqual,
+        .FOrdEqual,
+        .FUnordEqual,
+        .FOrdNotEqual,
+        .FUnordNotEqual,
+        .FOrdLessThan,
+        .FUnordLessThan,
+        .FOrdGreaterThan,
+        .FUnordGreaterThan,
+        .FOrdLessThanEqual,
+        .FUnordLessThanEqual,
+        .FOrdGreaterThanEqual,
+        .FUnordGreaterThanEqual,
+        .ShiftRightLogical,
+        .ShiftRightArithmetic,
+        .ShiftLeftLogical,
+        .BitwiseOr,
+        .BitwiseXor,
+        .BitwiseAnd,
+        .GroupNonUniformAll,
+        .GroupNonUniformAny,
+        .GroupNonUniformAllEqual,
+        .GroupNonUniformBroadcastFirst,
+        .GroupNonUniformBallot,
+        .GroupNonUniformInverseBallot,
+        .GroupNonUniformBallotFindLSB,
+        .GroupNonUniformBallotFindMSB,
+        => 5,
+
+        // Five operands.
+        .Select,
+        .ImageSampleDrefImplicitLod,
+        .ImageSampleDrefExplicitLod,
+        .ImageSampleProjDrefImplicitLod,
+        .ImageSampleProjDrefExplicitLod,
+        .ImageGather,
+        .ImageDrefGather,
+        .ImageTexelPointer,
+        .BitFieldSExtract,
+        .BitFieldUExtract,
+        .ImageSampleWeightedQCOM,
+        .ImageBoxFilterQCOM,
+        .RayQueryGetIntersectionTypeKHR,
+        .RayQueryGetIntersectionTriangleVertexPositionsKHR,
+        .GroupNonUniformBroadcast,
+        .GroupNonUniformBallotBitExtract,
+        .GroupNonUniformBallotBitCount,
+        .GroupNonUniformShuffle,
+        .GroupNonUniformShuffleXor,
+        .GroupNonUniformShuffleUp,
+        .GroupNonUniformShuffleDown,
+        .GroupNonUniformIAdd,
+        .GroupNonUniformFAdd,
+        .GroupNonUniformIMul,
+        .GroupNonUniformFMul,
+        .GroupNonUniformSMin,
+        .GroupNonUniformUMin,
+        .GroupNonUniformFMin,
+        .GroupNonUniformSMax,
+        .GroupNonUniformUMax,
+        .GroupNonUniformFMax,
+        .GroupNonUniformBitwiseAnd,
+        .GroupNonUniformBitwiseOr,
+        .GroupNonUniformBitwiseXor,
+        .GroupNonUniformLogicalAnd,
+        .GroupNonUniformLogicalOr,
+        .GroupNonUniformLogicalXor,
+        .GroupNonUniformQuadBroadcast,
+        .GroupNonUniformQuadSwap,
+        .GroupNonUniformRotate,
+        => 6,
+
+        // Six operands.
+        .BitFieldInsert,
+        .AtomicExchange,
+        .AtomicIAdd,
+        .AtomicISub,
+        .AtomicSMin,
+        .AtomicUMin,
+        .AtomicSMax,
+        .AtomicUMax,
+        .AtomicAnd,
+        .AtomicOr,
+        .AtomicXor,
+        .AtomicFAddEXT,
+        => 7,
+
+        // Seven operands.
+        .ImageBlockMatchSSDQCOM,
+        .ImageBlockMatchSADQCOM,
+        => 8,
+
+        // Eight operands.
+        .TypeImage,
+        .AtomicCompareExchange,
+        .RayQueryInitializeKHR,
+        => 9,
+
+        // Eleven operands.
+        .TraceRayKHR => 12,
+
+        // Not modelled: no minimum is enforced, matching the previous behavior.
+        else => null,
+    };
+}
+
 pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     if (words.len < 5) return error.InvalidSpirv;
     if (words[0] != spirv.MAGIC) return error.InvalidSpirvMagic;
@@ -66,6 +371,13 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         if (i + word_count > words.len) return error.InvalidSpirvTruncated;
 
         const op: spirv.Op = @enumFromInt(opcode);
+        // An instruction shorter than its opcode's spec minimum would leave the
+        // backend emit arms reading past the end of `inst.words`. Reject it here
+        // rather than letting ~96 unguarded arms index out of bounds.
+        if (minWordCount(op)) |min| {
+            if (word_count < min) return error.InvalidSpirvTruncated;
+        }
+
         const inst_words = words[i .. i + word_count];
 
         if (resultIdFromOp(op, inst_words)) |id| {

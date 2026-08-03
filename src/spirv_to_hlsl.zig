@@ -481,6 +481,13 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         if (i + word_count > words.len) return error.InvalidSpirvTruncated;
 
         const op: spirv.Op = @enumFromInt(opcode);
+        // Reject an instruction shorter than its opcode's spec minimum, so the
+        // emit arms below never index past the end of `inst.words`. (Shared
+        // table, see common.minWordCount.)
+        if (common.minWordCount(op)) |min| {
+            if (word_count < min) return error.InvalidSpirvTruncated;
+        }
+
         const inst_words = words[i .. i + word_count];
 
         if (resultIdFromOp(op, inst_words)) |id| {
