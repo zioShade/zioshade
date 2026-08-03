@@ -1,0 +1,55 @@
+; Regression guard for zioshade-sid: a UBO whose struct type AND instance are
+; both OpName'd "Globals" (the instance is NAMED, not anonymous), plus a
+; function-local also OpName'd "Globals". Hand-written (glslang emits anonymous
+; instances, which would NOT exercise the block-instance exclusion).
+;
+; The instance is a GLSL UBO (Uniform + Block, not BufferBlock) -> emitted under
+; the block-naming-mangled name Globals_1, NOT its raw OpName. So a local sharing
+; the block's raw OpName does NOT shadow it. The fix EXCLUDES such UBO instances
+; from the collision set -> the local keeps "Globals" (must NOT be mangled to
+; Globals_1, which would collide with the instance and break the UBO access).
+; A broader all-OpName pass mangles the local into Globals_1 -> regression.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor
+OpExecutionMode %main OriginUpperLeft
+
+OpName %main "main"
+OpName %Globals_t "Globals"
+OpName %inst "Globals"
+OpName %local "Globals"
+
+OpDecorate %Globals_t Block
+OpMemberDecorate %Globals_t 0 Offset 0
+OpDecorate %inst DescriptorSet 0
+OpDecorate %inst Binding 0
+OpDecorate %outColor Location 0
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%v4f = OpTypeVector %float 4
+%Globals_t = OpTypeStruct %float
+%ptr_Globals_uniform = OpTypePointer Uniform %Globals_t
+%ptr_float_uniform = OpTypePointer Uniform %float
+%ptr_v4_out = OpTypePointer Output %v4f
+%ptr_float_func = OpTypePointer Function %float
+
+%int_0 = OpConstant %int 0
+%float_7 = OpConstant %float 7
+
+%inst = OpVariable %ptr_Globals_uniform Uniform
+%outColor = OpVariable %ptr_v4_out Output
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%local = OpVariable %ptr_float_func Function
+OpStore %local %float_7
+%ac = OpAccessChain %ptr_float_uniform %inst %int_0
+%ubval = OpLoad %float %ac
+%lv = OpLoad %float %local
+%cc = OpCompositeConstruct %v4f %lv %ubval %float_7 %float_7
+OpStore %outColor %cc
+OpReturn
+OpFunctionEnd
