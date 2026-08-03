@@ -2569,12 +2569,22 @@ fn resolveSamplerArg(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
 fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
     // First try direct TypePointer
     if (common.resolvePointeeType(module, id)) |pt| return pt;
-    // Try resolving through Variable → TypePointer → pointee
+    // Resolve through value-producing instructions whose words[1] is a result
+    // TYPE that may be a TypePointer: a Variable, a pointer FunctionParameter
+    // (the real ptr<function> inout path), a CopyObject of a pointer, or a
+    // chained AccessChain result. Without FunctionParameter here, a pointer
+    // param's pointee type is unknown to buildAccessExprPlain, so it cannot
+    // detect the pointee is a struct and lowers a constant struct-member index
+    // to array-index `[i]` syntax -- WGSL forbids indexing a struct ("cannot
+    // index type 'BST'") -- instead of `.memberName` member access.
     const inst = common.getDef(module, id) orelse return null;
-    if (inst.op == .Variable and inst.words.len > 1) {
-        return common.resolvePointeeType(module, inst.words[1]);
+    switch (inst.op) {
+        .Variable, .FunctionParameter, .CopyObject, .AccessChain => {
+            if (inst.words.len > 1) return common.resolvePointeeType(module, inst.words[1]);
+            return null;
+        },
+        else => return null,
     }
-    return null;
 }
 
 /// Scan the module for OpAtomic* ops and record which SSBO struct members are
