@@ -549,6 +549,22 @@ test "WGSL lowers a self-loop with body-in-header (#selfloop)" {
     }
 }
 
+// MSL used to honest-error (UnsupportedOpcode) on the self-loop. It now lowers it via
+// the MSL twin of emitSelfLoopBodyHeaderGLSL. Assert a terminating while(true) loop
+// whose counter advances. Metal-validity + render-MATCH vs spirv-cross are verified
+// via the MSL validity gate + prove_opt (render-diff on Metal).
+test "MSL lowers a self-loop with body-in-header (#selfloop)" {
+    const msl = try crossMsl(SELFLOOP_BODYHEADER_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "if (!(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "break;") != null);
+    if (!try loopCounterAdvances(msl)) {
+        std.debug.print("MSL self-loop never advances the counter (infinite loop):\n{s}\n", .{msl});
+        return error.SelfLoopDoesNotAdvance;
+    }
+}
+
 // #wgsl-else-clobber: an if/else whose THEN-branch contains a nested (no-else) if was
 // silently mis-emitted — opening the nested if overwrote the enclosing if's
 // pending_false_label to null, so the enclosing then-block's terminating OpBranch never

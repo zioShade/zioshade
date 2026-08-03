@@ -6558,6 +6558,74 @@ fn emitBody(
     }
 }
 
+// #selfloop: MSL twin of spirv_to_glsl.zig's emitSelfLoopBodyHeaderGLSL. Lower a
+// self-loop whose continue target IS its own header (body in the header before the
+// LoopMerge; back-edge is the BranchConditional that follows). Emit the straight-line
+// header body ONCE in while(true), lower the back-edge to
+// `if (!(cond)) break; <phi back-edge updates>`. Phi inits are hoisted above the loop
+// by the existing machinery (tryEmitLoopPhiDeclMSL, reached before the LoopMerge).
+// Honest-error unless the header is straight-line and the back-edge's continue arm is
+// its true target. Returns the index of the merge block.
+fn emitSelfLoopBodyHeaderMSL(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    loop_idx: usize,
+    merge_lbl: u32,
+    hlbl_idx: usize,
+    back_edge: Instruction,
+    label_map: *const std.AutoHashMap(u32, usize),
+    w: anytype,
+    alloc: std.mem.Allocator,
+    is_frag: bool,
+    ovid: ?u32,
+    cbuffers: *const std.ArrayList(CbufferDecl),
+    textures: *const std.ArrayList(TextureDecl),
+    storage_buffers: *const std.ArrayList(CbufferDecl),
+    arraylen_buf_index: *const std.AutoHashMap(u32, u32),
+) !usize {
+    // The header body must be straight-line (no nested merge/switch/branch).
+    var hi: usize = hlbl_idx + 1;
+    while (hi < loop_idx) : (hi += 1) {
+        switch (m.instructions[hi].op) {
+            .LoopMerge, .Switch, .SelectionMerge, .Branch, .BranchConditional => return error.CrossCompileUnsupported,
+            else => {},
+        }
+    }
+    // Back-edge polarity: true target must be the header (continue) -> `if (!(cond)) break;`.
+    if (back_edge.words[2] != m.instructions[hlbl_idx].words[1]) return error.CrossCompileUnsupported;
+
+    // The loop body = the header's straight-line instructions, ONCE (Phi skipped -- the
+    // main emission loop already hoisted+initialized each header phi above the loop via
+    // tryEmitLoopPhiDeclMSL; re-declaring would duplicate, and decl-in-loop would re-zero
+    // the counter each iteration -> infinite loop).
+    try w.writeAll("    while (true)\n    {\n");
+    var bi: usize = hlbl_idx + 1;
+    while (bi < loop_idx) : (bi += 1) {
+        const inst = m.instructions[bi];
+        if (inst.op == .Phi or inst.op == .Label) continue;
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
+    }
+
+    // Lower the back-edge BranchConditional (true->header=continue, false->merge=break)
+    // to `if (!(cond)) break;` then the phi back-edge updates on the continue path.
+    const cond_name = names.get(back_edge.words[1]) orelse "true";
+    try w.print("        if (!({s})) break;\n", .{cond_name});
+    if (g_loop_phis) |lp| {
+        if (lp.get(loop_idx)) |plist| {
+            for (plist.items) |pi| {
+                if (pi.update_id == pi.result_id) continue; // self-carry, no copy
+                const rname = names.get(pi.result_id) orelse continue;
+                const uname = names.get(pi.update_id) orelse continue;
+                try w.print("        {s} = {s};\n", .{ rname, uname });
+            }
+        }
+    }
+    try w.writeAll("    }\n");
+
+    return label_map.get(merge_lbl) orelse (loop_idx + 2);
+}
+
 fn emitWhileLoopMSL(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -6619,6 +6687,14 @@ fn emitWhileLoopMSL(
     const header_lbl: u32 = if (m.instructions[hlbl_idx].words.len > 1) m.instructions[hlbl_idx].words[1] else 0;
 
     const next_inst = m.instructions[loop_idx + 1];
+    // #selfloop: OpLoopMerge %merge %hdr where the continue target IS the loop
+    // header (the body sits in the header before the LoopMerge). The generic body
+    // emitter mishandles it (re-enters the header's own LoopMerge / miscomputes the
+    // cond -> UnsupportedOpcode). Lower it directly instead, mirroring spirv-cross
+    // and the GLSL emitSelfLoopBodyHeaderGLSL twin. (Pattern B only.)
+    if (cont_lbl == header_lbl and next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
+        return try emitSelfLoopBodyHeaderMSL(m, names, decs, loop_idx, merge_lbl, hlbl_idx, next_inst, label_map, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
+    }
     if (next_inst.op == .Branch and next_inst.words.len >= 2) {
         // FIRST: is this a do-while (bottom-test) loop? Inspect the CONTINUE block's
         // terminator BEFORE scanning the body. Otherwise the body's own `if`
