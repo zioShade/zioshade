@@ -7649,3 +7649,18 @@ test "S3: OpExecutionModeId LocalSizeId with OpSpecConstantOp -> correct workgro
     defer alloc.free(wgsl);
     try assertContains(wgsl, "workgroup_size(8"); // sc(4) * two(OpConstant 2) = 8, NOT 1
 }
+
+test "zl3: WGSL struct AccessChain via a ptr param emits member access (not array index)" {
+    // simple.spv: src_PSMain(input: ptr<function, PSInput>) does OpAccessChain on
+    // the struct param. zioshade must emit (*input).color (member access), NOT
+    // (*input)[0] (array index -- WGSL forbids indexing a struct; tint rejects
+    // "cannot index type 'PSInput'"). Surfaced by the two-oracle tint sweep (#542).
+    const spv_bytes = @embedFile("cts/graphicsfuzz/simple.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    const wgsl = try zioshade.spirvToWGSL(alloc, words, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "(*input).color");
+    try assertNotContains(wgsl, "(*input)[");
+}
