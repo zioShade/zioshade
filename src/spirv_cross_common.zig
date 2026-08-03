@@ -1001,7 +1001,10 @@ pub fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         i += word_count;
     }
 
-    const owned_instructions = instructions.toOwnedSlice(alloc) catch instructions.items;
+    // Not `catch instructions.items`: that hands back the backing buffer, whose
+    // capacity is larger than items.len, and ParsedModule.deinit would then free
+    // a slice of the wrong length.
+    const owned_instructions = instructions.toOwnedSlice(alloc) catch return error.OutOfMemory;
     var module = ParsedModule{
         .instructions = owned_instructions,
         .id_defs = id_defs,
