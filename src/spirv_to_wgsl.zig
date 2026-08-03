@@ -6816,11 +6816,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     }
                     // If a LoopMerge follows, this phi is a LOOP-HEADER phi.
                     var lm_follows = false;
+                    var lm_cont: ?u32 = null; // #selfloop: the LoopMerge's continue label
                     {
                         var pk = i + 1;
                         while (pk < @min(i + 20, module.instructions.len)) : (pk += 1) {
                             if (module.instructions[pk].op == .LoopMerge) {
                                 lm_follows = true;
+                                if (module.instructions[pk].words.len >= 3) lm_cont = module.instructions[pk].words[2];
                                 break;
                             }
                             if (module.instructions[pk].op == .FunctionEnd or module.instructions[pk].op == .Label) break;
@@ -6855,6 +6857,32 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (lbl_idx) |lx| {
                                 if (lx < i) init_value_id = val_id else update_value_id = val_id;
                             }
+                        }
+                    }
+                    // #selfloop: a self-loop's continue target IS its header (cont ==
+                    // header), so the back-edge predecessor's Label sits in the SAME block
+                    // as this phi (before it) -- the index heuristic above then misreads the
+                    // back-edge incoming as the init (`var = <not-yet-defined increment>`
+                    // -> nana "no definition in scope" + the counter never advances). The
+                    // header Label is the nearest Label before this phi; if it equals the
+                    // LoopMerge's continue target, override: the pair whose predecessor IS
+                    // the header carries the back-edge (update) value; the other (preheader)
+                    // carries the init. (Normal loops keep the index heuristic unchanged.)
+                    if (lm_follows and lm_cont != null) blk: {
+                        var hdr_lbl: u32 = 0;
+                        var hp: usize = i;
+                        while (hp > 0) : (hp -= 1) {
+                            if (module.instructions[hp].op == .Label and module.instructions[hp].words.len > 1) {
+                                hdr_lbl = module.instructions[hp].words[1];
+                                break;
+                            }
+                        }
+                        if (hdr_lbl == 0 or lm_cont.? != hdr_lbl) break :blk;
+                        var pp2: usize = 3;
+                        while (pp2 + 1 < inst.words.len) : (pp2 += 2) {
+                            const val_id = inst.words[pp2];
+                            const lbl_id = inst.words[pp2 + 1];
+                            if (lbl_id == hdr_lbl) update_value_id = val_id else init_value_id = val_id;
                         }
                     }
                     if (!already_declared) {
@@ -6909,6 +6937,27 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                         try writeInd(w, indent);
                         try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
+                        // #selfloop: a self-loop (continue == header) has no `continuing {}`
+                        // block (the continue scan finds the header Label BEFORE the
+                        // LoopMerge), so the loop-carried phi updates would never emit ->
+                        // the counter never advances -> infinite loop. Emit them here, on
+                        // the continue path (after the break test), mirroring spirv-cross
+                        // and the GLSL emitSelfLoopBodyHeaderGLSL lowering. Gated on the
+                        // self-loop shape so normal loops (which use continuing {}) are
+                        // unaffected.
+                        if (loop_continue_label != null and loop_header_label != null and
+                            loop_continue_label.? == loop_header_label.? and loop_stack.items.len > 0)
+                        {
+                            const cur = &loop_stack.items[loop_stack.items.len - 1];
+                            var pi2: usize = cur.phi_start;
+                            while (pi2 < cur.phi_end) : (pi2 += 1) {
+                                const pu = phi_updates.items[pi2];
+                                const rname = names.get(pu.result_id) orelse continue;
+                                const vname = names.get(pu.value_id) orelse continue;
+                                try writeInd(w, indent);
+                                try w.print("{s} = {s};\n", .{ rname, vname });
+                            }
+                        }
                     } else if (pending_merge != null) {
                         const merge_label = pending_merge.?;
                         // Check if this is a break/continue inside a loop. The break
