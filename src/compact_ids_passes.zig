@@ -12716,3 +12716,77 @@ pub fn simplifyTrivialPhi(alloc: std.mem.Allocator, words: []const u32) error{Ou
     }
     return result.toOwnedSlice(alloc) catch return alloc.dupe(u32, words);
 }
+
+// ============================================================================
+// Allocation-failure discipline
+//
+// A pass that rewrites the SPIR-V word stream must either produce the complete
+// rewritten module or fail loudly. Dropping an instruction because an append
+// failed is a silent miscompile. `checkAllAllocationFailures` runs the target
+// once per allocation site with that allocation forced to fail and reports
+// error.SwallowedOutOfMemoryError if the target still returns success, plus any
+// leak the failure path introduces.
+//
+// These live here, inline, rather than in tests/optimizer_tests.zig: driving a
+// single pass directly from tests/ would need src/root.zig to re-export this
+// file, which would widen the library's public API for a test's convenience.
+// ============================================================================
+
+const testing_common = @import("spirv_cross_common.zig");
+
+// A hand-built module whose function entry block is the target of a branch and
+// holds an OpVariable, which is the shape ensureLoopPreheader rewrites: it
+// splices a new entry block in front and relocates the OpVariable into it.
+const test_preheader_module = [_]u32{
+    0x07230203, 0x00010500, 0, 10, 0, // magic, version, generator, bound, schema
+    (5 << 16) | 54, 1, 2, 0, 3, // %2 = OpFunction %1 None %3
+    (2 << 16) | 248, 4, // %4 = OpLabel (entry)
+    (4 << 16) | 59, 5, 6, 7, // %6 = OpVariable %5 Function
+    (2 << 16) | 249, 4, // OpBranch %4 (makes the entry block a branch target)
+    (1 << 16) | 56, // OpFunctionEnd
+};
+
+fn testCountInstructions(words: []const u32, opcode: u16) u32 {
+    var n: u32 = 0;
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == opcode) n += 1;
+        pos += wc;
+    }
+    return n;
+}
+
+fn testPreheaderUnderAllocFailure(a: std.mem.Allocator, words: []const u32) !void {
+    const out = try ensureLoopPreheader(a, words);
+    defer if (out.ptr != words.ptr) a.free(@constCast(out));
+    // The rewrite must be complete: the relocated OpVariable and the spliced
+    // pre-header OpLabel are both present, or the call should have failed.
+    try std.testing.expectEqual(testCountInstructions(words, 59), testCountInstructions(out, 59));
+    if (out.ptr != words.ptr) {
+        try std.testing.expectEqual(testCountInstructions(words, 248) + 1, testCountInstructions(out, 248));
+    }
+}
+
+test "alloc failure: ensureLoopPreheader fails loudly instead of dropping instructions" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        testPreheaderUnderAllocFailure,
+        .{&test_preheader_module},
+    );
+}
+
+fn testParseModuleUnderAllocFailure(a: std.mem.Allocator, words: []const u32) !void {
+    var module = try testing_common.parseModule(a, words);
+    defer module.deinit(a);
+    try std.testing.expect(module.instructions.len > 0);
+}
+
+test "alloc failure: parseModule fails loudly and frees exactly what it allocated" {
+    try std.testing.checkAllAllocationFailures(
+        std.testing.allocator,
+        testParseModuleUnderAllocFailure,
+        .{&test_preheader_module},
+    );
+}
