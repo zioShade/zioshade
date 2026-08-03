@@ -4,7 +4,55 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
-(nothing yet)
+### Changed
+
+- **Identifier mangling changed in generated output.** Four separate fixes now rename identifiers
+  that previously collided, so the text emitted for an unchanged input can differ from v0.4.0:
+  - function-scope ids that shadow a global's name are mangled (MSL #541, GLSL/HLSL #540);
+  - structs that share an `OpName` each get their own declaration under a mangled name, instead of
+    one declaration standing in for several distinct types (MSL #538, GLSL/HLSL #537);
+  - `OpName`s that collide with GLSL reserved words are mangled (#530).
+  These are correctness fixes (the old output was a name collision), but they change generated
+  source for consumers that pin a version and diff output. This entry records what the commits did;
+  it deliberately does not assert a SemVer classification.
+- The package manifest (`.paths`) now ships `include/` and `examples/`. Before this, a consumer who
+  fetched zioshade as a dependency got a copy where `zig build c-lib` failed with
+  `unable to open source directory 'include'`, because only `build.zig`, `build.zig.zon`,
+  `build_compat.zig`, and `src` were published. A CI job now builds `c-lib` from a tree containing
+  only the `.paths` entries, so the packaged form is a tested surface.
+
+### Added
+
+- Self-loops whose body lives in the loop header are lowered on GLSL, MSL, and WGSL; HLSL reports an
+  honest error rather than emitting wrong control flow (#544).
+- WGSL handles `LogicalNot` in the switch/loop replay path (#526).
+- CLI prints `path:line:col` on compile diagnostics (#524) and surfaces WGSL honest-error detail
+  through `crossErr` (#525).
+- `ARCHITECTURE.md` contributor map, an opcode/capability coverage matrix, and a C ABI consumer
+  example that demos MSL and WGSL output.
+
+### Fixed
+
+- Broad silent-wrong hunt across MSL/GLSL/HLSL/WGSL: roughly 17 bug classes fixed (#497).
+- All four backends honest-error on unknown types in the type emitter instead of emitting a
+  placeholder (#516, #517, #518, #519).
+- `OpUndef` folds to a zero literal, fixing use-without-declaration in generated source
+  (#511, #512).
+- `OpExecutionModeId` `LocalSizeId` and `OpSpecConstantOp` handled across all four backends
+  (#514, #515).
+- WGSL: `OpAccessChain` on a struct pointer parameter emits member access (#543); 1:1 binding
+  encoding plus `@tagName` crash guards (#513).
+- GLSL: user-struct types used by `Private` globals are declared (#531); unnamed uniform blocks get
+  a synthesized name (#523); `emitWhileLoop` recursion is bounded to an honest error instead of a
+  stack-overflow crash (#522); standalone builtin outputs alias to predefined names (#507).
+- MSL: a written SSBO emits as `device`, not read-only `constant` (#510).
+- HLSL: `OpMemberName` bytes are sanitized (anonymous `@data` members), and SM6+-only features
+  honest-error at `shader_model < 60` (#509).
+- An optimizer bug found by the new metamorphic oracle.
+- Internal tooling and test work, not individually listed: arbitrary-SPIR-V backend validity sweeps
+  wired into CI, a CTS ingestion credibility sweep with a vendored GraphicsFuzz corpus, a two-oracle
+  WGSL validity sweep (tint plus naga), an independent naga-oracle GLSL faithfulness check, a
+  spirv-reduce test-case reduction wrapper, a UB-free integer-corpus contract, and CI fixes.
 
 ## [0.4.0] - 2026-07-29
 
