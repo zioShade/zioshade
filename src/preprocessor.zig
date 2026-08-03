@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
 const std = @import("std");
-const compat = @import("compat.zig");
+pub const compat = @import("compat.zig");
 const builtin = @import("builtin");
-const lexer = @import("lexer.zig");
+/// Public because `process` takes and returns `lexer.Token`, so a caller (notably
+/// `tests/include_tests.zig`, which drives the preprocessor directly) needs the
+/// SAME lexer instance to build its token slice.
+pub const lexer = @import("lexer.zig");
 
 pub const Preprocessor = struct {
     alloc: std.mem.Allocator,
@@ -30,19 +33,35 @@ pub const Preprocessor = struct {
     include_paths: []const []const u8 = &.{},
     include_depth: u32 = 0,
     max_include_depth: u32 = 16,
+    /// ACTIVE include stack, keyed on the RESOLVED path (see `resolveInclude`),
+    /// not on the include token text. Entries are pushed before recursing into an
+    /// included file and popped on every exit path, so a hit means the file is
+    /// currently being included by itself: a genuine cycle. Keying on the token
+    /// text (the old behaviour) made every include implicitly include-once, which
+    /// silently dropped a legitimate second inclusion, and made two different
+    /// files under different `-I` roots collide when they shared a spelling.
     included_files: std.StringHashMapUnmanaged(void) = .empty, // cycle detection
+    /// Permanent set of files that asked for `#pragma once`, keyed on the same
+    /// resolved path as `included_files`. This is the only set that legitimately
+    /// suppresses a second inclusion.
     pragma_once_files: std.StringHashMapUnmanaged(void) = .empty, // #pragma once
     file_reader: ?*const fn ([]const u8) anyerror![:0]const u8 = null,
     // Back-reference to the source file path for relative includes
     source_file_path: []const u8 = "",
     // Stored include file contents (to keep slices alive)
     included_sources: std.ArrayListUnmanaged([:0]const u8) = .empty,
-    // Set when an `#include` could not be resolved. The caller honest-errors on
-    // this (instead of compiling the include-less source at exit 0 = #170
-    // silent-wrong); recorded rather than thrown so it survives the best-effort
-    // `pp.process(...) catch tokens` fallback used for other recoverable
-    // preprocessor errors.
+    // Set when an `#include` could not be honoured: not found, refused as unsafe
+    // (see `includeSpellingIsSafe` and the containment check in `resolveInclude`),
+    // or part of a cycle. The caller honest-errors on this (instead of compiling
+    // the include-less source at exit 0 = #170 silent-wrong); recorded rather than
+    // thrown so it survives the best-effort `pp.process(...) catch tokens`
+    // fallback used for other recoverable preprocessor errors. Every refusal sets
+    // this flag AND returns an error, so neither path can compile silently.
     unresolved_include: bool = false,
+    /// The include spelling that was refused, for diagnostics: an unsafe
+    /// spelling, a path that escapes its root, or a cycle. Owned; the first
+    /// refusal wins, so the message names the include the user has to fix.
+    unsafe_include_path: ?[]const u8 = null,
 
     /// Count of ACTUAL macro expansions performed (one per defined-macro
     /// invocation that is expanded, not per identifier scanned). Recursive
@@ -108,6 +127,7 @@ pub const Preprocessor = struct {
         self.pragma_once_files.deinit(self.alloc);
         for (self.included_sources.items) |src| self.alloc.free(src);
         self.included_sources.deinit(self.alloc);
+        if (self.unsafe_include_path) |p| self.alloc.free(p);
     }
 
     pub fn addDefine(self: *Preprocessor, name: []const u8, value: []const lexer.Token) !void {
@@ -192,6 +212,13 @@ pub const Preprocessor = struct {
         var include_path: ?[]const u8 = null;
         var is_system = false;
 
+        // Reassembled `<...>` spelling. Declared at FUNCTION scope: `include_path`
+        // aliases its bytes for the rest of the function, so a block-scoped defer
+        // would free them out from under every later use (including the safety
+        // checks below, which would then inspect freed memory).
+        var path_buf = std.ArrayListUnmanaged(u8).empty;
+        defer path_buf.deinit(self.alloc);
+
         if (file_tok.tag == .string_literal) {
             // #include "file" \u2014 relative include
             include_path = self.getTokenText(file_tok);
@@ -203,8 +230,6 @@ pub const Preprocessor = struct {
             // #include <file> \u2014 system include
             is_system = true;
             index.* += 1;
-            var path_buf = std.ArrayListUnmanaged(u8).empty;
-            defer path_buf.deinit(self.alloc);
             while (index.* < tokens.len) : (index.* += 1) {
                 const tok = tokens[index.*];
                 if (tok.tag == .gt) break;
@@ -228,14 +253,20 @@ pub const Preprocessor = struct {
         // Check include depth
         if (self.include_depth >= self.max_include_depth) return error.PreprocessFailed;
 
-        // Check for cycles
-        if (self.included_files.contains(path)) return;
+        // Refuse an include whose SPELLING can escape the include roots by
+        // construction, before touching the filesystem. Shader source is
+        // untrusted input (wintty users load ricing shaders off the internet), so
+        // `#include "../../../etc/passwd"` must not turn into an arbitrary-file
+        // read whose bytes then surface through diagnostics or emitted source.
+        if (!includeSpellingIsSafe(path)) {
+            self.recordUnsafeInclude(path);
+            return error.UnsafeIncludePath;
+        }
 
-        // Check #pragma once — skip if file was already included with #pragma once
-        if (self.pragma_once_files.contains(path)) return;
-
-        // Resolve the file and read it
-        const resolved_source = self.resolveInclude(path, is_system) catch |err| switch (err) {
+        // Resolve the file and read it. Resolution must happen BEFORE the
+        // cycle and #pragma-once checks, because both are now keyed on the
+        // resolved path rather than on the include token text.
+        const resolved = self.resolveInclude(path, is_system) catch |err| switch (err) {
             error.FileNotFound => {
                 // Include file not found: record it so the caller honest-errors,
                 // instead of silently dropping the include's declarations and
@@ -246,21 +277,59 @@ pub const Preprocessor = struct {
                 self.unresolved_include = true;
                 return;
             },
+            error.UnsafeIncludePath => {
+                self.recordUnsafeInclude(path);
+                return error.UnsafeIncludePath;
+            },
             else => return err,
         };
+        const resolved_source = resolved.source;
+        // Owned for the duration of this include. The map keys below are separate
+        // copies, so this can be released on every exit path.
+        defer if (resolved.resolved_path) |rp| self.alloc.free(rp);
 
-        // Mark as included for cycle detection
-        const path_copy = try self.alloc.dupe(u8, path);
-        try self.included_files.put(self.alloc, path_copy, {});
+        // Bookkeeping key. On the filesystem path this is the canonical absolute
+        // path, so two spellings of one file share a key and two different files
+        // that share a spelling under different roots do not. On the freestanding
+        // (wasm) path there is no filesystem to resolve against, so the include
+        // token text stays the key there.
+        const key: []const u8 = resolved.resolved_path orelse path;
+
+        // The file asked to be included at most once and already has been.
+        if (self.pragma_once_files.contains(key)) return;
+
+        // A hit on the ACTIVE include stack is a genuine cycle (a includes b
+        // includes a). Honest error rather than a silent skip: skipping drops the
+        // cycle head's declarations and compiles the rest anyway.
+        if (self.included_files.contains(key)) {
+            self.unresolved_include = true;
+            self.recordUnsafeInclude(path);
+            return error.IncludeCycle;
+        }
+
+        // Push onto the active include stack, and pop on EVERY exit path
+        // (including error paths) so a legitimate second, non-nested inclusion of
+        // the same file is not misreported as a cycle.
+        const path_copy = try self.alloc.dupe(u8, key);
+        self.included_files.put(self.alloc, path_copy, {}) catch |err| {
+            // Not on the stack yet, so the pop below is not armed: free here.
+            self.alloc.free(path_copy);
+            return err;
+        };
+        defer if (self.included_files.fetchRemove(path_copy)) |entry| self.alloc.free(entry.key);
 
         // Tokenize the included source
         const inc_tokens = try lexer.tokenize(self.alloc, resolved_source);
+        defer self.alloc.free(inc_tokens);
 
         // Recursively preprocess the included tokens
         const saved_source = self.source;
         const saved_source_path = self.source_file_path;
         self.source = resolved_source;
-        self.source_file_path = path;
+        // Point at the RESOLVED path so a nested relative include resolves against
+        // the directory the file was actually read from, and so a `#pragma once`
+        // inside it is recorded under the same key the checks above use.
+        self.source_file_path = key;
         self.include_depth += 1;
         defer {
             self.source = saved_source;
@@ -418,14 +487,89 @@ pub const Preprocessor = struct {
                 },
             }
         }
-
-        self.alloc.free(inc_tokens);
     }
 
-    fn resolveInclude(self: *Preprocessor, path: []const u8, is_system: bool) ![:0]const u8 {
-        // Try file reader callback first
+    /// Record the include spelling that was refused, for diagnostics. Best effort:
+    /// a failed dup must not mask the refusal itself, which is signalled by the
+    /// returned error and by `unresolved_include`.
+    fn recordUnsafeInclude(self: *Preprocessor, path: []const u8) void {
+        self.unresolved_include = true;
+        if (self.unsafe_include_path != null) return;
+        self.unsafe_include_path = self.alloc.dupe(u8, path) catch null;
+    }
+
+    /// An include spelling is refused outright when it can escape the include
+    /// roots by construction. Pure string handling with no filesystem access, so
+    /// it is also valid on the freestanding (wasm) target, and it runs before any
+    /// I/O. It is the cheap half of the containment policy; the realpath check in
+    /// `resolveInclude` is the half that catches symlink escapes.
+    fn includeSpellingIsSafe(path: []const u8) bool {
+        if (path.len == 0) return false;
+        // An embedded NUL truncates the path at the syscall boundary, so what is
+        // checked here would not be what is opened.
+        if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+        // Absolute (POSIX), and rooted or UNC (Windows).
+        if (path[0] == '/' or path[0] == '\\') return false;
+        // Windows drive form, "C:" or "C:/...".
+        if (path.len >= 2 and path[1] == ':' and std.ascii.isAlphabetic(path[0])) return false;
+        // A `..` PATH COMPONENT. Compared component-wise on both separators so a
+        // file legitimately named "..foo.glsl" is not refused.
+        var it = std.mem.splitAny(u8, path, "/\\");
+        while (it.next()) |component| {
+            if (std.mem.eql(u8, component, "..")) return false;
+        }
+        return true;
+    }
+
+    /// True when `candidate` is strictly inside `root`. Both are expected to be
+    /// canonical absolute paths. The comparison is component-wise, not a raw byte
+    /// prefix, so "/srv/shaders-evil/x" is not accepted as being under
+    /// "/srv/shaders".
+    fn pathIsUnderRoot(candidate: []const u8, root: []const u8) bool {
+        if (root.len == 0) return false;
+        var root_len = root.len;
+        while (root_len > 1 and (root[root_len - 1] == '/' or root[root_len - 1] == '\\')) root_len -= 1;
+        const trimmed = root[0..root_len];
+        if (candidate.len <= trimmed.len) return false;
+        if (!std.mem.startsWith(u8, candidate, trimmed)) return false;
+        // Root was the filesystem root ("/" or "\"), so the separator is already
+        // part of the prefix.
+        if (trimmed.len == 1 and (trimmed[0] == '/' or trimmed[0] == '\\')) return true;
+        const next = candidate[trimmed.len];
+        return next == '/' or next == '\\';
+    }
+
+    /// A successfully resolved include: the file's bytes plus, when a filesystem
+    /// was involved, the canonical absolute path they were read from. The path is
+    /// caller-owned; it is null on the `file_reader` (wasm) path, where there is
+    /// no filesystem to canonicalize against.
+    const ResolvedInclude = struct {
+        source: [:0]const u8,
+        resolved_path: ?[]const u8,
+    };
+
+    /// Canonicalize `candidate` and `root` and require the former to sit under the
+    /// latter. Returns the caller-owned canonical candidate path on success.
+    /// `error.FileNotFound` means the candidate does not exist (a normal miss);
+    /// `error.UnsafeIncludePath` means it exists but escapes the root.
+    fn canonicalizeUnderRoot(self: *Preprocessor, candidate: []const u8, root: []const u8) ![]const u8 {
+        var candidate_buf: [compat.max_path_bytes]u8 = undefined;
+        var root_buf: [compat.max_path_bytes]u8 = undefined;
+        const real_candidate = compat.realPathByPath(self.alloc, candidate, &candidate_buf) catch return error.FileNotFound;
+        // The root failing to canonicalize is not a normal miss: it means the
+        // include root itself is gone or unreadable, so nothing under it can be
+        // proven contained. Refuse rather than fall through to a read.
+        const real_root = compat.realPathByPath(self.alloc, root, &root_buf) catch return error.UnsafeIncludePath;
+        if (!pathIsUnderRoot(real_candidate, real_root)) return error.UnsafeIncludePath;
+        return try self.alloc.dupe(u8, real_candidate);
+    }
+
+    fn resolveInclude(self: *Preprocessor, path: []const u8, is_system: bool) !ResolvedInclude {
+        // Try file reader callback first. The host owns its own containment
+        // policy here, so nothing is canonicalized and the bookkeeping key stays
+        // the include token text.
         if (self.file_reader) |reader| {
-            return reader(path);
+            return .{ .source = try reader(path), .resolved_path = null };
         }
 
         // Filesystem-backed include resolution. Freestanding targets (the wasm
@@ -442,12 +586,18 @@ pub const Preprocessor = struct {
                 var full_path_buf: [4096]u8 = undefined;
                 const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}{s}", .{ dir_part, path }) catch return error.FileNotFound;
 
+                // The root is the directory holding the including file. An empty
+                // dir_part means the including file is itself cwd-relative.
+                const root = if (dir_part.len == 0) "." else dir_part;
+                const resolved_path = try self.canonicalizeUnderRoot(full_path, root);
+                errdefer self.alloc.free(resolved_path);
+
                 const raw = compat.readFileByPath(self.alloc, full_path, 10 * 1024 * 1024) catch return error.FileNotFound;
                 // Null-terminate for lexer
                 const z = try self.alloc.dupeZ(u8, raw);
                 self.alloc.free(raw);
                 try self.included_sources.append(self.alloc, z);
-                return z;
+                return .{ .source = z, .resolved_path = resolved_path };
             }
 
             // Try include paths
@@ -455,11 +605,19 @@ pub const Preprocessor = struct {
                 var full_path_buf: [4096]u8 = undefined;
                 const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
 
-                const raw = compat.readFileByPath(self.alloc, full_path, 10 * 1024 * 1024) catch continue;
+                // A miss on one root is normal, and so is a refusal: try the next
+                // root, and if none matches the caller's not-found path applies.
+                const resolved_path = self.canonicalizeUnderRoot(full_path, inc_path) catch continue;
+                errdefer self.alloc.free(resolved_path);
+
+                const raw = compat.readFileByPath(self.alloc, full_path, 10 * 1024 * 1024) catch {
+                    self.alloc.free(resolved_path);
+                    continue;
+                };
                 const z = try self.alloc.dupeZ(u8, raw);
                 self.alloc.free(raw);
                 try self.included_sources.append(self.alloc, z);
-                return z;
+                return .{ .source = z, .resolved_path = resolved_path };
             }
         }
 
@@ -2029,9 +2187,11 @@ test "#include cycle detection" {
     const tokens = try lexer.tokenize(alloc, source);
     defer alloc.free(tokens);
 
-    // Should not infinite loop or crash
-    const result = try pp.process(source, tokens);
-    defer alloc.free(result);
+    // A file that includes itself is a genuine cycle. It must terminate, and it
+    // must terminate with an honest error: silently skipping the second inclusion
+    // would drop the cycle head's declarations and compile the rest anyway.
+    try std.testing.expectError(error.IncludeCycle, pp.process(source, tokens));
+    try std.testing.expect(pp.unresolved_include);
 }
 
 test "#pragma once prevents re-inclusion" {

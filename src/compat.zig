@@ -272,6 +272,28 @@ pub fn writeFileByPath(alloc: std.mem.Allocator, path: []const u8, data: []const
     return dirWriteFile(main_io.io(), cwd(), path, data);
 }
 
+/// Canonicalize `path` (relative to cwd, or already absolute) into `out_buffer`:
+/// the result is absolute with `.`, `..` and symlinks fully resolved. The path
+/// must exist. `out_buffer` should be at least `max_path_bytes` long.
+///
+/// Hides the 0.15/0.16 split: 0.15 has `std.fs.Dir.realpath` returning a slice,
+/// 0.16 moved it behind `std.Io` as `std.Io.Dir.realPathFile` returning a
+/// length. Both wrap realpath(3) (or the Windows equivalent), so directories
+/// resolve as well as regular files. COMPAT(0.15): keep once the floor moves.
+///
+/// Used by the preprocessor to prove an `#include` stays under its include root,
+/// which is the only check that catches a symlink pointing out of the root.
+pub fn realPathByPath(alloc: std.mem.Allocator, path: []const u8, out_buffer: []u8) ![]u8 {
+    if (is_0_16) {
+        var main_io = MainIo().init(alloc);
+        defer main_io.deinit();
+        const n = try cwd().realPathFile(main_io.io(), path, out_buffer);
+        return out_buffer[0..n];
+    } else {
+        return cwd().realpath(path, out_buffer);
+    }
+}
+
 /// Delete the file at `path` (relative to cwd).
 pub fn deleteFileByPath(alloc: std.mem.Allocator, path: []const u8) !void {
     var main_io = MainIo().init(alloc);
