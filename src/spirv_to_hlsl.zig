@@ -4777,6 +4777,17 @@ fn emitWhileLoopHLSL(
     }
     const header_lbl: u32 = if (module.instructions[hlbl_idx].words.len > 1) module.instructions[hlbl_idx].words[1] else 0;
 
+    // #selfloop: a self-loop (continue target IS the header; body-in-header) is not
+    // lowered by HLSL. Normal polarity recurses into the header's own LoopMerge (also
+    // caught by the g_ewl_depth_h guard above); reversed polarity (break on the true
+    // arm) takes a non-recursing path that silently freezes the phi at its constant
+    // init and never advances -> infinite loop / `0 = ...;` garbage (silent-wrong,
+    // pre-existing). Honest-error BOTH polarities up front -- mandate-safe, and
+    // consistent with GLSL/MSL/WGSL (which lower normal polarity but honest-error
+    // reversed). cont_lbl == header_lbl is the literal definition; it cannot match a
+    // normal loop (whose continue is a separate block).
+    if (cont_lbl == header_lbl) return error.CrossCompileUnsupported;
+
     const next_inst = module.instructions[loop_idx + 1];
     if (next_inst.op == .Branch and next_inst.words.len >= 2) {
         // FIRST: is this a do-while (bottom-test) loop? Inspect the CONTINUE block's
