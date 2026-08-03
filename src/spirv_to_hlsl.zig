@@ -1398,7 +1398,7 @@ pub fn spirvToHLSL(
     // Mangle function-scope ids (Function-class OpVariable or OpFunctionParameter)
     // whose name collides with a GLOBAL variable's -- the only collision that
     // silently shadows (#sid). Scope-aware + block-instance-excluded.
-    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa);
+    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa, false);
 
     // Rename HLSL-reserved keyword names (line, register, etc.)
     {

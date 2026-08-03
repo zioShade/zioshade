@@ -2668,7 +2668,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     // also block-names UBO instances as Globals_1, so the exclusion fits). Without
     // this, two same-named ids (e.g. a Private global + a function-local both
     // "a_b") emit a redefinition (invalid MSL). Runs after aliasConst.
-    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa);
+    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa, true);
     for (module.instructions) |inst| {
         if (inst.op != .Variable) continue;
         const info = analyzeLocalConstArray(&module, inst) orelse continue;

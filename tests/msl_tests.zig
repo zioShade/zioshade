@@ -5689,3 +5689,24 @@ test "cuj: MSL -- a function-local shadowing a global's name gets mangled (no re
     // post-fix the local is mangled to "a_b_1" (absent pre-fix).
     try assertContains(msl, "float a_b_1;");
 }
+
+test "cuj: MSL -- a local sharing a PushConstant block's OpName is NOT mangled (no regression)" {
+    // msl_pushconstant_shadow.spv: MSL block-names PushConstant instances as
+    // `constant T& name_1` (like UBOs), so the local-var pre-pass must EXCLUDE
+    // them (MSL passes exclude_push_constant=true). Without that, a local sharing
+    // the block's raw OpName mangles to name_1 and collides with the PushConstant
+    // param -> Metal redefinition. (GLSL emits PushConstants bare; HLSL honest-
+    // errors, so only MSL excludes them.)
+    const spv_bytes = @embedFile("fixtures/msl_pushconstant_shadow.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const msl = try zioshade.spirvToMSL(alloc, words, .{});
+    defer alloc.free(msl);
+    // PushConstant param is block-named Globals_1; the local keeps "Globals"
+    // (must NOT mangle to Globals_1, which would collide with the param).
+    try assertContains(msl, "constant Globals& Globals_1");
+    try assertContains(msl, "float Globals;");
+    try assertNotContains(msl, "float Globals_1");
+}
