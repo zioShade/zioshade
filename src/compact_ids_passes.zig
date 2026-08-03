@@ -688,7 +688,12 @@ pub fn deadCodeElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 var chain_keys = std.ArrayListUnmanaged(u32).empty;
                 defer chain_keys.deinit(alloc);
                 var kit = replacements.keyIterator();
-                while (kit.next()) |k| chain_keys.append(alloc, k.*) catch {};
+                // Not best-effort: a key missing from this list is a key that
+                // never gets flattened, and the comment above records why that
+                // is invalid SPIR-V rather than a missed optimization. Abandon
+                // the forwarding rewrite entirely instead, which is what every
+                // other allocation failure in this pass already does.
+                while (kit.next()) |k| chain_keys.append(alloc, k.*) catch return current_words;
                 for (chain_keys.items) |k| {
                     var target = replacements.get(k) orelse continue;
                     var hops: u32 = 0;
@@ -2117,7 +2122,12 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
     var dead_header_labels = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer dead_header_labels.deinit(alloc);
     for (dead_ranges.items, 0..) |dr, idx| {
-        if (outermost.isSet(idx)) dead_header_labels.put(alloc, dr.header_label, dr.merge_label) catch {};
+        // Not best-effort: this map is what phase 4 uses to delete the dead loop
+        // body, but phase 4.5 derives `removed_labels` from `dead_ranges` and
+        // `outermost` instead, so it strips OpPhi entries for those labels
+        // whether or not the map entry survived. Dropping one leaves the loop in
+        // the module and still deletes the OpPhi predecessors that reach it.
+        if (outermost.isSet(idx)) dead_header_labels.put(alloc, dr.header_label, dr.merge_label) catch return words;
     }
 
     // Remove dead loop bodies: replace header with Label + OpBranch to merge, skip everything until merge
@@ -3559,7 +3569,11 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
             if (wc == 0) break;
             // OpDecorate=71, ArrayStride=6: word1=target, word2=decoration, word3=value
             if (opcode == 71 and wc >= 4 and words[sp + 2] == 6) {
-                strides.put(alloc, words[sp + 1], words[sp + 3]) catch {};
+                // Not best-effort: a missing entry makes the array hash as if it
+                // had stride 0, which is exactly the merge the comment above says
+                // must never happen. Abandon the dedup instead of merging two
+                // arrays that need different strides.
+                strides.put(alloc, words[sp + 1], words[sp + 3]) catch return words;
             }
             sp += wc;
         }
@@ -7228,6 +7242,9 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
 
     // Phase 4: Rewrite — skip var/store/load for qualifying vars, substitute load results
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    // Every `catch return words` below abandons this list; a defer covers them
+    // all, and is a no-op after the toOwnedSlice at the end empties it.
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]);
 
     pos = 5;
@@ -7346,11 +7363,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         pos = ie;
     }
 
-    const result_owned = result.toOwnedSlice(alloc) catch {
-        result.deinit(alloc);
-        return words;
-    };
-    return result_owned;
+    return result.toOwnedSlice(alloc) catch return words;
 }
 
 /// Constant folding: replace binary arithmetic ops where all operands are constants
@@ -7695,7 +7708,15 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                 if (bool_result) |br| {
                     const target = if (br) true_id else false_id;
                     if (target != 0) {
-                        bool_replacements.put(alloc, rid, target) catch {};
+                        // Not best-effort: `to_skip` cannot fail and deletes the
+                        // instruction that defines `rid` in phases 4 and 5, while
+                        // `bool_replacements` is what rewrites every use of `rid`
+                        // to the folded constant. Dropping the map entry deletes
+                        // the definition and leaves the uses dangling, which is
+                        // invalid SPIR-V. Record the map entry first so the two
+                        // can never disagree. This matches `fold_map` above,
+                        // which is already a `try` for the same reason.
+                        try bool_replacements.put(alloc, rid, target);
                         to_skip.set(rid);
                     }
                 }
@@ -7712,16 +7733,20 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                 const a_is_false = a == false_id;
                 const b_is_true = b == true_id;
                 const b_is_false = b == false_id;
+                // Every put below is paired with an infallible `to_skip.set`, so
+                // dropping one deletes the defining instruction and leaves its
+                // uses pointing at an id that no longer exists. See the note on
+                // the comparison-folding site above.
                 if ((a_is_true or a_is_false) and (b_is_true or b_is_false)) {
                     switch (opcode) {
                         166 => { // OpLogicalOr
                             const result = a_is_true or b_is_true;
-                            bool_replacements.put(alloc, rid, if (result) true_id else false_id) catch {};
+                            try bool_replacements.put(alloc, rid, if (result) true_id else false_id);
                             to_skip.set(rid);
                         },
                         167 => { // OpLogicalAnd
                             const result = a_is_true and b_is_true;
-                            bool_replacements.put(alloc, rid, if (result) true_id else false_id) catch {};
+                            try bool_replacements.put(alloc, rid, if (result) true_id else false_id);
                             to_skip.set(rid);
                         },
                         else => {},
@@ -7732,29 +7757,29 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                     if (opcode == 166) { // OpLogicalOr
                         if (a_is_true or b_is_true) {
                             // x || true = true
-                            bool_replacements.put(alloc, rid, true_id) catch {};
+                            try bool_replacements.put(alloc, rid, true_id);
                             to_skip.set(rid);
                         } else if (a_is_false) {
                             // false || b = b
-                            bool_replacements.put(alloc, rid, b) catch {};
+                            try bool_replacements.put(alloc, rid, b);
                             to_skip.set(rid);
                         } else if (b_is_false) {
                             // a || false = a
-                            bool_replacements.put(alloc, rid, a) catch {};
+                            try bool_replacements.put(alloc, rid, a);
                             to_skip.set(rid);
                         }
                     } else if (opcode == 167) { // OpLogicalAnd
                         if (a_is_false or b_is_false) {
                             // x && false = false
-                            bool_replacements.put(alloc, rid, false_id) catch {};
+                            try bool_replacements.put(alloc, rid, false_id);
                             to_skip.set(rid);
                         } else if (a_is_true) {
                             // true && b = b
-                            bool_replacements.put(alloc, rid, b) catch {};
+                            try bool_replacements.put(alloc, rid, b);
                             to_skip.set(rid);
                         } else if (b_is_true) {
                             // a && true = a
-                            bool_replacements.put(alloc, rid, a) catch {};
+                            try bool_replacements.put(alloc, rid, a);
                             to_skip.set(rid);
                         }
                     }
@@ -7767,11 +7792,12 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
             const rid = words[pos + 2];
             const operand = words[pos + 3];
             if (rid >= 1 and rid < bound) {
+                // Paired with an infallible `to_skip.set`, as above.
                 if (operand == true_id) {
-                    bool_replacements.put(alloc, rid, false_id) catch {};
+                    try bool_replacements.put(alloc, rid, false_id);
                     to_skip.set(rid);
                 } else if (operand == false_id) {
-                    bool_replacements.put(alloc, rid, true_id) catch {};
+                    try bool_replacements.put(alloc, rid, true_id);
                     to_skip.set(rid);
                 }
             }
@@ -7877,7 +7903,15 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
     // (comparison results folded to existing true_id/false_id)
     if (bool_replacements.count() > 0) {
         const br_result = result_owned;
-        var br_out = std.ArrayList(u32).initCapacity(alloc, br_result.len) catch return br_result;
+        // Phase 4 has already deleted the instruction that defines every id in
+        // `bool_replacements`, so this intermediate module names ids it no
+        // longer defines and only the rewrite below makes it whole again.
+        // Returning it, which is what every `catch return br_result` here used
+        // to do, hands back invalid SPIR-V as a success. Propagate instead; the
+        // caller degrades to the pre-pass module, which is still valid.
+        defer alloc.free(br_result);
+        var br_out = try std.ArrayList(u32).initCapacity(alloc, br_result.len);
+        defer br_out.deinit(alloc);
         br_out.appendSliceAssumeCapacity(br_result[0..5]);
         pos = 5;
         while (pos < br_result.len) {
@@ -7993,33 +8027,32 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
             }
             if (any_replaced and br_info != null) {
                 const info = br_info.?;
-                var br_buf = std.ArrayListUnmanaged(u32).initCapacity(alloc, bwc) catch {
-                    br_out.appendSlice(alloc, br_result[pos..bie]) catch return br_result;
-                    pos = bie;
-                    continue;
-                };
-                br_buf.append(alloc, bhdr) catch return br_result; // header
+                // The old fallback here copied the instruction through
+                // unrewritten, which emits a use of an id phase 4 deleted.
+                var br_buf = try std.ArrayListUnmanaged(u32).initCapacity(alloc, bwc);
+                defer br_buf.deinit(alloc);
+                try br_buf.append(alloc, bhdr); // header
                 var bw: u32 = pos + 1;
                 switch (info.fixed) {
                     1 => {
                         if (bw < bie) {
-                            br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            try br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]);
                             bw += 1;
                         }
                     },
                     2 => {
                         if (bw < bie) {
-                            br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            try br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]);
                             bw += 1;
                         }
                         if (bw < bie) {
-                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            try br_buf.append(alloc, br_result[bw]);
                             bw += 1;
                         } // result_id
                     },
                     3 => {
                         if (bw < bie) {
-                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            try br_buf.append(alloc, br_result[bw]);
                             bw += 1;
                         }
                     },
@@ -8029,41 +8062,41 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                     if (bw >= bie) break;
                     switch (ch) {
                         'i' => {
-                            br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                            try br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]);
                             bw += 1;
                         },
                         'I' => {
                             while (bw < bie) : (bw += 1) {
-                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]);
                             }
                         },
                         'l' => {
-                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            try br_buf.append(alloc, br_result[bw]);
                             bw += 1;
                         },
                         'L', 's' => {
                             while (bw < bie) : (bw += 1) {
-                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, br_result[bw]);
                             }
                         },
                         'M' => {
                             if (bw < bie) {
-                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, br_result[bw]);
                                 bw += 1;
                             }
                             while (bw < bie) : (bw += 1) {
-                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]);
                             }
                         },
                         'W' => {
                             while (bw + 1 < bie) {
-                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, br_result[bw]);
                                 bw += 1;
-                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]);
                                 bw += 1;
                             }
                             if (bw < bie) {
-                                br_buf.append(alloc, br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, br_result[bw]);
                                 bw += 1;
                             }
                         },
@@ -8071,34 +8104,32 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
                             while (bw < bie) {
                                 const w = br_result[bw];
                                 bw += 1;
-                                br_buf.append(alloc, w) catch return br_result;
+                                try br_buf.append(alloc, w);
                                 if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
                             }
                             while (bw < bie) : (bw += 1) {
-                                br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]) catch return br_result;
+                                try br_buf.append(alloc, bool_replacements.get(br_result[bw]) orelse br_result[bw]);
                             }
                         },
                         else => {
-                            br_buf.append(alloc, br_result[bw]) catch return br_result;
+                            try br_buf.append(alloc, br_result[bw]);
                             bw += 1;
                         },
                     }
                 }
                 while (bw < bie) : (bw += 1) {
-                    br_buf.append(alloc, br_result[bw]) catch return br_result;
+                    try br_buf.append(alloc, br_result[bw]);
                 }
-                br_out.appendSlice(alloc, br_buf.items) catch return br_result;
-                br_buf.deinit(alloc);
+                try br_out.appendSlice(alloc, br_buf.items);
             } else {
-                br_out.appendSlice(alloc, br_result[pos..bie]) catch return br_result;
+                try br_out.appendSlice(alloc, br_result[pos..bie]);
             }
             pos = bie;
         }
-        alloc.free(br_result);
-        return br_out.toOwnedSlice(alloc) catch {
-            br_out.deinit(alloc);
-            return alloc.dupe(u32, br_result);
-        };
+        // The old tail freed br_result and then read it again through
+        // alloc.dupe on the toOwnedSlice failure path, a use after free. The
+        // deferred free above runs after the return value is computed.
+        return try br_out.toOwnedSlice(alloc);
     }
 
     return result_owned;
@@ -12409,7 +12440,13 @@ pub fn foldConstCompositeExtract(alloc: std.mem.Allocator, words: []const u32) e
                     // Single-level extract only (wc == 5 means one index)
                     if (wc == 5 and index < cc.count) {
                         const component_id = words[cc.start + index];
-                        replacements.put(alloc, result_id, component_id) catch {};
+                        // Not best-effort: `to_skip` cannot fail and deletes the
+                        // OpCompositeExtract in phase 3, while `replacements` is
+                        // what rewrites its uses to the constant component.
+                        // Dropping the map entry deletes the definition and
+                        // leaves the uses dangling. Record it first so the two
+                        // can never disagree.
+                        try replacements.put(alloc, result_id, component_id);
                         to_skip.set(result_id);
                     }
                 }
@@ -12805,4 +12842,159 @@ test "alloc failure: parseModule fails loudly and frees exactly what it allocate
         testParseModuleUnderAllocFailure,
         .{&test_preheader_module},
     );
+}
+
+// The shape that exercises the record-the-edit/drive-the-edit pairing in
+// constFold: %7 is defined only by an OpIEqual on two int constants, and is
+// consumed by an OpLogicalNot. The pass marks %7 in the infallible `to_skip`
+// bitset, which deletes the OpIEqual, and records %7 -> %6 in the fallible
+// `bool_replacements` map, which is what rewrites the OpLogicalNot's operand.
+// Dropping the map entry deletes the definition and leaves the use behind.
+// The constant values are 100 and 200 so that the literal 7 appears nowhere
+// else in the module and a whole-word scan for it is unambiguous.
+// Enough folds that inserting them grows bool_replacements at least once. A
+// single fold is not enough to expose the bug: losing the only entry leaves the
+// map empty and constFold takes its `count() == 0` early return, so the
+// definitions are never deleted either. It is the grow, with earlier entries
+// already committed, that lets one key go missing while the pass still runs.
+const test_constfold_fold_count = 12;
+
+const test_constfold_module = build: {
+    var m: []const u32 = &[_]u32{
+        0x07230203, 0x00010500, 0, 64, 0, // magic, version, generator, bound, schema
+        (2 << 16) | 20, 1, // %1 = OpTypeBool
+        (4 << 16) | 21, 2, 32, 1, // %2 = OpTypeInt 32 Signed
+        (4 << 16) | 43, 2, 3, 100, // %3 = OpConstant %2 100
+        (4 << 16) | 43, 2, 4, 200, // %4 = OpConstant %2 200
+        (3 << 16) | 41, 1, 5, // %5 = OpConstantTrue %1
+        (3 << 16) | 42, 1, 6, // %6 = OpConstantFalse %1
+        (2 << 16) | 19, 7, // %7 = OpTypeVoid
+        (3 << 16) | 33, 8, 7, // %8 = OpTypeFunction %7
+        (5 << 16) | 54, 7, 9, 0, 8, // %9 = OpFunction %7 None %8
+        (2 << 16) | 248, 10, // %10 = OpLabel
+    };
+    // %(20+k) = OpIEqual %1 %3 %4, which folds to %6, consumed by an
+    // OpLogicalNot so the folded id has a use that must be rewritten.
+    for (0..test_constfold_fold_count) |k| {
+        m = m ++ [_]u32{
+            (5 << 16) | 170, 1, 20 + k, 3,      4,
+            (4 << 16) | 168, 1, 40 + k, 20 + k,
+        };
+    }
+    m = m ++ [_]u32{
+        (1 << 16) | 253, // OpReturn
+        (1 << 16) | 56, // OpFunctionEnd
+    };
+    break :build m[0..m.len].*;
+};
+
+fn testReferencesId(words: []const u32, id: u32) bool {
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        var i: usize = pos + 1;
+        while (i < pos + wc and i < words.len) : (i += 1) {
+            if (words[i] == id) return true;
+        }
+        pos += wc;
+    }
+    return false;
+}
+
+fn testDefinesIEqual(words: []const u32, id: u32) bool {
+    var pos: usize = 5;
+    while (pos < words.len) {
+        const wc: u32 = words[pos] >> 16;
+        if (wc == 0) break;
+        if (@as(u16, @truncate(words[pos] & 0xFFFF)) == 170 and wc >= 3 and words[pos + 2] == id) return true;
+        pos += wc;
+    }
+    return false;
+}
+
+// std.testing.FailingAllocator does not increment alloc_index on the call it
+// fails, so once it fails one allocation it fails every later one too. That
+// hides the defect this test is for: an entry dropped from a lookup map is only
+// observable if the pass keeps allocating afterwards and goes on to emit the
+// module. This one fails exactly the nth allocation and lets the rest through.
+const TestOneShotFailingAllocator = struct {
+    backing: std.mem.Allocator,
+    fail_index: usize,
+    index: usize = 0,
+
+    fn allocator(self: *TestOneShotFailingAllocator) std.mem.Allocator {
+        return .{
+            .ptr = self,
+            .vtable = &.{ .alloc = tAlloc, .resize = tResize, .remap = tRemap, .free = tFree },
+        };
+    }
+
+    fn tAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+        const self: *TestOneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        defer self.index += 1;
+        if (self.index == self.fail_index) return null;
+        return self.backing.rawAlloc(len, alignment, ra);
+    }
+    fn tResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) bool {
+        const self: *TestOneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawResize(memory, alignment, new_len, ra);
+    }
+    fn tRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ra: usize) ?[*]u8 {
+        const self: *TestOneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.backing.rawRemap(memory, alignment, new_len, ra);
+    }
+    fn tFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+        const self: *TestOneShotFailingAllocator = @ptrCast(@alignCast(ctx));
+        self.backing.rawFree(memory, alignment, ra);
+    }
+};
+
+// Unlike ensureLoopPreheader, constFold is allowed to degrade to the
+// unoptimized module when an allocation fails (its many `catch return words`
+// paths), so checkAllAllocationFailures, which insists on error.OutOfMemory
+// every time, is the wrong shape here. Drive a failing allocator directly and
+// assert the invariant that actually matters: whatever the pass returns must
+// never name an id it no longer defines.
+test "alloc failure: constFold never deletes a definition it failed to record a replacement for" {
+    const words: []const u32 = &test_constfold_module;
+
+    const alloc_count = blk: {
+        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const a = counting.allocator();
+        const out = try constFold(a, words);
+        if (out.ptr != words.ptr) a.free(@constCast(out));
+        break :blk counting.alloc_index;
+    };
+    try std.testing.expect(alloc_count > 0);
+
+    var fail_index: usize = 0;
+    while (fail_index < alloc_count) : (fail_index += 1) {
+        var failing = TestOneShotFailingAllocator{ .backing = std.testing.allocator, .fail_index = fail_index };
+        const a = failing.allocator();
+        const out = constFold(a, words) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        // For every folded comparison: either its OpIEqual is still there, or
+        // every reference to the id it defined was rewritten. A module that
+        // names an id it does not define is invalid SPIR-V, and the pass just
+        // returned it as a success.
+        var dangling: ?u32 = null;
+        for (0..test_constfold_fold_count) |k| {
+            const id: u32 = @intCast(20 + k);
+            if (!testDefinesIEqual(out, id) and testReferencesId(out, id)) {
+                dangling = id;
+                break;
+            }
+        }
+        if (out.ptr != words.ptr) a.free(@constCast(out));
+        if (dangling) |id| {
+            std.debug.print(
+                "\nfail_index {d}/{d}: constFold emitted a use of %{d} with no definition\n",
+                .{ fail_index, alloc_count, id },
+            );
+            return error.IncompleteRewriteReturnedAsSuccess;
+        }
+    }
 }
