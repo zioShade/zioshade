@@ -1,0 +1,41 @@
+; Regression guard for zioshade-cuj: MSL block-names PushConstant instances as
+; `constant T& name_1` (like UBOs), so the local-var pre-pass must EXCLUDE them
+; (else a local sharing the block's raw OpName mangles to name_1 and collides
+; with the PushConstant param -> Metal redefinition). GLSL emits PushConstants
+; bare and HLSL honest-errors, so only MSL passes exclude_push_constant=true.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor %pc
+OpExecutionMode %main OriginUpperLeft
+OpName %main "main"
+OpName %Pct "Globals"
+OpName %pc "Globals"
+OpName %local "Globals"
+OpDecorate %Pct Block
+OpMemberDecorate %Pct 0 Offset 0
+OpDecorate %outColor Location 1
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%v4f = OpTypeVector %float 4
+%uint = OpTypeInt 32 0
+%Pct = OpTypeStruct %float
+%ptr_pc = OpTypePointer PushConstant %Pct
+%ptr_pc_f = OpTypePointer PushConstant %float
+%ptr_v4o = OpTypePointer Output %v4f
+%ptr_ff = OpTypePointer Function %float
+%c0 = OpConstant %uint 0
+%float7 = OpConstant %float 7
+%pc = OpVariable %ptr_pc PushConstant
+%outColor = OpVariable %ptr_v4o Output
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%local = OpVariable %ptr_ff Function
+OpStore %local %float7
+%ac = OpAccessChain %ptr_pc_f %pc %c0
+%pv = OpLoad %float %ac
+%lv = OpLoad %float %local
+%cc = OpCompositeConstruct %v4f %lv %pv %float7 %float7
+OpStore %outColor %cc
+OpReturn
+OpFunctionEnd

@@ -1286,6 +1286,7 @@ pub fn commonPrewriteUniqueLocalVarNames(
     instructions: anytype,
     names: *std.AutoHashMap(u32, []const u8),
     alloc: std.mem.Allocator,
+    exclude_push_constant: bool,
 ) void {
     // block-only struct ids vs BufferBlock struct ids (distinguish UBO from SSBO),
     // and pointer-type id -> pointee type id.
@@ -1320,6 +1321,12 @@ pub fn commonPrewriteUniqueLocalVarNames(
             if (pointee_of.get(inst.words[1])) |pointee| {
                 if (block_only.contains(pointee) and !buffer_block_types.contains(pointee)) continue;
             }
+        } else if (exclude_push_constant and sc == .PushConstant) {
+            // MSL also block-names PushConstant instances (constant T& name_1, like
+            // UBOs), so a local sharing the block's raw OpName does not shadow them.
+            // GLSL emits PushConstants under their raw instance name and HLSL
+            // honest-errors on them, so only MSL passes exclude_push_constant=true.
+            continue;
         }
         if (names.get(inst.words[2])) |nm| claimed.put(nm, {}) catch {};
     }
