@@ -1,0 +1,51 @@
+; Reversed-polarity twin of selfloop_bodyheader.spvasm: the back-edge BranchConditional
+; targets (merge, header) are SWAPPED (true->merge=break, false->header=continue) and the
+; condition negated (SGreaterThanEqual i 10 = "i>=10") so the loop semantics are identical
+; (acc = 0+1+...+10 = 55, continue while i<10). spirv-cross lowers this correctly;
+; zioshade WGSL honest-errors it (the normal-polarity exit path is the only place the
+; self-loop phi update is emitted; a reversed back-edge would silently drop it ->
+; infinite loop). GLSL/MSL honest-error reversed polarity too. Reproducer for the
+; reversed-polarity silent-wrong regression found in PR #544 review.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %outColor Location 0
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%bool = OpTypeBool
+%v4float = OpTypeVector %float 4
+%ptr_int_Function = OpTypePointer Function %int
+%ptr_v4_out = OpTypePointer Output %v4float
+
+%int_0 = OpConstant %int 0
+%int_1 = OpConstant %int 1
+%int_10 = OpConstant %int 10
+%float_1 = OpConstant %float 1
+
+%outColor = OpVariable %ptr_v4_out Output
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%acc = OpVariable %ptr_int_Function Function
+OpStore %acc %int_0
+OpBranch %hdr
+%hdr = OpLabel
+%i = OpPhi %int %int_0 %entry %inext %hdr
+%ld = OpLoad %int %acc
+%add = OpIAdd %int %ld %i
+OpStore %acc %add
+%cond = OpSGreaterThanEqual %bool %i %int_10
+%inext = OpIAdd %int %i %int_1
+OpLoopMerge %merge %hdr None
+OpBranchConditional %cond %merge %hdr
+%merge = OpLabel
+%final = OpLoad %int %acc
+%finalf = OpConvertSToF %float %final
+%color = OpCompositeConstruct %v4float %finalf %finalf %finalf %float_1
+OpStore %outColor %color
+OpReturn
+OpFunctionEnd

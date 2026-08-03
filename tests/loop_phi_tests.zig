@@ -49,10 +49,13 @@ fn collectIdents(expr: []const u8, set: *std.StringHashMap(void)) !void {
     }
 }
 
-/// Returns the substring of the FIRST `while (true)` loop body (between its
-/// opening `{` and the matching `}`), or null.
+/// Returns the substring of the FIRST loop body (between its opening `{` and the
+/// matching `}`), or null. Matches GLSL/HLSL/MSL `while (true)` first, then WGSL
+/// `loop {` (only WGSL emits `loop {`; `while (true)` is tried first so the other
+/// backends are unaffected).
 fn loopBody(src: []const u8) ?[]const u8 {
-    const kw = std.mem.indexOf(u8, src, "while (true)") orelse return null;
+    const kw = std.mem.indexOf(u8, src, "while (true)") orelse
+        (std.mem.indexOf(u8, src, "loop {") orelse return null);
     // find first '{' after the keyword
     var i = kw;
     while (i < src.len and src[i] != '{') i += 1;
@@ -490,6 +493,93 @@ test "GLSL emits multiple early return points (#70)" {
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, glsl, i, "return;")) |pos| : (count += 1) i = pos + 1;
     try std.testing.expect(count >= 2);
+}
+
+// #selfloop: OpLoopMerge %merge %hdr where the continue target IS the loop header
+// (the body sits in the header before the LoopMerge -- a self-loop). zioshade REFUSED
+// this (emitWhileLoop self-reentered on the header's own LoopMerge -> CrossCompileUnsupported)
+// while spirv-cross lowers it as `for(;;){ body; if(!cond) break; advance }`. The naive
+// "break the self-recursion" guard is silent-wrong (double body + counter reset -> infinite
+// loop). Assert zioshade now emits a TERMINATING loop whose phi counter advances (no
+// counter-reset / infinite-loop silent-wrong), structured as while(true) + if(!(cond))break.
+// Render-MATCH vs spirv-cross (outColor = 55,55,55,1) is verified via
+// tools/glsl_render_check_spv.sh.
+const SELFLOOP_BODYHEADER_SPV = @embedFile("fixtures/selfloop_bodyheader.spv");
+
+test "GLSL lowers a self-loop with body-in-header (#selfloop)" {
+    const glsl = try crossGlsl(SELFLOOP_BODYHEADER_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "if (!(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "break;") != null);
+    if (!try loopCounterAdvances(glsl)) {
+        std.debug.print("GLSL self-loop never advances the counter (infinite loop):\n{s}\n", .{glsl});
+        return error.SelfLoopDoesNotAdvance;
+    }
+}
+
+// HLSL used to CRASH (SIGSEGV, exit 139) on the same self-loop: emitWhileLoopHLSL
+// re-entered the header's own LoopMerge with no recursion bound -> stack overflow.
+// (GLSL refused gracefully via its g_ewl_depth guard; HLSL never got that guard.)
+// Assert HLSL now refuses LOUDLY (honest-error) instead of crashing. The fix is the
+// guard only -- HLSL does not yet LOWER the self-loop (that is GLSL-only for now), so
+// an error is the correct, mandate-safe outcome.
+test "HLSL refuses a self-loop with body-in-header without crashing (#selfloop guard)" {
+    try std.testing.expectError(error.CrossCompileUnsupported, crossHlsl(SELFLOOP_BODYHEADER_SPV));
+}
+
+// WGSL used to emit BROKEN code (exit 0) on the self-loop: the loop-header phi's
+// back-edge predecessor IS the header (same block, before the phi), so the index-based
+// init/update attribution misread the back-edge incoming as the init
+// (`let v = <not-yet-defined increment>` -> naga "no definition in scope"), AND the
+// `continuing {}` scan (which looks for the continue label after the LoopMerge) found
+// nothing for cont==header, so the phi update never emitted -> the counter never
+// advanced -> infinite loop. Now: correct attribution (pred==header -> update) + emit
+// the phi update after the back-edge break. Assert a terminating loop whose counter
+// advances. naga-validity is verified separately (tools + the wgsl gate).
+test "WGSL lowers a self-loop with body-in-header (#selfloop)" {
+    const wgsl = try crossWgsl(SELFLOOP_BODYHEADER_SPV);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "loop {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "if (!(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "break;") != null);
+    if (!try loopCounterAdvances(wgsl)) {
+        std.debug.print("WGSL self-loop never advances the counter (infinite loop):\n{s}\n", .{wgsl});
+        return error.SelfLoopDoesNotAdvance;
+    }
+}
+
+// MSL used to honest-error (UnsupportedOpcode) on the self-loop. It now lowers it via
+// the MSL twin of emitSelfLoopBodyHeaderGLSL. Assert a terminating while(true) loop
+// whose counter advances. Metal-validity + render-MATCH vs spirv-cross are verified
+// via the MSL validity gate + prove_opt (render-diff on Metal).
+test "MSL lowers a self-loop with body-in-header (#selfloop)" {
+    const msl = try crossMsl(SELFLOOP_BODYHEADER_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "if (!(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "break;") != null);
+    if (!try loopCounterAdvances(msl)) {
+        std.debug.print("MSL self-loop never advances the counter (infinite loop):\n{s}\n", .{msl});
+        return error.SelfLoopDoesNotAdvance;
+    }
+}
+
+// Reversed-polarity twin of SELFLOOP_BODYHEADER_SPV (back-edge BranchConditional targets
+// swapped: true->merge=break, false->header=continue; cond negated so semantics are
+// identical, acc = 55). spirv-cross lowers it; zioshade honest-errors it in ALL backends:
+// the normal-polarity exit path is the only place the self-loop phi back-edge update is
+// emitted, so a reversed back-edge would silently drop it -> the counter never advances
+// -> infinite loop (valid output, oracle-accepted = silent-wrong). GLSL/MSL guard via
+// back-edge polarity; WGSL + HLSL guard on the self-loop shape. This locks the honest-
+// error so it cannot regress to silent-wrong (the hole PR #544 review found in WGSL).
+const SELFLOOP_REVERSED_SPV = @embedFile("fixtures/selfloop_reversed.spv");
+
+test "all backends honest-error a reversed-polarity self-loop (#selfloop)" {
+    try std.testing.expectError(error.CrossCompileUnsupported, crossGlsl(SELFLOOP_REVERSED_SPV));
+    try std.testing.expectError(error.CrossCompileUnsupported, crossMsl(SELFLOOP_REVERSED_SPV));
+    try std.testing.expectError(error.CrossCompileUnsupported, crossWgsl(SELFLOOP_REVERSED_SPV));
+    try std.testing.expectError(error.CrossCompileUnsupported, crossHlsl(SELFLOOP_REVERSED_SPV));
 }
 
 // #wgsl-else-clobber: an if/else whose THEN-branch contains a nested (no-else) if was
