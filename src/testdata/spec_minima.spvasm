@@ -1,0 +1,65 @@
+; Spec-minimum fixture for the generated minWordCount table.
+;
+; Every instruction below that a hand-written table got wrong appears here at
+; EXACTLY its SPIR-V spec minimum word count, so tests/spirv_min_word_count_tests.zig
+; fails if any of those entries is ever made over-strict again:
+;
+;   OpTypeStruct                                        2 words (zero members, legal)
+;   OpRayQueryProceedKHR                                4 words
+;   OpRayQueryGetIntersectionTypeKHR                    5 words
+;   OpRayQueryGetIntersectionTriangleVertexPositionsKHR 5 words
+;   OpSubgroupReadInvocationKHR                         5 words (opcode 4432, which
+;     src/spirv.zig misnames GroupNonUniformRotate; 4431 is the rotate)
+;
+; Regenerate with:
+;   spirv-as --target-env spv1.4 src/testdata/spec_minima.spvasm -o src/testdata/spec_minima.spv
+;   spirv-val --target-env spv1.4 src/testdata/spec_minima.spv
+;
+; The module is spirv-val VALID. It is a parser-level fixture only; no backend
+; is expected to lower ray query.
+; SPIR-V
+; Version: 1.4
+               OpCapability Shader
+               OpCapability RayQueryKHR
+               OpCapability RayQueryPositionFetchKHR
+               OpCapability SubgroupBallotKHR
+               OpExtension "SPV_KHR_ray_query"
+               OpExtension "SPV_KHR_ray_tracing_position_fetch"
+               OpExtension "SPV_KHR_shader_ballot"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %accel
+               OpExecutionMode %main LocalSize 1 1 1
+               OpDecorate %accel DescriptorSet 0
+               OpDecorate %accel Binding 0
+       %void = OpTypeVoid
+        %fnt = OpTypeFunction %void
+       %bool = OpTypeBool
+       %uint = OpTypeInt 32 0
+      %float = OpTypeFloat 32
+    %v3float = OpTypeVector %float 3
+     %uint_0 = OpConstant %uint 0
+     %uint_3 = OpConstant %uint 3
+   %uint_255 = OpConstant %uint 255
+    %float_0 = OpConstant %float 0
+    %float_1 = OpConstant %float 1
+  %float_100 = OpConstant %float 100
+     %origin = OpConstantComposite %v3float %float_0 %float_0 %float_0
+        %dir = OpConstantComposite %v3float %float_0 %float_0 %float_1
+       %arr3 = OpTypeArray %v3float %uint_3
+      %empty = OpTypeStruct
+         %rq = OpTypeRayQueryKHR
+     %ptr_rq = OpTypePointer Function %rq
+         %as = OpTypeAccelerationStructureKHR
+     %ptr_as = OpTypePointer UniformConstant %as
+      %accel = OpVariable %ptr_as UniformConstant
+       %main = OpFunction %void None %fnt
+      %entry = OpLabel
+        %rqv = OpVariable %ptr_rq Function
+          %a = OpLoad %as %accel
+               OpRayQueryInitializeKHR %rqv %a %uint_0 %uint_255 %origin %float_0 %dir %float_100
+          %p = OpRayQueryProceedKHR %bool %rqv
+          %t = OpRayQueryGetIntersectionTypeKHR %uint %rqv %uint_0
+         %vp = OpRayQueryGetIntersectionTriangleVertexPositionsKHR %arr3 %rqv %uint_0
+         %sr = OpSubgroupReadInvocationKHR %uint %uint_0 %uint_0
+               OpReturn
+               OpFunctionEnd

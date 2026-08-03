@@ -605,6 +605,23 @@ pub fn build(b: *std.Build) void {
     const trunc_test_step = b.step("test-truncated", "Run truncated-instruction negative fixture tests");
     trunc_test_step.dependOn(&run_trunc_tests.step);
 
+    // Corpus floor assertion for the generated minWordCount table. This is what
+    // catches an over-strict entry; the strict gate cannot, because it only
+    // exercises the GLSL frontend and reaches no parseModule copy.
+    const minwc_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/spirv_min_word_count_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    minwc_test_mod.addImport("zioshade", zioshade_mod);
+    const run_minwc_tests = b.addRunArtifact(b.addTest(.{
+        .name = "spirv-min-word-count-tests",
+        .root_module = minwc_test_mod,
+    }));
+    test_step.dependOn(&run_minwc_tests.step);
+    const minwc_test_step = b.step("test-min-word-count", "Run the minWordCount corpus floor assertion");
+    minwc_test_step.dependOn(&run_minwc_tests.step);
+
     // Loop-counter (OpPhi) cross-backend correctness tests
     const loopphi_test_mod = b.createModule(.{
         .root_source_file = b.path("tests/loop_phi_tests.zig"),
