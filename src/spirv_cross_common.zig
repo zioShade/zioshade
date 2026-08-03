@@ -1275,10 +1275,13 @@ pub fn commonPrewriteUniqueStructNames(
 /// function-local sharing the block's raw OpName does NOT shadow it. Such UBO
 /// instances are excluded from the collision set; without this, the local would
 /// be mangled INTO the block-naming suffix space and collide with the instance.
-/// SSBOs (StorageBuffer+Block, or Uniform+BufferBlock) and PushConstants are
-/// emitted under their RAW instance name, so they STAY in the collision set
-/// (a local CAN shadow them). (Other backends don't _1-mangle UBOs and don't
-/// emit a collidable instance name, so excluding their UBO instances is moot.)
+/// SSBOs (StorageBuffer+Block, or Uniform+BufferBlock) are emitted under their
+/// RAW instance name, so they STAY in the collision set (a local CAN shadow
+/// them). PushConstants: GLSL emits them bare (stay in the set) and HLSL
+/// honest-errors, but MSL block-names them name_1 (like UBOs), so `exclude_push_constant`
+/// is true only for MSL -- the sole backend for which they are excluded. (The
+/// other backends don't _1-mangle UBOs and don't emit a collidable instance
+/// name, so excluding their UBO instances is moot.)
 ///
 /// Run ONCE after collectNames (and after the struct-name pre-pass). Only
 /// colliding function-scope ids are mutated.
