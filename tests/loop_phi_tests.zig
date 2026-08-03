@@ -49,10 +49,13 @@ fn collectIdents(expr: []const u8, set: *std.StringHashMap(void)) !void {
     }
 }
 
-/// Returns the substring of the FIRST `while (true)` loop body (between its
-/// opening `{` and the matching `}`), or null.
+/// Returns the substring of the FIRST loop body (between its opening `{` and the
+/// matching `}`), or null. Matches GLSL/HLSL/MSL `while (true)` first, then WGSL
+/// `loop {` (only WGSL emits `loop {`; `while (true)` is tried first so the other
+/// backends are unaffected).
 fn loopBody(src: []const u8) ?[]const u8 {
-    const kw = std.mem.indexOf(u8, src, "while (true)") orelse return null;
+    const kw = std.mem.indexOf(u8, src, "while (true)") orelse
+        (std.mem.indexOf(u8, src, "loop {") orelse return null);
     // find first '{' after the keyword
     var i = kw;
     while (i < src.len and src[i] != '{') i += 1;
@@ -523,6 +526,27 @@ test "GLSL lowers a self-loop with body-in-header (#selfloop)" {
 // an error is the correct, mandate-safe outcome.
 test "HLSL refuses a self-loop with body-in-header without crashing (#selfloop guard)" {
     try std.testing.expectError(error.CrossCompileUnsupported, crossHlsl(SELFLOOP_BODYHEADER_SPV));
+}
+
+// WGSL used to emit BROKEN code (exit 0) on the self-loop: the loop-header phi's
+// back-edge predecessor IS the header (same block, before the phi), so the index-based
+// init/update attribution misread the back-edge incoming as the init
+// (`let v = <not-yet-defined increment>` -> naga "no definition in scope"), AND the
+// `continuing {}` scan (which looks for the continue label after the LoopMerge) found
+// nothing for cont==header, so the phi update never emitted -> the counter never
+// advanced -> infinite loop. Now: correct attribution (pred==header -> update) + emit
+// the phi update after the back-edge break. Assert a terminating loop whose counter
+// advances. naga-validity is verified separately (tools + the wgsl gate).
+test "WGSL lowers a self-loop with body-in-header (#selfloop)" {
+    const wgsl = try crossWgsl(SELFLOOP_BODYHEADER_SPV);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "loop {") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "if (!(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "break;") != null);
+    if (!try loopCounterAdvances(wgsl)) {
+        std.debug.print("WGSL self-loop never advances the counter (infinite loop):\n{s}\n", .{wgsl});
+        return error.SelfLoopDoesNotAdvance;
+    }
 }
 
 // #wgsl-else-clobber: an if/else whose THEN-branch contains a nested (no-else) if was
