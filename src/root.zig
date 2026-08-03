@@ -31,6 +31,16 @@ const parser = @import("parser.zig");
 /// that invoked the compile function or they will be zero/empty.
 pub const semantic = @import("semantic.zig");
 const codegen = @import("codegen.zig");
+/// Exposed publicly for use by `tests/optimizer_tests.zig`, whose
+/// allocation-failure checks drive a single optimizer pass directly (the
+/// pipeline in `codegen.zig` degrades a failing pass to the previous module, so
+/// it cannot show whether the pass itself failed loudly). Not part of the
+/// curated public API.
+pub const compact_ids_passes = @import("compact_ids_passes.zig");
+/// Exposed publicly for use by `tests/optimizer_tests.zig`, whose
+/// allocation-failure checks drive the shared SPIR-V module parser directly.
+/// Not part of the curated public API.
+pub const spirv_cross_common = @import("spirv_cross_common.zig");
 const spirv_to_hlsl = @import("spirv_to_hlsl.zig");
 const spirv_to_glsl = @import("spirv_to_glsl.zig");
 const spirv_to_msl = @import("spirv_to_msl.zig");
