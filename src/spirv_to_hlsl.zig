@@ -60,6 +60,16 @@ threadlocal var g_loop_merge_map_h: ?*const std.AutoHashMap(usize, LoopInfo) = n
 threadlocal var g_loop_phis_h: ?*const std.AutoHashMap(usize, std.ArrayList(PhiInfo)) = null;
 threadlocal var g_phi_hdr_h: ?*const std.AutoHashMap(u32, usize) = null;
 threadlocal var g_deferred_hdr_h: ?*const std.AutoHashMap(usize, void) = null;
+// #selfloop: bound emitWhileLoopHLSL self-recursion. On a valid-but-pathological loop
+// whose body re-enters its own LoopMerge (e.g. a self-loop with body-in-header,
+// cont_lbl == header_lbl) the recursion does not advance and exhausts the stack ->
+// SIGSEGV, a silent mandate violation (this is exactly what crashed HLSL on the
+// selfloop fixture while GLSL refused via its own copy of this guard). Refuse loudly
+// instead. Real shaders nest loops far below this (GraphicsFuzz/real apps < 100); the
+// bound is a safety net, not a capability limit. Mirrors spirv_to_glsl.zig's
+// g_ewl_depth / max_emit_while_depth.
+const max_emit_while_depth_h: u32 = 256;
+threadlocal var g_ewl_depth_h: u32 = 0;
 // The expression an EARLY OpReturn in an entry point must return (the fragment output
 // var, or `output` for a vertex). The HLSL entry returns its output value at function
 // end, so an early return (`if (hit) { fragColor = c; return; }`) must return that same
@@ -4512,6 +4522,8 @@ fn emitBody(
     }
     g_loop_hoists = &loop_hoists;
     g_hoisted_ids = &hoisted_ids;
+    // #selfloop: reset the per-function recursion-depth guard (mirrors GLSL).
+    g_ewl_depth_h = 0;
     // Expose the loop-context maps so emitBlock can delegate a loop-in-branch to
     // emitWhileLoopHLSL (it only receives label_map + bc_merge_map as params).
     g_loop_merge_map_h = &loop_merge_map;
@@ -4713,6 +4725,12 @@ fn emitWhileLoopHLSL(
     is_vertex: bool,
     output_var_id: ?u32,
 ) !usize {
+    // #selfloop: bound the self-recursion (nested-loop re-entry, and a self-referential
+    // LoopMerge the body re-enters -- the selfloop fixture crashed here with SIGSEGV).
+    // See max_emit_while_depth_h. Refuse loudly instead of exhausting the stack.
+    g_ewl_depth_h += 1;
+    defer g_ewl_depth_h -= 1;
+    if (g_ewl_depth_h > max_emit_while_depth_h) return error.CrossCompileUnsupported;
     // #413: declare loop-carried phi update temps ABOVE the loop. The top-of-
     // loop carry copy (#237) reads them on every iteration after the first;
     // without the hoist the declaration sits later in the body (and in the
