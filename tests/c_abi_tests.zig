@@ -304,6 +304,72 @@ test "cross-compile to all four backends" {
     }
 }
 
+// Result of a compile performed on a worker thread. The buffers stay owned by
+// the caller and are released on the main thread below.
+const CrossThread = struct {
+    status: c_int = -1,
+    words: ?[*]u32 = null,
+    word_count: usize = 0,
+    hlsl: ?[*]u8 = null,
+    hlsl_len: usize = 0,
+};
+
+fn compileOnWorker(out: *CrossThread) void {
+    var words: ?[*]u32 = null;
+    var word_count: usize = 0;
+    const cstatus = c_abi.zioshade_compile(
+        MINIMAL_FRAG.ptr,
+        MINIMAL_FRAG.len,
+        null,
+        &words,
+        &word_count,
+    );
+    if (cstatus != STATUS_OK) {
+        out.status = cstatus;
+        return;
+    }
+
+    var hlsl: ?[*]u8 = null;
+    var hlsl_len: usize = 0;
+    const hstatus = c_abi.zioshade_to_hlsl(@ptrCast(words), word_count, 0, 60, null, &hlsl, &hlsl_len);
+    if (hstatus != STATUS_OK) {
+        c_abi.zioshade_free_u32(words);
+        out.status = hstatus;
+        return;
+    }
+
+    out.status = STATUS_OK;
+    out.words = words;
+    out.word_count = word_count;
+    out.hlsl = hlsl;
+    out.hlsl_len = hlsl_len;
+}
+
+test "buffers allocated on a worker thread are freed on the main thread" {
+    // The natural host pattern: compile off the main thread, release the
+    // buffers on the main thread. Both buffers must come from an allocator
+    // that is shared across threads, otherwise the free below hands the main
+    // thread's allocator a block it never produced.
+    var i: usize = 0;
+    while (i < 64) : (i += 1) {
+        var result: CrossThread = .{};
+        const worker = try std.Thread.spawn(.{}, compileOnWorker, .{&result});
+        worker.join();
+
+        try std.testing.expectEqual(STATUS_OK, result.status);
+
+        // Contents are readable on this thread before the free.
+        try std.testing.expect(result.word_count >= 5);
+        try std.testing.expectEqual(@as(u32, 0x07230203), result.words.?[0]);
+        try std.testing.expect(result.hlsl_len > 0);
+        try std.testing.expectEqual(@as(u8, 0), result.hlsl.?[result.hlsl_len]);
+
+        // Free on a thread that did not allocate.
+        c_abi.zioshade_free_str(result.hlsl);
+        c_abi.zioshade_free_u32(result.words);
+    }
+}
+
 test "zioshade_to_hlsl rejects NULL spirv_words" {
     var hlsl: ?[*]u8 = null;
     var hlsl_len: usize = 0;
