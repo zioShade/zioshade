@@ -11,7 +11,7 @@
 ; A broader all-OpName pass mangles the local into Globals_1 -> regression.
 OpCapability Shader
 OpMemoryModel Logical GLSL450
-OpEntryPoint Fragment %main "main" %outColor
+OpEntryPoint Fragment %main "main" %outColor %inst
 OpExecutionMode %main OriginUpperLeft
 
 OpName %main "main"
