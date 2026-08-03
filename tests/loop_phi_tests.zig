@@ -492,6 +492,29 @@ test "GLSL emits multiple early return points (#70)" {
     try std.testing.expect(count >= 2);
 }
 
+// #selfloop: OpLoopMerge %merge %hdr where the continue target IS the loop header
+// (the body sits in the header before the LoopMerge -- a self-loop). zioshade REFUSED
+// this (emitWhileLoop self-reentered on the header's own LoopMerge -> CrossCompileUnsupported)
+// while spirv-cross lowers it as `for(;;){ body; if(!cond) break; advance }`. The naive
+// "break the self-recursion" guard is silent-wrong (double body + counter reset -> infinite
+// loop). Assert zioshade now emits a TERMINATING loop whose phi counter advances (no
+// counter-reset / infinite-loop silent-wrong), structured as while(true) + if(!(cond))break.
+// Render-MATCH vs spirv-cross (outColor = 55,55,55,1) is verified via
+// tools/glsl_render_check_spv.sh.
+const SELFLOOP_BODYHEADER_SPV = @embedFile("fixtures/selfloop_bodyheader.spv");
+
+test "GLSL lowers a self-loop with body-in-header (#selfloop)" {
+    const glsl = try crossGlsl(SELFLOOP_BODYHEADER_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "if (!(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "break;") != null);
+    if (!try loopCounterAdvances(glsl)) {
+        std.debug.print("GLSL self-loop never advances the counter (infinite loop):\n{s}\n", .{glsl});
+        return error.SelfLoopDoesNotAdvance;
+    }
+}
+
 // #wgsl-else-clobber: an if/else whose THEN-branch contains a nested (no-else) if was
 // silently mis-emitted — opening the nested if overwrote the enclosing if's
 // pending_false_label to null, so the enclosing then-block's terminating OpBranch never

@@ -3722,6 +3722,81 @@ fn emitBody(
     }
 }
 
+// #selfloop: lower a self-loop whose continue target IS its own header (the body
+// sits in the header before the LoopMerge; back-edge is the BranchConditional that
+// follows it). The generic body emitter re-enters the header's own LoopMerge
+// (self-recursion -> the g_ewl_depth guard -> CrossCompileUnsupported), and a bare
+// recursion-guard break is silent-wrong (double body + counter reset -> infinite
+// loop). Mirror spirv-cross instead: hoist the loop-carried phi inits ABOVE the loop
+// (so the counter is not re-initialized each iteration), emit the straight-line
+// header body ONCE, then lower the back-edge BranchConditional to
+// `if (!(cond)) break; <phi back-edge updates>`. Honest-error unless the header is
+// straight-line (no nested merge/switch/branch) and the back-edge's continue arm is
+// its true target -- the only shape this first increment lowers; richer self-loops
+// keep the prior CrossCompileUnsupported (loud, not silent-wrong). Returns the index
+// of the merge block (emission continues there).
+fn emitSelfLoopBodyHeaderGLSL(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    loop_idx: usize,
+    merge_lbl: u32,
+    hlbl_idx: usize,
+    back_edge: Instruction,
+    label_map: *const std.AutoHashMap(u32, usize),
+    w: anytype,
+    alloc: std.mem.Allocator,
+    is_frag: bool,
+    ovid: ?u32,
+) !usize {
+    // The header body must be straight-line: only Phi + plain instructions up to the
+    // LoopMerge (no nested LoopMerge/Switch/SelectionMerge/Branch/BranchConditional --
+    // those need block-nesting-aware lowering this path does not do).
+    var hi: usize = hlbl_idx + 1;
+    while (hi < loop_idx) : (hi += 1) {
+        switch (m.instructions[hi].op) {
+            .LoopMerge, .Switch, .SelectionMerge, .Branch, .BranchConditional => return error.CrossCompileUnsupported,
+            else => {},
+        }
+    }
+    // Back-edge polarity: true target must be the header (continue), false the merge
+    // (break), so the break test is `if (!(cond)) break;`. The reversed polarity is
+    // equally valid but untested by the reproducer; honest-error to stay gated.
+    if (back_edge.words[2] != m.instructions[hlbl_idx].words[1]) return error.CrossCompileUnsupported;
+
+    // The loop body = the header's straight-line instructions, emitted ONCE (no
+    // re-entry into the LoopMerge -> no self-recursion). Phi ops are skipped here:
+    // the main emission loop already hoisted+initialized each header phi ABOVE the
+    // loop (tryEmitLoopPhiDeclGLSL, reached before the LoopMerge since deferred_hdr
+    // excludes phis) -- re-declaring would be a duplicate, and decl-in-loop would
+    // re-zero the counter each iteration (counter-reset silent-wrong -> infinite loop).
+    try w.writeAll("    while (true)\n    {\n");
+    var bi: usize = hlbl_idx + 1;
+    while (bi < loop_idx) : (bi += 1) {
+        const inst = m.instructions[bi];
+        if (inst.op == .Phi or inst.op == .Label) continue;
+        try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid);
+    }
+
+    // Lower the back-edge BranchConditional (true->header=continue, false->merge=break)
+    // to `if (!(cond)) break;` then the phi back-edge updates on the continue path.
+    const cond_name = names.get(back_edge.words[1]) orelse "true";
+    try w.print("        if (!({s})) break;\n", .{cond_name});
+    if (g_loop_phis) |lp| {
+        if (lp.get(loop_idx)) |plist| {
+            for (plist.items) |pi| {
+                if (pi.update_id == pi.result_id) continue; // self-carry, no copy
+                const rname = names.get(pi.result_id) orelse continue;
+                const uname = names.get(pi.update_id) orelse exprName(m, names, pi.update_id, alloc);
+                try w.print("        {s} = {s};\n", .{ rname, uname });
+            }
+        }
+    }
+    try w.writeAll("    }\n");
+
+    return label_map.get(merge_lbl) orelse (loop_idx + 2);
+}
+
 fn emitWhileLoop(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3796,6 +3871,15 @@ fn emitWhileLoop(
     const header_lbl: u32 = if (m.instructions[hlbl_idx].words.len > 1) m.instructions[hlbl_idx].words[1] else 0;
 
     const next_inst = m.instructions[loop_idx + 1];
+    // #selfloop: OpLoopMerge %merge %hdr where the continue target IS the loop
+    // header (the body sits in the header before the LoopMerge). The generic body
+    // emitter would re-enter the header's own LoopMerge (self-recursion -> the
+    // g_ewl_depth guard -> CrossCompileUnsupported). Lower it directly instead,
+    // mirroring spirv-cross. (Pattern B only: back-edge BranchConditional; a
+    // Pattern-A self-loop keeps the existing honest-error.)
+    if (cont_lbl == header_lbl and next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
+        return try emitSelfLoopBodyHeaderGLSL(m, names, decs, loop_idx, merge_lbl, hlbl_idx, next_inst, label_map, w, alloc, is_frag, ovid);
+    }
     if (next_inst.op == .Branch and next_inst.words.len >= 2) {
         // FIRST: is this a do-while (bottom-test) loop? Inspect the CONTINUE block's
         // terminator BEFORE scanning the body. Otherwise the body's own `if`
