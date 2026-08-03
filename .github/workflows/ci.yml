@@ -155,6 +155,10 @@ jobs:
       # directory or a walker regression would report a green gate over an
       # empty run. Bump the floor in the same commit that adds fixtures.
       - name: Strict gate (no false-positive rejections)
+        # bash on every leg: this is the only step in the workflow that passes
+        # `-- <args>` through to the build step, and the Windows leg would
+        # otherwise run it under pwsh, which eats a bare `--`.
+        shell: bash
         run: zig build strict-gate --summary all -- --min-pass=2108
 
   # Arbitrary-SPIR-V backend validity sweep (e54.4.4). Feeds EXTERNAL .spv binaries

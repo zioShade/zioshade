@@ -300,7 +300,10 @@ pub fn build(b: *std.Build) void {
     }
     strict_gate_step.dependOn(&run_strict_gate.step);
 
-    // Runner self-tests: the conformance runner's own exit decision.
+    // Runner self-tests: the conformance runner's own exit decision and its
+    // argument parsing. Wired here because a test file cannot run otherwise;
+    // this and the b.args forwarding above are the only two reasons this file
+    // is touched by the verification-baseline work.
     const runner_selftest_mod = b.createModule(.{
         .root_source_file = b.path("tests/runner_selftest.zig"),
         .target = target,

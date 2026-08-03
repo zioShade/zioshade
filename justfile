@@ -1,9 +1,12 @@
 # zioshade — CI-equivalent recipes
 # All recipes use `mise exec --` to ensure Zig 0.15.2 is used.
-# `just ci` mirrors the GitHub workflow exactly (the jobs that gate every PR),
-# so a green `just ci` predicts a green CI run. `just ci-full` additionally runs
-# the gates that need local oracles or hardware (DXC, Metal, spirv-cross, the
-# render proofs), which the hosted runners cannot provide.
+# `just ci` runs the same job set as the GitHub workflow, but on one OS and one
+# toolchain (this machine, Zig 0.15.2). CI runs that set across 3 OSes and both
+# 0.15.2 and 0.16, so a green `just ci` is a necessary condition for a green CI
+# run, not a sufficient one: platform- and version-specific failures only show
+# up on the hosted runners. `just ci-full` adds the gates that need local
+# oracles or hardware (DXC, Metal, spirv-cross, the render proofs), which the
+# hosted runners cannot provide.
 
 set dotenv-load := false
 
@@ -416,12 +419,14 @@ c-abi:
 # Keep this list in step with the workflow: a gate that runs in only one of the
 # two is a gate nobody is really watching. Oracle- and hardware-dependent gates
 # live in `ci-full`, not here, because the hosted runners cannot run them.
+# Same job set as CI, one OS and one toolchain: CI still has to run it across
+# 3 OSes and both 0.15.2 and 0.16.
 #
-# mirror of .github/workflows/ci.yml (the jobs that gate every PR)
+# the workflow's job set, run locally on this OS with Zig 0.15.2
 ci: fmt-check build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion fuzz-smoke c-abi
     @echo ""
     @echo "═══════════════════════════════════════"
-    @echo "  CI PASSED (mirrors the GitHub workflow)"
+    @echo "  CI PASSED (this OS, Zig 0.15.2 only)"
     @echo "═══════════════════════════════════════"
 
 # Adds the gates that cannot run on the hosted runners: DXC (HLSL), Metal (MSL

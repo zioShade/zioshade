@@ -601,12 +601,139 @@ fn strictGateDir(
     }
 }
 
-/// Minimum-pass floor flag: `--min-pass=N` fails the run when fewer than N
-/// fixtures passed. CI pins the current count so a silently shrinking corpus
-/// (renamed directory, walker regression) cannot report success.
-const min_pass_flag = "--min-pass=";
+/// Everything the command line can select. `min_pass` is the floor flag:
+/// `--min-pass=N` (or `--min-pass N`) fails the run when fewer than N fixtures
+/// passed. CI pins the current count so a silently shrinking corpus (renamed
+/// directory, walker regression) cannot report success.
+pub const Options = struct {
+    save_spv_path: ?[]const u8 = null,
+    target: ?[]const u8 = null,
+    strict_enumerate: bool = false,
+    strict_gate: bool = false,
+    min_pass: ?u32 = null,
+};
 
-pub fn main() !void {
+pub const ArgError = error{
+    UnknownOption,
+    MissingValue,
+    InvalidNumber,
+    UnexpectedPositional,
+};
+
+/// Filled in on an `ArgError` so the caller can print which argument was bad.
+pub const ArgDiag = struct {
+    arg: []const u8 = "",
+    detail: []const u8 = "",
+};
+
+/// Value of `--name=VALUE`, or null when `arg` is not that flag in `=` form.
+fn inlineValue(arg: []const u8, name: []const u8) ?[]const u8 {
+    if (arg.len <= name.len) return null;
+    if (!std.mem.startsWith(u8, arg, name)) return null;
+    if (arg[name.len] != '=') return null;
+    return arg[name.len + 1 ..];
+}
+
+/// Accept both `--name=VALUE` and `--name VALUE`. Returns null when `argv[i.*]`
+/// is some other flag, and advances `i` past the value in the separated form.
+fn flagValue(
+    argv: []const []const u8,
+    i: *usize,
+    name: []const u8,
+    diag: *ArgDiag,
+) ArgError!?[]const u8 {
+    const arg = argv[i.*];
+    if (inlineValue(arg, name)) |value| {
+        if (value.len == 0) {
+            diag.* = .{ .arg = arg, .detail = "expected a value after '='" };
+            return error.MissingValue;
+        }
+        return value;
+    }
+    if (!std.mem.eql(u8, arg, name)) return null;
+    if (i.* + 1 >= argv.len) {
+        diag.* = .{ .arg = arg, .detail = "expected a value" };
+        return error.MissingValue;
+    }
+    i.* += 1;
+    return argv[i.*];
+}
+
+/// Parse the runner's command line. Pure (no I/O, no process exit) so the
+/// self-tests can pin its behavior.
+///
+/// Every unrecognised argument beginning with '-' is an error. A silently
+/// ignored option is exactly the failure this runner exists to rule out: a
+/// mistyped `--minpass=2108` that fell through to the positional target would
+/// leave the gate with no floor at all and still exit 0.
+pub fn parseArgs(argv: []const []const u8, diag: *ArgDiag) ArgError!Options {
+    var opts = Options{};
+
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+
+        if (std.mem.eql(u8, arg, "--strict-enumerate")) {
+            opts.strict_enumerate = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--strict-gate")) {
+            opts.strict_gate = true;
+            continue;
+        }
+        if (try flagValue(argv, &i, "--save-spv", diag)) |value| {
+            opts.save_spv_path = value;
+            continue;
+        }
+        if (try flagValue(argv, &i, "--min-pass", diag)) |value| {
+            opts.min_pass = std.fmt.parseInt(u32, value, 10) catch {
+                diag.* = .{ .arg = value, .detail = "--min-pass expects a non-negative integer" };
+                return error.InvalidNumber;
+            };
+            continue;
+        }
+        if (arg.len > 0 and arg[0] == '-') {
+            diag.* = .{ .arg = arg, .detail = "unrecognised option" };
+            return error.UnknownOption;
+        }
+        if (opts.target != null) {
+            diag.* = .{ .arg = arg, .detail = "a second positional target was given" };
+            return error.UnexpectedPositional;
+        }
+        opts.target = arg;
+    }
+
+    // The gate modes walk every suite, so they ignore both the positional
+    // target and --save-spv. Accepting them silently would hide a typo in the
+    // one invocation that has to be trustworthy.
+    if (opts.strict_gate or opts.strict_enumerate) {
+        if (opts.target) |target| {
+            diag.* = .{ .arg = target, .detail = "--strict-gate/--strict-enumerate walk every suite and ignore a target" };
+            return error.UnexpectedPositional;
+        }
+        if (opts.save_spv_path) |path| {
+            diag.* = .{ .arg = path, .detail = "--save-spv is ignored by --strict-gate/--strict-enumerate" };
+            return error.UnexpectedPositional;
+        }
+    }
+
+    return opts;
+}
+
+// The entry point differs by Zig version: 0.16 hands command-line args and the
+// environment in through a `std.process.Init.Minimal` parameter, while 0.15
+// exposes them via the global `std.process.argsAlloc`. Select the matching
+// signature at comptime (the same shape as src/cli.zig) so argument parsing
+// works on both. It used to be skipped entirely on 0.16, which made the whole
+// strict gate a silent no-op there: no --strict-gate, no --min-pass, exit 0.
+pub const main = if (compat.is_0_16) main_0_16 else main_0_15;
+
+fn main_0_15() !void {
+    try mainImpl();
+}
+
+fn main_0_16(init: compat.MainInit) !void {
+    compat.setMainInit(init);
     try mainImpl();
 }
 
@@ -621,41 +748,28 @@ fn mainImpl() !void {
     defer main_io.deinit();
     const io = main_io.io();
 
-    // On 0.15: parse args. On 0.16: args not available from void main, use defaults.
     var stats = Stats{};
-    var save_spv_path: ?[]const u8 = null;
-    var target_arg: ?[]const u8 = null;
-    var strict_enumerate = false;
-    var strict_gate = false;
-    var min_pass: ?u32 = null;
 
-    if (!compat.is_0_16) {
-        const args = try std.process.argsAlloc(alloc);
+    // argsAlloc is version-shimmed in compat, so this runs identically on 0.15
+    // and 0.16. The raw args stay alive for the whole run because target and
+    // save_spv_path point into them.
+    const raw_args = try compat.argsAlloc(alloc);
+    defer compat.argsFree(alloc, raw_args);
+    const argv = try alloc.alloc([]const u8, raw_args.len);
+    defer alloc.free(argv);
+    for (raw_args, 0..) |raw, idx| argv[idx] = raw;
 
-        var i: usize = 1;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--save-spv") and i + 1 < args.len) {
-                save_spv_path = args[i + 1];
-                i += 1;
-            } else if (std.mem.eql(u8, args[i], "--strict-enumerate")) {
-                strict_enumerate = true;
-            } else if (std.mem.eql(u8, args[i], "--strict-gate")) {
-                strict_gate = true;
-            } else if (std.mem.startsWith(u8, args[i], min_pass_flag)) {
-                const raw = args[i][min_pass_flag.len..];
-                min_pass = std.fmt.parseInt(u32, raw, 10) catch {
-                    log("ERROR: invalid {s} value: '{s}' (expected a non-negative integer)\n", .{ min_pass_flag, raw });
-                    std.process.exit(2);
-                };
-            } else {
-                target_arg = args[i];
-            }
-        }
-        // NOTE: args must NOT be freed until mainImpl returns,
-        // because target_arg and save_spv_path point into the args array.
-        // We intentionally leak args to avoid use-after-free.
-        // The GPA allocator will reclaim all memory on deinit.
-    }
+    var diag = ArgDiag{};
+    const opts = parseArgs(argv, &diag) catch |err| {
+        log("ERROR: {s}: '{s}' ({s})\n", .{ @errorName(err), diag.arg, diag.detail });
+        log("usage: conformance-runner [--strict-gate|--strict-enumerate] [--min-pass=N] [--save-spv PATH] [TARGET]\n", .{});
+        std.process.exit(2);
+    };
+    const save_spv_path = opts.save_spv_path;
+    const target_arg = opts.target;
+    const strict_enumerate = opts.strict_enumerate;
+    const strict_gate = opts.strict_gate;
+    const min_pass = opts.min_pass;
 
     const all_suites = .{
         .{ "glslang-430", "tests/glslang-430" },
