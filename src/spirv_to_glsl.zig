@@ -1450,7 +1450,7 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // silently shadows (#sid). Scope-aware + block-instance-excluded so it leaves
     // type/variable overlaps (e.g. a UBO block + its instance both "Globals") and
     // block-named instances alone. Runs after aliasConst.
-    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa);
+    common.commonPrewriteUniqueLocalVarNames(module.instructions, &names, aa, false);
     try collectDecorations(aa, &module, &decs);
 
     var cbuffers = std.ArrayList(CbufferDecl).initCapacity(aa, 0) catch return error.OutOfMemory;

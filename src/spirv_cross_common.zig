@@ -1275,10 +1275,13 @@ pub fn commonPrewriteUniqueStructNames(
 /// function-local sharing the block's raw OpName does NOT shadow it. Such UBO
 /// instances are excluded from the collision set; without this, the local would
 /// be mangled INTO the block-naming suffix space and collide with the instance.
-/// SSBOs (StorageBuffer+Block, or Uniform+BufferBlock) and PushConstants are
-/// emitted under their RAW instance name, so they STAY in the collision set
-/// (a local CAN shadow them). (Other backends don't _1-mangle UBOs and don't
-/// emit a collidable instance name, so excluding their UBO instances is moot.)
+/// SSBOs (StorageBuffer+Block, or Uniform+BufferBlock) are emitted under their
+/// RAW instance name, so they STAY in the collision set (a local CAN shadow
+/// them). PushConstants: GLSL emits them bare (stay in the set) and HLSL
+/// honest-errors, but MSL block-names them name_1 (like UBOs), so `exclude_push_constant`
+/// is true only for MSL -- the sole backend for which they are excluded. (The
+/// other backends don't _1-mangle UBOs and don't emit a collidable instance
+/// name, so excluding their UBO instances is moot.)
 ///
 /// Run ONCE after collectNames (and after the struct-name pre-pass). Only
 /// colliding function-scope ids are mutated.
@@ -1286,6 +1289,7 @@ pub fn commonPrewriteUniqueLocalVarNames(
     instructions: anytype,
     names: *std.AutoHashMap(u32, []const u8),
     alloc: std.mem.Allocator,
+    exclude_push_constant: bool,
 ) void {
     // block-only struct ids vs BufferBlock struct ids (distinguish UBO from SSBO),
     // and pointer-type id -> pointee type id.
@@ -1320,6 +1324,12 @@ pub fn commonPrewriteUniqueLocalVarNames(
             if (pointee_of.get(inst.words[1])) |pointee| {
                 if (block_only.contains(pointee) and !buffer_block_types.contains(pointee)) continue;
             }
+        } else if (exclude_push_constant and sc == .PushConstant) {
+            // MSL also block-names PushConstant instances (constant T& name_1, like
+            // UBOs), so a local sharing the block's raw OpName does not shadow them.
+            // GLSL emits PushConstants under their raw instance name and HLSL
+            // honest-errors on them, so only MSL passes exclude_push_constant=true.
+            continue;
         }
         if (names.get(inst.words[2])) |nm| claimed.put(nm, {}) catch {};
     }
