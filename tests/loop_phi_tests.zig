@@ -515,6 +515,16 @@ test "GLSL lowers a self-loop with body-in-header (#selfloop)" {
     }
 }
 
+// HLSL used to CRASH (SIGSEGV, exit 139) on the same self-loop: emitWhileLoopHLSL
+// re-entered the header's own LoopMerge with no recursion bound -> stack overflow.
+// (GLSL refused gracefully via its g_ewl_depth guard; HLSL never got that guard.)
+// Assert HLSL now refuses LOUDLY (honest-error) instead of crashing. The fix is the
+// guard only -- HLSL does not yet LOWER the self-loop (that is GLSL-only for now), so
+// an error is the correct, mandate-safe outcome.
+test "HLSL refuses a self-loop with body-in-header without crashing (#selfloop guard)" {
+    try std.testing.expectError(error.CrossCompileUnsupported, crossHlsl(SELFLOOP_BODYHEADER_SPV));
+}
+
 // #wgsl-else-clobber: an if/else whose THEN-branch contains a nested (no-else) if was
 // silently mis-emitted — opening the nested if overwrote the enclosing if's
 // pending_false_label to null, so the enclosing then-block's terminating OpBranch never
