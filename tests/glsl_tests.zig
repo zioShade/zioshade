@@ -3793,3 +3793,48 @@ test "zm0: two structs sharing one OpName get distinct mangled decls (no silent-
     try assertContains(hlsl, "struct S_1\n{");
     try assertContains(hlsl, "float _m2;");
 }
+
+test "sid: a function-local variable shadowing a global's name gets mangled" {
+    // value_dedup_collision.spv: Input global OpName "a_b" + Function local
+    // OpName "a-b" -> both sanitize to "a_b". The local would silently shadow
+    // the global (OpLoad %g reads the local -- plausible-but-wrong). spirv-cross
+    // dedups the same way, so this is render-MATCH-certifiable; here we assert
+    // name-distinctness. The fix is SCOPE-AWARE: only function-scope-vs-global
+    // collisions mangle; the UBO-block regression guard is the next test.
+    const spv_bytes = @embedFile("fixtures/value_dedup_collision.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 450 });
+    defer alloc.free(glsl);
+    // Input keeps "a_b"; the colliding local must be mangled ("a_b_1") so the
+    // load reads the input. Pre-fix both collapse to "a_b" (shadow -> silent-
+    // wrong) and "a_b_1" is absent.
+    try assertContains(glsl, "in float a_b;");
+    try assertContains(glsl, "a_b_1");
+
+    const hlsl = try zioshade.spirvToHLSL(alloc, words, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "a_b_1");
+}
+
+test "sid: a local sharing a UBO block's OpName is NOT mangled (no regression)" {
+    // ubo_block_local_collision.spv: a UBO whose struct type AND instance are
+    // both OpName "Globals", plus a function-local also "Globals". The instance
+    // is emitted under a block-naming-mangled name (Globals_1), so the local
+    // sharing the block's raw OpName does NOT shadow it. The fix EXCLUDES block
+    // instances from the collision set -> the local keeps "Globals" (NOT mangled
+    // to Globals_1, which would collide with the instance and break the UBO
+    // access). This guards the regression a broader all-OpName pass introduced.
+    const spv_bytes = @embedFile("fixtures/ubo_block_local_collision.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 450 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "} Globals_1;"); // instance block-named
+    try assertContains(glsl, "float Globals;"); // local NOT mangled
+    try assertNotContains(glsl, "float Globals_1"); // not mangled into block-naming space
+}
