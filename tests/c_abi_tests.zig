@@ -21,6 +21,7 @@ const CompileOptions = extern struct {
 
 const STATUS_OK: c_int = 0;
 const STATUS_INVALID_INPUT: c_int = 7;
+const STATUS_UNSUPPORTED: c_int = 8;
 
 const MINIMAL_FRAG: []const u8 =
     "#version 430\nlayout(location = 0) out vec4 FragColor;\nvoid main() { FragColor = vec4(1.0); }";
@@ -30,6 +31,13 @@ const MINIMAL_FRAG: []const u8 =
 // `tests/mesh_task_tests.zig`.
 const BROKEN_MESH: []const u8 =
     "#version 450\n#extension GL_EXT_mesh_shader : require\nlayout(local_size_x = 32) in;\nvoid main() {}";
+
+// Valid SPIR-V that the MSL backend refuses: gl_BaryCoordEXT has no Metal
+// builtin, so the backend honest-errors instead of emitting wrong output.
+const BARYCENTRIC_FRAG: []const u8 =
+    "#version 450\n#extension GL_EXT_fragment_shader_barycentric : require\nlayout(location = 0) out vec2 value;\nlayout(location = 0) pervertexEXT in vec2 vUV[3];\nvoid main() { value = gl_BaryCoordEXT.x * vUV[0] + gl_BaryCoordEXT.y * vUV[1] + gl_BaryCoordEXT.z * vUV[2]; }";
+
+const SPIRV_MAGIC: u32 = 0x07230203;
 
 /// Convert the last-error message to a Zig slice for comparisons.
 fn lastErrorSlice() ?[]const u8 {
@@ -384,4 +392,54 @@ test "zioshade_to_hlsl rejects too-small SPIR-V" {
     var hlsl_len: usize = 0;
     const status = c_abi.zioshade_to_hlsl(&stub, stub.len, 0, 60, null, &hlsl, &hlsl_len);
     try std.testing.expectEqual(STATUS_INVALID_INPUT, status);
+}
+
+test "zioshade_to_hlsl rejects a truncated module" {
+    // Long enough to hold a magic word, too short to hold a SPIR-V header.
+    const stub = [_]u32{ SPIRV_MAGIC, 0x00010500, 0 };
+    var hlsl: ?[*]u8 = null;
+    var hlsl_len: usize = 0;
+    const status = c_abi.zioshade_to_hlsl(&stub, stub.len, 0, 60, null, &hlsl, &hlsl_len);
+    try std.testing.expectEqual(STATUS_INVALID_INPUT, status);
+    try std.testing.expectEqual(@as(?[*]u8, null), hlsl);
+}
+
+test "zioshade_to_hlsl rejects a blob with the wrong magic word" {
+    // Header-sized, but not a SPIR-V module. This is bad input, not a codegen
+    // failure, so it must not land in the generic codegen bucket.
+    const stub = [_]u32{ 0xdeadbeef, 0x00010500, 0, 1, 0 };
+    var hlsl: ?[*]u8 = null;
+    var hlsl_len: usize = 0;
+    const status = c_abi.zioshade_to_hlsl(&stub, stub.len, 0, 60, null, &hlsl, &hlsl_len);
+    try std.testing.expectEqual(STATUS_INVALID_INPUT, status);
+    try std.testing.expectEqual(@as(?[*]u8, null), hlsl);
+}
+
+test "unsupported construct reports ZIOSHADE_ERR_UNSUPPORTED" {
+    // gl_BaryCoordEXT has no Metal builtin, so the MSL backend refuses it
+    // (error.UnsupportedBarycentric, see tests/msl_tests.zig). Valid input,
+    // unsupported construct: the C ABI must say so rather than "codegen failed".
+    var words: ?[*]u32 = null;
+    var word_count: usize = 0;
+    const opts: CompileOptions = .{
+        .stage = 1, // FRAGMENT
+        .version = 450,
+        .is_essl = 0,
+        .spirv_version_packed = 15,
+    };
+    const cstatus = c_abi.zioshade_compile(
+        BARYCENTRIC_FRAG.ptr,
+        BARYCENTRIC_FRAG.len,
+        @ptrCast(&opts),
+        &words,
+        &word_count,
+    );
+    try std.testing.expectEqual(STATUS_OK, cstatus);
+    defer c_abi.zioshade_free_u32(words);
+
+    var msl: ?[*]u8 = null;
+    var msl_len: usize = 0;
+    const status = c_abi.zioshade_to_msl(@ptrCast(words), word_count, 21, 0, null, &msl, &msl_len);
+    try std.testing.expectEqual(STATUS_UNSUPPORTED, status);
+    try std.testing.expectEqual(@as(?[*]u8, null), msl);
 }

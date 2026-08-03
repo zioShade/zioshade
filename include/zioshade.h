@@ -26,9 +26,16 @@
 //
 // Thread-safety
 // -------------
-// Each call manages its own arena via a threadlocal allocator. Concurrent
-// calls from different threads are safe. The `zioshade_last_error_*` getters
-// read threadlocal state owned by the calling thread.
+// Concurrent calls from different threads are safe. Internal scratch memory
+// comes from a threadlocal allocator, but every buffer handed back to the
+// caller comes from a single process-global, thread-safe allocator, so a
+// buffer produced on one thread may be released with the matching
+// zioshade_free_* helper from any thread. Compiling on a worker thread and
+// freeing on the main thread is supported.
+//
+// The `zioshade_last_error_*` getters are the exception: they read threadlocal
+// state and report the most recent error on the calling thread, so query them
+// on the same thread that made the failing call.
 
 #ifndef ZIOSHADE_H
 #define ZIOSHADE_H

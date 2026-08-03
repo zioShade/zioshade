@@ -380,8 +380,11 @@ pub export fn zioshade_compile(
 /// Validate inputs common to every cross-compile entry point. Returns null on
 /// success; on failure, writes the error state and returns the status code.
 fn validateSpirvInputs(spirv_words: ?[*]const u32, spirv_word_count: usize) ?c_int {
-    if (spirv_words == null) return setInvalidInputError("spirv_words is NULL");
+    const words = spirv_words orelse return setInvalidInputError("spirv_words is NULL");
     if (spirv_word_count < 5) return setInvalidInputError("spirv_word_count too small (need >= 5 for header)");
+    // Reject a blob that is not a SPIR-V module at the boundary, before any
+    // work or allocation happens.
+    if (words[0] != zioshade.spirv.MAGIC) return setInvalidInputError("spirv_words does not start with the SPIR-V magic word");
     return null;
 }
 
