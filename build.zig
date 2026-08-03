@@ -288,10 +288,32 @@ pub fn build(b: *std.Build) void {
     // Walks all fixture suites, compiles each with compileToSPIRV (fail-loud after flip),
     // exits non-zero if any curated-valid fixture is newly rejected (FP regression).
     // Known-unsupported fixtures in KNOWN_UNSUPPORTED are counted as XFAIL (not failures).
+    // Extra args after `--` are forwarded, so CI can pin the floor with
+    // `zig build strict-gate -- --min-pass=N`.
     const strict_gate_step = b.step("strict-gate", "Verify no curated-valid fixtures are rejected by the fail-loud API");
     const run_strict_gate = b.addRunArtifact(runner_exe);
     run_strict_gate.addArg("--strict-gate");
+    if (b.args) |args| {
+        for (args) |arg| {
+            run_strict_gate.addArg(arg);
+        }
+    }
     strict_gate_step.dependOn(&run_strict_gate.step);
+
+    // Runner self-tests: the conformance runner's own exit decision.
+    const runner_selftest_mod = b.createModule(.{
+        .root_source_file = b.path("tests/runner_selftest.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    runner_selftest_mod.addImport("zioshade", zioshade_mod);
+    const run_runner_selftests = b.addRunArtifact(b.addTest(.{
+        .name = "runner-selftests",
+        .root_module = runner_selftest_mod,
+    }));
+    test_step.dependOn(&run_runner_selftests.step);
+    const runner_selftest_step = b.step("test-runner", "Run conformance-runner self-tests");
+    runner_selftest_step.dependOn(&run_runner_selftests.step);
 
     // HLSL backend tests - run with: zig build test-hlsl
     const hlsl_test_step = b.step("test-hlsl", "Run HLSL backend tests (GLSL → SPIR-V → HLSL pipeline)");
