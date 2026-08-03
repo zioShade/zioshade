@@ -1,6 +1,9 @@
 # zioshade — CI-equivalent recipes
 # All recipes use `mise exec --` to ensure Zig 0.15.2 is used.
-# Run `just` or `just ci` to execute the full CI pipeline locally.
+# `just ci` mirrors the GitHub workflow exactly (the jobs that gate every PR),
+# so a green `just ci` predicts a green CI run. `just ci-full` additionally runs
+# the gates that need local oracles or hardware (DXC, Metal, spirv-cross, the
+# render proofs), which the hosted runners cannot provide.
 
 set dotenv-load := false
 
@@ -20,6 +23,14 @@ default: test
 # build the library (debug)
 build:
     {{zig}} build
+
+# build the CLI (mirrors the build-test CI job)
+cli:
+    {{zig}} build cli
+
+# build the examples (mirrors the build-test CI job)
+examples:
+    {{zig}} build examples
 
 # build in release mode
 release:
@@ -43,9 +54,12 @@ test-conformance:
 enumerate-fp:
     {{zig}} build enumerate-fp --summary all
 
+# --min-pass pins the current corpus size so a vanished fixture directory cannot report a
+# green gate over an empty run. Keep this floor in sync with .github/workflows/ci.yml.
+#
 # continuous strict-gate: verify no curated-valid fixtures are rejected (FP regression check)
 strict-gate:
-    {{zig}} build strict-gate --summary all
+    {{zig}} build strict-gate --summary all -- --min-pass=2108
 
 # ── backend oracle differentials ─────────────────────────────────────
 # Every backend output is checked against its reference oracle:
@@ -334,6 +348,10 @@ fuzz count="100000":
 fuzz-million:
     {{zig}} build fuzz -Doptimize=ReleaseFast -- --count 1000000 --seed 1
 
+# 5k-iteration smoke pass, exactly what the fuzz-smoke CI job runs
+fuzz-smoke:
+    {{zig}} build fuzz -- --count 5000
+
 # e54.4: arbitrary-SPIR-V backend validity sweep. Validity-checks zioshade's emitted
 # MSL/HLSL/GLSL/WGSL on ARBITRARY .spv input (external SPIR-V, not GLSL source), with
 # spirv-cross discrimination. Now green (INVALID=0, PRs #506-519) and wired into both
@@ -371,13 +389,49 @@ lib-bench count="1000":
 check:
     {{zig}} build 2>&1 | head -1
 
+# zig fmt --check over src (mirrors the fmt CI job)
+fmt-check:
+    {{zig}} fmt --check src
+
+# reformat src in place
+fmt:
+    {{zig}} fmt src
+
 # ── full CI pipeline ─────────────────────────────────────────────────
 
-# run everything CI would run (incl. backend oracle differentials)
-ci: test test-hlsl validate-dxc validate-metal strict-gate oracle-diff spv-validity cts-ingestion
+# C ABI smoke, exactly what the c-abi CI job runs
+c-abi:
+    {{zig}} build c-lib --summary all
+    {{zig}} build c-example --summary all
+    {{zig}} build run-c-example
+
+# One dependency per workflow step:
+#   fmt-check                              -> job `fmt`
+#   build, cli, examples, test, test-hlsl  -> job `build-test`
+#   test-conformance, strict-gate          -> job `conformance`
+#   spv-validity                           -> job `spv-validity`
+#   cts-ingestion                          -> job `cts-ingestion`
+#   fuzz-smoke                             -> job `fuzz-smoke`
+#   c-abi                                  -> job `c-abi`
+# Keep this list in step with the workflow: a gate that runs in only one of the
+# two is a gate nobody is really watching. Oracle- and hardware-dependent gates
+# live in `ci-full`, not here, because the hosted runners cannot run them.
+#
+# mirror of .github/workflows/ci.yml (the jobs that gate every PR)
+ci: fmt-check build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion fuzz-smoke c-abi
     @echo ""
     @echo "═══════════════════════════════════════"
-    @echo "  CI PASSED — all gates green"
+    @echo "  CI PASSED (mirrors the GitHub workflow)"
+    @echo "═══════════════════════════════════════"
+
+# Adds the gates that cannot run on the hosted runners: DXC (HLSL), Metal (MSL
+# render), and the spirv-cross / naga structural differentials.
+#
+# `ci` plus the gates that need local oracles or hardware
+ci-full: ci validate-dxc validate-metal oracle-diff
+    @echo ""
+    @echo "═══════════════════════════════════════"
+    @echo "  CI-FULL PASSED (incl. local oracles)"
     @echo "═══════════════════════════════════════"
 
 # ── cleaning ─────────────────────────────────────────────────────────
