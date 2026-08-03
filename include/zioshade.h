@@ -91,7 +91,17 @@ extern "C" {
  *
  * Mirrors `zioshade.Error` from `src/root.zig`. `ZIOSHADE_ERR_INVALID_INPUT` is
  * additional to the Zig error set and covers C-side argument validation
- * (NULL pointers, out-of-range enums, zero-length SPIR-V, etc.).
+ * (NULL pointers, out-of-range enums, zero-length SPIR-V, malformed SPIR-V
+ * binaries, etc.).
+ *
+ * `ZIOSHADE_ERR_UNSUPPORTED` is the honest-error refusal: the input was valid,
+ * but it contains a construct this backend cannot translate faithfully, so
+ * zioshade declined rather than emit wrong output. Retrying the same call will
+ * fail the same way. The useful caller responses are to try a different backend
+ * or to report the shader; `zioshade_last_error_message` names the construct.
+ *
+ * Values are ABI. New codes may be appended; existing ones never change, so a
+ * consumer that switches over this enum should keep a default branch.
  */
 typedef enum {
     ZIOSHADE_OK              = 0,
@@ -101,7 +111,8 @@ typedef enum {
     ZIOSHADE_ERR_PARSE       = 4, /* Parser failed (syntax error). */
     ZIOSHADE_ERR_SEMANTIC    = 5, /* Semantic analysis failed (type error, ...). */
     ZIOSHADE_ERR_CODEGEN     = 6, /* SPIR-V or backend codegen failed. */
-    ZIOSHADE_ERR_INVALID_INPUT = 7 /* C-side argument validation failed. */
+    ZIOSHADE_ERR_INVALID_INPUT = 7, /* C-side argument validation failed. */
+    ZIOSHADE_ERR_UNSUPPORTED = 8 /* Valid input, unsupported construct. */
 } zioshade_status_t;
 
 /* ---------------------------------------------------------------------------

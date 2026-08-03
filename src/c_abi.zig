@@ -43,6 +43,7 @@ const ZIOSHADE_ERR_PARSE: c_int = 4;
 const ZIOSHADE_ERR_SEMANTIC: c_int = 5;
 const ZIOSHADE_ERR_CODEGEN: c_int = 6;
 const ZIOSHADE_ERR_INVALID_INPUT: c_int = 7;
+const ZIOSHADE_ERR_UNSUPPORTED: c_int = 8;
 
 // ---------------------------------------------------------------------------
 // Allocators: threadlocal scratch, process-global results
@@ -176,8 +177,71 @@ fn statusFromErr(err: anyerror) c_int {
         error.ParseFailed => ZIOSHADE_ERR_PARSE,
         error.SemanticFailed => ZIOSHADE_ERR_SEMANTIC,
         error.CodegenFailed, error.EntryPointNotFound => ZIOSHADE_ERR_CODEGEN,
-        // Backend cross-compile errors (CrossCompileUnsupported, etc.) and
-        // anything else we haven't categorised gets bucketed as codegen.
+        // The SPIR-V handed to a cross-compile entry point is not a well formed
+        // module. That is bad input, not a compiler failure, so the caller
+        // should fix or reject the blob rather than retry.
+        error.InvalidSpirv,
+        error.InvalidSpirvMagic,
+        error.InvalidSpirvTruncated,
+        => ZIOSHADE_ERR_INVALID_INPUT,
+        // Honest-error refusals: the input is valid but contains a construct
+        // this backend cannot translate faithfully. Kept as an explicit list so
+        // a new refusal has to be classified deliberately; anything missed
+        // still falls through to the codegen bucket below.
+        error.CrossCompileUnsupported,
+        error.Unsupported,
+        error.UnsupportedArrayStageInput,
+        error.UnsupportedBarycentric,
+        error.UnsupportedBarycentricArrayOverlap,
+        error.UnsupportedBuiltin,
+        error.UnsupportedBuiltinStageInput,
+        error.UnsupportedBuiltinStageOutput,
+        error.UnsupportedCollidingOutputBlock,
+        error.UnsupportedComponentPacking,
+        error.UnsupportedConstantWidth,
+        error.UnsupportedDescriptorArray,
+        error.UnsupportedDoubleType,
+        error.UnsupportedDoWhileCompoundCond,
+        error.UnsupportedEarlyReturn,
+        error.UnsupportedExtensionCapability,
+        error.UnsupportedExtInst,
+        error.UnsupportedFragmentClipCullDistance,
+        error.UnsupportedFragmentDrawId,
+        error.UnsupportedFragmentOutput,
+        error.UnsupportedGlslVersion,
+        error.UnsupportedImageOperands,
+        error.UnsupportedInt,
+        error.UnsupportedIntegerTextureSample,
+        error.UnsupportedLoopInSwitchCase,
+        error.UnsupportedMultisampledSubpassInput,
+        error.UnsupportedMultisampleImage,
+        error.UnsupportedMultiSampleStorageImage,
+        error.UnsupportedNestedLoopInBranch,
+        error.UnsupportedNestedLoopPhi,
+        error.UnsupportedNestedSwitchInSwitchCase,
+        error.UnsupportedOp,
+        error.UnsupportedOpcode,
+        error.UnsupportedPhysicalStorageBuffer,
+        error.UnsupportedPushConstant,
+        error.UnsupportedRecursion,
+        error.UnsupportedRowMajorMatrix,
+        error.UnsupportedRowMajorMatrixStore,
+        error.UnsupportedSamplePosition,
+        error.UnsupportedSamplerArray,
+        error.UnsupportedSeparateSampler,
+        error.UnsupportedSeparateSamplers,
+        error.UnsupportedSpecConstantArraySize,
+        error.UnsupportedStage,
+        error.UnsupportedStructStageInput,
+        error.UnsupportedStructStageOutput,
+        error.UnsupportedSubpassInput,
+        error.UnsupportedTensor,
+        error.UnsupportedUboMemberLayout,
+        error.UnsupportedVaryingInHelper,
+        error.UnsupportedVectorWidth,
+        error.UnsupportedWholeArrayValueLoad,
+        => ZIOSHADE_ERR_UNSUPPORTED,
+        // Anything we haven't categorised gets bucketed as codegen.
         else => ZIOSHADE_ERR_CODEGEN,
     };
 }
