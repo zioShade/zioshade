@@ -42,12 +42,17 @@ All notable changes to zioshade are documented here. The format is loosely based
   (#514, #515).
 - WGSL: `OpAccessChain` on a struct pointer parameter emits member access (#543); 1:1 binding
   encoding plus `@tagName` crash guards (#513).
+- WGSL: every `UnsupportedOp` refusal now carries detail. The detail buffer was too small for the
+  longer messages, and seven refusal sites set no detail at all, so those cases surfaced as a bare
+  `UnsupportedOp` with no reason (#527).
 - GLSL: user-struct types used by `Private` globals are declared (#531); unnamed uniform blocks get
   a synthesized name (#523); `emitWhileLoop` recursion is bounded to an honest error instead of a
   stack-overflow crash (#522); standalone builtin outputs alias to predefined names (#507).
 - MSL: a written SSBO emits as `device`, not read-only `constant` (#510).
-- HLSL: `OpMemberName` bytes are sanitized (anonymous `@data` members), and SM6+-only features
-  honest-error at `shader_model < 60` (#509).
+- HLSL: `OpMemberName` bytes are sanitized (anonymous `@data` members) (#509).
+- HLSL: SM6+-only features (subgroup/wave ops, `helper_invocation`, `SV_Barycentrics`, raytracing,
+  mesh/task) honest-error at `shader_model < 60` instead of emitting HLSL that is invalid for
+  SM5.0 (e54.6).
 - An optimizer bug found by the new metamorphic oracle.
 - Internal tooling and test work, not individually listed: arbitrary-SPIR-V backend validity sweeps
   wired into CI, a CTS ingestion credibility sweep with a vendored GraphicsFuzz corpus, a two-oracle
