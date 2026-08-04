@@ -176,9 +176,30 @@ counts. Most recent recorded run: **51 PASS / 3 honest-error / 2 SKIP** at SM 6.
 56 `tests/spirv_bins/` fixtures (commit `e920e3f`, 2026-07-27). DXC needs Windows, Docker,
 or a Vulkan SDK install, so it is a dated snapshot, not a per-commit gate.
 
-The known non-PASS fixtures are DXC/D3D toolchain constraints, not zioshade bugs:
-- 3 barycentric tests: `SV_Barycentrics` requires SM 6.1+; DXC also doesn't support two barycentric semantics in one shader
-- 1 complex-expression: structured buffer exceeds DXC's 2,048-byte limit (actual: 16,384 bytes)
+The 5 non-PASS fixtures split 3 honest-error + 2 SKIP, matching the gloss in
+[`BENCHMARKS.md`](../BENCHMARKS.md#dxc-validation-snapshots): the 3 are cases where zioshade
+**declined to emit** rather than risk a wrong translation, and the 2 are a stage the harness
+does not drive at the default shader model.
+
+| Fixture | Result | Why |
+|---|---|---|
+| `shader-clock.spv` | honest-error | `error.UnsupportedInt64Type` from zioshade's HLSL backend |
+| `barycentric-khr-io-block.spv` | honest-error | `error.UnsupportedBarycentricArrayOverlap` from zioshade's HLSL backend |
+| `barycentric-nv.spv` | honest-error | `error.UnsupportedBarycentricArrayOverlap` from zioshade's HLSL backend |
+| `mesh_minimal.spv` | SKIP | mesh stage, which needs SM 6.5+; re-run with `zig build test-dxc -- <dxc> tests/spirv_bins 65` |
+| `mesh_v2c_triangle.spv` | SKIP | same, mesh stage at SM 6.5+ |
+
+So the 3 non-PASS-and-not-skipped fixtures are zioshade refusals, not DXC rejections; DXC
+is never reached for them. (The barycentric constructs would additionally need SM 6.1+ from
+DXC, and `complex-expression-in-access-chain.spv`, previously listed here as a DXC
+structured-buffer-size failure, now PASSes.)
+
+The split above is reproducible without a real DXC, because it is decided entirely inside
+zioshade: point the harness at a stub that always exits 0 and it still prints
+`Total: 51 PASS / 3 FAIL / 2 SKIP` and names the same fixtures. That reproduction proves
+**which fixtures zioshade refuses**; it proves nothing about the other 51, since a
+stub accepts anything. Only the dated real-DXC snapshot in BENCHMARKS.md supports the claim
+that DXC compiled those 51 to DXIL.
 
 ### 3.3 Cross-Compilation Validation
 

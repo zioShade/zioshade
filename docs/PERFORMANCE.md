@@ -21,18 +21,28 @@ library-vs-library result above contradicts them. They are retracted.
 
 ## Local snapshot (`zig build bench`)
 
-Apple M2, macOS 26.5.1, Zig 0.15.2, `ReleaseFast`, commit `5cc77f1`, 2026-08-04.
-Cross-compile only (pre-compiled SPIR-V to backend source), 2000 iterations each:
+Apple M2, macOS 26.5.1, Zig 0.15.2, `ReleaseFast`, code at commit `5cc77f1` (this branch
+changes documentation only), 2026-08-04. The "cross-compile only" section of
+`zig build bench`: pre-compiled SPIR-V to backend source, 2000 iterations per direction,
+`tools/bench_quick.zig` reporting the mean. Five consecutive runs on an otherwise idle
+machine:
 
-| Direction | Avg |
-|---|---:|
-| SPIR-V to HLSL | 112 µs |
-| SPIR-V to GLSL | 89 µs |
-| SPIR-V to MSL | 97 µs |
+| Direction | Median | Observed range over 5 runs |
+|---|---:|---|
+| SPIR-V to HLSL | 63 µs | 62-63 µs |
+| SPIR-V to GLSL | 62 µs | 61-62 µs |
+| SPIR-V to MSL | 58 µs | 58-59 µs |
 
-One machine, one run, absolute numbers only. It is here to show the order of magnitude of
-an in-process cross-compile, not as a comparative claim; the comparisons live in
-BENCHMARKS.md.
+Raw runs, in order (HLSL / GLSL / MSL, µs): 62/62/59, 63/61/59, 63/62/58, 63/62/58,
+63/62/58.
+
+One machine, absolute numbers only, and the shader being cross-compiled is the small
+`simple_frag` fixture in `tools/bench_quick.zig`, so this shows the order of magnitude of
+an in-process cross-compile and nothing more. It is not a comparative claim; the
+comparisons live in BENCHMARKS.md. The harness allocates through Zig's `DebugAllocator`,
+so the figures include that allocation path rather than a tuned one, and they will drift
+with the machine, the OS build, and the fixture. Re-run `zig build bench` before quoting
+them anywhere.
 
 ## Architectural reasons the in-process path is cheap
 

@@ -99,13 +99,20 @@ geometry, tess, etc.) are reported as **SKIP** with a roadmap reference.
 | Result | Count | Meaning |
 |---|---:|---|
 | PASS | 51 | HLSL compiled to DXIL by DXC |
-| honest-error | 3 | zioshade declined to emit rather than risk a wrong translation |
-| SKIP | 2 | stage/feature the harness does not drive |
+| honest-error | 3 | zioshade declined to emit rather than risk a wrong translation: `shader-clock.spv` (`error.UnsupportedInt64Type`), `barycentric-khr-io-block.spv` and `barycentric-nv.spv` (`error.UnsupportedBarycentricArrayOverlap`) |
+| SKIP | 2 | `mesh_minimal.spv` and `mesh_v2c_triangle.spv`: the mesh stage needs SM 6.5+, and this run used the default SM 6.0. Re-run at 6.5 with `zig build test-dxc -- <dxc> tests/spirv_bins 65` |
 | **Total** | **56** | fixtures in `tests/spirv_bins/` at that commit |
 
 This is the most recent recorded DXC run and the one the README quotes. It covers the
 whole fixture set rather than fragment alone, which is why it is not directly comparable
 to the per-stage tables below. Reproduce with `just dxc-image` then `just hlsl-dxc`.
+
+The 3-and-2 split is decided inside zioshade, before DXC is invoked, so it can be
+reproduced on any machine by pointing the harness at a stub `dxc` that always exits 0:
+`zig build test-dxc -- <stub> tests/spirv_bins 60` still prints
+`Total: 51 PASS / 3 FAIL / 2 SKIP` and names the same five fixtures (confirmed on macOS,
+2026-08-04). That reproduction says nothing about the 51: only a run against a real DXC,
+such as the snapshot above, shows that DXC accepted them.
 
 ### Older snapshots (kept for trend, superseded by the run above)
 
