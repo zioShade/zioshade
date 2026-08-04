@@ -4,6 +4,8 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-04
+
 ### Changed
 
 - **Identifier mangling changed in generated output.** Four separate fixes now rename identifiers
@@ -21,6 +23,16 @@ All notable changes to zioshade are documented here. The format is loosely based
   `build_compat.zig`, and `src` were published. A CI job now builds `c-lib` from a tree containing
   only the `.paths` entries, so the packaged form is a tested surface.
 - **C ABI: buffers returned to the caller may now be freed from any thread.** Caller-owned buffers previously came from a `threadlocal` allocator, so the documented free contract only held on the allocating thread: compiling on a worker thread and calling `zioshade_free_str`/`zioshade_free_u32` on the main thread handed a different thread's allocator a pointer it never produced. They now come from a single process-global, mutex-guarded `GeneralPurposeAllocator`, which keeps its double-free and foreign-pointer detection. Internal scratch memory stays threadlocal, and the `zioshade_last_error_*` getters still read threadlocal state, so they must be queried on the thread that made the failing call. `include/zioshade.h` documents the revised contract.
+- **The conformance gate fails loudly (#545).** Every infrastructure failure in the test runner used
+  to degrade to a skip, so a run in which the fixture directory had been renamed and nothing at all
+  executed exited 0 and looked identical to a full green run. Infrastructure failures are now a
+  separate `INFRA_ERROR` count that is always fatal, a fixture directory that cannot be opened is an
+  error rather than a silent no-op, and `zig build strict-gate -- --min-pass=N` enforces a floor on
+  the passing count (a TOTAL of 0 always fails). Unrecognised options exit 2 instead of being
+  silently ignored, and argument parsing now runs on Zig 0.16 as well as 0.15.2, where it was
+  previously skipped entirely. `strict-gate` runs in CI, and `just ci` is now a step-for-step mirror
+  of the CI workflow on one OS and one toolchain, with the gates hosted runners cannot run (DXC,
+  Metal, the spirv-cross and naga differentials) moved to `just ci-full`.
 
 ### Added
 
@@ -57,6 +69,30 @@ All notable changes to zioshade are documented here. The format is loosely based
   mesh/task) honest-error at `shader_model < 60` instead of emitting HLSL that is invalid for
   SM5.0 (e54.6).
 - An optimizer bug found by the new metamorphic oracle.
+- **Truncated SPIR-V instructions are rejected at parse time instead of crashing a backend (#548).**
+  The binary parser checked that an instruction's word count was non-zero and stayed inside the
+  buffer, but never that the instruction was long enough to carry the operands its opcode requires.
+  A module holding one short instruction (for example a 3-word `OpAccessChain`, where the spec
+  requires at least 4) was accepted and handed to emit arms that index the missing words
+  unconditionally: a panic in a safe build, an out-of-bounds read in `ReleaseFast`. All four
+  `parseModule` copies now consult a minimum-word-count table generated from the pinned Khronos
+  `spirv.core.grammar.json` (vendored, so regeneration and the drift check need no network) and
+  return `error.InvalidSpirvTruncated`. Opcodes absent from the table keep their previous behavior.
+  A corpus test asserts the table never over-constrains a module zioshade already compiles, and a CI
+  step rejects hand edits inside the generated block. Rejected modules also no longer leak the id
+  table.
+- **The optimizer no longer swallows allocation failures (#549).** Several rewrite passes recorded
+  an edit in one structure and the matching fixup in another, then dropped the second with a
+  best-effort `catch`, so an out-of-memory could emit a module that deletes a definition while
+  leaving its uses, deletes a block label while leaving branches to it, or re-emits a decoration it
+  meant to drop. Those are miscompiles produced by the error handling itself. Every allocation whose
+  loss changes the emitted words now propagates the failure, and the caller degrades to the
+  pre-optimization module. The four `parseModule` copies also stopped falling back to
+  `instructions.items` when `toOwnedSlice` failed, which handed `deinit` a slice longer than the
+  allocation and aborted any host using the C ABI's `DebugAllocator`. Leaks on the error paths of
+  the touched passes are fixed as well. Remaining unreviewed sites (15 `getOrPutValue(..., 0)`
+  counters in `mergeAccessChains`, `mergeBlocks`, `mergeNonEmptyBlocks`, `elimDeadFunctions`) are
+  recorded in the commit messages rather than claimed clean.
 - Internal tooling and test work, not individually listed: arbitrary-SPIR-V backend validity sweeps
   wired into CI, a CTS ingestion credibility sweep with a vendored GraphicsFuzz corpus, a two-oracle
   WGSL validity sweep (tint plus naga), an independent naga-oracle GLSL faithfulness check, a
