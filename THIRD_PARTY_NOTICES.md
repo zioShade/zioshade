@@ -1,6 +1,7 @@
 # Third-Party Notices
 
-This project uses test shader files from the following upstream projects.
+This project uses test shader files and vendored specification data from the
+following upstream projects.
 
 ## glslang (tests/glslang-430/)
 
@@ -52,6 +53,43 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+
+## SPIRV-Headers (tools/spirv.core.grammar.json)
+
+Vendored verbatim from KhronosGroup/SPIRV-Headers at commit
+`29981f65241605e08b0ede4cfeb999fe3b723c6a`, path
+`include/spirv/unified1/spirv.core.grammar.json`. It is the input to
+`tools/gen_min_word_count.py`, which generates the per-opcode minimum word count
+table in `src/spirv_cross_common.zig`. Vendoring keeps both regeneration and the
+CI drift check offline and reproducible.
+
+MIT License
+
+Copyright (c) 2014-2024 The Khronos Group Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a
+copy of this software and/or associated documentation files (the
+"Materials"), to deal in the Materials without restriction, including
+without limitation the rights to use, copy, modify, merge, publish,
+distribute, sublicense, and/or sell copies of the Materials, and to
+permit persons to whom the Materials are furnished to do so, subject to
+the following conditions:
+
+The above copyright notice and this permission notice shall be included
+in all copies or substantial portions of the Materials.
+
+MODIFICATIONS TO THIS FILE MAY MEAN IT NO LONGER ACCURATELY REFLECTS
+KHRONOS STANDARDS. THE UNMODIFIED, NORMATIVE VERSIONS OF KHRONOS
+SPECIFICATIONS AND HEADER INFORMATION ARE LOCATED AT
+   https://www.khronos.org/registry/
+
+THE MATERIALS ARE PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
+IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT,
+TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
+MATERIALS OR THE USE OR OTHER DEALINGS IN THE MATERIALS.
 
 ## Shadertoy content (NOT included)
 

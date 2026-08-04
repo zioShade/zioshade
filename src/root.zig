@@ -9,6 +9,11 @@ pub const spirv = @import("spirv.zig");
 /// structured input. See docs/specs/2026-06-02-cfg-structurization.md.
 pub const cfg_structurize = @import("cfg_structurize.zig");
 pub const compat = @import("compat.zig");
+/// Exposed publicly for `tests/spirv_min_word_count_tests.zig`, which asserts
+/// the generated `minWordCount` table never exceeds the real word count of any
+/// instruction in the repository's SPIR-V corpus. External callers should use
+/// the cross-compilation entry points rather than the parser internals.
+pub const spirv_cross_common = @import("spirv_cross_common.zig");
 
 // Internal modules — not part of the public API
 const lexer = @import("lexer.zig");
