@@ -521,13 +521,30 @@ fn strictGateDir(
         if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
         if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
 
+        // The walker already found these files, so a path that will not format,
+        // will not open, or will not read is the harness breaking. Dropping any
+        // of them with a bare `continue` removes the fixture from the totals
+        // with no diagnostic and no exit-code effect, which is exactly the gate
+        // that cannot fail honestly. Route them all through .infra_error.
         var path_buf: [compat.max_path_bytes]u8 = undefined;
-        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s}/{s} ({s})\n", .{ dir_path, entry.path, @errorName(err) });
+            continue;
+        };
 
         // Apply same skip logic as testShader
-        const file = compat.dirOpenFile(io, compat.cwd(), full_path, .{}) catch continue;
+        const file = compat.dirOpenFile(io, compat.cwd(), full_path, .{}) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s} ({s})\n", .{ full_path, @errorName(err) });
+            continue;
+        };
         defer compat.fileClose(io, file);
-        const source = compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024) catch continue;
+        const source = compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s} ({s})\n", .{ full_path, @errorName(err) });
+            continue;
+        };
         defer alloc.free(source);
         if (source.len == 0) continue;
         if (std.mem.indexOf(u8, source, "void main") == null and
@@ -536,7 +553,11 @@ fn strictGateDir(
 
         const final_source = inlineIncludes(io, alloc, full_path, source) catch source;
         defer if (final_source.ptr != source.ptr) alloc.free(final_source);
-        const source_z = alloc.dupeZ(u8, final_source) catch continue;
+        const source_z = alloc.dupeZ(u8, final_source) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s} ({s})\n", .{ full_path, @errorName(err) });
+            continue;
+        };
         defer alloc.free(source_z);
 
         const stage: zioshade.Stage = blk: {
@@ -618,6 +639,7 @@ pub const ArgError = error{
     MissingValue,
     InvalidNumber,
     UnexpectedPositional,
+    ConflictingOptions,
 };
 
 /// Filled in on an `ArgError` so the caller can print which argument was bad.
@@ -715,6 +737,22 @@ pub fn parseArgs(argv: []const []const u8, diag: *ArgDiag) ArgError!Options {
             diag.* = .{ .arg = path, .detail = "--save-spv is ignored by --strict-gate/--strict-enumerate" };
             return error.UnexpectedPositional;
         }
+    }
+
+    // The two gate modes are mutually exclusive and the enumerate branch is
+    // tested first, so accepting both would let the report silently win over
+    // the gate the caller asked for.
+    if (opts.strict_gate and opts.strict_enumerate) {
+        diag.* = .{ .arg = "--strict-enumerate", .detail = "--strict-gate and --strict-enumerate are mutually exclusive" };
+        return error.ConflictingOptions;
+    }
+
+    // --strict-enumerate is a report, not a gate: it has no pass count to
+    // compare against a floor. Swallowing the flag here is the same
+    // silent-ignore defect the floor exists to rule out.
+    if (opts.strict_enumerate and opts.min_pass != null) {
+        diag.* = .{ .arg = "--min-pass", .detail = "--strict-enumerate is a report and honors no pass floor" };
+        return error.ConflictingOptions;
     }
 
     return opts;

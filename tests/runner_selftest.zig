@@ -125,6 +125,36 @@ test "an argument the gate modes would ignore is rejected" {
     );
 }
 
+test "the two gate modes cannot be requested together" {
+    // The enumerate branch is tested first, so accepting both would let the
+    // report silently win over the gate the caller asked for.
+    var diag = ArgDiag{};
+    try std.testing.expectError(
+        error.ConflictingOptions,
+        parseArgs(&.{ "runner", "--strict-gate", "--strict-enumerate" }, &diag),
+    );
+    try std.testing.expectError(
+        error.ConflictingOptions,
+        parseArgs(&.{ "runner", "--strict-enumerate", "--strict-gate" }, &diag),
+    );
+}
+
+test "a floor handed to the enumerate report is rejected, not ignored" {
+    // --strict-enumerate exits 0 unconditionally, so honoring a floor there is
+    // impossible; swallowing the flag would be the same silent-ignore defect
+    // the floor exists to rule out.
+    var diag = ArgDiag{};
+    try std.testing.expectError(
+        error.ConflictingOptions,
+        parseArgs(&.{ "runner", "--strict-enumerate", "--min-pass=999999" }, &diag),
+    );
+    try std.testing.expectEqualStrings("--min-pass", diag.arg);
+
+    // The same floor is still accepted by the gate mode.
+    const gated = try parse(&.{ "runner", "--strict-gate", "--min-pass=999999" });
+    try std.testing.expectEqual(@as(?u32, 999999), gated.min_pass);
+}
+
 test "conformance mode still takes a single positional target" {
     const opts = try parse(&.{ "runner", "tests/glslang-430" });
     try std.testing.expectEqualStrings("tests/glslang-430", opts.target.?);

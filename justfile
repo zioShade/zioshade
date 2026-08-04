@@ -416,11 +416,11 @@ c-abi:
 #   cts-ingestion                          -> job `cts-ingestion`
 #   fuzz-smoke                             -> job `fuzz-smoke`
 #   c-abi                                  -> job `c-abi`
-# Keep this list in step with the workflow: a gate that runs in only one of the
-# two is a gate nobody is really watching. Oracle- and hardware-dependent gates
-# live in `ci-full`, not here, because the hosted runners cannot run them.
-# Same job set as CI, one OS and one toolchain: CI still has to run it across
-# 3 OSes and both 0.15.2 and 0.16.
+# Keep this list in step with the workflow: a gate that runs in only one of the two
+# is a gate nobody is really watching. The difference is coverage, not job set: this
+# runs one OS and one toolchain, CI runs the same jobs across 3 OSes and both 0.15.2
+# and 0.16. Oracle- and hardware-dependent gates live in `ci-full`, not here, because
+# the hosted runners cannot run them.
 #
 # the workflow's job set, run locally on this OS with Zig 0.15.2
 ci: fmt-check build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion fuzz-smoke c-abi
