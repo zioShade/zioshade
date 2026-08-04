@@ -3,18 +3,18 @@
 
 # zioshade status
 
-Generated: `2026-07-22T08:05:24Z` · commit `e378898`
+Generated: `2026-08-04T18:43:25Z` · commit `5cc77f1`
 
 ## Conformance (`zig build conformance` — every fixture's SPIR-V validated with spirv-val)
 
 | Metric | Count |
 |--------|-------|
-| PASS (spirv-val clean) | 2102 |
+| PASS (spirv-val clean) | 2108 |
 | FAIL (spirv-val) | 0 |
 | FAIL (compile) | 0 |
 | SKIP | 8 |
 | XFAIL (known-unsupported, documented) | 13 |
-| **TOTAL** | **2123** |
+| **TOTAL** | **2129** |
 
 The suite exits 0 when `FAIL (spirv) == 0` and `FAIL (compile) == 0`
 (PASS + XFAIL + SKIP == TOTAL). XFAIL entries are the curated, documented

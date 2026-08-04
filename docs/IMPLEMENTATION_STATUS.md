@@ -36,8 +36,8 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Cross-compilers (HLSL, GLSL, MSL, WGSL) | ~12,000 |
 | Optimizer (compact_ids_passes) | ~10,200 |
 | Preprocessor | ~1,800 |
-| Conformance passing | 2102 PASS / 0 FP-regression / 13 XFAIL (`zig build strict-gate`); full spirv-val-validated counts in [`docs/STATUS.md`](STATUS.md) (single source of truth) |
-| External DXC SPIR-V fixtures | 47 / 51 compile (4 limited by DXC SM 6.1+ / 2 KB structured-buffer cap) |
+| Conformance passing | 2108 PASS / 0 FP-regression / 13 XFAIL (`zig build strict-gate`); full spirv-val-validated counts in [`docs/STATUS.md`](STATUS.md) (single source of truth) |
+| External DXC SPIR-V fixtures | 51 PASS / 3 honest-error / 2 SKIP at SM 6.0 (dated snapshot, commit `e920e3f`, 2026-07-27; [`BENCHMARKS.md`](../BENCHMARKS.md#dxc-validation-snapshots) is the source of truth for DXC figures) |
 | WGSL stress tests | 470 / 470 |
 | Fuzzer iterations (clean) | 1,000,000 (run `just fuzz-million` to reproduce; ad-hoc: `zig build fuzz -- --count N`) |
 | Shader stages supported | 14 (vert, frag, comp, geom, tesc, tese, mesh, task, raygen, closesthit, miss, intersection, anyhit, callable) |
@@ -57,7 +57,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 | Mesh/Task shaders | ✅ | 4 pass | ⚠️ Basic |
 | Ray tracing shaders | ✅ | 3 pass | ⚠️ Basic |
 | SPIR-V output | 1.0–1.6 | 1.0–1.6 | ✅ |
-| spirv-val conformance | Reference | 2102 PASS / 0 FP-regression / 13 XFAIL (honest rejections), exits 0; counts in `docs/STATUS.md` | ✅ |
+| spirv-val conformance | Reference | 2108 PASS / 0 FP-regression / 13 XFAIL (honest rejections), exits 0; counts in `docs/STATUS.md` | ✅ |
 | GLSL extensions parsed | 100+ | 9 (subgroup basic/vote/arithmetic/ballot/shuffle, fragment interlock, mesh, ray tracing, null initializer) | ⚠️ Covers wintty needs |
 | Error diagnostics | Rich (line, column, context) | Line/column via `compileToSPIRVWithDiagnostics` + CLI (`line:col: error: msg`); in-function statement errors carry real locations, other paths fall back (sometimes `0:0`); messages terse | ⚠️ Partial |
 
@@ -65,7 +65,7 @@ If your shaders fall inside the validated set, this should work. If you need ful
 
 | Capability | SPIRV-Cross | zioshade | Status |
 |------------|-------------|--------|--------|
-| HLSL output | SM 5.0+ | SM 6.0 (DXC-validated); SM 5.0 down-compile + SM6-feature gating via `--shader-model` (not DXC-validated at SM 5.0 -- see G10) | ✅ DXC validates 47/51 at SM 6.0 |
+| HLSL output | SM 5.0+ | SM 6.0 (DXC-validated); SM 5.0 down-compile + SM6-feature gating via `--shader-model` (not DXC-validated at SM 5.0 -- see G10) | ✅ DXC-validated; counts in [`BENCHMARKS.md`](../BENCHMARKS.md#dxc-validation-snapshots) |
 | MSL output | 2.0+ | Metal 2.0+ | ✅ |
 | GLSL output | 110, 140, 150, 300 es, 330, 410, 430, 450, 460 | 330, 400, 410, 420, 430 (default), 440, 450, 460 | ✅ Selectable desktop range; 420pack guard + location gating at < 420 / 330; honest-error on unsupported version & ESSL (#169) |
 | WGSL output | ✅ | ✅ | ✅ naga-validated; stage I/O **interface blocks** (in + out), cross-function I/O, frexp/modf struct-return, loop phi, passthrough-return, scalar geometric builtins, vector shifts, array-element/struct construction all naga-clean. Honest-errors the genuinely-unrepresentable: recursion, multisample/sampler arrays, layer/viewport/clip-cull/point-size built-ins, dual-source blending, ARM tensors, ray queries, geometry/tess stages |
@@ -167,22 +167,46 @@ DXC and the Metal compiler are **platform SDK tools** that produce GPU-specific 
 
 ### 3.1 SPIR-V Validation
 
-Runnable fixtures pass `spirv-val`, the official SPIR-V validator (see `docs/STATUS.md`, the single source of truth for counts; `zig build strict-gate` reports **2102 PASS / 0 FP-regression / 13 XFAIL**). 13 known-unsupported fixtures are **honestly rejected** (XFAIL) instead of silently emitting hollow SPIR-V. The suite exits **0**. The XFAIL fixtures (the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig`) cover: 64-bit int/float types (`fp64`, `int64`, `spv.double`), OpExtInst new-form texture builtins (`newTexture`, `spv.newTexture`), AMD/NV extensions (`gcn_shader`, `shader_ballot`, `spv.nvAtomicFp16Vec`), the clock extension (`shader-clock`), arrays-of-arrays (`spv.AofA`), `struct-material` (all `error.SemanticFailed`), plus the two deliberately-rejected constructs documented in [3.6](#36-deliberately-rejected-constructs-honest-errors) -- `ubo_layout` (conflicting matrix layout on a shared struct type) and `loop-dominator-and-switch-default` (an unstructurizable `continue`), both `error.CodegenFailed`. (`extended-arithmetic`, `image-query`, `ray_sphere_test`, and `spec-constant-work-group-size` were previously XFAIL but now **pass**.) These are expected honest rejections, not regressions.
+Runnable fixtures pass `spirv-val`, the official SPIR-V validator (see `docs/STATUS.md`, the single source of truth for counts; `zig build strict-gate` reports **2108 PASS / 0 FP-regression / 13 XFAIL**). 13 known-unsupported fixtures are **honestly rejected** (XFAIL) instead of silently emitting hollow SPIR-V. The suite exits **0**. The XFAIL fixtures (the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig`) cover: 64-bit int/float types (`fp64`, `int64`, `spv.double`), OpExtInst new-form texture builtins (`newTexture`, `spv.newTexture`), AMD/NV extensions (`gcn_shader`, `shader_ballot`, `spv.nvAtomicFp16Vec`), the clock extension (`shader-clock`), arrays-of-arrays (`spv.AofA`), `struct-material` (all `error.SemanticFailed`), plus the two deliberately-rejected constructs documented in [3.6](#36-deliberately-rejected-constructs-honest-errors) -- `ubo_layout` (conflicting matrix layout on a shared struct type) and `loop-dominator-and-switch-default` (an unstructurizable `continue`), both `error.CodegenFailed`. (`extended-arithmetic`, `image-query`, `ray_sphere_test`, and `spec-constant-work-group-size` were previously XFAIL but now **pass**.) These are expected honest rejections, not regressions.
 
 ### 3.2 DXC Validation
 
-**47 / 51** pre-compiled SPIR-V→HLSL shaders compile with DXC (SM 6.0). The 4 failures are:
-- 3 barycentric tests: `SV_Barycentrics` requires SM 6.1+; DXC also doesn't support two barycentric semantics in one shader
-- 1 complex-expression: structured buffer exceeds DXC's 2,048-byte limit (actual: 16,384 bytes)
+[`BENCHMARKS.md`](../BENCHMARKS.md#dxc-validation-snapshots) is the source of truth for DXC
+counts. Most recent recorded run: **51 PASS / 3 honest-error / 2 SKIP** at SM 6.0 over the
+56 `tests/spirv_bins/` fixtures (commit `e920e3f`, 2026-07-27). DXC needs Windows, Docker,
+or a Vulkan SDK install, so it is a dated snapshot, not a per-commit gate.
 
-All 4 are DXC toolchain constraints, not zioshade bugs.
+The 5 non-PASS fixtures split 3 honest-error + 2 SKIP, matching the gloss in
+[`BENCHMARKS.md`](../BENCHMARKS.md#dxc-validation-snapshots): the 3 are cases where zioshade
+**declined to emit** rather than risk a wrong translation, and the 2 are a stage the harness
+does not drive at the default shader model.
+
+| Fixture | Result | Why |
+|---|---|---|
+| `shader-clock.spv` | honest-error | `error.UnsupportedInt64Type` from zioshade's HLSL backend |
+| `barycentric-khr-io-block.spv` | honest-error | `error.UnsupportedBarycentricArrayOverlap` from zioshade's HLSL backend |
+| `barycentric-nv.spv` | honest-error | `error.UnsupportedBarycentricArrayOverlap` from zioshade's HLSL backend |
+| `mesh_minimal.spv` | SKIP | mesh stage, which needs SM 6.5+; re-run with `zig build test-dxc -- <dxc> tests/spirv_bins 65` |
+| `mesh_v2c_triangle.spv` | SKIP | same, mesh stage at SM 6.5+ |
+
+So the 3 non-PASS-and-not-skipped fixtures are zioshade refusals, not DXC rejections; DXC
+is never reached for them. (The barycentric constructs would additionally need SM 6.1+ from
+DXC, and `complex-expression-in-access-chain.spv`, previously listed here as a DXC
+structured-buffer-size failure, now PASSes.)
+
+The split above is reproducible without a real DXC, because it is decided entirely inside
+zioshade: point the harness at a stub that always exits 0 and it still prints
+`Total: 51 PASS / 3 FAIL / 2 SKIP` and names the same fixtures. That reproduction proves
+**which fixtures zioshade refuses**; it proves nothing about the other 51, since a
+stub accepts anything. Only the dated real-DXC snapshot in BENCHMARKS.md supports the claim
+that DXC compiled those 51 to DXIL.
 
 ### 3.3 Cross-Compilation Validation
 
 All 3 primary backends produce compilable output across the conformance corpus (exact per-backend pass counts predate the current 2,098-fixture corpus and are pending regeneration - tracked under the "single source of truth for status numbers" cleanup):
 - **GLSL backend**: passes
 - **MSL backend**: passes
-- **HLSL backend**: passes (DXC-validated 47/51 on the prebuilt SPIR-V fixtures)
+- **HLSL backend**: passes (DXC-validated on the prebuilt SPIR-V fixtures; counts in [`BENCHMARKS.md`](../BENCHMARKS.md#dxc-validation-snapshots))
 - **Cross-compare** (GLSL↔HLSL output consistency): pass
 - **WGSL backend**: passes its test suite
 
@@ -289,7 +313,7 @@ wintty compiles ~10 shaders at startup:
 | # | Gap | Impact | Effort |
 |---|-----|--------|--------|
 | G9 | **More GLSL extensions** | Only 9 parsed. Full glslang supports 100+. Low priority unless specific project needs them. | Small each, large total |
-| G10 | **HLSL SM 5.0** | ⏳ **Down-compile + SM6 gating done; validation pending.** `--shader-model 50` emits the SM 5.0 position semantic (vertex `POSITION` vs `SV_Position`) AND now honest-errors (`RequiresShaderModel60`) when an SM 6.0+-only construct is used at `shader_model < 60` -- subgroup/Wave ops, `helper_invocation` (-> WaveIsHelperLane), `SV_Barycentrics`, and mesh/task entry models. (Conservative 6.0 threshold; Barycentric is 6.1 and mesh/task 6.5, but the gate treats all as 6.0+.) Regression-tested. **Remaining:** DXC validation at SM 5.0 (vs_5_0/ps_5_0/cs_5_0); the 47/51 figure is SM 6.0. | Medium |
+| G10 | **HLSL SM 5.0** | ⏳ **Down-compile + SM6 gating done; validation pending.** `--shader-model 50` emits the SM 5.0 position semantic (vertex `POSITION` vs `SV_Position`) AND now honest-errors (`RequiresShaderModel60`) when an SM 6.0+-only construct is used at `shader_model < 60` -- subgroup/Wave ops, `helper_invocation` (-> WaveIsHelperLane), `SV_Barycentrics`, and mesh/task entry models. (Conservative 6.0 threshold; Barycentric is 6.1 and mesh/task 6.5, but the gate treats all as 6.0+.) Regression-tested. **Remaining:** DXC validation at SM 5.0 (vs_5_0/ps_5_0/cs_5_0); the recorded DXC figures are SM 6.0 / SM 6.5 only (see [`BENCHMARKS.md`](../BENCHMARKS.md#dxc-validation-snapshots)). | Medium |
 | G11 | **Row-major / column-major matrix layout** | Basic handling. Full SPIRV-Cross has explicit layout management. | Medium |
 | G12 | **Multi-entry-point support** | Some SPIR-V modules have multiple entry points. | Small |
 | G13 | **Copy-memory optimization** | Disabled due to correctness issues. Would save one instruction per struct copy. | Hard (fundamental DCE interaction) |
