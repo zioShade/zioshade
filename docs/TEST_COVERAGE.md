@@ -46,7 +46,7 @@ Each stress case is a single-purpose shader that, when broken in zioshade, would
 | Backend | Where it's exercised | Approx count |
 |---|---|---:|
 | **SPIR-V output (the conformance oracle)** | All entries above | 2,104 PASS / 11 XFAIL (honest rejections) / 0 FP-regression, exits 0 (counts: `docs/STATUS.md`) |
-| **HLSL backend (SM 6.0)** | `zig build test-hlsl` (793 tests) + DXC compilation of 47/51 prebuilt SPIR-V fixtures via `tools/dxc_batch_test.zig` | 793 + 47 |
+| **HLSL backend (SM 6.0)** | `zig build test-hlsl` (793 tests) + DXC compilation of the prebuilt SPIR-V fixtures via `tools/dxc_batch_test.zig` (counts in [BENCHMARKS.md](../BENCHMARKS.md#dxc-validation-snapshots)) | 793 + DXC snapshot |
 | **MSL backend** | `zig build test` (108 msl-tests) + cross-compile of every stress fixture | 108 + 457 |
 | **GLSL round-trip** | `zig build test` (122 glsl-tests) + reference suite | 122 |
 | **WGSL backend** | `zig build test` (20 wgsl-tests) + WGSL-prefixed stress fixtures (321 cases under `tests/conformance/stress/wgsl_*`) | 20 + 321 |

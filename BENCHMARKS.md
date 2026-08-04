@@ -73,7 +73,15 @@ For wintty's startup sequence (10 shaders): subprocess approach would take ~1.8 
 
 For your own project: if you compile shaders at build time (offline) the win is "fewer seconds of CMake friction." If you compile shaders at runtime (hot-reload, JIT specialization), the win is "this is actually viable now."
 
-## DXC validation snapshot (M5.3)
+## DXC validation snapshots
+
+> **This section is the single source of truth for DXC results.** Every DXC figure
+> quoted anywhere else in the repo (README, `docs/DIFFERENTIAL_PROOF.md`) should link
+> here rather than restate a number. DXC requires Windows, a Vulkan SDK install, or the
+> pinned Docker image (`just dxc-image`), so these runs are **not** re-measured on every
+> commit: each row below is a dated snapshot, stamped with the commit it was taken at,
+> and is unverified between snapshots. Re-run `just hlsl-dxc` to refresh, and add a new
+> stamped block rather than editing an old one.
 
 End-to-end validation of zioshade's HLSL output: every SPIR-V fixture in
 `tests/spirv_bins/` is cross-compiled to HLSL, written to a temp file, and
@@ -85,6 +93,21 @@ geometry, tess, etc.) are reported as **SKIP** with a roadmap reference.
 > **Reproduce:** `zig build test-dxc [-- <dxc_path> <spv_dir> <sm>]` —
 > defaults to `C:/VulkanSDK/1.4.341.1/Bin/dxc.exe`, `tests/spirv_bins`,
 > SM `60`.
+
+### Latest snapshot: commit `e920e3f`, 2026-07-27, SM 6.0, DXC in the pinned Docker image
+
+| Result | Count | Meaning |
+|---|---:|---|
+| PASS | 51 | HLSL compiled to DXIL by DXC |
+| honest-error | 3 | zioshade declined to emit rather than risk a wrong translation |
+| SKIP | 2 | stage/feature the harness does not drive |
+| **Total** | **56** | fixtures in `tests/spirv_bins/` at that commit |
+
+This is the most recent recorded DXC run and the one the README quotes. It covers the
+whole fixture set rather than fragment alone, which is why it is not directly comparable
+to the per-stage tables below. Reproduce with `just dxc-image` then `just hlsl-dxc`.
+
+### Older snapshots (kept for trend, superseded by the run above)
 
 **Snapshot — commit `b14d0429`, 2026-05-27, SM 6.0, DXC 1.10 (5180):**
 
@@ -124,4 +147,6 @@ HLSL backend coverage to fixture coverage.
 - `compute_minimal.spv` exposed an SSBO emit issue in the compute path at
   SM 6.0; resolved at SM 6.5.
 
-Fragment pass rate: **48/51 = 94.1%** at SM 6.5 (was 47/51 = 92.2% at SM 6.0).
+Fragment pass rate: **48/51 = 94.1%** at SM 6.5 (was 47/51 = 92.2% at SM 6.0), as of the
+2026-05-28 snapshot above. Both figures are superseded by the 2026-07-27 whole-corpus run
+at the top of this section; they are retained only to show the SM 6.0 to SM 6.5 delta.
