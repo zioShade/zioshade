@@ -1,51 +1,70 @@
-# zioshade Performance Benchmark
+# Performance
 
-## Test Environment
-- **CPU**: (varies by machine)
-- **OS**: Windows
-- **Build**: ReleaseFast (Zig 0.15.2)
-- **Iterations**: 100 per shader (10 warmup)
+**[BENCHMARKS.md](../BENCHMARKS.md) is the source of truth for zioshade's performance
+claims.** It carries the measured numbers, the methodology, and the honest framing of what
+each figure does and does not prove. This file used to duplicate that material with
+older, unstamped estimates; those have been removed rather than carried forward.
 
-## zioshade Pipeline Performance
+The two headline results, both measured (see BENCHMARKS.md for the full tables):
 
-### GLSL → SPIR-V → HLSL (single backend)
+- **Library vs library, in-process:** roughly **1.4-1.6x** faster than SPIRV-Cross on the
+  median cell (SPIR-V to GLSL / HLSL / MSL, same SPIR-V input, no subprocess on either
+  side). This is the honest raw-throughput figure.
+- **Workflow, vs subprocess CLIs:** **150-265x** faster than spawning
+  `glslangValidator + spirv-cross` per shader. That gap is dominated by process-spawn
+  cost, so it is a **workflow win, not an algorithm win**, and BENCHMARKS.md says so
+  explicitly.
 
-| Shader | Avg (µs) | Min (µs) | SPIR-V→HLSL (µs) | SPV Words | HLSL Bytes |
-|--------|----------|----------|-------------------|-----------|------------|
-| simple (uv gradient) | 418 | 281 | 20 | 140 | 371 |
-| for_loop_accumulate | 793 | 454 | 65 | 277 | 763 |
-| func_calls (noise) | 504 | 367 | 56 | 414 | 1,589 |
-| nested_loop | 718 | 463 | 57 | 369 | 1,087 |
-| complex (raymarcher) | 2,166 | 1,270 | 119 | 1,022 | 4,851 |
+An earlier revision of this file advertised a "25-500x" speedup and an *estimated*
+library-API comparison row. Both were projections, not measurements, and the measured
+library-vs-library result above contradicts them. They are retracted.
 
-### Full Pipeline (GLSL → SPIR-V → HLSL + GLSL + MSL, all 3 backends)
+## Local snapshot (`zig build bench`)
 
-- **Average**: 683 µs per shader
-- All 3 backend outputs generated in under 1ms
+Apple M2, macOS 26.5.1, Zig 0.15.2, `ReleaseFast`, code at commit `5cc77f1` (this branch
+changes documentation only), 2026-08-04. The "cross-compile only" section of
+`zig build bench`: pre-compiled SPIR-V to backend source, 2000 iterations per direction,
+`tools/bench_quick.zig` reporting the mean. Five consecutive runs on an otherwise idle
+machine:
 
-## Comparison: zioshade vs glslang+spirv-cross
+| Direction | Median | Observed range |
+|---|---:|---|
+| SPIR-V to HLSL | 62 µs | 62-66 µs |
+| SPIR-V to GLSL | 62 µs | 61-65 µs |
+| SPIR-V to MSL | 58 µs | 57-61 µs |
 
-zioshade is a single-process, pure Zig compiler. The traditional pipeline requires:
-1. glslangValidator CLI process spawn (~10-50ms on Windows due to process creation overhead)
-2. spirv-cross CLI process spawn (~10-50ms on Windows)
-3. C++ runtime initialization
+Median is over 8 consecutive runs; the range is the union of 14 runs across two
+independent sessions on the same machine, because a single session reports a
+misleadingly tight spread. Run-to-run variance is a few microseconds and is
+sensitive to machine load, so treat the range, not the median, as the real signal.
 
-Estimated comparison:
-- **glslang + spirv-cross CLI**: 50-200ms (dominated by process creation)
-- **glslang + spirv-cross library (DLL)**: 5-20ms (library init + compilation)
-- **zioshade (single process)**: 0.3-2ms (pure computation, no IPC)
+One machine, absolute numbers only, and the shader being cross-compiled is the small
+`simple_frag` fixture in `tools/bench_quick.zig`, so this shows the order of magnitude of
+an in-process cross-compile and nothing more. It is not a comparative claim; the
+comparisons live in BENCHMARKS.md. The harness allocates through Zig's `DebugAllocator`,
+so the figures include that allocation path rather than a tuned one, and they will drift
+with the machine, the OS build, and the fixture. Re-run `zig build bench` before quoting
+them anywhere.
 
-**Speedup**: 25-500x depending on whether CLI or library API is used.
+## Architectural reasons the in-process path is cheap
 
-## Key Advantages
-1. **No C++ runtime** — pure Zig, no system dependencies
-2. **No process spawning** — in-process compilation
-3. **No DLL loading** — statically linked
-4. **Single allocation context** — arena allocator for bulk free
-5. **All 3 backends simultaneously** — HLSL + GLSL + MSL from one SPIR-V pass
+These are properties of the design, not measurements:
 
-## Benchmark Reproduction
+1. **No C++ runtime.** Pure Zig, no system dependencies.
+2. **No process spawning.** In-process compilation.
+3. **No DLL loading.** Statically linked.
+4. **Single allocation context.** Arena allocator, bulk free.
+5. **All backends from one SPIR-V pass.** HLSL + GLSL + MSL + WGSL off the same module.
+
+## Reproducing
+
 ```bash
-zig build-exe -OReleaseFast --dep zioshade -Mroot=tools/bench_perf.zig -Mzioshade=src/root.zig -femit-bin=bench_perf.exe
-./bench_perf.exe
+zig build bench            # quick per-shader zioshade-only timings (tools/bench_quick.zig)
+zig build bench-compare    # zioshade vs subprocess glslang + spirv-cross (tools/bench_compare.zig)
+zig build lib-bench        # zioshade vs in-process SPIRV-Cross C API; needs the Vulkan SDK libs
 ```
+
+`bench-compare` picks up `glslangValidator` and `spirv-cross` from `PATH`, or from
+`ZIOSHADE_BENCH_GLSLANG` / `ZIOSHADE_BENCH_SPIRVX`. `lib-bench` needs the SPIRV-Cross
+static libs (`-Dvulkan-sdk=<path>`, or `$VULKAN_SDK`). See BENCHMARKS.md for the
+invocation details.
