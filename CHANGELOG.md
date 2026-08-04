@@ -20,6 +20,7 @@ All notable changes to zioshade are documented here. The format is loosely based
   `unable to open source directory 'include'`, because only `build.zig`, `build.zig.zon`,
   `build_compat.zig`, and `src` were published. A CI job now builds `c-lib` from a tree containing
   only the `.paths` entries, so the packaged form is a tested surface.
+- **C ABI: buffers returned to the caller may now be freed from any thread.** Caller-owned buffers previously came from a `threadlocal` allocator, so the documented free contract only held on the allocating thread: compiling on a worker thread and calling `zioshade_free_str`/`zioshade_free_u32` on the main thread handed a different thread's allocator a pointer it never produced. They now come from a single process-global, mutex-guarded `GeneralPurposeAllocator`, which keeps its double-free and foreign-pointer detection. Internal scratch memory stays threadlocal, and the `zioshade_last_error_*` getters still read threadlocal state, so they must be queried on the thread that made the failing call. `include/zioshade.h` documents the revised contract.
 
 ### Added
 
@@ -30,6 +31,8 @@ All notable changes to zioshade are documented here. The format is loosely based
   through `crossErr` (#525).
 - `ARCHITECTURE.md` contributor map, an opcode/capability coverage matrix, and a C ABI consumer
   example that demos MSL and WGSL output.
+- **C ABI: `ZIOSHADE_ERR_UNSUPPORTED` (value 8) appended to `zioshade_status_t`.** This is the honest-error refusal: the input was valid, but it contains a construct the requested backend cannot translate faithfully, so zioshade declined rather than emit wrong output. It was previously indistinguishable from a genuine `ZIOSHADE_ERR_CODEGEN` failure, which told callers to retry a call that can only fail the same way. Existing enum values are unchanged, so this is an additive ABI change; consumers that switch over `zioshade_status_t` should keep a default branch. `include/zioshade.h` now documents that new codes may be appended.
+- **C ABI: cross-compile entry points reject a non-SPIR-V blob at the boundary.** `zioshade_to_hlsl`/`_msl`/`_glsl`/`_wgsl` check the SPIR-V magic word before any work or allocation and return `ZIOSHADE_ERR_INVALID_INPUT`, alongside the existing NULL and word-count checks.
 
 ### Fixed
 
