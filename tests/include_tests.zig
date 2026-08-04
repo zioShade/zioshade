@@ -208,6 +208,63 @@ test "include: a symlink pointing out of the root is refused" {
     try std.testing.expect(pp.unresolved_include);
 }
 
+test "include: a symlink out of a `-I` root is refused BY NAME, not as not-found" {
+    var tree = Tree.create("symlinkroot") catch return error.SkipZigTest;
+    const secret = try Tree.writeIn(tree.outside, "secret.glsl", "#define LEAKED 1\n");
+    defer alloc.free(secret);
+    const link = try Tree.pathIn(tree.root, "link.glsl");
+    defer alloc.free(link);
+
+    symLinkAbsolute(secret, link) catch {
+        tree.destroy(&.{secret});
+        return error.SkipZigTest;
+    };
+    defer tree.destroy(&.{ secret, link });
+
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    // Resolution goes through the `-I` roots, where a miss on one root is a
+    // normal `continue`. A containment refusal must NOT be swallowed by that
+    // loop: it has to reach the caller naming the offending include, the same
+    // way a refused spelling does, rather than as a bare not-found.
+    const source: [:0]const u8 = "#include \"link.glsl\"\nvoid main() {}";
+    try std.testing.expectError(error.UnsafeIncludePath, run(&pp, "", &.{tree.root}, source));
+    try std.testing.expect(!pp.defines.contains("LEAKED"));
+    try std.testing.expect(pp.unresolved_include);
+    try std.testing.expectEqualStrings("link.glsl", pp.unsafe_include_path.?);
+}
+
+test "include: a later `-I` root still wins over an earlier refused one" {
+    var tree = Tree.create("rootorder") catch return error.SkipZigTest;
+    const secret = try Tree.writeIn(tree.outside, "secret.glsl", "#define LEAKED 1\n");
+    defer alloc.free(secret);
+    const link = try Tree.pathIn(tree.root, "helper.glsl");
+    defer alloc.free(link);
+
+    symLinkAbsolute(secret, link) catch {
+        tree.destroy(&.{secret});
+        return error.SkipZigTest;
+    };
+    // The second root holds a legitimate file under the SAME spelling.
+    const helper = try Tree.writeIn(tree.outside, "helper.glsl", "#define ROOT2_OK 1\n");
+    defer alloc.free(helper);
+    defer tree.destroy(&.{ secret, link, helper });
+
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    // A refusal on the first root is sticky but not final: the search continues,
+    // and a root that resolves the spelling legitimately still wins.
+    const source: [:0]const u8 = "#include \"helper.glsl\"\nvoid main() {}";
+    const out = try run(&pp, "", &.{ tree.root, tree.outside }, source);
+    defer alloc.free(out);
+
+    try std.testing.expect(!pp.unresolved_include);
+    try std.testing.expect(pp.defines.contains("ROOT2_OK"));
+    try std.testing.expect(!pp.defines.contains("LEAKED"));
+}
+
 // ---------------------------------------------------------------------------
 // Containment: legitimate includes still resolve
 // ---------------------------------------------------------------------------

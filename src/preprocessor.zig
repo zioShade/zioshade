@@ -586,14 +586,26 @@ pub const Preprocessor = struct {
             }
 
             // Try include paths
+            //
+            // Sticky across the loop so a containment refusal is not downgraded
+            // to a plain not-found: an escape refused here must reach the user
+            // NAMED, the same way the spelling refusal in `handleInclude` does,
+            // rather than as a bare `preprocess_failed`.
+            var refused_for_containment = false;
             for (self.include_paths) |inc_path| {
                 var full_path_buf: [4096]u8 = undefined;
                 const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
 
-                // A miss on one root is normal, and so is a refusal: try the next
-                // root, and if none matches the caller's not-found path applies.
+                // A miss on one root is normal: try the next. A refusal is not a
+                // miss, but a LATER root may still resolve the same spelling
+                // legitimately, so keep looking and only report the refusal if no
+                // root matched. See canonicalizeUnderRoot for the residual race
+                // reading back the canonical path does not close.
                 var real_buf: [compat.max_path_bytes]u8 = undefined;
-                const real_path = self.canonicalizeUnderRoot(full_path, inc_path, &real_buf) catch continue;
+                const real_path = self.canonicalizeUnderRoot(full_path, inc_path, &real_buf) catch |err| {
+                    if (err == error.UnsafeIncludePath) refused_for_containment = true;
+                    continue;
+                };
 
                 const raw = compat.readFileByPath(self.alloc, real_path, 10 * 1024 * 1024) catch continue;
                 const z = try self.alloc.dupeZ(u8, raw);
@@ -601,6 +613,7 @@ pub const Preprocessor = struct {
                 try self.included_sources.append(self.alloc, z);
                 return z;
             }
+            if (refused_for_containment) return error.UnsafeIncludePath;
         }
 
         return error.FileNotFound;
