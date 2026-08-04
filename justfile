@@ -358,8 +358,9 @@ fuzz-smoke:
 # e54.4: arbitrary-SPIR-V backend validity sweep. Validity-checks zioshade's emitted
 # MSL/HLSL/GLSL/WGSL on ARBITRARY .spv input (external SPIR-V, not GLSL source), with
 # spirv-cross discrimination. Now green (INVALID=0, PRs #506-519) and wired into both
-# `ci` (local) and GitHub Actions (Linux: GLSL complete-oracle + WGSL via naga; MSL/
-# HLSL skip gracefully -- environmental). Exits non-zero on any regression.
+# `ci` (local) and GitHub Actions (Linux: GLSL complete-oracle + WGSL via naga; macOS:
+# MSL on a real Metal compiler; Windows: HLSL on the Vulkan SDK's DXC). Each leg skips
+# gracefully where its compiler is absent. Exits non-zero on any regression.
 spv-validity:
     {{zig}} build cli
     tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
@@ -369,7 +370,9 @@ spv-validity:
 # path and reports, per backend, ok / invalid-output / honest-error / CRASH. NON-GATING
 # credibility report: invalid-output is expected breadth; the ONLY gate is a NEW crash
 # (count exceeding tests/cts/baseline.txt). GLSL complete-oracle (glslang) + WGSL candidate
-# (naga); MSL/HLSL skip gracefully. Surfaces mandate-violation crashes on broad real SPIR-V.
+# (naga) + MSL (Metal) + HLSL (DXC); each backend skips gracefully where its compiler is
+# absent, so the msl/hlsl baseline rows are enforced by the macOS and Windows CI jobs.
+# Surfaces mandate-violation crashes on broad real SPIR-V.
 cts-ingestion:
     {{zig}} build cli
     tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz

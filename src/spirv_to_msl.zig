@@ -1542,6 +1542,18 @@ threadlocal var g_switch_chain: ?[]const ChainPhiEntry = null;
 const LoopMergeCtx = struct { merge_label: u32, phis: []const Instruction };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
+// Bound on emitWhileLoopMSL's mutual recursion with emitBlock. Same guard, and same
+// reason, as spirv_to_glsl.zig's max_emit_while_depth (PR #522): on some valid-but-
+// pathological loop structures the recursion does not advance (emitWhileLoopMSL emits
+// the body, emitBlock walks a branch back into the SAME loop header, and around again),
+// so it exhausts the stack and dies by SIGSEGV -- a crash on spirv-val-valid input, i.e.
+// a mandate violation. Refuse loudly instead. Real shaders nest loops far below this
+// (GraphicsFuzz and real apps are under 100), so the bound is a safety net, not a
+// capability limit. This fixes the CRASH; compiling these shaders correctly rather than
+// honest-erroring is a separate loop-lowering follow-up.
+const max_emit_while_depth: u32 = 256;
+threadlocal var g_ewl_depth: u32 = 0;
+
 // Maps a flattened interface-block Input member to its main0_in field name so
 // buildAccessExpr can rewrite `vin.member` (an OpAccessChain into a struct-typed
 // Input var, which has no MSL declaration) to `in.<blockinstance>_<member>`.
@@ -6213,6 +6225,12 @@ fn emitBody(
         g_loop_hoists = null;
         g_hoisted_ids = null;
         g_materialized_phis = null;
+        // Belt-and-braces reset of the loop-recursion depth, per function: the
+        // increment's own defer already restores it on both the normal and the
+        // error-unwind path, but a threadlocal counter that leaks would silently
+        // lower the effective bound for every later shader on this thread. Mirrors
+        // spirv_to_glsl.zig.
+        g_ewl_depth = 0;
     }
     var materialized_phis = std.AutoHashMap(u32, void).init(alloc);
     defer materialized_phis.deinit();
@@ -6656,6 +6674,9 @@ fn emitWhileLoopMSL(
     storage_buffers: *const std.ArrayList(CbufferDecl),
     arraylen_buf_index: *const std.AutoHashMap(u32, u32),
 ) !usize {
+    g_ewl_depth += 1;
+    defer g_ewl_depth -= 1;
+    if (g_ewl_depth > max_emit_while_depth) return error.CrossCompileUnsupported;
     // #413: declare loop-carried phi update temps ABOVE the loop. The top-of-
     // loop carry copy (#237) reads them on every iteration after the first;
     // without the hoist the declaration sits later in the body (and in the
