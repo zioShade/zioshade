@@ -70,6 +70,15 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y glslang-tools spirv-tools
 
+      # tests/wgsl_tests.zig gates 224 assertions behind nagaValidateOrSkip, which
+      # takes its SkipZigTest path when naga is absent, so without this step the
+      # WGSL oracle never ran in the job that runs the Zig test suite. Same pinned
+      # version as the spv-validity and cts-ingestion jobs. Linux only: naga has no
+      # prebuilt binary and Rust is preinstalled on ubuntu-latest.
+      - name: Install naga (WGSL oracle)
+        if: runner.os == 'Linux'
+        run: cargo install naga-cli --version 30.0.0
+
       - name: Install Zig ${{ matrix.zig }}
         uses: mlugg/setup-zig@v2
         with:
@@ -138,6 +147,19 @@ jobs:
 
       - name: Run conformance suite
         run: zig build conformance --summary all
+
+      # The strict gate (no curated-valid fixture may be rejected by the
+      # fail-loud API) is a merge invariant in CONTRIBUTING and the README
+      # badge, so it runs here rather than only on a maintainer's machine.
+      # --min-pass pins the current corpus size: without it a renamed fixture
+      # directory or a walker regression would report a green gate over an
+      # empty run. Bump the floor in the same commit that adds fixtures.
+      - name: Strict gate (no false-positive rejections)
+        # bash on every leg: this is the only step in the workflow that passes
+        # `-- <args>` through to the build step, and the Windows leg would
+        # otherwise run it under pwsh, which eats a bare `--`.
+        shell: bash
+        run: zig build strict-gate --summary all -- --min-pass=2108
 
   # Arbitrary-SPIR-V backend validity sweep (e54.4.4). Feeds EXTERNAL .spv binaries
   # (not GLSL source) straight through the backends and compile-checks each emitted
