@@ -58,8 +58,15 @@ const ZIOSHADE_ERR_UNSUPPORTED: c_int = 8;
 // consumer may compile on a worker thread and release the buffer on the main
 // thread, which would hand a different thread's allocator a pointer it never
 // produced (heap corruption, or an `Invalid free` abort). Caller-owned buffers
-// therefore come from a single process-global allocator, see `result_allocator`
-// below, so `zioshade_free_*` is safe from any thread.
+// therefore come from a single process-global GeneralPurposeAllocator, see
+// `result_gpa` below, so `zioshade_free_*` is safe from any thread.
+//
+// That global is guarded by a mutex rather than replaced with a lock-free
+// allocator so it keeps the GeneralPurposeAllocator's free-path validation:
+// double frees and pointers this library never handed out are still detected
+// instead of silently corrupting the heap. A single uncontended lock per
+// returned buffer is negligible next to a shader compile. The mutex also keeps
+// the ABI usable from `-fsingle-threaded` consumers.
 //
 // Rule for future ABI entry points: caller-owned memory goes through
 // `allocBytes`, never through `alloc()`.
@@ -70,10 +77,11 @@ fn alloc() std.mem.Allocator {
     return gpa.allocator();
 }
 
-/// Process-global allocator backing every caller-owned buffer. `smp_allocator`
-/// is thread-safe for both allocation and release, so a buffer produced on one
-/// thread can be freed on any other.
-const result_allocator: std.mem.Allocator = std.heap.smp_allocator;
+/// Process-global allocator backing every caller-owned buffer. Every use is
+/// serialised by `result_mutex`, so a buffer produced on one thread can be
+/// freed on any other.
+var result_gpa: compat.Gpa(.{}) = .{};
+var result_mutex: std.Thread.Mutex = .{};
 
 // ---------------------------------------------------------------------------
 // Length-prefix allocation
@@ -95,7 +103,9 @@ fn allocBytes(n: usize) ?[*]u8 {
     // (ARM32, MIPS, RISC-V without misaligned-access support) will fault if
     // the SPIR-V word buffer isn't at least 4-byte aligned; requesting u64
     // alignment for the prefix block makes the payload at +8 also 8-aligned.
-    const buf = result_allocator.alignedAlloc(u8, .of(u64), PREFIX + n) catch return null;
+    result_mutex.lock();
+    defer result_mutex.unlock();
+    const buf = result_gpa.allocator().alignedAlloc(u8, .of(u64), PREFIX + n) catch return null;
     std.mem.writeInt(u64, buf[0..8], @as(u64, n), .little);
     return buf.ptr + PREFIX;
 }
@@ -107,7 +117,9 @@ fn freeBytes(p: ?[*]u8) void {
     // `start` came from an 8-aligned alloc above; restore the aligned slice
     // type so `Allocator.free` sees the correct `Slice.alignment`.
     const aligned: [*]align(8) u8 = @ptrCast(@alignCast(start));
-    result_allocator.free(aligned[0 .. PREFIX + n]);
+    result_mutex.lock();
+    defer result_mutex.unlock();
+    result_gpa.allocator().free(aligned[0 .. PREFIX + n]);
 }
 
 // ---------------------------------------------------------------------------
