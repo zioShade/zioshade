@@ -3615,6 +3615,7 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
 
     // Second pass: skip duplicate arrays and replace references
     var result = std.ArrayList(u32).initCapacity(alloc, words.len) catch return words;
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]);
 
     pos = 5;
@@ -3645,7 +3646,10 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 pos = ie;
                 continue;
             }
-            seen_decorations.put(alloc, dh, {}) catch {};
+            // Paired with the `continue` above: the map is what suppresses the
+            // second copy of a decoration the dedup has just made duplicate.
+            // Dropping the entry re-emits it, so this is not best-effort.
+            try seen_decorations.put(alloc, dh, {});
         }
         // Also deduplicate OpMemberDecorate
         if (opcode == 72 and wc >= 4) { // OpMemberDecorate
@@ -3662,7 +3666,8 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
                 pos = ie;
                 continue;
             }
-            seen_decorations.put(alloc, dh, {}) catch {};
+            // Same pairing as the OpDecorate arm above.
+            try seen_decorations.put(alloc, dh, {});
         }
 
         const info = compact_ids.getOpInfo(opcode) orelse {
@@ -3753,10 +3758,7 @@ pub fn dedupArrayTypes(alloc: std.mem.Allocator, words: []const u32) error{OutOf
         pos = ie;
     }
 
-    if (result.items.len == words.len) {
-        result.deinit(alloc);
-        return words;
-    }
+    if (result.items.len == words.len) return words;
     const nw = result.toOwnedSlice(alloc) catch return words;
     const dce = deadCodeElim(alloc, nw) catch return nw;
     if (dce.ptr != nw.ptr) alloc.free(nw);
