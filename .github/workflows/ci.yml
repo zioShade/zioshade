@@ -281,11 +281,12 @@ jobs:
       - name: Run C consumer
         run: zig build run-c-example
 
-  # Builds the C ABI from a tree that contains ONLY the entries listed in
-  # build.zig.zon's .paths, which is exactly what a `zig fetch` consumer sees.
-  # Every other job starts from a full checkout, so a build step that reads a
-  # top-level directory missing from .paths (include/ was, until this job
-  # existed) would only fail in a downstream project. Linux alone is enough:
+  # Builds the C ABI and the C consumer example from a tree that contains ONLY
+  # the entries listed in build.zig.zon's .paths, which is exactly what a
+  # `zig fetch` consumer sees. Every other job starts from a full checkout, so a
+  # build step that reads a top-level directory missing from .paths (include/
+  # was, until this job existed) would only fail in a downstream project.
+  # c-lib covers include/, c-example covers examples/. Linux alone is enough:
   # this validates packaging, not platform support.
   package-smoke:
     name: package smoke (.paths only)
@@ -303,11 +304,21 @@ jobs:
           dest="${RUNNER_TEMP}/pkg"
           rm -rf "$dest"
           mkdir -p "$dest"
-          mapfile -t paths < <(awk '/\.paths *= *\.\{/,/\}/' build.zig.zon | grep -oE '"[^"]+"' | tr -d '"')
-          if [ "${#paths[@]}" -eq 0 ]; then
-            echo "could not parse .paths out of build.zig.zon" >&2
-            exit 1
-          fi
+          # Parsed with python3 rather than awk: the brace-range form is not
+          # portable across the awk implementations a runner image may ship.
+          python3 - build.zig.zon > "${RUNNER_TEMP}/paths.txt" <<'PY'
+          import re, sys
+
+          src = open(sys.argv[1], encoding="utf-8").read()
+          block = re.search(r"\.paths\s*=\s*\.\{(.*?)\}", src, re.S)
+          if block is None:
+              sys.exit("could not find a .paths block in build.zig.zon")
+          entries = re.findall(r'"([^"]+)"', block.group(1))
+          if not entries:
+              sys.exit(".paths block in build.zig.zon is empty")
+          print("\n".join(entries))
+          PY
+          mapfile -t paths < "${RUNNER_TEMP}/paths.txt"
           for p in "${paths[@]}"; do
             echo "packaging $p"
             cp -R "$p" "$dest/$p"
@@ -318,3 +329,6 @@ jobs:
         run: zig build c-lib --summary all
       - name: Assert the C header was installed
         run: test -f "${RUNNER_TEMP}/pkg/zig-out/include/zioshade.h"
+      - name: Build the C consumer example from the packaged form
+        working-directory: ${{ runner.temp }}/pkg
+        run: zig build c-example --summary all
