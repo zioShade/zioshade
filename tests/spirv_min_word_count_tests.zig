@@ -17,8 +17,12 @@
 //! Reintroducing any over-strict entry fails it immediately and names the
 //! offending file, opcode and counts.
 //!
-//! The deliberately truncated negative fixtures are excluded by name, since
-//! being under the minimum is the whole point of those.
+//! The deliberately malformed fixtures are excluded by name, since being under
+//! the minimum (or not being a well-formed module at all) is the whole point of
+//! those. Everything else in the corpus is required to parse: an unreadable
+//! file, a non-module `.spv`, or a malformed instruction stream fails the test
+//! rather than being skipped. A corpus test that quietly skips is the same class
+//! of defect this table exists to prevent.
 
 const std = @import("std");
 const zioshade = @import("zioshade");
@@ -32,11 +36,17 @@ const SPIRV_MAGIC: u32 = 0x07230203;
 /// Directories walked recursively for `.spv` files.
 const corpus_dirs = [_][]const u8{ "tests", "src/testdata" };
 
-/// Fixtures that are deliberately shorter than the spec minimum. They exist to
-/// prove the check fires, so they must not be held to the floor.
-fn isDeliberatelyTruncated(path: []const u8) bool {
+/// Fixtures that are deliberately malformed. They exist to prove the parser
+/// rejects bad input, so they must not be held to the floor. Anything not named
+/// here is required to be a well-formed module.
+fn isDeliberatelyMalformed(path: []const u8) bool {
     const base = std.fs.path.basename(path);
-    return std.mem.startsWith(u8, base, "truncated_");
+    // Instructions truncated below their opcode minimum: the negative fixtures
+    // for the very check this test guards.
+    if (std.mem.startsWith(u8, base, "truncated_")) return true;
+    // A valid SPIR-V header followed by garbage words (honest-error fixture).
+    if (std.mem.eql(u8, base, "hostile_garbage.spv")) return true;
+    return false;
 }
 
 const Counts = struct {
@@ -45,9 +55,18 @@ const Counts = struct {
 };
 
 fn checkModule(path: []const u8, bytes: []const u8, counts: *Counts) !void {
-    if (bytes.len < 20 or bytes.len % 4 != 0) return;
+    if (bytes.len < 20 or bytes.len % 4 != 0) {
+        std.debug.print(
+            "\nnot a SPIR-V module: {s} is {d} bytes (need >= 20 and a multiple of 4)\n",
+            .{ path, bytes.len },
+        );
+        return error.CorpusFileIsNotAModule;
+    }
     const word_len = bytes.len / 4;
-    if (std.mem.readInt(u32, bytes[0..4], .little) != SPIRV_MAGIC) return;
+    if (std.mem.readInt(u32, bytes[0..4], .little) != SPIRV_MAGIC) {
+        std.debug.print("\nnot a SPIR-V module: {s} has the wrong magic word\n", .{path});
+        return error.CorpusFileIsNotAModule;
+    }
 
     counts.modules += 1;
 
@@ -56,9 +75,24 @@ fn checkModule(path: []const u8, bytes: []const u8, counts: *Counts) !void {
         const header = std.mem.readInt(u32, bytes[i * 4 ..][0..4], .little);
         const word_count: usize = header >> 16;
         const opcode: u16 = @truncate(header & 0xFFFF);
-        // A zero count or an overrun means the module itself is malformed, not
-        // that the table is wrong. Stop scanning rather than fail.
-        if (word_count == 0 or i + word_count > word_len) return;
+        // A zero count or an overrun means the module itself is malformed. Every
+        // corpus module that is not named in isDeliberatelyMalformed is supposed
+        // to be well formed, so this is a failure and not a reason to abandon
+        // the rest of the scan silently.
+        if (word_count == 0) {
+            std.debug.print(
+                "\nmalformed corpus module: {s} has a zero word count at word {d}\n",
+                .{ path, i },
+            );
+            return error.CorpusModuleMalformed;
+        }
+        if (i + word_count > word_len) {
+            std.debug.print(
+                "\nmalformed corpus module: {s} instruction at word {d} claims {d} words, past the {d}-word end\n",
+                .{ path, i, word_count, word_len },
+            );
+            return error.CorpusModuleMalformed;
+        }
 
         const op: zioshade.spirv.Op = @enumFromInt(opcode);
         if (common.minWordCount(op)) |min| {
@@ -86,9 +120,15 @@ test "minWordCount never exceeds the real word count anywhere in the corpus" {
         for (entries) |entry| {
             if (!entry.is_file) continue;
             if (!std.mem.endsWith(u8, entry.path, ".spv")) continue;
-            if (isDeliberatelyTruncated(entry.path)) continue;
+            if (isDeliberatelyMalformed(entry.path)) continue;
 
-            const bytes = compat.readFileByPath(alloc, entry.path, 64 * 1024 * 1024) catch continue;
+            const bytes = compat.readFileByPath(alloc, entry.path, 64 * 1024 * 1024) catch |err| {
+                std.debug.print(
+                    "\nunreadable corpus module: {s} ({s})\n",
+                    .{ entry.path, @errorName(err) },
+                );
+                return err;
+            };
             defer alloc.free(bytes);
 
             try checkModule(entry.path, bytes, &counts);
