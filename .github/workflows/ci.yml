@@ -174,8 +174,9 @@ jobs:
   # (not GLSL source) straight through the backends and compile-checks each emitted
   # backend source with its ecosystem reference compiler. GLSL is the COMPLETE oracle
   # (glslangValidator accepts/rejects definitively); WGSL via naga is a CANDIDATE
-  # oracle. MSL (Metal) and HLSL (DXC container) are environmental and skip GRACEFULLY
-  # on Linux by design -- the sweep never false-fails on a missing optional oracle.
+  # oracle. MSL (Metal) and HLSL (DXC) are environmental and skip GRACEFULLY on Linux by
+  # design -- the sweep never false-fails on a missing optional oracle -- so they get
+  # their own runners in the msl-validity (macOS) and hlsl-validity (Windows) jobs.
   # Guards the e54.4 + S1 fixes (PRs #506-519) against silent regression on arbitrary
   # SPIR-V, the exact plausible-but-wrong class this project exists to prevent.
   # INVALID is 0 as of eee5886; this job turns that into a non-regression gate.
@@ -215,7 +216,8 @@ jobs:
   # per-backend ok / invalid-output / honest-error / CRASH. NON-GATING on invalid-output
   # (expected breadth); GATES on a NEW crash (count > tests/cts/baseline.txt) -- a crash
   # on valid input is a mandate violation. GLSL complete-oracle (glslang) + WGSL candidate
-  # (naga 30.0.0); MSL/HLSL skip gracefully.
+  # (naga 30.0.0). MSL and HLSL skip gracefully here (no Metal, no DXC on this runner);
+  # their rows in the baseline are enforced by the msl-validity / hlsl-validity jobs.
   cts-ingestion:
     name: CTS ingestion credibility (GLSL + WGSL)
     needs: build-test
@@ -241,6 +243,107 @@ jobs:
         run: zig build cli
 
       - name: Run CTS ingestion sweep
+        run: bash tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz
+
+  # MSL leg of the two SPIR-V-input sweeps, on a real Metal compiler. The Linux jobs
+  # above skip MSL and HLSL (no Metal, no DXC), so until this job and hlsl-validity
+  # existed, the two backends wintty actually links -- MSL on macOS, HLSL on Windows --
+  # had NO CI-enforced gate on arbitrary SPIR-V input: a contributor could regress their
+  # crash behaviour and CI stayed green.
+  #
+  # Zig 0.16 (not 0.15.2) for the same reason as build-test's macOS row: 0.15.2 cannot
+  # link libSystem against the SDK the current macOS runner image ships.
+  #
+  # COMPILE-validation only: does the Metal compiler accept what zioshade emitted.
+  # Render-differential (same pixels) needs a GPU and stays a local gate (`just prove`,
+  # `just prove-naga`, tools/*_render_check.sh) -- hosted runners have no usable GPU.
+  msl-validity:
+    name: MSL validity + CTS ingestion (macOS)
+    needs: build-test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: true
+
+      # glslangValidator + spirv-dis/spirv-val (stage detection, input validity) +
+      # spirv-cross (the MSL discriminator: zioshade-invalid is only a REAL bug if
+      # spirv-cross's MSL for the same module compiles). naga is deliberately not
+      # installed -- WGSL is already gated on Linux and building it here would add a
+      # Rust compile to every run for no new signal.
+      - name: Install oracle validators
+        run: brew install glslang spirv-tools spirv-cross
+
+      # Fail HERE, loudly, if the runner has no usable Metal compiler, rather than
+      # letting the sweeps take their graceful-skip path and report a green MSL gate
+      # that never ran. The probe compiles a trivial known-good .metal file.
+      - name: Verify the Metal oracle actually compiles MSL
+        run: bash tools/msl_compile_check.sh --probe
+
+      - name: Build CLI
+        run: zig build cli
+
+      - name: Run arbitrary-SPIR-V validity sweep (MSL leg live)
+        run: bash tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
+
+      - name: Run CTS ingestion sweep (MSL crash gate live)
+        run: bash tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz
+
+  # HLSL leg of the two SPIR-V-input sweeps, on a real DXC. The Windows Vulkan SDK ships
+  # dxc.exe (plus glslangValidator, spirv-dis/val and spirv-cross), so this mirrors how
+  # the conformance job gets spirv-val rather than standing up the dxc-oracle container
+  # that macOS/Linux developers use. Same scope as msl-validity: compile-validation only.
+  hlsl-validity:
+    name: HLSL validity + CTS ingestion (Windows)
+    needs: build-test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          # Same @actions/cache overflow as the Windows conformance leg: with the
+          # Vulkan SDK installed, the post-step cache save falls back to a pure-JS tar
+          # and blows the V8 stack on the .zig-cache tree, failing a job whose sweeps
+          # passed. The cache only ever shortens a cold compile.
+          use-cache: false
+
+      - name: Install Vulkan SDK (ships DXC + glslang + SPIRV-Tools + SPIRV-Cross)
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.341.1
+          cache: true
+
+      # Loud, explicit toolchain check: every one of these is a hard requirement of the
+      # sweeps, and a missing one must read as "this runner lacks the oracle", never as
+      # a shader-correctness failure. `spirv-cross --version` exits non-zero (it prints
+      # usage), so its presence is checked with command -v instead.
+      - name: Verify the HLSL oracle toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          dxc --version
+          glslangValidator --version
+          spirv-dis --version
+          spirv-val --version
+          command -v spirv-cross
+          bash tools/hlsl_compile_check.sh --probe
+
+      - name: Build CLI
+        run: zig build cli
+
+      - name: Run arbitrary-SPIR-V validity sweep (HLSL leg live)
+        shell: bash
+        run: bash tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
+
+      - name: Run CTS ingestion sweep (HLSL crash gate live)
+        shell: bash
         run: bash tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz
 
   fuzz-smoke:

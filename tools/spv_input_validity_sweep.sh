@@ -18,10 +18,15 @@
 #   WGSL  -> naga                             CANDIDATE bug -- naga is an INCOMPLETE
 #                                             oracle and spirv-cross has NO WGSL backend
 #                                             to discriminate against (see caveat below)
-#   MSL   -> Metal (MslCompileCheck), spirv-cross-discriminated:
+#   MSL   -> Metal (tools/msl_compile_check.sh), spirv-cross-discriminated:
 #             zioshade fails Metal -> REAL bug only if spirv-cross's MSL compiles;
 #             spirv-cross can't emit -> INCONCLUSIVE; both fail -> oracle-limit.
-#   HLSL  -> dxc (in the dxc-oracle container), spirv-cross-discriminated.
+#   HLSL  -> DXC (tools/hlsl_compile_check.sh), spirv-cross-discriminated.
+#
+# The MSL and HLSL oracles are resolved by those two wrappers, which pick whichever
+# compiler the machine actually has (xcrun metal / swiftc+Metal device; a native dxc on
+# PATH such as the Windows Vulkan SDK's, or the dxc-oracle container) and prove it works
+# by compiling a trivial shader before the sweep trusts it.
 #
 # A CRASH (Zig panic / unreachable / signal) inside zioshade on valid input is itself a
 # mandate violation and is detected separately (stderr signature + signal exit code) --
@@ -37,8 +42,13 @@
 # Gate signal = INVALID (real bug) or any CRASH. Oracle-limit, inconclusive, and
 # honest-error (zioshade refused to emit) are reported but not fatal: honest-error is
 # the mandate working as designed. Wired into `just ci` and GitHub Actions (Linux:
-# GLSL complete-oracle + WGSL via naga; MSL/HLSL skip gracefully where their compilers
-# are absent -- never a false fail). INVALID=0 as of eee5886 (PRs #506-519).
+# GLSL complete-oracle + WGSL via naga; macOS: MSL; Windows: HLSL via the Vulkan SDK's
+# dxc; every leg skips gracefully where its compiler is absent -- never a false fail).
+# INVALID=0 as of eee5886 (PRs #506-519).
+#
+# COMPILE-validation only. Render-differential (same pixels, not just "it compiles")
+# needs a GPU and stays local (`just prove`, tools/*_render_check.sh); hosted CI runners
+# have none.
 #
 # Usage: tools/spv_input_validity_sweep.sh [dir]
 #   dir  directory of .spv binaries  (default: tests/arbitrary_spirv)
@@ -47,8 +57,6 @@ cd "$(dirname "$0")/.."
 
 DIR=${1:-tests/arbitrary_spirv}
 CLI=${CLI:-zig-out/bin/zioshade}
-CHECK=.zig-cache/mslcheck
-CONTAINER=${CONTAINER:-dxc-oracle}
 
 [ -x "$CLI" ] || { echo "error: build the CLI first (zig build cli)"; exit 2; }
 command -v glslangValidator >/dev/null || { echo "error: glslangValidator not on PATH"; exit 2; }
@@ -56,29 +64,21 @@ command -v spirv-cross >/dev/null || { echo "error: spirv-cross not on PATH (MSL
 command -v spirv-dis >/dev/null || { echo "error: spirv-dis not on PATH (stage detection)"; exit 2; }
 
 HAVE_NAGA=0; command -v naga >/dev/null && HAVE_NAGA=1
-# swiftc ships on Linux too WITHOUT the Metal framework, so `command -v swiftc` alone
-# would false-positive HAVE_METAL there and crash the MslCompileCheck build (no
-# `import Metal`) -- the plausible-but-wrong anti-pattern this gate exists to prevent.
-# Probe the ACTUAL capability by building MslCompileCheck (which imports Metal): success
-# => Metal is present (and $CHECK is ready); failure => MSL skips gracefully. Mirrors the
-# DXC binary-probe below (test the real tool, not a proxy for it).
+# Probe the MSL and HLSL oracles ONCE, by actually COMPILING a trivial known-good shader
+# with each (that is what the wrappers' --probe does), and pin the winner for every
+# per-file call. Probing the real capability rather than the presence of a binary is what
+# keeps this honest: swiftc ships on Linux WITHOUT the Metal framework, and a running
+# container whose dxc is not invokable would otherwise make every HLSL case
+# false-classify as oracle-limit (silent masking -- the failure mode this gate exists to
+# prevent). A failed probe means the leg SKIPS; it never means "passed".
 HAVE_METAL=0
-if command -v swiftc >/dev/null 2>&1; then
-  if [ ! -x "$CHECK" ] || [ tools/MslCompileCheck.swift -nt "$CHECK" ]; then
-    swiftc -O tools/MslCompileCheck.swift -o "$CHECK" >/dev/null 2>&1 && HAVE_METAL=1
-  else
-    HAVE_METAL=1   # cached build from a prior Metal-present run
-  fi
+if MSL_ORACLE=$(bash tools/msl_compile_check.sh --probe 2>/dev/null); then
+  HAVE_METAL=1; export ZIOSHADE_MSL_ORACLE="$MSL_ORACLE"
 fi
-# DXC ships no macOS build; tools/hlsl_validity_sweep.sh runs /opt/dxc/bin/dxc in the
-# `dxc-oracle` container (it needs LD_LIBRARY_PATH=/opt/dxc/lib; it is NOT on PATH).
-# Probe the BINARY itself, not just the container: a running container whose dxc isn't
-# invokable would otherwise make every HLSL case false-classify as oracle-limit (silent
-# masking -- the exact failure mode this gate exists to prevent). NB: on this host `dxc`
-# is also an interactive shell ALIAS for `docker container exec`, which does not expand
-# in non-interactive bash, so `dxc --help` would always silently fail too.
 HAVE_DXC=0
-docker exec -e LD_LIBRARY_PATH=/opt/dxc/lib "$CONTAINER" /opt/dxc/bin/dxc --version >/dev/null 2>&1 && HAVE_DXC=1
+if HLSL_ORACLE=$(bash tools/hlsl_compile_check.sh --probe 2>/dev/null); then
+  HAVE_DXC=1; export ZIOSHADE_HLSL_ORACLE="$HLSL_ORACLE"
+fi
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -165,9 +165,9 @@ for f in "$DIR"/*.spv; do
   # ---- MSL (Metal, spirv-cross-discriminated; runs regardless of stage) ----
   if [ "$HAVE_METAL" = 1 ]; then
     if "$CLI" msl "$f" > "$TMP/o.metal" 2> "$TMP/err.msl"; then
-      if "$CHECK" "$TMP/o.metal" >/dev/null 2>&1; then msl_valid=$((msl_valid+1))
+      if bash tools/msl_compile_check.sh "$TMP/o.metal" >/dev/null 2>&1; then msl_valid=$((msl_valid+1))
       elif ! spirv-cross "$f" --msl > "$TMP/ref.metal" 2>/dev/null; then msl_incon=$((msl_incon+1))   # ref can't emit
-      elif "$CHECK" "$TMP/ref.metal" >/dev/null 2>&1; then msl_invalid=$((msl_invalid+1)); echo "INVALID-MSL $name (spirv-cross ref compiles)"
+      elif bash tools/msl_compile_check.sh "$TMP/ref.metal" >/dev/null 2>&1; then msl_invalid=$((msl_invalid+1)); echo "INVALID-MSL $name (spirv-cross ref compiles)"
       else msl_limit=$((msl_limit+1))   # both fail -> Metal/oracle limit
       fi
     else
@@ -182,14 +182,10 @@ for f in "$DIR"/*.spv; do
   if [ "$HAVE_DXC" = 1 ] && [ -n "$gstage" ]; then
     prof=$(dxc_profile "$gstage")
     if "$CLI" hlsl "$f" > "$TMP/o.hlsl" 2> "$TMP/err.hlsl"; then
-      docker cp "$TMP/o.hlsl" "$CONTAINER:/tmp/zs.hlsl" >/dev/null 2>&1
-      if docker exec -e LD_LIBRARY_PATH=/opt/dxc/lib "$CONTAINER" /opt/dxc/bin/dxc -Wno-ignored-attributes -T "$prof" -E main /tmp/zs.hlsl -Fo /dev/null >/dev/null 2>&1; then hlsl_valid=$((hlsl_valid+1))
+      if bash tools/hlsl_compile_check.sh "$prof" "$TMP/o.hlsl" >/dev/null 2>&1; then hlsl_valid=$((hlsl_valid+1))
       elif ! spirv-cross "$f" --hlsl --shader-model 60 > "$TMP/ref.hlsl" 2>/dev/null; then hlsl_incon=$((hlsl_incon+1))
-      else
-        docker cp "$TMP/ref.hlsl" "$CONTAINER:/tmp/zs_ref.hlsl" >/dev/null 2>&1
-        if docker exec -e LD_LIBRARY_PATH=/opt/dxc/lib "$CONTAINER" /opt/dxc/bin/dxc -Wno-ignored-attributes -T "$prof" -E main /tmp/zs_ref.hlsl -Fo /dev/null >/dev/null 2>&1; then hlsl_invalid=$((hlsl_invalid+1)); echo "INVALID-HLSL $name (spirv-cross ref compiles)"
-        else hlsl_limit=$((hlsl_limit+1)); fi
-      fi
+      elif bash tools/hlsl_compile_check.sh "$prof" "$TMP/ref.hlsl" >/dev/null 2>&1; then hlsl_invalid=$((hlsl_invalid+1)); echo "INVALID-HLSL $name (spirv-cross ref compiles)"
+      else hlsl_limit=$((hlsl_limit+1)); fi
     else
       rc=$?
       if is_crash "$TMP/err.hlsl" "$rc"; then crashes=$((crashes+1)); echo "CRASH-HLSL $name (rc=$rc)"; else hlsl_herr=$((hlsl_herr+1)); fi
@@ -210,14 +206,14 @@ else
   echo "  WGSL: skipped (naga not installed)"
 fi
 if [ "$HAVE_METAL" = 1 ]; then
-  echo "  MSL:  valid=$msl_valid  INVALID=$msl_invalid  oracle-limit=$msl_limit  inconclusive=$msl_incon  honest-error=$msl_herr"
+  echo "  MSL:  valid=$msl_valid  INVALID=$msl_invalid  oracle-limit=$msl_limit  inconclusive=$msl_incon  honest-error=$msl_herr  (oracle: $ZIOSHADE_MSL_ORACLE)"
 else
-  echo "  MSL:  skipped (swiftc/Metal not available)"
+  echo "  MSL:  skipped (no Metal compiler: neither xcrun metal nor swiftc+Metal device)"
 fi
 if [ "$HAVE_DXC" = 1 ]; then
-  echo "  HLSL: valid=$hlsl_valid  INVALID=$hlsl_invalid  oracle-limit=$hlsl_limit  inconclusive=$hlsl_incon  honest-error=$hlsl_herr"
+  echo "  HLSL: valid=$hlsl_valid  INVALID=$hlsl_invalid  oracle-limit=$hlsl_limit  inconclusive=$hlsl_incon  honest-error=$hlsl_herr  (oracle: $ZIOSHADE_HLSL_ORACLE)"
 else
-  echo "  HLSL: skipped (dxc-oracle container not running; HLSL is environmental)"
+  echo "  HLSL: skipped (no DXC: not on PATH and no dxc-oracle container)"
 fi
 [ "$crashes" -gt 0 ] && echo "  CRASH: $crashes  (zioshade crashed on valid input -- mandate violation)"
 if [ "$wgsl_invalid" -gt 0 ]; then

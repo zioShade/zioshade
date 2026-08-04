@@ -18,8 +18,17 @@
 # wrong). Existing baseline crashes are tracked beads bugs; lower the baseline when fixed.
 #
 # GLSL -> glslangValidator (complete oracle). WGSL -> naga (candidate oracle; spirv-cross
-# has no WGSL backend to discriminate). MSL (Metal) and HLSL (DXC container) are
-# environmental and skip gracefully on Linux, exactly like the e54.4.4 sweep.
+# has no WGSL backend to discriminate). MSL -> the Metal compiler and HLSL -> DXC, via
+# tools/msl_compile_check.sh and tools/hlsl_compile_check.sh, which resolve whichever
+# compiler the machine actually has (macOS Metal toolchain / Metal device; a native dxc
+# on PATH, e.g. the Windows Vulkan SDK's, or the dxc-oracle container). Both are
+# environmental and skip gracefully where their compiler is absent (e.g. a Linux runner),
+# exactly like the e54.4.4 sweep -- a missing optional oracle is never a false fail, but
+# it is also never counted as a pass.
+#
+# These are COMPILE-validation legs only. Render-differential (does the compiled shader
+# produce the same pixels) needs a GPU and stays a local-only gate (`just prove`,
+# `just prove-naga`, tools/*_render_check.sh); hosted CI runners have no usable GPU.
 #
 # Usage: tools/cts_ingestion_sweep.sh [corpus-dir]
 #   corpus-dir  directory of .spv binaries (default: tests/cts/graphicsfuzz)
@@ -35,6 +44,17 @@ command -v glslangValidator >/dev/null || { echo "error: glslangValidator not on
 command -v spirv-dis >/dev/null || { echo "error: spirv-dis not on PATH (stage detection)"; exit 2; }
 
 HAVE_NAGA=0; command -v naga >/dev/null && HAVE_NAGA=1
+# Probe the MSL/HLSL oracles ONCE (each probe compiles a trivial known-good shader) and
+# pin the winner for every per-file call, so the sweep can never use an oracle the probe
+# did not validate.
+HAVE_METAL=0
+if MSL_ORACLE=$(bash tools/msl_compile_check.sh --probe 2>/dev/null); then
+  HAVE_METAL=1; export ZIOSHADE_MSL_ORACLE="$MSL_ORACLE"
+fi
+HAVE_DXC=0
+if HLSL_ORACLE=$(bash tools/hlsl_compile_check.sh --probe 2>/dev/null); then
+  HAVE_DXC=1; export ZIOSHADE_HLSL_ORACLE="$HLSL_ORACLE"
+fi
 [ -d "$CORPUS" ] || { echo "error: corpus not found at $CORPUS"; exit 2; }
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -62,8 +82,24 @@ glslang_stage() {
   esac
 }
 
+# DXC target profile for each of the six standard stages (HLSL is stage-profiled, so a
+# file whose execution model is not one of them SKIPS the HLSL leg rather than guessing).
+dxc_profile() {
+  case "$1" in
+    frag) echo "ps_6_0";;
+    vert) echo "vs_6_0";;
+    comp) echo "cs_6_0";;
+    geom) echo "gs_6_0";;
+    tesc) echo "hs_6_0";;
+    tese) echo "ds_6_0";;
+    *)    echo "";;
+  esac
+}
+
 g_ok=0; g_inv=0; g_herr=0; g_crash=0; g_skip=0
 w_ok=0; w_inv=0; w_herr=0; w_crash=0
+m_ok=0; m_inv=0; m_herr=0; m_crash=0
+h_ok=0; h_inv=0; h_herr=0; h_crash=0; h_skip=0
 total=0; val_in=0; val_out=0
 
 shopt -s nullglob
@@ -93,6 +129,31 @@ for f in "$CORPUS"/*.spv; do
       else w_herr=$((w_herr+1)); fi
     fi
   fi
+  # ---- MSL (Metal compiler; runs regardless of stage) ----
+  if [ "$HAVE_METAL" = 1 ]; then
+    if "$CLI" msl "$f" > "$TMP/o.metal" 2> "$TMP/e.msl"; then
+      if bash tools/msl_compile_check.sh "$TMP/o.metal" >/dev/null 2>&1; then m_ok=$((m_ok+1))
+      else m_inv=$((m_inv+1)); fi
+    else
+      rc=$?
+      if is_crash "$TMP/e.msl" "$rc"; then m_crash=$((m_crash+1)); echo "CRASH-MSL $(basename "$f") (rc=$rc)"
+      else m_herr=$((m_herr+1)); fi
+    fi
+  fi
+  # ---- HLSL (DXC; stage-profiled, skips non-standard stages) ----
+  hp=$(dxc_profile "$gs")
+  if [ "$HAVE_DXC" = 1 ] && [ -n "$hp" ]; then
+    if "$CLI" hlsl "$f" > "$TMP/o.hlsl" 2> "$TMP/e.hlsl"; then
+      if bash tools/hlsl_compile_check.sh "$hp" "$TMP/o.hlsl" >/dev/null 2>&1; then h_ok=$((h_ok+1))
+      else h_inv=$((h_inv+1)); fi
+    else
+      rc=$?
+      if is_crash "$TMP/e.hlsl" "$rc"; then h_crash=$((h_crash+1)); echo "CRASH-HLSL $(basename "$f") (rc=$rc)"
+      else h_herr=$((h_herr+1)); fi
+    fi
+  else
+    h_skip=$((h_skip+1))
+  fi
 done
 
 [ "$total" -eq 0 ] && { echo "error: no .spv files in $CORPUS"; exit 2; }
@@ -106,6 +167,16 @@ if [ "$HAVE_NAGA" = 1 ]; then
 else
   echo "  WGSL: skipped (naga not installed)"
 fi
+if [ "$HAVE_METAL" = 1 ]; then
+  echo "  MSL:  ok=$m_ok  invalid-output=$m_inv  honest-error=$m_herr  CRASH=$m_crash  (oracle: $ZIOSHADE_MSL_ORACLE)"
+else
+  echo "  MSL:  skipped (no Metal compiler: neither xcrun metal nor swiftc+Metal device)"
+fi
+if [ "$HAVE_DXC" = 1 ]; then
+  echo "  HLSL: ok=$h_ok  invalid-output=$h_inv  honest-error=$h_herr  CRASH=$h_crash  skip=$h_skip  (oracle: $ZIOSHADE_HLSL_ORACLE)"
+else
+  echo "  HLSL: skipped (no DXC: not on PATH and no dxc-oracle container)"
+fi
 echo "Gate: NEW crash only (count > tests/cts/baseline.txt). invalid-output is non-gating (breadth)."
 
 # Crash-regression gate vs the committed baseline. A backend's current CRASH count may not
@@ -117,6 +188,10 @@ if [ -f "$BASELINE" ]; then
     case "$backend" in
       glsl) cur=$g_crash;;
       wgsl) cur=$w_crash;;
+      # A skipped backend reports 0 crashes and so can never exceed its baseline: an
+      # absent oracle cannot fail the gate, and cannot certify the backend either.
+      msl)  cur=$m_crash;;
+      hlsl) cur=$h_crash;;
       *)    continue;;
     esac
     if [ "${cur:-0}" -gt "${count:-0}" ]; then
