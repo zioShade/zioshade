@@ -61,3 +61,6 @@ zig-pkg/
 
 # Local task ledger (autonomous-panel), not for the repo
 GOAL.md
+
+# Local-only advisor audit notes, not part of the published project.
+plans/
