@@ -27,14 +27,16 @@ changes documentation only), 2026-08-04. The "cross-compile only" section of
 `tools/bench_quick.zig` reporting the mean. Five consecutive runs on an otherwise idle
 machine:
 
-| Direction | Median | Observed range over 5 runs |
+| Direction | Median | Observed range |
 |---|---:|---|
-| SPIR-V to HLSL | 63 µs | 62-63 µs |
-| SPIR-V to GLSL | 62 µs | 61-62 µs |
-| SPIR-V to MSL | 58 µs | 58-59 µs |
+| SPIR-V to HLSL | 62 µs | 62-66 µs |
+| SPIR-V to GLSL | 62 µs | 61-65 µs |
+| SPIR-V to MSL | 58 µs | 57-61 µs |
 
-Raw runs, in order (HLSL / GLSL / MSL, µs): 62/62/59, 63/61/59, 63/62/58, 63/62/58,
-63/62/58.
+Median is over 8 consecutive runs; the range is the union of 14 runs across two
+independent sessions on the same machine, because a single session reports a
+misleadingly tight spread. Run-to-run variance is a few microseconds and is
+sensitive to machine load, so treat the range, not the median, as the real signal.
 
 One machine, absolute numbers only, and the shader being cross-compiled is the small
 `simple_frag` fixture in `tools/bench_quick.zig`, so this shows the order of magnitude of
