@@ -19,10 +19,13 @@
 //
 // Thread safety
 // -------------
-// The allocator and the last-error state are both `threadlocal`. Concurrent
-// calls from different threads each see their own GeneralPurposeAllocator
-// instance and their own error buffer. The error getters
-// (`zioshade_last_error_*`) read state owned by the calling thread.
+// Concurrent calls from different threads are safe. Internal scratch memory
+// comes from a `threadlocal` GeneralPurposeAllocator, but every buffer handed
+// back to the caller comes from a single process-global, thread-safe allocator,
+// so a buffer produced on one thread may be released with the matching
+// `zioshade_free_*` helper from any thread. The last-error state stays
+// `threadlocal`: the error getters (`zioshade_last_error_*`) read state owned
+// by the calling thread.
 
 const std = @import("std");
 const compat = zioshade.compat;
@@ -40,21 +43,45 @@ const ZIOSHADE_ERR_PARSE: c_int = 4;
 const ZIOSHADE_ERR_SEMANTIC: c_int = 5;
 const ZIOSHADE_ERR_CODEGEN: c_int = 6;
 const ZIOSHADE_ERR_INVALID_INPUT: c_int = 7;
+const ZIOSHADE_ERR_UNSUPPORTED: c_int = 8;
 
 // ---------------------------------------------------------------------------
-// Threadlocal allocator
+// Allocators: threadlocal scratch, process-global results
 // ---------------------------------------------------------------------------
 //
-// Each thread that touches the C ABI gets its own GeneralPurposeAllocator.
-// We never reset or deinit it — C callers manage the lifetime of returned
-// buffers via the `zioshade_free_*` helpers, and the GPA itself lives until
-// process exit. This matches what consumers of a typical C library expect.
+// Each thread that touches the C ABI gets its own GeneralPurposeAllocator for
+// internal scratch work (the temporary buffers a single call needs and frees
+// before returning). We never reset or deinit it, and it lives until process
+// exit. This matches what consumers of a typical C library expect.
+//
+// Anything the CALLER owns must NOT come from that threadlocal GPA: a C
+// consumer may compile on a worker thread and release the buffer on the main
+// thread, which would hand a different thread's allocator a pointer it never
+// produced (heap corruption, or an `Invalid free` abort). Caller-owned buffers
+// therefore come from a single process-global GeneralPurposeAllocator, see
+// `result_gpa` below, so `zioshade_free_*` is safe from any thread.
+//
+// That global is guarded by a mutex rather than replaced with a lock-free
+// allocator so it keeps the GeneralPurposeAllocator's free-path validation:
+// double frees and pointers this library never handed out are still detected
+// instead of silently corrupting the heap. A single uncontended lock per
+// returned buffer is negligible next to a shader compile. The mutex also keeps
+// the ABI usable from `-fsingle-threaded` consumers.
+//
+// Rule for future ABI entry points: caller-owned memory goes through
+// `allocBytes`, never through `alloc()`.
 
 threadlocal var gpa: compat.Gpa(.{}) = .{};
 
 fn alloc() std.mem.Allocator {
     return gpa.allocator();
 }
+
+/// Process-global allocator backing every caller-owned buffer. Every use is
+/// serialised by `result_mutex`, so a buffer produced on one thread can be
+/// freed on any other.
+var result_gpa: compat.Gpa(.{}) = .{};
+var result_mutex: compat.Mutex = .{};
 
 // ---------------------------------------------------------------------------
 // Length-prefix allocation
@@ -76,8 +103,9 @@ fn allocBytes(n: usize) ?[*]u8 {
     // (ARM32, MIPS, RISC-V without misaligned-access support) will fault if
     // the SPIR-V word buffer isn't at least 4-byte aligned; requesting u64
     // alignment for the prefix block makes the payload at +8 also 8-aligned.
-    const a = alloc();
-    const buf = a.alignedAlloc(u8, .of(u64), PREFIX + n) catch return null;
+    result_mutex.lock();
+    defer result_mutex.unlock();
+    const buf = result_gpa.allocator().alignedAlloc(u8, .of(u64), PREFIX + n) catch return null;
     std.mem.writeInt(u64, buf[0..8], @as(u64, n), .little);
     return buf.ptr + PREFIX;
 }
@@ -89,7 +117,9 @@ fn freeBytes(p: ?[*]u8) void {
     // `start` came from an 8-aligned alloc above; restore the aligned slice
     // type so `Allocator.free` sees the correct `Slice.alignment`.
     const aligned: [*]align(8) u8 = @ptrCast(@alignCast(start));
-    alloc().free(aligned[0 .. PREFIX + n]);
+    result_mutex.lock();
+    defer result_mutex.unlock();
+    result_gpa.allocator().free(aligned[0 .. PREFIX + n]);
 }
 
 // ---------------------------------------------------------------------------
@@ -159,8 +189,78 @@ fn statusFromErr(err: anyerror) c_int {
         error.ParseFailed => ZIOSHADE_ERR_PARSE,
         error.SemanticFailed => ZIOSHADE_ERR_SEMANTIC,
         error.CodegenFailed, error.EntryPointNotFound => ZIOSHADE_ERR_CODEGEN,
-        // Backend cross-compile errors (CrossCompileUnsupported, etc.) and
-        // anything else we haven't categorised gets bucketed as codegen.
+        // The blob handed to a cross-compile entry point is not a SPIR-V module
+        // at all, or is cut short of its own header. That is bad input, not a
+        // compiler failure, so the caller should fix or reject the blob rather
+        // than retry.
+        //
+        // Deliberately NOT listed here: bare `error.InvalidSpirv`. Several
+        // backend sites return it from internal invariant checks in zioshade's
+        // own control-flow lowering, on modules that are perfectly valid, so
+        // mapping it to INVALID_INPUT would blame the caller for our failure.
+        // It falls through to the codegen bucket below instead. Renaming those
+        // backend sites is a larger change than this contract fix.
+        error.InvalidSpirvMagic,
+        error.InvalidSpirvTruncated,
+        => ZIOSHADE_ERR_INVALID_INPUT,
+        // Honest-error refusals: the input is valid but contains a construct
+        // this backend cannot translate faithfully. Kept as an explicit list so
+        // a new refusal has to be classified deliberately; anything missed
+        // still falls through to the codegen bucket below.
+        error.CrossCompileUnsupported,
+        error.Unsupported,
+        error.UnsupportedArrayStageInput,
+        error.UnsupportedBarycentric,
+        error.UnsupportedBarycentricArrayOverlap,
+        error.UnsupportedBuiltin,
+        error.UnsupportedBuiltinStageInput,
+        error.UnsupportedBuiltinStageOutput,
+        error.UnsupportedCollidingOutputBlock,
+        error.UnsupportedComponentPacking,
+        error.UnsupportedConstantWidth,
+        error.UnsupportedDescriptorArray,
+        error.UnsupportedDoubleType,
+        error.UnsupportedDoWhileCompoundCond,
+        error.UnsupportedEarlyReturn,
+        error.UnsupportedExtensionCapability,
+        error.UnsupportedExtInst,
+        error.UnsupportedFragmentClipCullDistance,
+        error.UnsupportedFragmentDrawId,
+        error.UnsupportedFragmentOutput,
+        error.UnsupportedGlslVersion,
+        error.UnsupportedImageOperands,
+        error.UnsupportedInt,
+        error.UnsupportedIntegerTextureSample,
+        error.UnsupportedLoopInSwitchCase,
+        error.UnsupportedMultisampledSubpassInput,
+        error.UnsupportedMultisampleImage,
+        error.UnsupportedMultiSampleStorageImage,
+        error.UnsupportedNestedLoopInBranch,
+        error.UnsupportedNestedLoopPhi,
+        error.UnsupportedNestedSwitchInSwitchCase,
+        error.UnsupportedOp,
+        error.UnsupportedOpcode,
+        error.UnsupportedPhysicalStorageBuffer,
+        error.UnsupportedPushConstant,
+        error.UnsupportedRecursion,
+        error.UnsupportedRowMajorMatrix,
+        error.UnsupportedRowMajorMatrixStore,
+        error.UnsupportedSamplePosition,
+        error.UnsupportedSamplerArray,
+        error.UnsupportedSeparateSampler,
+        error.UnsupportedSeparateSamplers,
+        error.UnsupportedSpecConstantArraySize,
+        error.UnsupportedStage,
+        error.UnsupportedStructStageInput,
+        error.UnsupportedStructStageOutput,
+        error.UnsupportedSubpassInput,
+        error.UnsupportedTensor,
+        error.UnsupportedUboMemberLayout,
+        error.UnsupportedVaryingInHelper,
+        error.UnsupportedVectorWidth,
+        error.UnsupportedWholeArrayValueLoad,
+        => ZIOSHADE_ERR_UNSUPPORTED,
+        // Anything we haven't categorised gets bucketed as codegen.
         else => ZIOSHADE_ERR_CODEGEN,
     };
 }
@@ -299,8 +399,11 @@ pub export fn zioshade_compile(
 /// Validate inputs common to every cross-compile entry point. Returns null on
 /// success; on failure, writes the error state and returns the status code.
 fn validateSpirvInputs(spirv_words: ?[*]const u32, spirv_word_count: usize) ?c_int {
-    if (spirv_words == null) return setInvalidInputError("spirv_words is NULL");
+    const words = spirv_words orelse return setInvalidInputError("spirv_words is NULL");
     if (spirv_word_count < 5) return setInvalidInputError("spirv_word_count too small (need >= 5 for header)");
+    // Reject a blob that is not a SPIR-V module at the boundary, before any
+    // work or allocation happens.
+    if (words[0] != zioshade.spirv.MAGIC) return setInvalidInputError("spirv_words does not start with the SPIR-V magic word");
     return null;
 }
 
