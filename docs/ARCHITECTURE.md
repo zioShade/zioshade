@@ -155,6 +155,10 @@ on a real Metal GPU:
   compile-checks each emission (glslang/naga/Metal/dxc), spirv-cross-discriminated. The
   GLSL-source sweeps only ever exercised zioshade's own frontend output; this one gates
   robust arbitrary-SPIR-V consumption. Not in `just ci` while known bugs are open.
+- Where those sweeps run in CI: GLSL + WGSL on Linux, MSL on a macOS runner (real Metal
+  compiler), HLSL on a Windows runner (the Vulkan SDK's DXC). Those last two are
+  COMPILE-validation only -- render/exec differentials need a GPU, which hosted runners
+  do not have, so `just prove*` stays a local gate.
 
 Always `PROVE_FULL=1 just prove` before claiming correctness (the default is a 1/25 sample).
 

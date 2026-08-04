@@ -11,5 +11,24 @@
 #          #522). It now refuses loudly instead of stack-exhausting. The deeper loop-
 #          lowering fix (handle the cyclic/self-referential LoopMerge correctly rather than
 #          refusing) is a follow-up; the GLSL invalid-output=54 breadth is separate triage.
+# msl 0 = the FIRST run of this leg (2026-08-04) found graphicsfuzz_022.spv and
+#         graphicsfuzz_082.spv CRASHING (SIGSEGV, rc=139, no diagnostic):
+#         emitWhileLoopMSL and emitBlock recursed into each other on the SAME loop
+#         header (lldb, pre-fix line numbers: alternating spirv_to_msl.zig:7237 / :7442
+#         frames, loop_idx=75, merge 62, cont 60, block 68) until the stack guard page
+#         was hit. Both inputs pass spirv-val, so this was a crash on VALID input. Fixed
+#         by porting the GLSL max_emit_while_depth guard (PR #522) to the MSL backend:
+#         it now refuses loudly (CrossCompileUnsupported), moving both files from CRASH
+#         to honest-error (MSL honest-error 19 -> 21). Lowering these loops correctly
+#         instead of refusing is the same follow-up as glsl/gf032. The MSL
+#         invalid-output=47 breadth is separate triage.
+# hlsl 0 = no crash on this corpus at the row's first measurement (2026-08-04, DXC
+#          1.9.0.5191; ok=20 invalid-output=46 honest-error=22).
+#
+# The msl and hlsl legs only RUN where their compiler exists (macOS Metal, DXC), so on a
+# Linux runner they skip and report 0, which can never exceed the baseline. The macos and
+# windows CI jobs are what actually enforce these two rows.
 glsl 0
 wgsl 0
+msl 0
+hlsl 0
