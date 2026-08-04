@@ -43,6 +43,28 @@ pub const is_0_16 = @hasDecl(std, "Io") and @hasDecl(std.Io, "Dir");
 
 pub const Gpa = std.heap.DebugAllocator;
 
+/// Dual-version mutual exclusion.
+///
+/// 0.15 has `std.Thread.Mutex`. On 0.16 it moved to `std.Io.Mutex`, whose
+/// `lock` takes an `Io` and is cancelable, which callers on a C ABI boundary
+/// have no sensible way to supply. Rather than thread an `Io` through, the
+/// 0.16 arm is a small atomic spinlock with the same `lock`/`unlock` shape.
+/// It is only ever held across a single allocator call, so contention is
+/// bounded by an allocation, not by any user work.
+pub const Mutex = if (is_0_16) struct {
+    locked: std.atomic.Value(bool) = .init(false),
+
+    pub fn lock(m: *@This()) void {
+        while (m.locked.cmpxchgWeak(false, true, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    pub fn unlock(m: *@This()) void {
+        m.locked.store(false, .release);
+    }
+} else std.Thread.Mutex;
+
 // ---- File system types ----
 
 pub const Dir = if (is_0_16) std.Io.Dir else std.fs.Dir;

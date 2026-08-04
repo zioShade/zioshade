@@ -81,7 +81,7 @@ fn alloc() std.mem.Allocator {
 /// serialised by `result_mutex`, so a buffer produced on one thread can be
 /// freed on any other.
 var result_gpa: compat.Gpa(.{}) = .{};
-var result_mutex: std.Thread.Mutex = .{};
+var result_mutex: compat.Mutex = .{};
 
 // ---------------------------------------------------------------------------
 // Length-prefix allocation
