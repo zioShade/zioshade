@@ -7835,6 +7835,7 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
 
     // Phase 4: Rewrite — skip foldable ops, insert new OpConstants in the right place
     var result = std.ArrayList(u32).initCapacity(alloc, words.len + fold_map.count() * 4) catch return words;
+    defer result.deinit(alloc);
     result.appendSliceAssumeCapacity(words[0..5]); // header
 
     var inserted_constants = false;
@@ -7894,10 +7895,7 @@ pub fn constFold(alloc: std.mem.Allocator, words: []const u32) error{OutOfMemory
         }
     }
 
-    const result_owned = result.toOwnedSlice(alloc) catch {
-        result.deinit(alloc);
-        return words;
-    };
+    const result_owned = result.toOwnedSlice(alloc) catch return words;
 
     // Phase 5: Replace operand references for bool_replacements
     // (comparison results folded to existing true_id/false_id)
