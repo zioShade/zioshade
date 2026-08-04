@@ -189,10 +189,17 @@ fn statusFromErr(err: anyerror) c_int {
         error.ParseFailed => ZIOSHADE_ERR_PARSE,
         error.SemanticFailed => ZIOSHADE_ERR_SEMANTIC,
         error.CodegenFailed, error.EntryPointNotFound => ZIOSHADE_ERR_CODEGEN,
-        // The SPIR-V handed to a cross-compile entry point is not a well formed
-        // module. That is bad input, not a compiler failure, so the caller
-        // should fix or reject the blob rather than retry.
-        error.InvalidSpirv,
+        // The blob handed to a cross-compile entry point is not a SPIR-V module
+        // at all, or is cut short of its own header. That is bad input, not a
+        // compiler failure, so the caller should fix or reject the blob rather
+        // than retry.
+        //
+        // Deliberately NOT listed here: bare `error.InvalidSpirv`. Several
+        // backend sites return it from internal invariant checks in zioshade's
+        // own control-flow lowering, on modules that are perfectly valid, so
+        // mapping it to INVALID_INPUT would blame the caller for our failure.
+        // It falls through to the codegen bucket below instead. Renaming those
+        // backend sites is a larger change than this contract fix.
         error.InvalidSpirvMagic,
         error.InvalidSpirvTruncated,
         => ZIOSHADE_ERR_INVALID_INPUT,
