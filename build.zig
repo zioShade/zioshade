@@ -621,6 +621,31 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_minwc_tests.step);
     const minwc_test_step = b.step("test-min-word-count", "Run the minWordCount corpus floor assertion");
     minwc_test_step.dependOn(&run_minwc_tests.step);
+    // #include containment and include-once tests. These drive the preprocessor
+    // directly (it is not part of the public surface), so the internal module is
+    // wired in alongside the public one.
+    const preprocessor_mod = b.createModule(.{
+        .root_source_file = b.path("src/preprocessor.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    preprocessor_mod.addImport("ziotime", ziotime_mod);
+    preprocessor_mod.addImport("ziojson", ziojson_mod);
+    const include_test_mod = b.createModule(.{
+        .root_source_file = b.path("tests/include_tests.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    // Only the internal module: src/preprocessor.zig may belong to one module,
+    // so importing "zioshade" here as well would claim the same file twice.
+    include_test_mod.addImport("preprocessor", preprocessor_mod);
+    const run_include_tests = b.addRunArtifact(b.addTest(.{
+        .name = "include-tests",
+        .root_module = include_test_mod,
+    }));
+    test_step.dependOn(&run_include_tests.step);
+    const include_test_step = b.step("test-include", "Run #include resolution tests");
+    include_test_step.dependOn(&run_include_tests.step);
 
     // Loop-counter (OpPhi) cross-backend correctness tests
     const loopphi_test_mod = b.createModule(.{

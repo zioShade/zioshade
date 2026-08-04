@@ -70,6 +70,31 @@ pub const CompileDetail = enum {
 /// This threadlocal will be removed in a future version.
 pub threadlocal var last_compile_detail: ?CompileDetail = null;
 
+/// Stable backing storage for the refused-`#include` message. The offending
+/// spelling lives in `Preprocessor.unsafe_include_path`, which the preprocessor's
+/// `deinit` frees before any caller can read it, so the message is formatted into
+/// this threadlocal at the point of failure.
+threadlocal var unsafe_include_msg_buf: [512]u8 = undefined;
+
+/// Turn a refused `#include` into a diagnostic that NAMES the offending include.
+/// Without this a refusal reaches the user as a bare `preprocess_failed` with
+/// nothing saying which include was refused or why, which is indistinguishable
+/// from any other preprocessor failure.
+fn noteUnsafeInclude(pp: *const preprocessor.Preprocessor) void {
+    const offender = pp.unsafe_include_path orelse return;
+    // A stale context from an earlier compile on this thread would otherwise win
+    // (the diagnostic builder prefers `last_error_inner`).
+    semantic.clearError();
+    const msg: []const u8 = std.fmt.bufPrint(
+        &unsafe_include_msg_buf,
+        "refused #include \"{s}\": an include must resolve inside the including file's directory or a -I root",
+        .{offender},
+    ) catch "refused #include: the path resolves outside the including file's directory and every -I root";
+    semantic.last_error_ctx = msg;
+    semantic.last_error_line = pp.unsafe_include_line;
+    semantic.last_error_column = pp.unsafe_include_column;
+}
+
 /// Returns the last semantic error context string (e.g., "function call", "variable declaration").
 pub fn lastErrorCtx() ?[]const u8 {
     if (semantic.last_error_ctx.len == 0) return null;
@@ -360,6 +385,7 @@ pub fn compileToSPIRV(
     // `catch tokens` above swallows recoverable preprocessor errors, but a missing
     // include drops real declarations and must not compile at exit 0.
     if (pp.unresolved_include) {
+        noteUnsafeInclude(&pp);
         last_compile_detail = .preprocess_failed;
         return error.PreprocessFailed;
     }
@@ -553,6 +579,7 @@ pub fn compileToSPIRVNoOpt(
     defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
     // An unresolved #include is an honest error, not a silent skip (#170).
     if (pp.unresolved_include) {
+        noteUnsafeInclude(&pp);
         last_compile_detail = .preprocess_failed;
         return error.PreprocessFailed;
     }
@@ -642,6 +669,7 @@ pub fn compileToSPIRVStrict(
     defer if (pp_tokens.ptr != tokens.ptr) alloc.free(pp_tokens);
     // An unresolved #include is an honest error, not a silent skip (#170).
     if (pp.unresolved_include) {
+        noteUnsafeInclude(&pp);
         last_compile_detail = .preprocess_failed;
         return error.PreprocessFailed;
     }
