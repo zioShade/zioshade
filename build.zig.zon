@@ -21,7 +21,9 @@
         "build.zig",
         "build.zig.zon",
         "build_compat.zig",
+        "include",
         "src",
+        "examples",
     },
     .fingerprint = 0x8a823918dadacdf2,
 }
