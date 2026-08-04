@@ -1,6 +1,6 @@
 .{
     .name = .zioshade,
-    .version = "0.4.0",
+    .version = "0.5.0",
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         // Dual-version (0.15.2 + 0.16) monotonic-clock lib. compat.zig's
