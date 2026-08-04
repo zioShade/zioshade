@@ -61,6 +61,15 @@ All notable changes to zioshade are documented here. The format is loosely based
   wired into CI, a CTS ingestion credibility sweep with a vendored GraphicsFuzz corpus, a two-oracle
   WGSL validity sweep (tint plus naga), an independent naga-oracle GLSL faithfulness check, a
   spirv-reduce test-case reduction wrapper, a UB-free integer-corpus contract, and CI fixes.
+- **`#include <file>` now resolves from `-I` roots.** The reassembled `<...>` spelling was freed
+  before it was used, so an angle-bracket include never found its file and the compile failed with
+  `preprocess_failed` even when the file was present under a `-I` root. Angle-bracket includes now
+  behave like quoted ones for `-I` lookup. This is a behavior widening: source that previously
+  errored can now compile.
+- **`#include` is contained to its roots.** An include must resolve inside the including file's
+  directory or a `-I` root; one that escapes (by spelling or through a symlink) is refused, and the
+  diagnostic names the offending include and its `line:col` instead of a bare `preprocess_failed`.
+
 
 ## [0.4.0] - 2026-07-29
 
