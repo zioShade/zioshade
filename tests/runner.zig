@@ -2,20 +2,49 @@ const std = @import("std");
 const zioshade = @import("zioshade");
 const compat = zioshade.compat;
 
-const Result = enum { pass, fail, skip, compile_error };
+/// `infra_error` is distinct from `skip`: it means the harness itself broke
+/// (local I/O, formatting, an unexpected error from the compiler entry point),
+/// not that the fixture was legitimately not applicable. It always forces a
+/// non-zero exit, so a broken harness can never look like a green run.
+const Result = enum { pass, fail, skip, compile_error, infra_error };
 
-const Stats = struct {
+pub const Stats = struct {
     pass: u32 = 0,
     fail: u32 = 0,
     skip: u32 = 0,
     compile_error: u32 = 0,
+    infra_error: u32 = 0, // harness/infrastructure failures (never a legitimate skip)
     strict_fp: u32 = 0, // false-positive candidates (tolerate OK, strict fails)
     xfail: u32 = 0, // expected failures (known-unsupported fixtures)
 
-    fn total(self: Stats) u32 {
-        return self.pass + self.fail + self.skip + self.compile_error + self.xfail;
+    pub fn total(self: Stats) u32 {
+        return self.pass + self.fail + self.skip + self.compile_error + self.infra_error + self.xfail;
     }
 };
+
+/// Pure exit decision for the runner. Non-zero exit when anything really
+/// failed, when the harness broke, when nothing ran at all, or when the pass
+/// count is under the caller-supplied floor.
+pub fn shouldFail(stats: Stats, min_pass: ?u32) bool {
+    if (stats.fail > 0 or stats.compile_error > 0 or stats.infra_error > 0) return true;
+    if (stats.total() == 0) return true;
+    if (min_pass) |floor| {
+        if (stats.pass < floor) return true;
+    }
+    return false;
+}
+
+/// Print the reasons that are not already obvious from the per-fixture log.
+fn reportExitReasons(stats: Stats, min_pass: ?u32) void {
+    if (stats.infra_error > 0)
+        log("FAIL: {d} infrastructure error(s), see INFRA-ERROR lines above\n", .{stats.infra_error});
+    if (stats.total() == 0)
+        log("FAIL: no fixtures ran at all (TOTAL 0), the fixture tree or the walker is broken\n", .{});
+    if (min_pass) |floor| {
+        if (stats.pass < floor)
+            log("FAIL: expected at least {d} passing fixtures, got {d}\n", .{ floor, stats.pass });
+    }
+}
 
 /// Paths of fixtures that are expected to fail after the fail-loud flip.
 /// These are either genuinely unrepresentable constructs (extensions not modeled,
@@ -113,7 +142,9 @@ fn inlineIncludes(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8,
 fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, save_spv: ?[]const u8) !Result {
     const dir = compat.cwd();
 
-    const file = compat.dirOpenFile(io, dir, path, .{}) catch return .skip;
+    // The walker already told us this path exists, so failing to open it is the
+    // harness breaking, not a fixture that does not apply.
+    const file = compat.dirOpenFile(io, dir, path, .{}) catch return .infra_error;
     defer compat.fileClose(io, file);
     const source = try compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024);
     // Ensure null-terminated for downstream use
@@ -184,17 +215,19 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     };
     defer alloc.free(words);
 
-    // Write to temp file or specified path
+    // Write to temp file or specified path. These three are local I/O and
+    // formatting, so a failure is the harness breaking, not a missing tool:
+    // report .infra_error, never .skip.
     const tmp_path: []const u8 = if (save_spv) |sp| sp else blk: {
         var buf: [compat.max_path_bytes]u8 = undefined;
-        break :blk std.fmt.bufPrint(&buf, ".zig-cache/conformance-{}.spv", .{compat.randomInt(u64)}) catch return .skip;
+        break :blk std.fmt.bufPrint(&buf, ".zig-cache/conformance-{}.spv", .{compat.randomInt(u64)}) catch return .infra_error;
     };
-    const tmp_file = compat.dirCreateFile(io, dir, tmp_path, .{}) catch return .skip;
+    const tmp_file = compat.dirCreateFile(io, dir, tmp_path, .{}) catch return .infra_error;
     defer {
         compat.fileClose(io, tmp_file);
         // Keep the file if validation failed, for debugging
     }
-    compat.fileWriteAll(io, tmp_file, std.mem.sliceAsBytes(words)) catch return .skip;
+    compat.fileWriteAll(io, tmp_file, std.mem.sliceAsBytes(words)) catch return .infra_error;
 
     // Run spirv-val. Degrade to .skip (not .fail) when it cannot be spawned at
     // all — e.g. VULKAN_SDK unset and no spirv-val on PATH — so a missing tool
@@ -377,7 +410,10 @@ fn enumerateDir(
 }
 
 fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, stats: *Stats) !void {
-    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
+    // A fixture directory that cannot be opened (renamed, deleted, unreadable)
+    // must be loud. Returning void here used to make a whole missing suite
+    // indistinguishable from a suite in which everything passed.
+    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return error.FixtureDirUnavailable;
     defer compat.dirClose(io, dir);
 
     var walker = try compat.dirWalk(dir, alloc);
@@ -405,7 +441,10 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
         var path_buf: [compat.max_path_bytes]u8 = undefined;
         const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
 
-        const result = testShader(io, alloc, full_path, null) catch .skip;
+        const result = testShader(io, alloc, full_path, null) catch |err| blk: {
+            log("  INFRA-ERROR {s} ({s})\n", .{ full_path, @errorName(err) });
+            break :blk Result.infra_error;
+        };
         const known = isKnownUnsupported(full_path);
         switch (result) {
             .pass => {
@@ -441,6 +480,10 @@ fn runDir(io: compat.IoType, alloc: std.mem.Allocator, dir_path: []const u8, sta
                 stats.skip += 1;
                 log("  SKIP {s}\n", .{full_path});
             },
+            .infra_error => {
+                stats.infra_error += 1;
+                log("  INFRA-ERROR {s} (harness I/O failure)\n", .{full_path});
+            },
         }
     }
 }
@@ -454,7 +497,7 @@ fn strictGateDir(
     dir_path: []const u8,
     stats: *Stats,
 ) !void {
-    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return;
+    const dir = compat.dirOpenDir(io, compat.cwd(), dir_path, .{ .iterate = true }) catch return error.FixtureDirUnavailable;
     defer compat.dirClose(io, dir);
 
     var walker = try compat.dirWalk(dir, alloc);
@@ -478,13 +521,30 @@ fn strictGateDir(
         if (std.mem.indexOf(u8, entry.basename, ".asm.") != null) continue;
         if (std.mem.indexOf(u8, entry.basename, ".nocompat.") != null) continue;
 
+        // The walker already found these files, so a path that will not format,
+        // will not open, or will not read is the harness breaking. Dropping any
+        // of them with a bare `continue` removes the fixture from the totals
+        // with no diagnostic and no exit-code effect, which is exactly the gate
+        // that cannot fail honestly. Route them all through .infra_error.
         var path_buf: [compat.max_path_bytes]u8 = undefined;
-        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch continue;
+        const full_path = std.fmt.bufPrint(&path_buf, "{s}/{s}", .{ dir_path, entry.path }) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s}/{s} ({s})\n", .{ dir_path, entry.path, @errorName(err) });
+            continue;
+        };
 
         // Apply same skip logic as testShader
-        const file = compat.dirOpenFile(io, compat.cwd(), full_path, .{}) catch continue;
+        const file = compat.dirOpenFile(io, compat.cwd(), full_path, .{}) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s} ({s})\n", .{ full_path, @errorName(err) });
+            continue;
+        };
         defer compat.fileClose(io, file);
-        const source = compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024) catch continue;
+        const source = compat.fileReadToEndAlloc(io, file, alloc, 10 * 1024 * 1024) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s} ({s})\n", .{ full_path, @errorName(err) });
+            continue;
+        };
         defer alloc.free(source);
         if (source.len == 0) continue;
         if (std.mem.indexOf(u8, source, "void main") == null and
@@ -493,7 +553,11 @@ fn strictGateDir(
 
         const final_source = inlineIncludes(io, alloc, full_path, source) catch source;
         defer if (final_source.ptr != source.ptr) alloc.free(final_source);
-        const source_z = alloc.dupeZ(u8, final_source) catch continue;
+        const source_z = alloc.dupeZ(u8, final_source) catch |err| {
+            stats.infra_error += 1;
+            log("  INFRA-ERROR {s} ({s})\n", .{ full_path, @errorName(err) });
+            continue;
+        };
         defer alloc.free(source_z);
 
         const stage: zioshade.Stage = blk: {
@@ -558,7 +622,156 @@ fn strictGateDir(
     }
 }
 
-pub fn main() !void {
+/// Everything the command line can select. `min_pass` is the floor flag:
+/// `--min-pass=N` (or `--min-pass N`) fails the run when fewer than N fixtures
+/// passed. CI pins the current count so a silently shrinking corpus (renamed
+/// directory, walker regression) cannot report success.
+pub const Options = struct {
+    save_spv_path: ?[]const u8 = null,
+    target: ?[]const u8 = null,
+    strict_enumerate: bool = false,
+    strict_gate: bool = false,
+    min_pass: ?u32 = null,
+};
+
+pub const ArgError = error{
+    UnknownOption,
+    MissingValue,
+    InvalidNumber,
+    UnexpectedPositional,
+    ConflictingOptions,
+};
+
+/// Filled in on an `ArgError` so the caller can print which argument was bad.
+pub const ArgDiag = struct {
+    arg: []const u8 = "",
+    detail: []const u8 = "",
+};
+
+/// Value of `--name=VALUE`, or null when `arg` is not that flag in `=` form.
+fn inlineValue(arg: []const u8, name: []const u8) ?[]const u8 {
+    if (arg.len <= name.len) return null;
+    if (!std.mem.startsWith(u8, arg, name)) return null;
+    if (arg[name.len] != '=') return null;
+    return arg[name.len + 1 ..];
+}
+
+/// Accept both `--name=VALUE` and `--name VALUE`. Returns null when `argv[i.*]`
+/// is some other flag, and advances `i` past the value in the separated form.
+fn flagValue(
+    argv: []const []const u8,
+    i: *usize,
+    name: []const u8,
+    diag: *ArgDiag,
+) ArgError!?[]const u8 {
+    const arg = argv[i.*];
+    if (inlineValue(arg, name)) |value| {
+        if (value.len == 0) {
+            diag.* = .{ .arg = arg, .detail = "expected a value after '='" };
+            return error.MissingValue;
+        }
+        return value;
+    }
+    if (!std.mem.eql(u8, arg, name)) return null;
+    if (i.* + 1 >= argv.len) {
+        diag.* = .{ .arg = arg, .detail = "expected a value" };
+        return error.MissingValue;
+    }
+    i.* += 1;
+    return argv[i.*];
+}
+
+/// Parse the runner's command line. Pure (no I/O, no process exit) so the
+/// self-tests can pin its behavior.
+///
+/// Every unrecognised argument beginning with '-' is an error. A silently
+/// ignored option is exactly the failure this runner exists to rule out: a
+/// mistyped `--minpass=2108` that fell through to the positional target would
+/// leave the gate with no floor at all and still exit 0.
+pub fn parseArgs(argv: []const []const u8, diag: *ArgDiag) ArgError!Options {
+    var opts = Options{};
+
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
+
+        if (std.mem.eql(u8, arg, "--strict-enumerate")) {
+            opts.strict_enumerate = true;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--strict-gate")) {
+            opts.strict_gate = true;
+            continue;
+        }
+        if (try flagValue(argv, &i, "--save-spv", diag)) |value| {
+            opts.save_spv_path = value;
+            continue;
+        }
+        if (try flagValue(argv, &i, "--min-pass", diag)) |value| {
+            opts.min_pass = std.fmt.parseInt(u32, value, 10) catch {
+                diag.* = .{ .arg = value, .detail = "--min-pass expects a non-negative integer" };
+                return error.InvalidNumber;
+            };
+            continue;
+        }
+        if (arg.len > 0 and arg[0] == '-') {
+            diag.* = .{ .arg = arg, .detail = "unrecognised option" };
+            return error.UnknownOption;
+        }
+        if (opts.target != null) {
+            diag.* = .{ .arg = arg, .detail = "a second positional target was given" };
+            return error.UnexpectedPositional;
+        }
+        opts.target = arg;
+    }
+
+    // The gate modes walk every suite, so they ignore both the positional
+    // target and --save-spv. Accepting them silently would hide a typo in the
+    // one invocation that has to be trustworthy.
+    if (opts.strict_gate or opts.strict_enumerate) {
+        if (opts.target) |target| {
+            diag.* = .{ .arg = target, .detail = "--strict-gate/--strict-enumerate walk every suite and ignore a target" };
+            return error.UnexpectedPositional;
+        }
+        if (opts.save_spv_path) |path| {
+            diag.* = .{ .arg = path, .detail = "--save-spv is ignored by --strict-gate/--strict-enumerate" };
+            return error.UnexpectedPositional;
+        }
+    }
+
+    // The two gate modes are mutually exclusive and the enumerate branch is
+    // tested first, so accepting both would let the report silently win over
+    // the gate the caller asked for.
+    if (opts.strict_gate and opts.strict_enumerate) {
+        diag.* = .{ .arg = "--strict-enumerate", .detail = "--strict-gate and --strict-enumerate are mutually exclusive" };
+        return error.ConflictingOptions;
+    }
+
+    // --strict-enumerate is a report, not a gate: it has no pass count to
+    // compare against a floor. Swallowing the flag here is the same
+    // silent-ignore defect the floor exists to rule out.
+    if (opts.strict_enumerate and opts.min_pass != null) {
+        diag.* = .{ .arg = "--min-pass", .detail = "--strict-enumerate is a report and honors no pass floor" };
+        return error.ConflictingOptions;
+    }
+
+    return opts;
+}
+
+// The entry point differs by Zig version: 0.16 hands command-line args and the
+// environment in through a `std.process.Init.Minimal` parameter, while 0.15
+// exposes them via the global `std.process.argsAlloc`. Select the matching
+// signature at comptime (the same shape as src/cli.zig) so argument parsing
+// works on both. It used to be skipped entirely on 0.16, which made the whole
+// strict gate a silent no-op there: no --strict-gate, no --min-pass, exit 0.
+pub const main = if (compat.is_0_16) main_0_16 else main_0_15;
+
+fn main_0_15() !void {
+    try mainImpl();
+}
+
+fn main_0_16(init: compat.MainInit) !void {
+    compat.setMainInit(init);
     try mainImpl();
 }
 
@@ -573,34 +786,28 @@ fn mainImpl() !void {
     defer main_io.deinit();
     const io = main_io.io();
 
-    // On 0.15: parse args. On 0.16: args not available from void main, use defaults.
     var stats = Stats{};
-    var save_spv_path: ?[]const u8 = null;
-    var target_arg: ?[]const u8 = null;
-    var strict_enumerate = false;
-    var strict_gate = false;
 
-    if (!compat.is_0_16) {
-        const args = try std.process.argsAlloc(alloc);
+    // argsAlloc is version-shimmed in compat, so this runs identically on 0.15
+    // and 0.16. The raw args stay alive for the whole run because target and
+    // save_spv_path point into them.
+    const raw_args = try compat.argsAlloc(alloc);
+    defer compat.argsFree(alloc, raw_args);
+    const argv = try alloc.alloc([]const u8, raw_args.len);
+    defer alloc.free(argv);
+    for (raw_args, 0..) |raw, idx| argv[idx] = raw;
 
-        var i: usize = 1;
-        while (i < args.len) : (i += 1) {
-            if (std.mem.eql(u8, args[i], "--save-spv") and i + 1 < args.len) {
-                save_spv_path = args[i + 1];
-                i += 1;
-            } else if (std.mem.eql(u8, args[i], "--strict-enumerate")) {
-                strict_enumerate = true;
-            } else if (std.mem.eql(u8, args[i], "--strict-gate")) {
-                strict_gate = true;
-            } else {
-                target_arg = args[i];
-            }
-        }
-        // NOTE: args must NOT be freed until mainImpl returns,
-        // because target_arg and save_spv_path point into the args array.
-        // We intentionally leak args to avoid use-after-free.
-        // The GPA allocator will reclaim all memory on deinit.
-    }
+    var diag = ArgDiag{};
+    const opts = parseArgs(argv, &diag) catch |err| {
+        log("ERROR: {s}: '{s}' ({s})\n", .{ @errorName(err), diag.arg, diag.detail });
+        log("usage: conformance-runner [--strict-gate|--strict-enumerate] [--min-pass=N] [--save-spv PATH] [TARGET]\n", .{});
+        std.process.exit(2);
+    };
+    const save_spv_path = opts.save_spv_path;
+    const target_arg = opts.target;
+    const strict_enumerate = opts.strict_enumerate;
+    const strict_gate = opts.strict_gate;
+    const min_pass = opts.min_pass;
 
     const all_suites = .{
         .{ "glslang-430", "tests/glslang-430" },
@@ -642,16 +849,22 @@ fn mainImpl() !void {
         log("\n=== STRICT-GATE: curated-valid fixtures must compile (no spirv-val) ===\n", .{});
         inline for (all_suites) |suite| {
             log("\n--- {s} ---\n", .{suite.@"0"});
-            strictGateDir(io, alloc, suite.@"1", &stats) catch {};
+            strictGateDir(io, alloc, suite.@"1", &stats) catch |err| {
+                stats.infra_error += 1;
+                log("  INFRA-ERROR suite {s} at {s} ({s})\n", .{ suite.@"0", suite.@"1", @errorName(err) });
+            };
         }
         log("\n=== STRICT-GATE SUMMARY ===\n", .{});
         log("PASS:  {d}\n", .{stats.pass});
         log("XFAIL: {d}\n", .{stats.xfail});
         log("FAIL (FP-regression): {d}\n", .{stats.fail});
+        log("INFRA_ERROR: {d}\n", .{stats.infra_error});
+        log("TOTAL: {d}\n", .{stats.total()});
         if (stats.fail > 0) {
-            log("ERROR: {} curated-valid fixture(s) were rejected — false-positive regressions!\n", .{stats.fail});
-            std.process.exit(1);
+            log("ERROR: {} curated-valid fixture(s) were rejected, false-positive regressions!\n", .{stats.fail});
         }
+        reportExitReasons(stats, min_pass);
+        if (shouldFail(stats, min_pass)) std.process.exit(1);
         return;
     }
 
@@ -660,7 +873,10 @@ fn mainImpl() !void {
         inline for (all_suites) |suite| {
             if (std.mem.eql(u8, target, suite.@"0")) {
                 log("\n=== {s} ===\n", .{suite.@"0"});
-                runDir(io, alloc, suite.@"1", &stats) catch {};
+                runDir(io, alloc, suite.@"1", &stats) catch |err| {
+                    stats.infra_error += 1;
+                    log("  INFRA-ERROR suite {s} at {s} ({s})\n", .{ suite.@"0", suite.@"1", @errorName(err) });
+                };
                 matched_suite = true;
                 break;
             }
@@ -675,7 +891,10 @@ fn mainImpl() !void {
                 std.mem.eql(u8, ext, ".rmiss") or std.mem.eql(u8, ext, ".rahit") or
                 std.mem.eql(u8, ext, ".rint") or std.mem.eql(u8, ext, ".rcall"))
             {
-                const result = testShader(io, alloc, target, save_spv_path) catch .skip;
+                const result = testShader(io, alloc, target, save_spv_path) catch |err| blk: {
+                    log("  INFRA-ERROR {s} ({s})\n", .{ target, @errorName(err) });
+                    break :blk Result.infra_error;
+                };
                 switch (result) {
                     .pass => {
                         stats.pass += 1;
@@ -692,16 +911,26 @@ fn mainImpl() !void {
                     .skip => {
                         stats.skip += 1;
                     },
+                    .infra_error => {
+                        stats.infra_error += 1;
+                        log("  INFRA-ERROR {s} (harness I/O failure)\n", .{target});
+                    },
                 }
             } else {
                 log("\n=== {s} ===\n", .{target});
-                runDir(io, alloc, target, &stats) catch {};
+                runDir(io, alloc, target, &stats) catch |err| {
+                    stats.infra_error += 1;
+                    log("  INFRA-ERROR {s} ({s})\n", .{ target, @errorName(err) });
+                };
             }
         }
     } else {
         inline for (all_suites) |suite| {
             log("\n=== {s} ===\n", .{suite.@"0"});
-            runDir(io, alloc, suite.@"1", &stats) catch {};
+            runDir(io, alloc, suite.@"1", &stats) catch |err| {
+                stats.infra_error += 1;
+                log("  INFRA-ERROR suite {s} at {s} ({s})\n", .{ suite.@"0", suite.@"1", @errorName(err) });
+            };
         }
     }
 
@@ -711,9 +940,11 @@ fn mainImpl() !void {
     log("FAIL (compile): {d}\n", .{stats.compile_error});
     log("SKIP:           {d}\n", .{stats.skip});
     log("XFAIL:          {d}\n", .{stats.xfail});
+    log("INFRA_ERROR:    {d}\n", .{stats.infra_error});
     log("TOTAL:          {d}\n", .{stats.total()});
 
-    if (stats.fail > 0 or stats.compile_error > 0) {
+    reportExitReasons(stats, min_pass);
+    if (shouldFail(stats, min_pass)) {
         std.process.exit(1);
     }
 }

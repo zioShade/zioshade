@@ -29,8 +29,12 @@ for a silent-wrong is a regression even if a test appears to pass.
 
 ## Build, test, prove
 
-- `just ci` is exactly what GitHub CI runs (`test test-hlsl validate-dxc strict-gate
-  oracle-diff`). Use it, not a bare `zig build test`.
+- `just ci` mirrors the GitHub workflow's job set (`fmt-check build cli examples test
+  test-hlsl test-conformance strict-gate spv-validity cts-ingestion fuzz-smoke c-abi`),
+  run locally on this OS with Zig 0.15.2 only; CI still runs it across 3 OSes and both
+  0.15.2 and 0.16. `just ci-full` adds the gates the hosted runners cannot run
+  (`validate-dxc validate-metal oracle-diff`). Use one of them, not a bare
+  `zig build test`.
 - `just test` -- full suite. `just strict-gate` -- the conformance gate.
 - `just prove` -- the differential proof (renders zioshade output vs an independent
   glslang to SPIRV-Cross reference on a real GPU and diffs, across fragment, vertex,
