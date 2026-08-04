@@ -1945,6 +1945,9 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
     const bound = if (words.len > 3) words[3] else 0;
     if (bound > words.len) return error.InvalidSpirv;
     const id_defs = try alloc.alloc(?usize, bound);
+    // The parse loop below can reject a malformed instruction; without this the
+    // id table leaks on every rejected module.
+    errdefer alloc.free(id_defs);
     @memset(id_defs, null);
     var i: usize = 5;
     while (i < words.len) {
@@ -1954,6 +1957,12 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
         if (wc == 0) return error.InvalidSpirv;
         if (i + wc > words.len) return error.InvalidSpirvTruncated;
         const op: spirv.Op = @enumFromInt(oc);
+        // Reject an instruction shorter than its opcode's spec minimum, so the
+        // emit arms below never index past the end of `inst.words`. (Shared
+        // table, see common.minWordCount.)
+        if (common.minWordCount(op)) |min| {
+            if (wc < min) return error.InvalidSpirvTruncated;
+        }
         const iw = words[i .. i + wc];
         if (resultIdFromOp(op, iw)) |id| {
             if (id < bound) id_defs[id] = instructions.items.len;

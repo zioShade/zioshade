@@ -400,6 +400,17 @@ fmt-check:
 fmt:
     {{zig}} fmt src
 
+# fail if the generated minWordCount table in src/spirv_cross_common.zig has
+# drifted from the vendored Khronos grammar (tools/spirv.core.grammar.json).
+# A hand edit inside the BEGIN/END GENERATED block is a silent-rejection hazard,
+# so it is a gate, not a convention. Offline: no network needed.
+check-min-word-count:
+    python3 tools/gen_min_word_count.py --check src/spirv_cross_common.zig
+
+# ── full CI pipeline ─────────────────────────────────────────────────
+
+# run everything CI would run (incl. backend oracle differentials)
+
 # ── full CI pipeline ─────────────────────────────────────────────────
 
 # C ABI smoke, exactly what the c-abi CI job runs
@@ -409,7 +420,7 @@ c-abi:
     {{zig}} build run-c-example
 
 # One dependency per workflow step:
-#   fmt-check                              -> job `fmt`
+#   fmt-check, check-min-word-count        -> job `fmt`
 #   build, cli, examples, test, test-hlsl  -> job `build-test`
 #   test-conformance, strict-gate          -> job `conformance`
 #   spv-validity                           -> job `spv-validity`
@@ -423,7 +434,7 @@ c-abi:
 # the hosted runners cannot run them.
 #
 # the workflow's job set, run locally on this OS with Zig 0.15.2
-ci: fmt-check build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion fuzz-smoke c-abi
+ci: fmt-check check-min-word-count build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion fuzz-smoke c-abi
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED (this OS, Zig 0.15.2 only)"

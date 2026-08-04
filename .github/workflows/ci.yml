@@ -31,6 +31,15 @@ jobs:
       - name: zig fmt --check
         run: zig fmt --check src
 
+      # The minWordCount table in src/spirv_cross_common.zig is generated from
+      # the vendored Khronos grammar. A hand edit inside the BEGIN/END GENERATED
+      # block can only make the table wrong, and an over-strict entry silently
+      # rejects spec-valid SPIR-V, so drift is a gate. Reads the vendored
+      # tools/spirv.core.grammar.json, no network. python3 is preinstalled on
+      # ubuntu-latest.
+      - name: minWordCount table is not hand-edited
+        run: python3 tools/gen_min_word_count.py --check src/spirv_cross_common.zig
+
   build-test:
     name: build & test (${{ matrix.os }}, zig ${{ matrix.zig }})
     strategy:

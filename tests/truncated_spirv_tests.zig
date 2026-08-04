@@ -1,0 +1,62 @@
+//! Negative fixtures for the per-opcode minimum word count check.
+//!
+//! Each `truncated_*.spv` is a real GraphicsFuzz module with exactly one
+//! instruction rewritten to be one word shorter than the SPIR-V spec minimum
+//! for its opcode (the dropped operand words are deleted so the instruction
+//! stream stays aligned). Before `common.minWordCount` existed, every one of
+//! these crashed the backends with an out-of-bounds index panic, because the
+//! emit arms read `inst.words[2]`, `inst.words[3]` and `inst.words[4..]`
+//! without a length guard.
+//!
+//! Regenerate the fixtures with `python3 tools/gen_truncated_fixtures.py`.
+
+const std = @import("std");
+const zioshade = @import("zioshade");
+
+const alloc = std.testing.allocator;
+
+const truncated_accesschain = @embedFile("truncated_accesschain_spv");
+const truncated_vectorshuffle = @embedFile("truncated_vectorshuffle_spv");
+const truncated_functioncall = @embedFile("truncated_functioncall_spv");
+
+/// Untruncated source module of `truncated_vectorshuffle.spv`. Positive control:
+/// the check must reject the truncation, not the module.
+const valid_module = @embedFile("valid_module_spv");
+
+fn toWords(bytes: []const u8) ![]u32 {
+    const words = try alloc.alloc(u32, bytes.len / 4);
+    @memcpy(std.mem.sliceAsBytes(words), bytes[0 .. words.len * 4]);
+    return words;
+}
+
+/// Every backend must reject the module with a loud error rather than panic.
+fn expectTruncatedOnAllBackends(bytes: []const u8) !void {
+    const words = try toWords(bytes);
+    defer alloc.free(words);
+
+    try std.testing.expectError(error.InvalidSpirvTruncated, zioshade.spirvToGLSL(alloc, words, .{}));
+    try std.testing.expectError(error.InvalidSpirvTruncated, zioshade.spirvToHLSL(alloc, words, .{}));
+    try std.testing.expectError(error.InvalidSpirvTruncated, zioshade.spirvToMSL(alloc, words, .{}));
+    try std.testing.expectError(error.InvalidSpirvTruncated, zioshade.spirvToWGSL(alloc, words, .{}));
+}
+
+test "truncated OpAccessChain is rejected by every backend" {
+    try expectTruncatedOnAllBackends(truncated_accesschain);
+}
+
+test "truncated OpVectorShuffle is rejected by every backend" {
+    try expectTruncatedOnAllBackends(truncated_vectorshuffle);
+}
+
+test "truncated OpFunctionCall is rejected by every backend" {
+    try expectTruncatedOnAllBackends(truncated_functioncall);
+}
+
+test "positive control: the untruncated module still cross-compiles" {
+    const words = try toWords(valid_module);
+    defer alloc.free(words);
+
+    const out = try zioshade.spirvToGLSL(alloc, words, .{});
+    defer alloc.free(out);
+    try std.testing.expect(out.len > 0);
+}
