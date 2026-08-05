@@ -1,0 +1,12 @@
+version = 1
+
+[people]
+alex = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGHeRY15lfmV/maTaEyMmxh0K6jk+3os9XNfRXxA90t/ alex@deblasis.net"
+
+[admins]
+keys = ["alex"]
+
+[scope.plans]
+paths = ["plans/**"]
+readers = ["alex"]
+keys = ["ee87e2729342a893ea50e37adc5eb598f19b8a791030faad5882ef0bfa149867"]

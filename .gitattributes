@@ -1,0 +1,2 @@
+.gitsip/** -filter -merge -diff
+plans/** filter=gitsip merge=gitsip diff=gitsip -text export-ignore
