@@ -62,5 +62,5 @@ zig-pkg/
 # Local task ledger (autonomous-panel), not for the repo
 GOAL.md
 
-# Local-only advisor audit notes, not part of the published project.
-plans/
+# Advisor audit notes. Tracked, but stored encrypted: see .gitsip/policy.toml.
+# Anyone can clone them; only holders of a wrapped key can read them.
