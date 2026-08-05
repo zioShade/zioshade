@@ -10,3 +10,8 @@ keys = ["alex"]
 paths = ["plans/**"]
 readers = ["alex"]
 keys = ["ee87e2729342a893ea50e37adc5eb598f19b8a791030faad5882ef0bfa149867"]
+
+[scope.private]
+paths = ["GOAL.md", "private/**"]
+readers = ["alex"]
+keys = ["37e39f9d302b34ae901990ca9cbc2afdf976826b68f7dc725bdfcc1c083171f2"]
