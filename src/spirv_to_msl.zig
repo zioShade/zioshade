@@ -3998,7 +3998,21 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                     continue;
                 }
                 trackBinding(&max_buf_binding, binding);
-                cb.append(alloc, .{ .name = names.get(rid) orelse "Globals", .type_id = pt, .binding = binding, .descriptor_set = set }) catch {};
+                // A block instance with no name (`uniform buf0 { ... };` with the instance
+                // omitted) is OpName "" -- PRESENT but empty, so `orelse` never fires and
+                // cb.name stays empty. That empty name is used for the struct declaration
+                // (`struct \n{`, which Metal rejects as an anonymous struct), the parameter
+                // type, and every body reference. Synthesize a stable name from the struct
+                // type, else the binding, and publish it back into `names` so the
+                // declaration and all references agree. Same root fix as GLSL #523; the
+                // HLSL twin covers only SSBOs (#474), not UBOs.
+                const cb_nm: []const u8 = blk: {
+                    if (names.get(rid)) |n| if (n.len > 0) break :blk n;
+                    if (names.get(pt)) |tn| if (tn.len > 0) break :blk tn;
+                    break :blk std.fmt.allocPrint(alloc, "_ub{d}", .{binding}) catch "_ub";
+                };
+                _ = names.put(rid, cb_nm) catch {};
+                cb.append(alloc, .{ .name = cb_nm, .type_id = pt, .binding = binding, .descriptor_set = set }) catch {};
             },
             .StorageBuffer => {
                 // SSBO (SPIR-V 1.3+ storage-class form): shares the MSL buffer

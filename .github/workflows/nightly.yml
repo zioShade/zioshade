@@ -1,0 +1,46 @@
+name: nightly
+
+# The per-PR `ci` workflow runs `zig build fuzz -- --count 5000`, which is 0.5% of the
+# depth this project advertises. Running the full million on every PR would add ~9
+# minutes to every push for a signal that is statistical rather than per-change, so it
+# lives here instead, once a day against main.
+#
+# Deliberately NOT here: the render-differential proof (`just prove`, `just prove-naga`,
+# tools/*_render_check.sh). It needs a real GPU and hosted runners do not have one, so it
+# stays a local gate. A nightly that silently skipped it would be worse than not having
+# one, because the summary would imply coverage that never ran.
+on:
+  schedule:
+    # 03:17 UTC. Deliberately off the hour: GitHub queues scheduled jobs at :00 heavily
+    # enough that they can be delayed or dropped entirely under load.
+    - cron: "17 3 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz-million:
+    name: structured fuzz (1M iterations)
+    runs-on: ubuntu-latest
+    # ~9 minutes locally at ReleaseFast; the ceiling is generous so a slow runner
+    # reports a real failure rather than a timeout that reads like one.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          use-cache: true
+
+      # Fixed seed: a nightly that picks a fresh seed every run cannot tell a new
+      # regression from a case yesterday's seed simply never generated. Bump the seed
+      # deliberately when you want new ground, so the change is in the diff.
+      - name: Run the full structured GLSL fuzz
+        run: zig build fuzz -Doptimize=ReleaseFast -- --count 1000000 --seed 1

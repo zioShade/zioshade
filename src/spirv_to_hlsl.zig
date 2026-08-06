@@ -2455,6 +2455,25 @@ fn collectResources(
                 // gl_PerVertex). result_id is unique; spirv-cross uses the same `_<id>`.
                 if (is_ssbo and raw_name.len == 0) {
                     raw_name = std.fmt.allocPrint(alloc, "_ssbo_{d}", .{result_id}) catch "_ssbo";
+                } else if (raw_name.len == 0) {
+                    // The same unnamed-instance case for a plain UBO, which the SSBO-only
+                    // branch above left behind: `uniform buf0 { ... };` with no instance
+                    // name is OpName "", so raw_name is empty and the declaration comes out
+                    // as `cbuffer  : register(b0)` -- DXC rejects it with "expected
+                    // identifier". Prefer the struct type's name, as GLSL #523 does, and
+                    // fall back to the binding so two unnamed blocks cannot collide.
+                    if (names.get(pointee_type)) |tn| {
+                        if (tn.len > 0) raw_name = tn;
+                    }
+                    if (raw_name.len == 0) {
+                        raw_name = std.fmt.allocPrint(alloc, "_ub{d}", .{binding}) catch "_ub";
+                    }
+                    // Publish it back so the DECLARATION and the BODY agree. emitStructMembers
+                    // prefixes members with the cbuffer name, while buildAccessExpr derives its
+                    // prefix from `names`, so renaming only one of the two swaps "cbuffer has no
+                    // identifier" for "use of undeclared identifier". Same publish-back step as
+                    // GLSL #523.
+                    _ = names.put(result_id, raw_name) catch {};
                 }
                 // A loose (non-block) uniform points at a scalar/vector/matrix/array
                 // rather than a struct. Gather it into the synthesized default cbuffer
