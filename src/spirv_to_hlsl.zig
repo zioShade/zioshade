@@ -1588,6 +1588,31 @@ pub fn spirvToHLSL(
     for (cbuffers.items) |cb| {
         hlslEmitStructForwardDecls(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
     }
+    // A Private global of user-struct type (`QuicksortObject obj;` in the source) is
+    // emitted by emitFunction as `static QuicksortObject obj;`, but nothing declared
+    // the TYPE: the loop above only walks cbuffer types, and the per-vertex loop in
+    // emitFunction only walks per-vertex input blocks. DXC then reports "unknown type
+    // name". Declare them here, where the module-level dedup sets live, so a type
+    // already emitted for a cbuffer is not declared twice, and so the declaration
+    // precedes both the static global and every function that uses it.
+    for (module.instructions) |inst| {
+        if (inst.op != .Variable or inst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Private) continue;
+        // Unwrap array-of-struct: the element type is what needs declaring. Track the
+        // id alongside the instruction, since Instruction carries only op and words.
+        var elem_id = resolvePointeeType(&module, inst.words[2]) orelse continue;
+        while (true) {
+            const elem = getDef(&module, elem_id) orelse break;
+            if ((elem.op == .TypeArray or elem.op == .TypeRuntimeArray) and elem.words.len > 2) {
+                elem_id = elem.words[2];
+                continue;
+            }
+            if (elem.op == .TypeStruct) {
+                hlslEmitOneStructForwardDecl(&module, &names, elem_id, w, aa, &emitted_structs, &emitted_names2) catch {};
+            }
+            break;
+        }
+    }
     if (emitted_structs.count() > 0) try w.writeAll("\n");
 
     // Emit cbuffers
@@ -2000,9 +2025,11 @@ pub fn spirvToHLSL(
     try w.writeAll("\n");
 
     // Emit non-entry functions first (user-defined functions)
+    var emitted_globals = false;
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue; // emit entry last
-        try emitFunction(&module, &names, &decorations, fid, w, aa, false, &out_param_info, options.shader_model);
+        try emitFunction(&module, &names, &decorations, fid, w, aa, false, &out_param_info, options.shader_model, !emitted_globals);
+        emitted_globals = true;
     }
 
     // Detect MRT (multiple render targets) for fragment entry
@@ -2059,7 +2086,7 @@ pub fn spirvToHLSL(
     }
 
     // Emit entry function last
-    try emitFunction(&module, &names, &decorations, entry_id, w, aa, true, &out_param_info, options.shader_model);
+    try emitFunction(&module, &names, &decorations, entry_id, w, aa, true, &out_param_info, options.shader_model, !emitted_globals);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -3157,6 +3184,11 @@ fn emitFunction(
     is_entry: bool,
     out_param_info: *const std.AutoHashMap(u32, std.ArrayList(usize)),
     shader_model: u32,
+    // Private/Workgroup globals are MODULE scope, but this function emits them just
+    // above its own signature. With more than one function that meant one `static`
+    // declaration per function and DXC reporting "redefinition". Only the first
+    // function emitted passes true.
+    emit_globals: bool,
 ) !void {
     const func_inst = getDef(module, func_id) orelse return;
     if (func_inst.op != .Function or func_inst.words.len < 5) return;
@@ -3792,6 +3824,7 @@ fn emitFunction(
     }
     // Emit Private storage class variables as static globals
     for (module.instructions) |inst| {
+        if (!emit_globals) break;
         if (inst.op == .Variable and inst.words.len >= 4) {
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
             if (sc == .Private) {
