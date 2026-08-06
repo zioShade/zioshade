@@ -1729,7 +1729,7 @@ threadlocal var g_frag_coord_ty: ?[]const u8 = null;
 
 /// A mutated Private global promoted to a local in the entry impl and threaded into
 /// every helper as `thread T&`.
-const PrivGlobal = struct { name: []const u8, ty: []const u8 };
+const PrivGlobal = struct { var_id: u32, name: []const u8, ty: []const u8, init_id: ?u32 };
 
 /// Mutated Private globals threaded through helper signatures. Fragment only: this
 /// must match, exactly, the set the fragment entry path DECLARES as locals, or a
@@ -3421,7 +3421,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
     for (module.instructions) |inst| {
         if (inst.op == .Variable and inst.words.len >= 4) {
             const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
-            if (sc == .Function) {
+            // Private as well as Function: a Private global of user-struct type is
+            // promoted to an entry-impl local and threaded into helpers, so its TYPE
+            // needs declaring at module scope exactly like a Function local's does.
+            // Scanning only Function storage left `QuicksortObject obj;` referring to
+            // a type that was never declared.
+            if (sc == .Function or sc == .Private) {
                 const ptr_type = inst.words[1];
                 const ptr_inst = getDef(&module, ptr_type) orelse continue;
                 if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
@@ -5435,48 +5440,21 @@ fn emitFunction(
         // The body's bare references then resolve to it. Only MUTATED scalars:
         // read-only const globals are already module-promoted/aliased (re-declaring
         // would be a redefinition), and arrays are #173-honest-errored.
-        for (m.instructions) |ginst| {
-            if (ginst.op != .Variable or ginst.words.len < 4) continue;
-            if (@as(spirv.StorageClass, @enumFromInt(ginst.words[3])) != .Private) continue;
-            const gptr = getDef(m, ginst.words[1]) orelse continue;
-            if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
-            const gpt = gptr.words[3];
-            const gpti = getDef(m, gpt) orelse continue;
-            // Vectors and matrices belong here for the same reason scalars do: they are
-            // plain value types in the thread address space, `float2x2 m;` is a legal
-            // MSL local, and mslType already spells them. Restricting this to scalars
-            // meant a mutated `mat2`/`vec3` Private global was never declared at all and
-            // every body reference to it was an undeclared identifier.
-            //
-            // Structs stay out: declaring one needs its TYPE emitted at module scope,
-            // which only the UBO path does today. Arrays stay out and keep the #173
-            // honest error. Both are refusals or existing gaps rather than silent-wrong.
-            switch (gpti.op) {
-                .TypeFloat, .TypeInt, .TypeBool, .TypeVector, .TypeMatrix => {},
-                else => continue,
-            }
-            const gvar = ginst.words[2];
-            var mutated = false;
-            for (m.instructions) |u| {
-                // OpStore has no result type/id: word layout is [op, pointer, object],
-                // so the pointer is words[1] (unlike Load/AccessChain where it's words[3]).
-                if (u.op == .Store and u.words.len >= 3 and pointerRootsAt(m, u.words[1], gvar)) {
-                    mutated = true;
-                    break;
-                }
-            }
-            if (!mutated) continue;
-            const gname = names.get(gvar) orelse continue;
-            const gtn = mslType(m, gpt, names, alloc) catch continue;
-            if (ginst.words.len >= 5) {
+        // Same set the helper signatures thread (g_priv_globals), from the SAME
+        // predicate: a global declared here but absent from the signature list, or the
+        // reverse, means a helper takes a parameter its caller cannot supply.
+        var decl_privs = std.ArrayList(PrivGlobal).initCapacity(alloc, 0) catch return error.OutOfMemory;
+        collectThreadedPrivGlobals(m, names, &decl_privs, alloc);
+        for (decl_privs.items) |pg| {
+            if (pg.init_id) |iid| {
                 // Initializer operand present (spirv-cross-emitted SPIR-V): init here.
-                const glit = mslConstLiteral(m, ginst.words[4], names, alloc) catch continue;
-                try w.print("    {s} {s} = {s};\n", .{ gtn, gname, glit });
+                const glit = mslConstLiteral(m, iid, names, alloc) catch continue;
+                try w.print("    {s} {s} = {s};\n", .{ pg.ty, pg.name, glit });
             } else {
                 // No initializer operand (zioshade/glslang emit OpStore-after-decl): the
                 // body's store assigns before any read; declare bare (matches SPIR-V
                 // Private semantics -- undefined until stored).
-                try w.print("    {s} {s};\n", .{ gtn, gname });
+                try w.print("    {s} {s};\n", .{ pg.ty, pg.name });
             }
         }
         try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures, storage_buffers, arraylen_buf_index);
@@ -6215,6 +6193,11 @@ fn collectThreadedPrivGlobals(m: *const ParsedModule, names: *std.AutoHashMap(u3
         const gpti = getDef(m, gpt) orelse continue;
         switch (gpti.op) {
             .TypeFloat, .TypeInt, .TypeBool, .TypeVector, .TypeMatrix => {},
+            // Structs are admitted now that the module-scope struct scan covers Private
+            // storage. Arrays stay out and keep the #173 honest error: an array needs
+            // spvUnsafeArray wrapping to be passed by reference, which is a separate
+            // change, and an honest refusal beats output that does not compile.
+            .TypeStruct => {},
             else => continue,
         }
         const gvar = ginst.words[2];
@@ -6228,7 +6211,12 @@ fn collectThreadedPrivGlobals(m: *const ParsedModule, names: *std.AutoHashMap(u3
         if (!mutated) continue;
         const gname = names.get(gvar) orelse continue;
         const gtn = mslType(m, gpt, names, alloc) catch continue;
-        out.append(alloc, .{ .name = gname, .ty = gtn }) catch {};
+        out.append(alloc, .{
+            .var_id = gvar,
+            .name = gname,
+            .ty = gtn,
+            .init_id = if (ginst.words.len >= 5) ginst.words[4] else null,
+        }) catch {};
     }
 }
 
