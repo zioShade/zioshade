@@ -1727,6 +1727,16 @@ threadlocal var g_frag_outputs: ?[]const FragOutput = null;
 // Set in spirvToMSL (the rename must precede helper emission); null when no FragCoord.
 threadlocal var g_frag_coord_ty: ?[]const u8 = null;
 
+/// A mutated Private global promoted to a local in the entry impl and threaded into
+/// every helper as `thread T&`.
+const PrivGlobal = struct { name: []const u8, ty: []const u8 };
+
+/// Mutated Private globals threaded through helper signatures. Fragment only: this
+/// must match, exactly, the set the fragment entry path DECLARES as locals, or a
+/// helper takes a parameter its caller cannot supply. `collectThreadedPrivGlobals` is
+/// the single predicate both use, so the two cannot drift apart.
+threadlocal var g_priv_globals: ?[]const PrivGlobal = null;
+
 fn phiTypeNameMSL(m: *const ParsedModule, type_id: u32) []const u8 {
     const tinst = getDef(m, type_id) orelse return "int";
     switch (tinst.op) {
@@ -3622,6 +3632,16 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             g_frag_coord_ty = if (fragCoordNeedsFullVec(&module, vid)) "float4" else "float2";
             break;
         }
+    }
+    // Same timing rationale as g_frag_coord_ty above: helpers are emitted BEFORE the
+    // entry, so the threaded-parameter set has to exist now. Fragment only, because
+    // this list must match the set the fragment entry path declares as locals.
+    g_priv_globals = null;
+    defer g_priv_globals = null;
+    var priv_globals = std.ArrayList(PrivGlobal).initCapacity(aa, 0) catch return error.OutOfMemory;
+    if (is_frag) {
+        collectThreadedPrivGlobals(&module, &names, &priv_globals, aa);
+        if (priv_globals.items.len > 0) g_priv_globals = priv_globals.items;
     }
     if (g_has_stage_in) {
         // This is now the SOLE stage-input rename (the entry function's own copy is
@@ -6154,6 +6174,16 @@ fn emitFunction(
         first_param = false;
         try w.print("{s} _fragCoord", .{fty});
     }
+    // Mutated Private globals. The entry impl owns the storage; helpers take a
+    // reference, so a store in a helper is visible to the entry and to sibling calls,
+    // which is what Private storage means in SPIR-V.
+    if (g_priv_globals) |list| {
+        for (list) |pg| {
+            if (!first_param) try w.writeAll(", ");
+            first_param = false;
+            try w.print("thread {s}& {s}", .{ pg.ty, pg.name });
+        }
+    }
 
     // #480: forward-prototype pass emits `<signature>;` and stops before the body.
     if (g_proto_only) {
@@ -6163,6 +6193,43 @@ fn emitFunction(
     try w.writeAll(")\n{\n");
     try emitBody(m, names, decs, func_idx, w, alloc, false, null, cbuffers, textures, storage_buffers, arraylen_buf_index);
     try w.writeAll("}\n");
+}
+
+/// The mutated Private globals that get promoted to entry-impl locals and threaded
+/// into helpers. Metal forbids file-scope mutable variables, so a Private global has
+/// to become a local somewhere; if any function other than the entry references it,
+/// that local must also be passed by reference to the functions that do.
+///
+/// Scalars, vectors and matrices only. A struct would need its type emitted at module
+/// scope (only the UBO path does that today) and an array keeps the #173 honest error.
+/// Read-only globals are excluded by the mutation check: they are already module-scope
+/// promoted or aliased, so declaring them again would be a redefinition.
+fn collectThreadedPrivGlobals(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), out: *std.ArrayList(PrivGlobal), alloc: std.mem.Allocator) void {
+    for (m.instructions) |ginst| {
+        if (ginst.op != .Variable or ginst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(ginst.words[3])) != .Private) continue;
+        if (common.constInitializedPrivateVar(m, ginst) != null) continue;
+        const gptr = getDef(m, ginst.words[1]) orelse continue;
+        if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
+        const gpt = gptr.words[3];
+        const gpti = getDef(m, gpt) orelse continue;
+        switch (gpti.op) {
+            .TypeFloat, .TypeInt, .TypeBool, .TypeVector, .TypeMatrix => {},
+            else => continue,
+        }
+        const gvar = ginst.words[2];
+        var mutated = false;
+        for (m.instructions) |u| {
+            if (u.op == .Store and u.words.len >= 3 and pointerRootsAt(m, u.words[1], gvar)) {
+                mutated = true;
+                break;
+            }
+        }
+        if (!mutated) continue;
+        const gname = names.get(gvar) orelse continue;
+        const gtn = mslType(m, gpt, names, alloc) catch continue;
+        out.append(alloc, .{ .name = gname, .ty = gtn }) catch {};
+    }
 }
 
 // ---- Body/Block/Instruction emission (same structure as GLSL backend) ----
@@ -9189,6 +9256,15 @@ fn emitInstruction(
                 if (!first_arg) try w.writeAll(", ");
                 first_arg = false;
                 try w.writeAll("_fragCoord");
+            }
+            // Matches the helper's threaded Private-global params. Each name is in
+            // scope here: the entry impl declares it, every helper re-threads it.
+            if (g_priv_globals) |list| {
+                for (list) |pg| {
+                    if (!first_arg) try w.writeAll(", ");
+                    first_arg = false;
+                    try w.writeAll(pg.name);
+                }
             }
             try w.writeAll(");\n");
         },
