@@ -5422,7 +5422,19 @@ fn emitFunction(
             if (gptr.op != .TypePointer or gptr.words.len < 4) continue;
             const gpt = gptr.words[3];
             const gpti = getDef(m, gpt) orelse continue;
-            if (gpti.op != .TypeFloat and gpti.op != .TypeInt and gpti.op != .TypeBool) continue;
+            // Vectors and matrices belong here for the same reason scalars do: they are
+            // plain value types in the thread address space, `float2x2 m;` is a legal
+            // MSL local, and mslType already spells them. Restricting this to scalars
+            // meant a mutated `mat2`/`vec3` Private global was never declared at all and
+            // every body reference to it was an undeclared identifier.
+            //
+            // Structs stay out: declaring one needs its TYPE emitted at module scope,
+            // which only the UBO path does today. Arrays stay out and keep the #173
+            // honest error. Both are refusals or existing gaps rather than silent-wrong.
+            switch (gpti.op) {
+                .TypeFloat, .TypeInt, .TypeBool, .TypeVector, .TypeMatrix => {},
+                else => continue,
+            }
             const gvar = ginst.words[2];
             var mutated = false;
             for (m.instructions) |u| {
