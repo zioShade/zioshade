@@ -6530,6 +6530,78 @@ fn emitBody(
             }
         }
     }
+    // #post-loop-header-use: the same hoist, for header values read AFTER the loop.
+    //
+    // The pass above hoists a Pattern-B header value when the CONTINUE block reads it.
+    // A header value read after the loop's merge has the identical problem and was not
+    // covered: SPIR-V only requires the definition to dominate the use, and a loop
+    // header dominates everything downstream of it, so a value computed in loop 1's
+    // header may legally be read inside loop 2. C scoping does not work that way -- the
+    // Pattern-B replay puts the definition inside `while (true) { ... }`, which is a
+    // sibling scope of loop 2, so the read is out of scope. graphicsfuzz_072 has three
+    // sequential loops and computes its exit-test operands in the first one's header,
+    // giving six "use of undeclared identifier" errors in both MSL and HLSL.
+    //
+    // Sound for the same reason as the continue-block case: the loop header always
+    // executes when control reaches the loop (the exit test lives inside `while (true)`),
+    // so the hoisted variable is assigned before any post-loop read. Pattern-A header
+    // instructions are emitted in place ABOVE `while (true)` and are already in scope,
+    // which is why this is restricted to deferred_hdr exactly as the pass above is.
+    {
+        var li = func_idx + 1;
+        while (li < m.instructions.len) : (li += 1) {
+            const minst = m.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            const merge_idx = label_map.get(minst.words[1]) orelse continue; // words[1] = merge label
+            var hlbl = li;
+            while (hlbl > func_idx) : (hlbl -= 1) {
+                if (m.instructions[hlbl].op == .Label) break;
+            }
+            var hi = hlbl + 1;
+            while (hi < li) : (hi += 1) {
+                if (!deferred_hdr.contains(hi)) continue;
+                const hinst = m.instructions[hi];
+                if (hinst.op == .Phi) continue; // pre-declared by the phi prologue
+                const rid = common.resultIdFromOp(hinst.op, hinst.words) orelse continue;
+                if (hoisted_ids.contains(rid)) continue;
+                // Skip the merge block's leading OpPhis. A merge phi naming this value is
+                // NOT a post-loop read: the loop-merge-phi mechanism copies it into the
+                // `_lm` variable at the break, inside the loop, where it is in scope.
+                // Counting them hoisted seven corpus shaders that did not need it.
+                var ci = merge_idx;
+                while (ci < m.instructions.len and (m.instructions[ci].op == .Label or m.instructions[ci].op == .Phi)) : (ci += 1) {}
+                var referenced = false;
+                while (ci < m.instructions.len) : (ci += 1) {
+                    if (m.instructions[ci].op == .FunctionEnd) break;
+                    const cw = m.instructions[ci].words;
+                    var wi: usize = 1;
+                    while (wi < cw.len) : (wi += 1) {
+                        if (cw[wi] == rid) {
+                            referenced = true;
+                            break;
+                        }
+                    }
+                    if (referenced) break;
+                }
+                if (!referenced) continue;
+                if (loop_hoists.getPtr(li)) |e| {
+                    e.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch continue;
+                } else {
+                    var hlist = std.ArrayList(common.HoistedPhiSrc).initCapacity(alloc, 1) catch continue;
+                    hlist.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                    loop_hoists.put(li, hlist) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                }
+                hoisted_ids.put(rid, {}) catch {};
+            }
+        }
+    }
     g_loop_phis = &loop_phis;
     g_phi_hdr = &phi_hdr;
     g_deferred_hdr = &deferred_hdr;
