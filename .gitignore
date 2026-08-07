@@ -63,3 +63,9 @@ zig-pkg/
 
 # Advisor audit notes. Tracked, but stored encrypted: see .gitsip/policy.toml.
 # Anyone can clone them; only holders of a wrapped key can read them.
+
+# Local gitsip secrets: single-key mode (.gitsip/key) and local identity
+# (.gitsip/identity). Never tracked. Unused today (this repo reads ~/.ssh),
+# ignored so a stray `git add -A` can't scoop them in if that mode is enabled.
+.gitsip/key
+.gitsip/identity
