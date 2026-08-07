@@ -6027,16 +6027,34 @@ fn emitInstruction(
         },
 
         .Phi => {
-            // OpPhi: SSA phi node - just use the first available predecessor value
             if (inst.words.len < 4) return;
             // #491: a selection-merge phi already materialized as a `_phi` var by
             // the BranchConditional handler keeps that name; re-aliasing it to a
             // branch-local incoming value would reference an out-of-scope temp.
             if (g_materialized_phis) |mp| if (mp.contains(inst.words[2])) return;
+            // Same reasoning for the other two mechanisms that own a phi: a
+            // #413-hoisted phi (declared above the loop, assigned in each arm) and a
+            // loop-header phi both already have a correct variable and correct
+            // assignments under their own name. Mirrors the MSL backend.
+            {
+                const owned = (if (g_hoisted_ids) |h| h.contains(inst.words[2]) else false) or
+                    (if (g_phi_hdr_h) |ph| ph.get(inst.words[2]) != null else false);
+                if (owned) return;
+            }
             const result_id = inst.words[2];
             // words[3..] are pairs of (value_id, label_id)
-            // Take the first value as the phi result
+            // Aliasing to incoming[0] is only sound when every predecessor carries the
+            // SAME id -- then the phi is degenerate and the choice does not matter. With
+            // distinct incoming values it silently yields the FIRST predecessor's value
+            // on every path, and no mechanism owns this phi, so there is no assignment
+            // anywhere that would make it right. Refuse instead of miscompiling.
             const first_value = inst.words[3];
+            {
+                var pi: usize = 5;
+                while (pi < inst.words.len) : (pi += 2) {
+                    if (inst.words[pi] != first_value) return error.UnsupportedPhiAlias;
+                }
+            }
             const source_name = names.get(first_value) orelse {
                 const alias = try std.fmt.allocPrint(alloc, "v{d}", .{first_value});
                 if (try names.fetchPut(result_id, alias)) |old| alloc.free(old.value);
