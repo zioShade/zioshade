@@ -49,6 +49,11 @@ threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
 // copies. Set per-loop in emitWhileLoopHLSL (save/restore for nesting). Mirrors GLSL's
 // local carried_phis set + the GLSL body #491's carried_phis.contains() branches.
 threadlocal var g_carried_phis_h: ?*const std.AutoHashMap(u32, void) = null;
+
+/// Fragment input builtins hoisted to module-scope statics because a helper reads
+/// them. Non-zero means the entry must rename its semantic-bound parameters and copy
+/// them into the statics.
+threadlocal var g_hoisted_frag_inputs: ?*std.AutoHashMap(u32, void) = null;
 // #471: OpStore targets (OpAccessChain result ids) into UNREPRESENTABLE gl_PerVertex
 // block members (gl_PointSize) that must be dropped — HLSL has no equivalent, so the
 // store is skipped entirely rather than emitted against a non-existent output field.
@@ -197,6 +202,28 @@ fn collectMergePhisHLSL(module: *const ParsedModule, label_map: *const std.AutoH
 ///    silent-wrong shape: it compiles as an undeclared identifier rather than pointing
 ///    at the phi at all.
 ///
+/// True when a function other than the entry point references `var_id`.
+///
+/// A fragment builtin like gl_FragCoord reaches the shader as a parameter on the entry
+/// signature, so a helper that reads it names something not in scope. Detecting the
+/// case lets the builtin be hoisted to a module-scope `static` (what spirv-cross does)
+/// only when it is actually needed, leaving single-function shaders byte-identical.
+fn hlslReferencedOutsideEntry(module: *const ParsedModule, var_id: u32, entry_id: u32) bool {
+    var cur_func: u32 = 0;
+    for (module.instructions) |inst| {
+        if (inst.op == .Function and inst.words.len >= 3) {
+            cur_func = inst.words[2];
+            continue;
+        }
+        if (cur_func == entry_id or cur_func == 0) continue;
+        if (inst.words.len < 2) continue;
+        for (inst.words[1..]) |wrd| {
+            if (wrd == var_id) return true;
+        }
+    }
+    return false;
+}
+
 /// The result id is unique and stable for the whole emit, so every site agrees by
 /// construction and the function needs no ordering guarantees.
 fn hlslPhiVarName(rid: u32, alloc: std.mem.Allocator) []const u8 {
@@ -2043,6 +2070,34 @@ pub fn spirvToHLSL(
     try w.writeAll("\n");
 
     // Emit non-entry functions first (user-defined functions)
+    // A fragment input builtin that a HELPER reads cannot stay an entry parameter:
+    // helpers have no access to it. Hoist it to a module-scope `static`, which is what
+    // spirv-cross emits, and let the entry copy its semantic-bound parameter in.
+    // `names` keeps the original spelling, so every body and helper reference resolves
+    // to the static with no rewriting. Emitted HERE rather than from emitFunction
+    // because that runs per function: the first function emitted is a helper, where
+    // `is_fragment` is false and the input list is the helper's own (empty) one.
+    var hoisted_frag_inputs = std.AutoHashMap(u32, void).init(aa);
+    defer hoisted_frag_inputs.deinit();
+    g_hoisted_frag_inputs = &hoisted_frag_inputs;
+    defer g_hoisted_frag_inputs = null;
+    if (module.execution_model == .Fragment) {
+        if (entry_id != 0) {
+            for (module.instructions) |vinst| {
+                if (vinst.op != .Variable or vinst.words.len < 4) continue;
+                if (@as(spirv.StorageClass, @enumFromInt(vinst.words[3])) != .Input) continue;
+                const vid = vinst.words[2];
+                if (getDecorationValue(&decorations, vid, .built_in) == null) continue;
+                if (!hlslReferencedOutsideEntry(&module, vid, entry_id)) continue;
+                const ty = hlslType(&module, vinst.words[1], &names, aa) catch continue;
+                const nm = names.get(vid) orelse continue;
+                try w.print("static {s} {s};\n", .{ ty, nm });
+                hoisted_frag_inputs.put(vid, {}) catch {};
+            }
+            if (hoisted_frag_inputs.count() > 0) try w.writeAll("\n");
+        }
+    }
+
     var emitted_globals = false;
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue; // emit entry last
@@ -4033,6 +4088,11 @@ fn emitFunction(
                 } else if (bi == .bary_coord_no_persp_khr) {
                     // gl_BaryCoordNoPerspEXT → noperspective float3 SV_Barycentrics
                     try w.print("noperspective float3 {s} : {s}", .{ iv_name, semantic });
+                } else if (g_hoisted_frag_inputs != null and g_hoisted_frag_inputs.?.contains(ivid)) {
+                    // Hoisted to a module-scope static: the parameter takes a distinct
+                    // name and is copied into the static at the top of the body, so
+                    // `iv_name` keeps resolving to the static everywhere else.
+                    try w.print("{s} {s}_sv : {s}", .{ iv_type, iv_name, semantic });
                 } else {
                     try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
                 }
@@ -4251,6 +4311,18 @@ fn emitFunction(
         try w.writeAll(") : SV_Target\n{\n");
     } else {
         try w.writeAll(")\n{\n");
+    }
+
+    // Copy each hoisted builtin from its semantic-bound parameter into the static, so
+    // helpers called from here observe the real value rather than a default.
+    if (is_fragment) {
+        if (g_hoisted_frag_inputs) |set| {
+            for (input_var_ids.items) |ivid| {
+                if (!set.contains(ivid)) continue;
+                const nm = names.get(ivid) orelse continue;
+                try w.print("    {s} = {s}_sv;\n", .{ nm, nm });
+            }
+        }
     }
 
     // Declare output variable as local in fragment entry
