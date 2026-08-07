@@ -8075,6 +8075,26 @@ fn emitInstruction(
             // that name; aliasing to a branch-local incoming value would be wrong.
             if (g_materialized_phis) |mp| if (mp.contains(inst.words[2])) return;
             const fv = inst.words[3];
+            // Aliasing to incoming[0] is only sound when every predecessor carries the
+            // SAME id -- then the phi is degenerate and the choice does not matter. With
+            // distinct incoming values it silently yields the FIRST predecessor's value on
+            // every path. Refuse instead of miscompiling.
+            //
+            // Scoped to phis no other mechanism owns. A #413-hoisted phi (declared above
+            // the loop, assigned in each arm) and a loop-header phi (declared and carried
+            // by tryEmitLoopPhiDeclMSL) both reach here having already been emitted
+            // correctly under their own name -- the same two exclusions the phi prologue
+            // makes -- so refusing those would reject shaders that compile correctly.
+            {
+                const owned = (if (g_hoisted_ids) |h| h.contains(inst.words[2]) else false) or
+                    (if (g_phi_hdr) |ph| ph.get(inst.words[2]) != null else false);
+                if (!owned) {
+                    var pi: usize = 5;
+                    while (pi < inst.words.len) : (pi += 2) {
+                        if (inst.words[pi] != fv) return error.UnsupportedPhiAlias;
+                    }
+                }
+            }
             if (names.get(fv)) |sn| {
                 const a = try alloc.dupe(u8, sn);
                 if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
