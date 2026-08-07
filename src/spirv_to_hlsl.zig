@@ -4930,6 +4930,73 @@ fn emitBody(
 /// Emit instructions from a block starting at `label` until we reach a Branch to `merge_label`.
 /// Handles nested if/else by recursion.
 /// Returns the index of the last instruction processed.
+// #selfloop: HLSL twin of spirv_to_glsl.zig's emitSelfLoopBodyHeaderGLSL (and MSL's).
+// Lower a self-loop whose continue target IS its own header (body in the header before
+// the LoopMerge; back-edge is the BranchConditional that follows). Emit the straight-
+// line header body ONCE in while(true), lower the back-edge to
+// `if (!(cond)) break; <phi back-edge updates>`. The loop-header phi is already declared
+// + initialized above the loop by emitBody's inline OpPhi handling (reached before the
+// LoopMerge since deferred_hdr excludes phis) -- do NOT re-declare (duplicate) or
+// decl-in-loop (counter-reset/infinite-loop). Honest-error unless the header is
+// straight-line and the back-edge's continue arm is its true target (reversed polarity
+// stays honest-error, consistent with GLSL/MSL/WGSL). Returns the merge-block index.
+fn emitSelfLoopBodyHeaderHLSL(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
+    loop_idx: usize,
+    merge_lbl: u32,
+    hlbl_idx: usize,
+    back_edge: Instruction,
+    label_map: *const std.AutoHashMap(u32, usize),
+    w: anytype,
+    alloc: std.mem.Allocator,
+    is_fragment: bool,
+    is_vertex: bool,
+    output_var_id: ?u32,
+) !usize {
+    // The header body must be straight-line (no nested merge/switch/branch).
+    var hi: usize = hlbl_idx + 1;
+    while (hi < loop_idx) : (hi += 1) {
+        switch (module.instructions[hi].op) {
+            .LoopMerge, .Switch, .SelectionMerge, .Branch, .BranchConditional => return error.CrossCompileUnsupported,
+            else => {},
+        }
+    }
+    // Back-edge polarity: true target must be the header (continue) -> `if (!(cond)) break;`.
+    if (back_edge.words[2] != module.instructions[hlbl_idx].words[1]) return error.CrossCompileUnsupported;
+
+    // The loop body = the header's straight-line instructions, ONCE (Phi skipped -- the
+    // phi is declared above the loop by emitBody; the body instrs are deferred_hdr so
+    // emitBody skipped them at their original position, leaving this helper as the sole
+    // emitter -- no double-body).
+    try w.writeAll("    while (true)\n    {\n");
+    var bi: usize = hlbl_idx + 1;
+    while (bi < loop_idx) : (bi += 1) {
+        const inst = module.instructions[bi];
+        if (inst.op == .Phi or inst.op == .Label) continue;
+        try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, is_vertex, output_var_id);
+    }
+
+    // Lower the back-edge BranchConditional (true->header=continue, false->merge=break)
+    // to `if (!(cond)) break;` then the phi back-edge updates on the continue path.
+    const cond_name = names.get(back_edge.words[1]) orelse "true";
+    try w.print("        if (!({s})) break;\n", .{cond_name});
+    if (g_loop_phis_h) |lp| {
+        if (lp.get(loop_idx)) |plist| {
+            for (plist.items) |pi| {
+                if (pi.update_id == pi.result_id) continue; // self-carry, no copy
+                const rname = names.get(pi.result_id) orelse continue;
+                const uname = names.get(pi.update_id) orelse continue;
+                try w.print("        {s} = {s};\n", .{ rname, uname });
+            }
+        }
+    }
+    try w.writeAll("    }\n");
+
+    return label_map.get(merge_lbl) orelse (loop_idx + 2);
+}
+
 fn emitWhileLoopHLSL(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5001,18 +5068,20 @@ fn emitWhileLoopHLSL(
     }
     const header_lbl: u32 = if (module.instructions[hlbl_idx].words.len > 1) module.instructions[hlbl_idx].words[1] else 0;
 
-    // #selfloop: a self-loop (continue target IS the header; body-in-header) is not
-    // lowered by HLSL. Normal polarity recurses into the header's own LoopMerge (also
-    // caught by the g_ewl_depth_h guard above); reversed polarity (break on the true
-    // arm) takes a non-recursing path that silently freezes the phi at its constant
-    // init and never advances -> infinite loop / `0 = ...;` garbage (silent-wrong,
-    // pre-existing). Honest-error BOTH polarities up front -- mandate-safe, and
-    // consistent with GLSL/MSL/WGSL (which lower normal polarity but honest-error
-    // reversed). cont_lbl == header_lbl is the literal definition; it cannot match a
-    // normal loop (whose continue is a separate block).
-    if (cont_lbl == header_lbl) return error.CrossCompileUnsupported;
-
     const next_inst = module.instructions[loop_idx + 1];
+    // #selfloop: lower a self-loop (continue target IS the header; body in the header
+    // before the LoopMerge) via the HLSL twin of emitSelfLoopBodyHeader{GLSL,MSL},
+    // mirroring spirv-cross. The generic emitter mishandles it: normal polarity recurses
+    // into the header's own LoopMerge (the g_ewl_depth_h guard turns that into an
+    // honest-error); reversed polarity takes a non-recursing path that silently freezes
+    // the phi (silent-wrong). Pattern B only (back-edge BranchConditional); the helper
+    // honest-errors reversed polarity, so both polarities stay mandate-safe.
+    if (cont_lbl == header_lbl) {
+        if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
+            return try emitSelfLoopBodyHeaderHLSL(module, names, decorations, loop_idx, merge_lbl, hlbl_idx, next_inst, label_map, w, alloc, is_fragment, is_vertex, output_var_id);
+        }
+        return error.CrossCompileUnsupported;
+    }
     if (next_inst.op == .Branch and next_inst.words.len >= 2) {
         // FIRST: is this a do-while (bottom-test) loop? Inspect the CONTINUE block's
         // terminator BEFORE scanning the body. Otherwise the body's own `if`
