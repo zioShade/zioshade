@@ -241,16 +241,60 @@ fn collectSwitchChainPhis(m: *const ParsedModule, switch_inst: Instruction, merg
         }
     }
 }
+/// Name of the materialized variable for phi result `rid`.
+///
+/// Derived from the IMMUTABLE result id, never by suffixing whatever `names` happens
+/// to hold. `names` maps ids to EXPRESSIONS, not identifiers, and passes rewrite it
+/// between the declaration and the use, so suffixing it produced three distinct
+/// failures: a declaration and a use that disagree (`v57_phi` declared, `v246_phi`
+/// referenced), repeated suffixing across finalize paths (`v56_phi_phi_phi_phi`), and
+/// aliasing to a folded constant (`_GLF_color = ((float4)0)_phi;`). This is the same
+/// defect #559 fixed in the HLSL backend; the MSL copy was never ported.
+///
+/// One exception: an id the #413 pre-scan hoisted above a loop is deliberately NOT
+/// renamed to `_phi`, so it keeps its hoisted name.
+fn mslPhiVarName(names: *std.AutoHashMap(u32, []const u8), rid: u32, alloc: std.mem.Allocator) []const u8 {
+    if (g_hoisted_ids) |h| {
+        if (h.contains(rid)) {
+            // Duplicated, not returned by reference: callers may `fetchPut` this back
+            // into `names` and free the displaced value, which would otherwise be this
+            // exact slice.
+            const cur = names.get(rid) orelse "pv";
+            return alloc.dupe(u8, cur) catch cur;
+        }
+    }
+    return std.fmt.allocPrint(alloc, "v{d}_phi", .{rid}) catch "pv_phi";
+}
+/// True if THIS site should print the declaration of phi `rid`'s variable.
+///
+/// A phi between a loop header and its merge is walked by the loop pre-scan of every
+/// ENCLOSING loop as well as by whichever construct actually owns it, so the same
+/// variable reaches several declaration sites. Before mslPhiVarName the repeated
+/// declarations each got a different name (`v47_phi`, `v47_phi_phi`, ...) and so did
+/// not collide -- at the cost of the decl/use mismatch that motivated the rename.
+/// With one stable name they collide, so the first (outermost, therefore widest
+/// scope, therefore covering every assignment and read) declaration wins and later
+/// sites emit assignments only.
+///
+/// Module-scoped rather than function-scoped on purpose: phi result ids are SSA ids,
+/// unique across the module, so a phi belongs to exactly one function.
+fn mslPhiDeclare(rid: u32) bool {
+    const dp = g_declared_phis orelse return true;
+    if (dp.contains(rid)) return false;
+    dp.put(rid, {}) catch {};
+    return true;
+}
 fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
+        if (!mslPhiDeclare(phi.words[2])) continue;
         const t = try mslValueType(m, phi.words[1], names, alloc);
-        const vn = names.get(phi.words[2]) orelse "pv"; // already renamed to {orig}_phi by finalizeSwitchPhis (called before decl)
+        const vn = mslPhiVarName(names, phi.words[2], alloc);
         try w.print("    {s} {s};\n", .{ t, vn });
     }
 }
 fn emitSwitchPhiCaseCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, case_label: u32, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
-        const vn = names.get(phi.words[2]) orelse "pv"; // already renamed
+        const vn = mslPhiVarName(names, phi.words[2], alloc);
         var pi: usize = 3;
         while (pi + 1 < phi.words.len) : (pi += 2) {
             if (phi.words[pi + 1] == case_label) {
@@ -262,8 +306,7 @@ fn emitSwitchPhiCaseCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []
 }
 fn finalizeSwitchPhis(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
     for (phis) |phi| {
-        const vn = names.get(phi.words[2]) orelse "pv";
-        const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+        const pn = mslPhiVarName(names, phi.words[2], alloc);
         if (names.fetchPut(phi.words[2], pn) catch null) |old| alloc.free(old.value);
         if (g_materialized_phis) |mp| mp.put(phi.words[2], {}) catch {};
     }
@@ -1503,6 +1546,9 @@ threadlocal var g_deferred_hdr: ?*const std.AutoHashMap(usize, void) = null;
 // incoming value (which is out of scope after the merge) — it would undo the
 // materialization and reintroduce the undeclared-identifier bug.
 threadlocal var g_materialized_phis: ?*std.AutoHashMap(u32, void) = null;
+// Phi variables already DECLARED in this emit. Distinct from g_materialized_phis,
+// which also means "renamed" and is written by non-declaring passes. See mslPhiDeclare.
+threadlocal var g_declared_phis: ?*std.AutoHashMap(u32, void) = null;
 
 // #413: loop-phi update temps defined INSIDE the loop have their declaration
 // hoisted above the loop header (declare-then-assign split) — the top-of-loop
@@ -6306,6 +6352,7 @@ fn emitBody(
         g_loop_hoists = null;
         g_hoisted_ids = null;
         g_materialized_phis = null;
+        g_declared_phis = null;
         // Belt-and-braces reset of the loop-recursion depth, per function: the
         // increment's own defer already restores it on both the normal and the
         // error-unwind path, but a threadlocal counter that leaks would silently
@@ -6316,6 +6363,9 @@ fn emitBody(
     var materialized_phis = std.AutoHashMap(u32, void).init(alloc);
     defer materialized_phis.deinit();
     g_materialized_phis = &materialized_phis;
+    var declared_phis = std.AutoHashMap(u32, void).init(alloc);
+    defer declared_phis.deinit();
+    g_declared_phis = &declared_phis;
     // #honest-error (cross-scope phi): build the set of loop-MERGE-phi result ids
     // (OpPhis at the top of any loop's merge block). A loop-carried phi whose
     // back-edge UPDATE is one of these is a CROSS-SCOPE phi — the outer loop's
@@ -6486,6 +6536,36 @@ fn emitBody(
     g_loop_hoists = &loop_hoists;
     g_hoisted_ids = &hoisted_ids;
 
+    // Phi-variable prologue: every materialized phi variable is declared ONCE here, at
+    // function scope, instead of at whichever construct happens to reach it first.
+    //
+    // The emitter can traverse one source region more than once -- an enclosing loop's
+    // pre-scan walks phis that belong to a nested loop or switch -- and it reaches those
+    // regions at different nesting depths. Declaring at the point of use therefore gave
+    // either a redefinition (two declarations landing in one scope, graphicsfuzz_041) or
+    // an out-of-scope reference (the surviving declaration landing in a sibling block,
+    // graphicsfuzz_001). Hoisting makes both structurally impossible: one declaration,
+    // visible to every assignment and every read. A phi that never gets materialized
+    // leaves an unused local, which Metal accepts.
+    //
+    // Two exclusions, both of which have their own declaration mechanism and their own
+    // name: #413-hoisted ids (declared above the loop by the hoist) and loop-carried
+    // header phis (declared as plain `vN` by tryEmitLoopPhiDeclMSL).
+    {
+        var pi = func_idx + 1;
+        while (pi < m.instructions.len) : (pi += 1) {
+            const pinst = m.instructions[pi];
+            if (pinst.op == .FunctionEnd) break;
+            if (pinst.op != .Phi or pinst.words.len < 3) continue;
+            const rid = pinst.words[2];
+            if (hoisted_ids.contains(rid)) continue;
+            if (phi_hdr.get(rid) != null) continue;
+            const t = mslValueType(m, pinst.words[1], names, alloc) catch continue;
+            try w.print("    {s} {s};\n", .{ t, mslPhiVarName(names, rid, alloc) });
+            if (g_declared_phis) |dp| dp.put(rid, {}) catch {};
+        }
+    }
+
     var idx = func_idx + 1;
     while (idx < m.instructions.len) : (idx += 1) {
         const inst = m.instructions[idx];
@@ -6521,39 +6601,44 @@ fn emitBody(
                 collectMergePhis(m, &label_map, mval, &mphis, alloc);
                 for (mphis.items) |pv| {
                     const t = try mslValueType(m, pv.type_id, names, alloc);
-                    const vn = names.get(pv.result_id) orelse "pv";
+                    const vn = mslPhiVarName(names, pv.result_id, alloc);
+                    // An enclosing construct may already have declared this variable
+                    // (mslPhiDeclare). Drop the type and keep the initializer as a plain
+                    // assignment -- skipping it outright would leave the phi undefined on
+                    // the fall-through path.
+                    const ty: []const u8 = if (mslPhiDeclare(pv.result_id)) t else "";
+                    const sep: []const u8 = if (ty.len > 0) " " else "";
                     if (he) {
                         // Both arms assign it; declare uninitialized.
-                        try w.print("    {s} {s}_phi;\n", .{ t, vn });
+                        if (ty.len > 0) try w.print("    {s} {s};\n", .{ ty, vn });
                     } else {
                         // No else arm: the fall-through value is the incoming from the
                         // header block (in scope before the `if`); initialize to it so
                         // the phi is defined when the condition is false.
                         const false_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                         const fvn = mslExprName(m, names, false_val, alloc);
-                        try w.print("    {s} {s}_phi = {s};\n", .{ t, vn, fvn });
+                        try w.print("    {s}{s}{s} = {s};\n", .{ ty, sep, vn, fvn });
                     }
                 }
                 try w.print("    if ({s})\n    {{\n", .{cn});
                 idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                 for (mphis.items) |pv| {
-                    const vn = names.get(pv.result_id) orelse "pv";
+                    const vn = mslPhiVarName(names, pv.result_id, alloc);
                     const true_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
-                    try w.print("        {s}_phi = {s};\n", .{ vn, mslExprName(m, names, true_val, alloc) });
+                    try w.print("        {s} = {s};\n", .{ vn, mslExprName(m, names, true_val, alloc) });
                 }
                 if (he) {
                     try w.writeAll("    } else {\n");
                     idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     for (mphis.items) |pv| {
-                        const vn = names.get(pv.result_id) orelse "pv";
+                        const vn = mslPhiVarName(names, pv.result_id, alloc);
                         const false_val = if (mslPhiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-                        try w.print("        {s}_phi = {s};\n", .{ vn, mslExprName(m, names, false_val, alloc) });
+                        try w.print("        {s} = {s};\n", .{ vn, mslExprName(m, names, false_val, alloc) });
                     }
                 }
                 try w.writeAll("    }\n");
                 for (mphis.items) |pv| {
-                    const vn = names.get(pv.result_id) orelse "pv";
-                    const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                    const pn = mslPhiVarName(names, pv.result_id, alloc);
                     if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
                     if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
                 }
@@ -6589,21 +6674,21 @@ fn emitBody(
                 // Rename + declare merge phis AND chain phis (both use _phi naming).
                 finalizeSwitchPhis(names, sphis.items, alloc);
                 for (chain_entries.items) |ce| {
-                    const vn = names.get(ce.phi.words[2]) orelse "pv";
-                    const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                    const pn = mslPhiVarName(names, ce.phi.words[2], alloc);
                     if (names.fetchPut(ce.phi.words[2], pn) catch null) |old| alloc.free(old.value);
                     if (g_materialized_phis) |mp| mp.put(ce.phi.words[2], {}) catch {};
                 }
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                 for (chain_entries.items) |ce| {
+                    if (!mslPhiDeclare(ce.phi.words[2])) continue;
                     const t = try mslValueType(m, ce.phi.words[1], names, alloc);
-                    const vn = names.get(ce.phi.words[2]) orelse "pv";
+                    const vn = mslPhiVarName(names, ce.phi.words[2], alloc);
                     try w.print("    {s} {s};\n", .{ t, vn });
                 }
                 // Entry inits: for each chain phi at case C, if(sel==C) chain_phi=initial.
                 if (chain_entries.items.len > 0) {
                     for (chain_entries.items) |ce| {
-                        const vn = names.get(ce.phi.words[2]) orelse "pv";
+                        const vn = mslPhiVarName(names, ce.phi.words[2], alloc);
                         try w.print("    if ({s} == {d}) {{ {s} = {s}; }}\n", .{ sn, ce.literal, vn, mslExprName(m, names, ce.entry_value, alloc) });
                     }
                 }
@@ -7015,10 +7100,10 @@ fn emitWhileLoopMSL(
             // inside would shadow it with a per-iteration-uninitialized var
             // (switch_in_loop, maxdiff 255).
             if (g_hoisted_ids) |h| if (h.contains(phi_result)) continue;
-            const vn = names.get(phi_result) orelse continue;
+            _ = names.get(phi_result) orelse continue;
             const t = mslValueType(m, sinst.words[1], names, alloc) catch continue;
-            try w.print("    {s} {s}_phi;\n", .{ t, vn });
-            const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+            const pn = mslPhiVarName(names, phi_result, alloc);
+            if (mslPhiDeclare(phi_result)) try w.print("    {s} {s};\n", .{ t, pn });
             _ = names.fetchPut(phi_result, pn) catch {};
             if (g_materialized_phis) |mp| mp.put(phi_result, {}) catch {};
         }
@@ -7313,8 +7398,12 @@ fn emitWhileLoopMSL(
                         collectMergePhis(m, label_map, nmv, &mphis, alloc);
                         // Declaration: skip phis already pre-declared by the loop pre-scan (#496).
                         for (mphis.items) |pv| {
-                            const vn = names.get(pv.result_id) orelse "pv";
-                            const pre_decl = (if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false) or (if (g_hoisted_ids) |h| h.contains(pv.result_id) else false);
+                            const vn = mslPhiVarName(names, pv.result_id, alloc);
+                            // `or` short-circuits, so mslPhiDeclare is consulted (and marks)
+                            // only where the pre-#496 condition would have declared. It can
+                            // then still divert to the assignment form if an enclosing
+                            // construct already emitted the declaration.
+                            const pre_decl = (if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false) or (if (g_hoisted_ids) |h| h.contains(pv.result_id) else false) or !mslPhiDeclare(pv.result_id);
                             if (pre_decl) {
                                 // Pre-declared by the loop pre-scan (#496): skip the
                                 // declaration, but for no-else emit the fall-through
@@ -7328,21 +7417,20 @@ fn emitWhileLoopMSL(
                             } else {
                                 const t = try mslValueType(m, pv.type_id, names, alloc);
                                 if (nhe) {
-                                    try w.print("        {s} {s}_phi;\n", .{ t, vn });
+                                    try w.print("        {s} {s};\n", .{ t, vn });
                                 } else {
                                     const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-                                    try w.print("        {s} {s}_phi = {s};\n", .{ t, vn, mslExprName(m, names, false_val, alloc) });
+                                    try w.print("        {s} {s} = {s};\n", .{ t, vn, mslExprName(m, names, false_val, alloc) });
                                 }
                             }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
-                        // Assignments: use the pre-declared name (vn, already renamed to _phi
-                        // by the pre-scan) for pre-declared phis; {vn}_phi for new ones.
+                        // Assignments: one name for pre-declared and new phis alike --
+                        // mslPhiVarName is derived from the result id, so it matches the
+                        // declaration above without depending on which pass ran first.
                         for (mphis.items) |pv| {
-                            const vn = names.get(pv.result_id) orelse "pv";
-                            const pre_decl = (if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false) or (if (g_hoisted_ids) |h| h.contains(pv.result_id) else false);
-                            const phi_name: []const u8 = if (pre_decl) vn else std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch vn;
+                            const phi_name = mslPhiVarName(names, pv.result_id, alloc);
                             const true_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                             try w.print("            {s} = {s};\n", .{ phi_name, mslExprName(m, names, true_val, alloc) });
                         }
@@ -7350,9 +7438,7 @@ fn emitWhileLoopMSL(
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                             for (mphis.items) |pv| {
-                                const vn = names.get(pv.result_id) orelse "pv";
-                                const pre_decl = (if (g_materialized_phis) |mp| mp.contains(pv.result_id) else false) or (if (g_hoisted_ids) |h| h.contains(pv.result_id) else false);
-                                const phi_name: []const u8 = if (pre_decl) vn else std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch vn;
+                                const phi_name = mslPhiVarName(names, pv.result_id, alloc);
                                 const false_val = if (mslPhiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                                 try w.print("            {s} = {s};\n", .{ phi_name, mslExprName(m, names, false_val, alloc) });
                             }
@@ -7362,8 +7448,7 @@ fn emitWhileLoopMSL(
                         for (mphis.items) |pv| {
                             if (g_materialized_phis) |mp| if (mp.contains(pv.result_id)) continue;
                             if (g_hoisted_ids) |h| if (h.contains(pv.result_id)) continue; // #413 hoisted above the loop: keep its name, don't rename to _phi
-                            const vn = names.get(pv.result_id) orelse "pv";
-                            const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                            const pn = mslPhiVarName(names, pv.result_id, alloc);
                             if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
                             if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
                         }
@@ -7597,34 +7682,37 @@ fn emitBlock(
                 collectMergePhis(m, lm, nmv, &mphis, alloc);
                 for (mphis.items) |pv| {
                     const t = try mslValueType(m, pv.type_id, names, alloc);
-                    const vn = names.get(pv.result_id) orelse "pv";
+                    const vn = mslPhiVarName(names, pv.result_id, alloc);
+                    // See the emitBody site: drop the type, keep the initializer, when an
+                    // enclosing construct already declared this variable.
+                    const ty: []const u8 = if (mslPhiDeclare(pv.result_id)) t else "";
+                    const sep: []const u8 = if (ty.len > 0) " " else "";
                     if (he) {
-                        try w.print("{s}    {s} {s}_phi;\n", .{ indent, t, vn });
+                        if (ty.len > 0) try w.print("{s}    {s} {s};\n", .{ indent, ty, vn });
                     } else {
                         const false_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, t, vn, mslExprName(m, names, false_val, alloc) });
+                        try w.print("{s}    {s}{s}{s} = {s};\n", .{ indent, ty, sep, vn, mslExprName(m, names, false_val, alloc) });
                     }
                 }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
                 i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
                 for (mphis.items) |pv| {
-                    const vn = names.get(pv.result_id) orelse "pv";
+                    const vn = mslPhiVarName(names, pv.result_id, alloc);
                     const true_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
-                    try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, mslExprName(m, names, true_val, alloc) });
+                    try w.print("{s}        {s} = {s};\n", .{ indent, vn, mslExprName(m, names, true_val, alloc) });
                 }
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
                     i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
                     for (mphis.items) |pv| {
-                        const vn = names.get(pv.result_id) orelse "pv";
+                        const vn = mslPhiVarName(names, pv.result_id, alloc);
                         const false_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-                        try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, mslExprName(m, names, false_val, alloc) });
+                        try w.print("{s}        {s} = {s};\n", .{ indent, vn, mslExprName(m, names, false_val, alloc) });
                     }
                 }
                 try w.print("{s}    }}\n", .{indent});
                 for (mphis.items) |pv| {
-                    const vn = names.get(pv.result_id) orelse "pv";
-                    const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
+                    const pn = mslPhiVarName(names, pv.result_id, alloc);
                     if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
                     if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
                 }
