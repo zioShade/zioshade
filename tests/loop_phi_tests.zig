@@ -518,14 +518,22 @@ test "GLSL lowers a self-loop with body-in-header (#selfloop)" {
     }
 }
 
-// HLSL used to CRASH (SIGSEGV, exit 139) on the same self-loop: emitWhileLoopHLSL
-// re-entered the header's own LoopMerge with no recursion bound -> stack overflow.
-// (GLSL refused gracefully via its g_ewl_depth guard; HLSL never got that guard.)
-// Assert HLSL now refuses LOUDLY (honest-error) instead of crashing. The fix is the
-// guard only -- HLSL does not yet LOWER the self-loop (that is GLSL-only for now), so
-// an error is the correct, mandate-safe outcome.
-test "HLSL refuses a self-loop with body-in-header without crashing (#selfloop guard)" {
-    try std.testing.expectError(error.CrossCompileUnsupported, crossHlsl(SELFLOOP_BODYHEADER_SPV));
+// HLSL used to CRASH (SIGSEGV, exit 139) on the self-loop (emitWhileLoopHLSL re-entered
+// the header's own LoopMerge with no recursion bound -> stack overflow), then honest-
+// errored once the recursion guard landed. It now LOWERS it via the HLSL twin of
+// emitSelfLoopBodyHeader{GLSL,MSL}. Assert a terminating while(true) loop whose counter
+// advances. (The recursion guard remains for non-self-loop pathological nesting; the
+// crash history is why it stays.) DXC/glslang-validity + the HLSL gate verify separately.
+test "HLSL lowers a self-loop with body-in-header (#selfloop)" {
+    const hlsl = try crossHlsl(SELFLOOP_BODYHEADER_SPV);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "if (!(") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "break;") != null);
+    if (!try loopCounterAdvances(hlsl)) {
+        std.debug.print("HLSL self-loop never advances the counter (infinite loop):\n{s}\n", .{hlsl});
+        return error.SelfLoopDoesNotAdvance;
+    }
 }
 
 // WGSL used to emit BROKEN code (exit 0) on the self-loop: the loop-header phi's
