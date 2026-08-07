@@ -8074,25 +8074,29 @@ fn emitInstruction(
             // Already materialized as a `_phi` var by the selection handler — keep
             // that name; aliasing to a branch-local incoming value would be wrong.
             if (g_materialized_phis) |mp| if (mp.contains(inst.words[2])) return;
+            // A #413-hoisted phi (declared above the loop, assigned in each arm) and a
+            // loop-header phi (declared and carried by tryEmitLoopPhiDeclMSL) already
+            // have a correct variable and correct assignments under their own name --
+            // the same two exclusions the phi prologue makes. Keep that name. Aliasing
+            // them to an incoming value discards a correct materialization: in
+            // graphicsfuzz_039 the if/else merge is hoisted into `v34`, assigned in both
+            // arms, and this arm then re-pointed it at the TRUE arm's local `v27`, so the
+            // loop-merge copy after the `if` emitted `v81_lm = v27;` -- out of scope
+            // there, and the false arm's value silently dropped where it is in scope.
+            {
+                const owned = (if (g_hoisted_ids) |h| h.contains(inst.words[2]) else false) or
+                    (if (g_phi_hdr) |ph| ph.get(inst.words[2]) != null else false);
+                if (owned) return;
+            }
             const fv = inst.words[3];
             // Aliasing to incoming[0] is only sound when every predecessor carries the
             // SAME id -- then the phi is degenerate and the choice does not matter. With
             // distinct incoming values it silently yields the FIRST predecessor's value on
             // every path. Refuse instead of miscompiling.
-            //
-            // Scoped to phis no other mechanism owns. A #413-hoisted phi (declared above
-            // the loop, assigned in each arm) and a loop-header phi (declared and carried
-            // by tryEmitLoopPhiDeclMSL) both reach here having already been emitted
-            // correctly under their own name -- the same two exclusions the phi prologue
-            // makes -- so refusing those would reject shaders that compile correctly.
             {
-                const owned = (if (g_hoisted_ids) |h| h.contains(inst.words[2]) else false) or
-                    (if (g_phi_hdr) |ph| ph.get(inst.words[2]) != null else false);
-                if (!owned) {
-                    var pi: usize = 5;
-                    while (pi < inst.words.len) : (pi += 2) {
-                        if (inst.words[pi] != fv) return error.UnsupportedPhiAlias;
-                    }
+                var pi: usize = 5;
+                while (pi < inst.words.len) : (pi += 2) {
+                    if (inst.words[pi] != fv) return error.UnsupportedPhiAlias;
                 }
             }
             if (names.get(fv)) |sn| {
