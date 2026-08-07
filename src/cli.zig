@@ -830,6 +830,16 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // MSL: an OpPhi whose predecessors carry DIFFERENT values, which none of the
+    // structured merge handlers claimed. The only name available is one incoming
+    // value's, which would be that predecessor's value on every path.
+    if (err == error.UnsupportedPhiAlias) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: this shader has a control-flow merge whose value differs by predecessor in a shape the MSL backend cannot yet materialize. Emitting it would silently use one branch's value on every path, so zioshade refuses instead. Workaround: feed UNOPTIMIZED SPIR-V (drop `spirv-opt -O`), which keeps the value in a variable rather than a phi.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL honest-errors (UnsupportedOp / UnsupportedExtInst) carry a precise reason in
     // spirv_to_wgsl.last_error_detail (which construct is unrepresentable / which GLSL.std.450
     // instruction has no mapping). Surface it so the refusal is actionable instead of a bare

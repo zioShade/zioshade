@@ -240,6 +240,7 @@ fn statusFromErr(err: anyerror) c_int {
         error.UnsupportedNestedSwitchInSwitchCase,
         error.UnsupportedOp,
         error.UnsupportedOpcode,
+        error.UnsupportedPhiAlias,
         error.UnsupportedPhysicalStorageBuffer,
         error.UnsupportedPushConstant,
         error.UnsupportedRecursion,
