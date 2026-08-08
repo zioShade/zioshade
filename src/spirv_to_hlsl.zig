@@ -226,7 +226,23 @@ fn hlslReferencedOutsideEntry(module: *const ParsedModule, var_id: u32, entry_id
 
 /// The result id is unique and stable for the whole emit, so every site agrees by
 /// construction and the function needs no ordering guarantees.
-fn hlslPhiVarName(rid: u32, alloc: std.mem.Allocator) []const u8 {
+///
+/// One exception: an id the #413 pre-scan hoisted above a loop is declared there by the
+/// hoist, under whatever `names` holds for it, and the loop's carry copy reads that same
+/// name. Handing such an id a `_phi` name splits the declaration from the use: in
+/// graphicsfuzz_045 the hoist emitted `int v50;` and the carry `v39 = v50;` while the
+/// merge materialization assigned `v77_phi`, so v50 was never written and DXC rejected
+/// the loop. Mirrors mslPhiVarName, which has always had this exclusion.
+fn hlslPhiVarName(names: *std.AutoHashMap(u32, []const u8), rid: u32, alloc: std.mem.Allocator) []const u8 {
+    if (g_hoisted_ids) |h| {
+        if (h.contains(rid)) {
+            // Duplicated, not returned by reference: callers may `fetchPut` this back
+            // into `names` and free the displaced value, which would otherwise be this
+            // exact slice.
+            const cur = names.get(rid) orelse "pv";
+            return alloc.dupe(u8, cur) catch cur;
+        }
+    }
     return std.fmt.allocPrint(alloc, "v{d}_phi", .{rid}) catch "pv_phi";
 }
 
@@ -236,12 +252,22 @@ fn emitMergePhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u3
         // #false-loop-init: a carried phi was already declared before the loop; skip.
         if (g_carried_phis_h) |cp| if (cp.contains(pv.result_id)) continue;
         const t = try hlslType(module, pv.type_id, names, alloc);
-        const vn = hlslPhiVarName(pv.result_id, alloc);
+        const vn = hlslPhiVarName(names, pv.result_id, alloc);
+        // A #413-hoisted phi is already declared above the loop, and the loop's carry
+        // copy reads THAT variable. Redeclaring it here would shadow it, so the arm
+        // copies below would write the inner one and the carry would read a variable
+        // nothing ever assigned (graphicsfuzz_045: DXC "Loop must have break", because
+        // the loop counter is carried through exactly such a phi). Drop the type and
+        // keep the initializer -- skipping the line outright would leave the phi
+        // undefined on the fall-through path. Mirrors the MSL emitter.
+        const hoisted = if (g_hoisted_ids) |h| h.contains(pv.result_id) else false;
+        const ty: []const u8 = if (hoisted) "" else t;
+        const sep: []const u8 = if (ty.len > 0) " " else "";
         if (has_else) {
-            try w.print("{s}    {s} {s};\n", .{ indent, t, vn });
+            if (ty.len > 0) try w.print("{s}    {s} {s};\n", .{ indent, ty, vn });
         } else {
             const false_val = if (hlslPhiPred1InTrueRegion(module, label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-            try w.print("{s}    {s} {s} = {s};\n", .{ indent, t, vn, hlslExprName(module, names, false_val, alloc) });
+            try w.print("{s}    {s}{s}{s} = {s};\n", .{ indent, ty, sep, vn, hlslExprName(module, names, false_val, alloc) });
         }
     }
 }
@@ -250,7 +276,7 @@ fn emitMergePhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u3
 /// of that arm's block (where the value is in scope). (#491)
 fn emitMergePhiArmCopiesHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), label_map: *const std.AutoHashMap(u32, usize), mphis: []const HlslMergePhi, tl: u32, mval: u32, true_arm: bool, w: anytype, alloc: std.mem.Allocator, indent: []const u8) !void {
     for (mphis) |pv| {
-        const vn = hlslPhiVarName(pv.result_id, alloc);
+        const vn = hlslPhiVarName(names, pv.result_id, alloc);
         // #false-loop-init: a carried phi is already renamed to `<vn>_phi` (== vn now),
         // so assign the bare name; non-carried get the `_phi` suffix here.
         const carried = if (g_carried_phis_h) |cp| cp.contains(pv.result_id) else false;
@@ -273,7 +299,7 @@ fn finalizeMergePhisHLSL(names: *std.AutoHashMap(u32, []const u8), mphis: []cons
     for (mphis) |pv| {
         // #false-loop-init: a carried phi was renamed + materialized at loop top; skip.
         if (g_carried_phis_h) |cp| if (cp.contains(pv.result_id)) continue;
-        const pn = hlslPhiVarName(pv.result_id, alloc);
+        const pn = hlslPhiVarName(names, pv.result_id, alloc);
         if (names.fetchPut(pv.result_id, pn) catch null) |old| alloc.free(old.value);
         if (g_materialized_phis) |mp| mp.put(pv.result_id, {}) catch {};
     }
@@ -298,13 +324,13 @@ fn collectSwitchMergePhisHLSL(module: *const ParsedModule, label_map: *const std
 fn emitSwitchPhiDeclsHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
         const t = try hlslType(module, phi.words[1], names, alloc);
-        const vn = hlslPhiVarName(phi.words[2], alloc);
+        const vn = hlslPhiVarName(names, phi.words[2], alloc);
         try w.print("    {s} {s};\n", .{ t, vn }); // all cases assign, so uninitialized
     }
 }
 fn emitSwitchPhiCaseCopyHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, case_label: u32, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
-        const vn = hlslPhiVarName(phi.words[2], alloc);
+        const vn = hlslPhiVarName(names, phi.words[2], alloc);
         var pi: usize = 3;
         while (pi + 1 < phi.words.len) : (pi += 2) {
             if (phi.words[pi + 1] == case_label) {
@@ -356,7 +382,7 @@ fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
 
 fn finalizeSwitchPhisHLSL(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
     for (phis) |phi| {
-        const pn = hlslPhiVarName(phi.words[2], alloc);
+        const pn = hlslPhiVarName(names, phi.words[2], alloc);
         if (names.fetchPut(phi.words[2], pn) catch null) |old| alloc.free(old.value);
         if (g_materialized_phis) |mp| mp.put(phi.words[2], {}) catch {};
     }
@@ -5332,7 +5358,7 @@ fn emitWhileLoopHLSL(
                 const rid = pinst.words[2];
                 if (!cont_refs.contains(rid) or carried_phis.contains(rid)) continue;
                 const rtt = try hlslType(module, pinst.words[1], names, alloc);
-                const phi_name = hlslPhiVarName(rid, alloc);
+                const phi_name = hlslPhiVarName(names, rid, alloc);
                 try w.print("    {s} {s};\n", .{ rtt, phi_name });
                 if (names.fetchPut(rid, phi_name) catch null) |old| alloc.free(old.value);
                 carried_phis.put(rid, {}) catch {};
