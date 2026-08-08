@@ -840,6 +840,16 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // A loop whose top-test block is really the head of a short-circuit chain
+    // (`while (a && b)`). Emitting it would drop the second operand and leave the
+    // chain's merge phi unassigned -- silently, since the result still compiles.
+    if (err == error.UnsupportedShortCircuitLoopCond) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: this shader has a loop whose condition is a short-circuit chain (`while (a && b)`) in a form the backend cannot yet structure. Emitting it would silently drop the second operand, so zioshade refuses instead. Workaround: rewrite the loop condition as a single expression, or hoist the second test into an `if (...) break;` in the body.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL honest-errors (UnsupportedOp / UnsupportedExtInst) carry a precise reason in
     // spirv_to_wgsl.last_error_detail (which construct is unrepresentable / which GLSL.std.450
     // instruction has no mapping). Surface it so the refusal is actionable instead of a bare
