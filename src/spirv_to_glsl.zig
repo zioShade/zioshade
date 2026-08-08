@@ -3567,6 +3567,70 @@ fn emitBody(
             }
         }
     }
+    // #post-loop-header-use: the same hoist, for Pattern-B header values read AFTER the
+    // loop (port of spirv_to_msl.zig's pass, PR #569 -- MSL+HLSL fixed it, GLSL was not).
+    // SPIR-V only requires a def to dominate its uses, and a loop header dominates
+    // everything downstream, so a value computed in loop 1's header may be read inside
+    // loop 2. C scoping does not work that way -- the Pattern-B replay puts the
+    // definition inside while(true){...}, a sibling scope of loop 2, so the read is out
+    // of scope (graphicsfuzz_072: exit-test operands computed in loop 1's header, read in
+    // loop 2 -> "undeclared identifier"). Sound because the header always executes when
+    // control reaches the loop, so the hoisted var is assigned before any post-loop read.
+    // Restricted to deferred_hdr (Pattern-A header instrs are emitted in place above the
+    // while, already in scope); skips the merge block's leading OpPhis (a merge phi
+    // referencing the value is a phi-resolution concern, not a post-loop read that needs
+    // the hoist -- GLSL resolves merge phis via incoming-aliasing, separately from this).
+    {
+        var li = func_idx + 1;
+        while (li < m.instructions.len) : (li += 1) {
+            const minst = m.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            const merge_idx = label_map.get(minst.words[1]) orelse continue;
+            var hlbl = li;
+            while (hlbl > func_idx) : (hlbl -= 1) {
+                if (m.instructions[hlbl].op == .Label) break;
+            }
+            var hi = hlbl + 1;
+            while (hi < li) : (hi += 1) {
+                if (!deferred_hdr.contains(hi)) continue;
+                const hinst = m.instructions[hi];
+                if (hinst.op == .Phi) continue;
+                const rid = common.resultIdFromOp(hinst.op, hinst.words) orelse continue;
+                if (hoisted_ids.contains(rid)) continue;
+                var ci = merge_idx;
+                while (ci < m.instructions.len and (m.instructions[ci].op == .Label or m.instructions[ci].op == .Phi)) : (ci += 1) {}
+                var referenced = false;
+                while (ci < m.instructions.len) : (ci += 1) {
+                    if (m.instructions[ci].op == .FunctionEnd) break;
+                    const cw = m.instructions[ci].words;
+                    var wi: usize = 1;
+                    while (wi < cw.len) : (wi += 1) {
+                        if (cw[wi] == rid) {
+                            referenced = true;
+                            break;
+                        }
+                    }
+                    if (referenced) break;
+                }
+                if (!referenced) continue;
+                if (loop_hoists.getPtr(li)) |e| {
+                    e.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch continue;
+                } else {
+                    var hlist = std.ArrayList(common.HoistedPhiSrc).initCapacity(alloc, 1) catch continue;
+                    hlist.append(alloc, .{ .id = rid, .type_id = hinst.words[1] }) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                    loop_hoists.put(li, hlist) catch {
+                        hlist.deinit(alloc);
+                        continue;
+                    };
+                }
+                hoisted_ids.put(rid, {}) catch {};
+            }
+        }
+    }
     g_loop_phis = &loop_phis;
     g_phi_hdr = &phi_hdr;
     g_deferred_hdr = &deferred_hdr;
