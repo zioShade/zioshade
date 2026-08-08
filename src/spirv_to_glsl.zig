@@ -3578,7 +3578,8 @@ fn emitBody(
     // control reaches the loop, so the hoisted var is assigned before any post-loop read.
     // Restricted to deferred_hdr (Pattern-A header instrs are emitted in place above the
     // while, already in scope); skips the merge block's leading OpPhis (a merge phi
-    // naming the value is copied into the _lm var inside the loop, not a post-loop read).
+    // referencing the value is a phi-resolution concern, not a post-loop read that needs
+    // the hoist -- GLSL resolves merge phis via incoming-aliasing, separately from this).
     {
         var li = func_idx + 1;
         while (li < m.instructions.len) : (li += 1) {
