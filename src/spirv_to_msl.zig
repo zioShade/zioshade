@@ -7014,6 +7014,42 @@ fn emitWhileLoopMSL(
                 return loop_idx + 1;
             }
             cond_end = bc_idx;
+            // #loopcond-not-exit: the BranchConditional found in the "condition block"
+            // is only the loop's top test if one of its targets IS the loop merge. When
+            // neither is, the block is not a condition block at all -- it is the first
+            // block of a SHORT-CIRCUIT chain (`while (a && b)`), whose OpSelectionMerge
+            // sits right above the branch and whose real exit test lives further down.
+            //
+            // Treating it as the top test emits `if (!(a)) break;`, silently DROPPING the
+            // second operand, and leaves the chain's merge phi with no assignment: on
+            // graphicsfuzz_001 that produced `bool v56_phi;` declared, read twice, and
+            // never written. It compiled cleanly (the phi prologue declares it), so no
+            // compile-only gate could see it -- a silent-wrong, not a diagnosable one.
+            //
+            // Lowering this shape needs a real no-top-test path (`while (true)` with the
+            // exit taken from a deeper BranchConditional to the merge); until then,
+            // refuse. Exactly two corpus shaders reach here, graphicsfuzz_001 and _068.
+            const sbc = m.instructions[bc_idx];
+            if (sbc.words.len >= 4 and sbc.words[2] != merge_lbl and sbc.words[3] != merge_lbl and
+                bc_idx > 0 and m.instructions[bc_idx - 1].op == .SelectionMerge and m.instructions[bc_idx - 1].words.len > 1)
+            {
+                // The selection's merge block starting with a BOOL OpPhi is what makes this
+                // a short-circuit chain rather than an ordinary `if` in the first body
+                // block: that phi IS the combined condition. Without this check the guard
+                // also rejected the `do { if (c) break; ... } while(false)` idiom, whose
+                // first block looks identical up to here but whose merge carries no bool
+                // phi (selection-block-dominator).
+                if (label_map.get(m.instructions[bc_idx - 1].words[1])) |smi| {
+                    if (smi + 1 < m.instructions.len) {
+                        const sphi = m.instructions[smi + 1];
+                        if (sphi.op == .Phi and sphi.words.len > 1) {
+                            if (getDef(m, sphi.words[1])) |td| {
+                                if (td.op == .TypeBool) return error.UnsupportedShortCircuitLoopCond;
+                            }
+                        }
+                    }
+                }
+            }
         }
     } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
         // Pattern B

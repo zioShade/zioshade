@@ -247,6 +247,7 @@ fn statusFromErr(err: anyerror) c_int {
         error.UnsupportedRowMajorMatrix,
         error.UnsupportedRowMajorMatrixStore,
         error.UnsupportedSamplePosition,
+        error.UnsupportedShortCircuitLoopCond,
         error.UnsupportedSamplerArray,
         error.UnsupportedSeparateSampler,
         error.UnsupportedSeparateSamplers,
