@@ -3755,7 +3755,15 @@ fn emitBody(
                     const cv = inst.words[wi];
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
-                    try w.print("    case {d}:\n", .{cv});
+                    // #switch-case-scope: wrap each case body in its own block. C switch
+                    // cases share ONE scope, so a value declared in multiple cases (common
+                    // when each case runs the same logic -- zioshade names the per-case
+                    // SPIR-V ids identically, e.g. `bool v193 = ...` in case 9/5/12)
+                    // collides -> redefinition (graphicsfuzz_022/_037). A per-case block
+                    // gives each case its own scope; spirv-cross does the same. The
+                    // switch-merge phis are declared once BEFORE the switch and assigned
+                    // per case inside this block, so they stay in scope after the switch.
+                    try w.print("    case {d}: {{\n", .{cv});
                     _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                     // #switch-fallthrough: omit `break;` ONLY when this case body's first
@@ -3769,12 +3777,14 @@ fn emitBody(
                     const cterm = caseTerminatorTargetGLSL(m, &label_map, target);
                     const fallthrough = if (cterm) |t| isSwitchCaseTargetGLSL(inst.words, t) else false;
                     try w.writeAll(if (!fallthrough) "    break;\n" else "");
+                    try w.writeAll("    }\n");
                 }
                 if (dl != mval) {
-                    try w.writeAll("    default:\n");
+                    try w.writeAll("    default: {\n");
                     _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
                     try w.writeAll("    break;\n");
+                    try w.writeAll("    }\n");
                 }
                 try w.writeAll("    }\n");
                 finalizeSwitchPhis(names, sphis.items, alloc);
@@ -4378,20 +4388,22 @@ fn emitWhileLoop(
                     try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                     try w.print("        switch ({s}) {{\n", .{sn});
                     if (dl != smv) {
-                        try w.writeAll("        default:\n");
+                        try w.writeAll("        default: {\n");
                         bi = try emitBlock(m, names, decs, dl, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
                         try w.writeAll("        break;\n");
+                        try w.writeAll("        }\n");
                     }
                     var wi: usize = 3;
                     while (wi + 1 < binst.words.len) : (wi += 2) {
                         const cv = binst.words[wi];
                         const target = binst.words[wi + 1];
                         if (target == smv) continue;
-                        try w.print("        case {d}:\n", .{cv});
+                        try w.print("        case {d}: {{\n", .{cv});
                         bi = try emitBlock(m, names, decs, target, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                         try w.writeAll("        break;\n");
+                        try w.writeAll("        }\n");
                     }
                     try w.writeAll("        }\n");
                     finalizeSwitchPhis(names, sphis.items, alloc);
