@@ -5758,6 +5758,44 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // #170 (function-local var name collision): glslang can emit two DISTINCT
+    // OpVariables with the SAME OpName (e.g. "icoord"), which would collide in
+    // WGSL. The emission loop's .Variable case deduped these by appending _1/_2
+    // and writing the unique name back to `names` -- but that ran AFTER every
+    // name-resolution pre-scan below (load propagation, AccessChain pre-scan/
+    // refresh, and the arithmetic inline-expression pre-scan), so any frozen
+    // expression that captured the colliding var name held the PRE-mangle name
+    // ("icoord") while direct emission used the POST-mangle name ("icoord_1"):
+    // the same value under two names, and the stale name leaked wherever the
+    // result was re-inlined (naga "unknown identifier", silent-wrong). Running
+    // the SAME counter-suffix dedup HERE -- before any pre-scan reads a var name
+    // -- makes decl and every use agree. The emission .Variable case becomes a
+    // plain emit (names[rid] is already unique).
+    {
+        var vdi: usize = func_idx + 1;
+        while (vdi < module.instructions.len) : (vdi += 1) {
+            const dvinst = module.instructions[vdi];
+            if (dvinst.op == .FunctionEnd) break;
+            if (dvinst.op != .Variable or dvinst.words.len < 4) continue;
+            const dsc: spirv.StorageClass = @enumFromInt(dvinst.words[3]);
+            if (dsc != .Function) continue; // Private/Output/Input handled elsewhere
+            const drid = dvinst.words[2];
+            var dvn = names.get(drid) orelse "v";
+            if (declared_local_names.contains(dvn)) {
+                var dn: u32 = 1;
+                var duniq = std.fmt.allocPrint(alloc, "{s}_{d}", .{ dvn, dn }) catch continue;
+                while (declared_local_names.contains(duniq)) {
+                    alloc.free(duniq);
+                    dn += 1;
+                    duniq = std.fmt.allocPrint(alloc, "{s}_{d}", .{ dvn, dn }) catch continue;
+                }
+                if (names.fetchPut(drid, duniq) catch null) |old| alloc.free(old.value);
+                dvn = duniq;
+            }
+            declared_local_names.put(arena.dupe(u8, dvn) catch continue, {}) catch continue;
+        }
+    }
+
     // Pre-pass (MUST run before the AccessChain pre-scan below): propagate the
     // source name of DIRECT-variable loads (e.g. `%27 = OpLoad %int %index`, or
     // `OpLoad %float %FragColor`) onto the load result. The AccessChain pre-scan
@@ -7346,23 +7384,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                     if (sc == .Function) {
                         const rt = try wgslType(module, inst.words[1], names, arena);
-                        // Dedup a name already used by another local var (glslang may
-                        // give two distinct OpVariables the same OpName); rename the
-                        // collider and update the names map so its uses resolve to the
-                        // unique name (the declaration precedes every use). (#170)
-                        var vn = names.get(inst.words[2]) orelse "v";
-                        if (declared_local_names.contains(vn)) {
-                            var n: u32 = 1;
-                            var uniq = try std.fmt.allocPrint(alloc, "{s}_{d}", .{ vn, n });
-                            while (declared_local_names.contains(uniq)) {
-                                alloc.free(uniq);
-                                n += 1;
-                                uniq = try std.fmt.allocPrint(alloc, "{s}_{d}", .{ vn, n });
-                            }
-                            if (try names.fetchPut(inst.words[2], uniq)) |old| alloc.free(old.value);
-                            vn = uniq;
-                        }
-                        try declared_local_names.put(try arena.dupe(u8, vn), {});
+                        // Local-var name collision was deduped in the pre-pass before
+                        // any name-resolution stage ran; names[rid] is already the unique
+                        // emitted name and declared_local_names is already populated. (#170)
+                        const vn = names.get(inst.words[2]) orelse "v";
                         try writeInd(w, indent);
                         // #476: OpVariable Function with an Initializer operand (word[4]) —
                         // emit it, else the local reads zero before any store (silent-wrong).
