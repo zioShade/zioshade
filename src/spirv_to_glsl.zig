@@ -3281,25 +3281,6 @@ fn emitFunction(
 
 // #477: SWITCH-merge phi materialization (N incoming). Mirrors HLSL/MSL — declare a
 // `_phi` var per phi before the switch, assign the matching incoming at each case end.
-/// Name of the materialized variable for a phi result `rid`. Derived from the
-/// IMMUTABLE result id, never by suffixing whatever `names` happens to hold:
-/// `names` maps ids to rendered EXPRESSIONS (not identifiers), and passes
-/// rewrite it between a phi's declaration and its use, so suffixing produced
-/// invalid identifiers (`vec3(1.0)_phi`) and decl/use mismatches -- the
-/// #559/#564 class that MSL/HLSL fixed but GLSL never ported. Returns the FULL
-/// name including the `_phi` suffix; callers must not add `_phi` themselves. A
-/// #413-hoisted id keeps its hoisted name (handing it a `_phi` name would split
-/// the hoisted decl from the carry copy).
-fn glslPhiVarName(names: *const std.AutoHashMap(u32, []const u8), rid: u32, alloc: std.mem.Allocator) []const u8 {
-    if (g_hoisted_ids) |h| {
-        if (h.contains(rid)) {
-            const cur = names.get(rid) orelse "pv";
-            return alloc.dupe(u8, cur) catch cur;
-        }
-    }
-    return std.fmt.allocPrint(alloc, "v{d}_phi", .{rid}) catch "pv_phi";
-}
-
 fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), ml: u32, list: *std.ArrayList(Instruction), alloc: std.mem.Allocator) void {
     const midx = label_map.get(ml) orelse return;
     var pj: usize = midx + 1;
@@ -3312,17 +3293,17 @@ fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHash
 fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
         const t = try glslType(m, phi.words[1], names, alloc);
-        const vn = glslPhiVarName(names, phi.words[2], alloc);
-        try w.print("    {s} {s};\n", .{ t, vn });
+        const vn = names.get(phi.words[2]) orelse "pv";
+        try w.print("    {s} {s}_phi;\n", .{ t, vn });
     }
 }
 fn emitSwitchPhiCaseCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, case_label: u32, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
-        const vn = glslPhiVarName(names, phi.words[2], alloc);
+        const vn = names.get(phi.words[2]) orelse "pv";
         var pi: usize = 3;
         while (pi + 1 < phi.words.len) : (pi += 2) {
             if (phi.words[pi + 1] == case_label) {
-                try w.print("        {s} = {s};\n", .{ vn, exprName(m, names, phi.words[pi], alloc) });
+                try w.print("        {s}_phi = {s};\n", .{ vn, exprName(m, names, phi.words[pi], alloc) });
                 break;
             }
         }
@@ -3330,7 +3311,8 @@ fn emitSwitchPhiCaseCopy(m: *const ParsedModule, names: *std.AutoHashMap(u32, []
 }
 fn finalizeSwitchPhis(names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, alloc: std.mem.Allocator) void {
     for (phis) |phi| {
-        const pn = glslPhiVarName(names, phi.words[2], alloc);
+        const vn = names.get(phi.words[2]) orelse "pv";
+        const pn = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
         if (names.fetchPut(phi.words[2], pn) catch null) |old| alloc.free(old.value);
     }
 }
@@ -3695,43 +3677,44 @@ fn emitBody(
                 }
                 for (phi_decls.items) |pv| {
                     const rtt = try glslType(m, pv.type_id, names, alloc);
-                    const vn = glslPhiVarName(names, pv.result_id, alloc);
+                    const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
                         // Both arms assign it; declare uninitialized.
-                        try w.print("    {s} {s};\n", .{ rtt, vn });
+                        try w.print("    {s} {s}_phi;\n", .{ rtt, vn });
                     } else {
                         // No else arm (short-circuit a && b): the fall-through value is the
                         // incoming from the header block (in scope before the if); initialize
                         // to it so the phi is defined when the condition is false. Mirrors MSL.
                         const false_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                         const fvn = exprName(m, names, false_val, alloc);
-                        try w.print("    {s} {s} = {s};\n", .{ rtt, vn, fvn });
+                        try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
                     }
                 }
                 try w.print("    if ({s})\n    {{\n", .{cn});
                 idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                 // After true branch: assign Phi vars
                 for (phi_decls.items) |pv| {
-                    const vn = glslPhiVarName(names, pv.result_id, alloc);
+                    const vn = names.get(pv.result_id) orelse "pv";
                     const true_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                     const tvn = exprName(m, names, true_val, alloc);
-                    try w.print("        {s} = {s};\n", .{ vn, tvn });
+                    try w.print("        {s}_phi = {s};\n", .{ vn, tvn });
                 }
                 if (he) {
                     try w.writeAll("    } else {\n");
                     idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     // After false branch: assign Phi vars
                     for (phi_decls.items) |pv| {
-                        const vn = glslPhiVarName(names, pv.result_id, alloc);
+                        const vn = names.get(pv.result_id) orelse "pv";
                         const false_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                         const fvn = exprName(m, names, false_val, alloc);
-                        try w.print("        {s} = {s};\n", .{ vn, fvn });
+                        try w.print("        {s}_phi = {s};\n", .{ vn, fvn });
                     }
                 }
                 try w.writeAll("    }\n");
                 // Map Phi result IDs to _phi names
                 for (phi_decls.items) |pv| {
-                    const phi_name = glslPhiVarName(names, pv.result_id, alloc);
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const phi_name = try std.fmt.allocPrint(alloc, "{s}_phi", .{vn});
                     if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
                 }
                 if (label_map.get(mval)) |mi| {
@@ -4148,7 +4131,8 @@ fn emitWhileLoop(
                 const rid = pinst.words[2];
                 if (!cont_refs.contains(rid) or carried_phis.contains(rid)) continue;
                 const rtt = try glslType(m, pinst.words[1], names, alloc);
-                const phi_name = glslPhiVarName(names, rid, alloc);
+                const vn = names.get(rid) orelse continue;
+                const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                 try w.print("    {s} {s};\n", .{ rtt, phi_name });
                 if (names.fetchPut(rid, phi_name) catch null) |old| alloc.free(old.value);
                 carried_phis.put(rid, {}) catch {};
@@ -4335,43 +4319,53 @@ fn emitWhileLoop(
                             // renamed to its `_phi` var; don't re-declare it body-local.
                             if (carried_phis.contains(pv.result_id)) continue;
                             const rtt = try glslType(m, pv.type_id, names, alloc);
-                            const vn = glslPhiVarName(names, pv.result_id, alloc);
+                            const vn = names.get(pv.result_id) orelse "pv";
                             if (nhe) {
-                                try w.print("        {s} {s};\n", .{ rtt, vn });
+                                try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
                             } else {
                                 // No else arm: initialize to the fall-through (header) value so
                                 // the phi is defined when the condition is false. Mirrors MSL.
                                 const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                                 const fvn = exprName(m, names, false_val, alloc);
-                                try w.print("        {s} {s} = {s};\n", .{ rtt, vn, fvn });
+                                try w.print("        {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
                             }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         for (body_phis.items) |pv| {
-                            // glslPhiVarName(rid) returns the same stable name for carried
-                            // (declared at loop top) and non-carried phis, so the former
-                            // carried/non-carried branch is now a single assignment.
-                            const vn = glslPhiVarName(names, pv.result_id, alloc);
+                            // Carried phis are already renamed (name == `<vn>_phi`), so
+                            // assign the bare name; others get the `_phi` suffix here.
+                            const carried = carried_phis.contains(pv.result_id);
+                            const vn = names.get(pv.result_id) orelse "pv";
                             const true_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                             const tvn = exprName(m, names, true_val, alloc);
-                            try w.print("            {s} = {s};\n", .{ vn, tvn });
+                            if (carried) {
+                                try w.print("            {s} = {s};\n", .{ vn, tvn });
+                            } else {
+                                try w.print("            {s}_phi = {s};\n", .{ vn, tvn });
+                            }
                         }
                         if (nhe) {
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                             for (body_phis.items) |pv| {
-                                const vn = glslPhiVarName(names, pv.result_id, alloc);
+                                const carried = carried_phis.contains(pv.result_id);
+                                const vn = names.get(pv.result_id) orelse "pv";
                                 const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                                 const fvn = exprName(m, names, false_val, alloc);
-                                try w.print("            {s} = {s};\n", .{ vn, fvn });
+                                if (carried) {
+                                    try w.print("            {s} = {s};\n", .{ vn, fvn });
+                                } else {
+                                    try w.print("            {s}_phi = {s};\n", .{ vn, fvn });
+                                }
                             }
                         }
                         try w.writeAll("        }\n");
                         for (body_phis.items) |pv| {
                             // Carried phis were renamed at the top; don't rename again.
                             if (carried_phis.contains(pv.result_id)) continue;
-                            const phi_name = glslPhiVarName(names, pv.result_id, alloc);
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                             if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
                         }
                     }
@@ -4558,36 +4552,37 @@ fn emitBlock(
                 }
                 for (phi_decls2.items) |pv| {
                     const rtt = try glslType(m, pv.type_id, names, alloc);
-                    const vn = glslPhiVarName(names, pv.result_id, alloc);
+                    const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
-                        try w.print("{s}    {s} {s};\n", .{ indent, rtt, vn });
+                        try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
                     } else {
                         const false_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                         const fvn = exprName(m, names, false_val, alloc);
-                        try w.print("{s}    {s} {s} = {s};\n", .{ indent, rtt, vn, fvn });
+                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, rtt, vn, fvn });
                     }
                 }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
                 i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
                 for (phi_decls2.items) |pv| {
-                    const vn = glslPhiVarName(names, pv.result_id, alloc);
+                    const vn = names.get(pv.result_id) orelse "pv";
                     const true_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                     const tvn = exprName(m, names, true_val, alloc);
-                    try w.print("{s}        {s} = {s};\n", .{ indent, vn, tvn });
+                    try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, tvn });
                 }
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
                     i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
                     for (phi_decls2.items) |pv| {
-                        const vn = glslPhiVarName(names, pv.result_id, alloc);
+                        const vn = names.get(pv.result_id) orelse "pv";
                         const false_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                         const fvn = exprName(m, names, false_val, alloc);
-                        try w.print("{s}        {s} = {s};\n", .{ indent, vn, fvn });
+                        try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, fvn });
                     }
                 }
                 try w.print("{s}    }}\n", .{indent});
                 for (phi_decls2.items) |pv| {
-                    const phi_name = glslPhiVarName(names, pv.result_id, alloc);
+                    const vn = names.get(pv.result_id) orelse "pv";
+                    const phi_name = try std.fmt.allocPrint(alloc, "{s}_phi", .{vn});
                     if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
                 }
                 if (lm.get(nmv)) |nmi| {
