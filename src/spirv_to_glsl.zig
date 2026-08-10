@@ -1020,6 +1020,16 @@ fn isDeferredHdrGLSL(idx: usize) bool {
     return dh.contains(idx);
 }
 
+/// True if `rid` is a loop back-edge carrier hoisted above its loop by the #413
+/// pre-scan (recorded in g_hoisted_ids). Such a phi is the loop-header phi's
+/// update; the loop-top carry copy reads its carrier name, so a body selection
+/// that materializes it MUST write the carrier name (not a disconnected `_phi`
+/// temp), exactly like a `carried_phis` phi. See emitWhileLoop's body
+/// BranchConditional handler (#phi-carrier).
+fn phiIsHoistedLoopCarrierGLSL(rid: u32) bool {
+    return if (g_hoisted_ids) |h| h.contains(rid) else false;
+}
+
 fn tryResolveTypeName(m: *const ParsedModule, type_id: u32) []const u8 {
     const inst = getDef(m, type_id) orelse return "float";
     return switch (inst.op) {
@@ -4315,27 +4325,42 @@ fn emitWhileLoop(
                             }
                         }
                         for (body_phis.items) |pv| {
-                            // A loop-carried phi was already declared at loop top and
-                            // renamed to its `_phi` var; don't re-declare it body-local.
-                            if (carried_phis.contains(pv.result_id)) continue;
+                            // A loop-carried phi was already declared at loop top (a
+                            // carried_phis phi as `vN_phi`, or a #413-hoisted back-edge
+                            // carrier as its base name); don't re-declare it body-local.
+                            const pre_declared = carried_phis.contains(pv.result_id) or phiIsHoistedLoopCarrierGLSL(pv.result_id);
+                            // A pre-declared phi must NOT be redeclared (that would shadow the
+                            // variable the loop's carry copy reads), but with no else arm it
+                            // still needs the fall-through assignment. Skipping the line
+                            // outright left the carrier holding the PREVIOUS iteration's value
+                            // whenever the condition was false -- graphicsfuzz_045 emitted
+                            // `int v50;` read by `v39 = v50;` with the only write inside the
+                            // `if`. Drop the type, keep the assignment. Mirrors MSL and #572.
+                            if (pre_declared and nhe) continue;
                             const rtt = try glslType(m, pv.type_id, names, alloc);
                             const vn = names.get(pv.result_id) orelse "pv";
+                            const sfx: []const u8 = if (pre_declared) "" else "_phi";
                             if (nhe) {
-                                try w.print("        {s} {s}_phi;\n", .{ rtt, vn });
+                                try w.print("        {s} {s}{s};\n", .{ rtt, vn, sfx });
                             } else {
                                 // No else arm: initialize to the fall-through (header) value so
                                 // the phi is defined when the condition is false. Mirrors MSL.
                                 const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                                 const fvn = exprName(m, names, false_val, alloc);
-                                try w.print("        {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
+                                if (pre_declared) {
+                                    try w.print("        {s} = {s};\n", .{ vn, fvn });
+                                } else {
+                                    try w.print("        {s} {s}{s} = {s};\n", .{ rtt, vn, sfx, fvn });
+                                }
                             }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         for (body_phis.items) |pv| {
-                            // Carried phis are already renamed (name == `<vn>_phi`), so
-                            // assign the bare name; others get the `_phi` suffix here.
-                            const carried = carried_phis.contains(pv.result_id);
+                            // A carried phi is already renamed to `vN_phi`; a #413-hoisted
+                            // back-edge carrier keeps its base name. Both write the bare
+                            // (current) name; others get the `_phi` suffix here.
+                            const carried = carried_phis.contains(pv.result_id) or phiIsHoistedLoopCarrierGLSL(pv.result_id);
                             const vn = names.get(pv.result_id) orelse "pv";
                             const true_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
                             const tvn = exprName(m, names, true_val, alloc);
@@ -4349,7 +4374,7 @@ fn emitWhileLoop(
                             try w.writeAll("        } else {\n");
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                             for (body_phis.items) |pv| {
-                                const carried = carried_phis.contains(pv.result_id);
+                                const carried = carried_phis.contains(pv.result_id) or phiIsHoistedLoopCarrierGLSL(pv.result_id);
                                 const vn = names.get(pv.result_id) orelse "pv";
                                 const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
                                 const fvn = exprName(m, names, false_val, alloc);
@@ -4362,8 +4387,9 @@ fn emitWhileLoop(
                         }
                         try w.writeAll("        }\n");
                         for (body_phis.items) |pv| {
-                            // Carried phis were renamed at the top; don't rename again.
-                            if (carried_phis.contains(pv.result_id)) continue;
+                            // Carried phis were renamed at the top; hoisted carriers keep
+                            // their base name. Either way, don't rename again.
+                            if (carried_phis.contains(pv.result_id) or phiIsHoistedLoopCarrierGLSL(pv.result_id)) continue;
                             const vn = names.get(pv.result_id) orelse "pv";
                             const phi_name = std.fmt.allocPrint(alloc, "{s}_phi", .{vn}) catch continue;
                             if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
@@ -4852,8 +4878,28 @@ fn emitInstruction(
                 if (std.mem.endsWith(u8, existing, "_phi")) return;
             }
             if (inst.words.len < 4) return;
+            // A #413-hoisted phi and a loop-header phi already have a correct variable
+            // and correct assignments under their own name; keep it. Same two exclusions
+            // the MSL and HLSL arms make.
+            {
+                const owned = (if (g_hoisted_ids) |h| h.contains(inst.words[2]) else false) or
+                    (if (g_phi_hdr) |ph| ph.get(inst.words[2]) != null else false);
+                if (owned) return;
+            }
             const fv = inst.words[3];
             const result_id = inst.words[2];
+            // Aliasing to incoming[0] is only sound when every predecessor carries the
+            // SAME id -- then the phi is degenerate and the choice does not matter. With
+            // distinct incoming values it silently yields the FIRST predecessor's value
+            // on every path, and no mechanism owns this phi, so there is no assignment
+            // anywhere that would make it right. Refuse instead of miscompiling.
+            // Ports #565 (MSL) and #567 (HLSL); GLSL was the last backend without it.
+            {
+                var pi: usize = 5;
+                while (pi < inst.words.len) : (pi += 2) {
+                    if (inst.words[pi] != fv) return error.UnsupportedPhiAlias;
+                }
+            }
             if (names.get(fv)) |sn| {
                 const a = try alloc.dupe(u8, sn);
                 if (names.fetchPut(result_id, a) catch null) |old| alloc.free(old.value);

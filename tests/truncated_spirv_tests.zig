@@ -52,11 +52,22 @@ test "truncated OpFunctionCall is rejected by every backend" {
     try expectTruncatedOnAllBackends(truncated_functioncall);
 }
 
-test "positive control: the untruncated module still cross-compiles" {
+test "positive control: the untruncated module is not rejected as truncated" {
     const words = try toWords(valid_module);
     defer alloc.free(words);
 
-    const out = try zioshade.spirvToGLSL(alloc, words, .{});
-    defer alloc.free(out);
-    try std.testing.expect(out.len > 0);
+    // The control exists to show the truncation check rejects the TRUNCATION, not the
+    // module. It cannot assert successful cross-compilation any more: this module is
+    // graphicsfuzz_001 (the truncated_vectorshuffle fixture is generated from it), whose
+    // loop condition is a short-circuit `&&` that the GLSL backend now refuses rather
+    // than miscompiling -- it used to emit code that dropped the second operand
+    // entirely. So accept either a clean compile or that one documented semantic
+    // refusal, and fail on anything else, InvalidSpirvTruncated above all.
+    if (zioshade.spirvToGLSL(alloc, words, .{})) |out| {
+        defer alloc.free(out);
+        try std.testing.expect(out.len > 0);
+    } else |err| {
+        try std.testing.expect(err != error.InvalidSpirvTruncated);
+        try std.testing.expectEqual(error.UnsupportedPhiAlias, err);
+    }
 }
