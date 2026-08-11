@@ -205,6 +205,14 @@ prove-integer:
 chaos-classify dir="tests/spirv-cross":
     @bash tools/chaos_classify.sh {{dir}}
 
+# WGSL structural-drop sweep: does the emitted WGSL still contain every loop, switch and
+# nested-selection switch-break the INPUT SPIR-V requires? A drop is silent-wrong — the
+# output compiles, it just skips control flow. The 2026-07-28 count sweep proved MSL/GLSL/
+# HLSL clean but never covered WGSL, and PR #581 found four dropped switch-breaks there.
+# Calibrated: against the pre-#581 binary it reports graphicsfuzz_081 (4 required, 0 emitted).
+wgsl-structural-drop:
+    @python3 tools/wgsl_structural_drop_sweep.py
+
 # GLSL faithfulness check (non-proxy ground truth for zioshade-GLSL). Renders naga(zioshade-
 # GLSL(source)->glslang) vs zioshade-MSL(source) [the proven-correct reference] — an
 # INDEPENDENT renderer of the round-tripped SPIR-V, no spirv-cross. MATCH => zioshade-GLSL
