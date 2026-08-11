@@ -5980,6 +5980,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     }
 
     // Pre-scan: inline single-use CompositeExtract results (v15 = v14.x → rename v15 to v14.x)
+    // Extracts this pre-scan declines to rename, but which the emission path renames
+    // anyway. Their names are NOT final here, so an expression cached over them would
+    // freeze a name that later changes. See the inline_exprs builder below.
+    var late_renamed_extracts = std.AutoHashMap(u32, void).init(arena);
     // Process in instruction order so parent extracts are renamed before children
     {
         var ii: usize = func_idx + 1;
@@ -6005,7 +6009,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (sd.words.len > 3) {
                             const ptr_def = getDef(module, sd.words[3]);
                             if (ptr_def) |pd| {
-                                if (pd.op == .AccessChain) continue; // skip
+                                if (pd.op == .AccessChain) {
+                                    late_renamed_extracts.put(result_id, {}) catch {};
+                                    continue; // skip
+                                }
                             }
                         }
                     }
@@ -6305,6 +6312,25 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (uses != 2) continue;
             if (dead_extracts.contains(result_id) or dead_conditions.contains(result_id)) continue;
             if (store_operands.contains(result_id)) continue;
+            // buildInlineExpr resolves operands through `names` and freezes the result.
+            // An operand the extract pre-scan declined to rename gets renamed anyway
+            // during emission, so the cached string would keep a name that no longer
+            // exists. graphicsfuzz_081 emitted `let v41 = v18[v30].x + v18[v30].z;` and
+            // then re-expanded the same add at its use site as `(v35 + v40)`, naming two
+            // temps that were never bound. Declining to cache is always safe: the `let`
+            // binding is emitted regardless, so the use site falls back to it. Same class
+            // as the AccessChain rebuild above, which exists for exactly this reason.
+            {
+                var oi: usize = 3;
+                var operand_renamed_late = false;
+                while (oi < scan_inst.words.len) : (oi += 1) {
+                    if (late_renamed_extracts.contains(scan_inst.words[oi])) {
+                        operand_renamed_late = true;
+                        break;
+                    }
+                }
+                if (operand_renamed_late) continue;
+            }
             const expr = buildInlineExpr(module, names, &inline_exprs, result_id, arena, 0) orelse continue;
             try inline_exprs.put(result_id, expr);
         }
