@@ -1812,6 +1812,23 @@ fn writeIndentStatic(w: anytype, depth: u32) !void {
     while (d < depth) : (d += 1) try w.writeAll("    ");
 }
 
+/// Emit `break;` when the instruction at `idx` is an OpBranch to a switch's merge label.
+///
+/// The switch case-body replay emits an arm by walking instructions and stopping at the
+/// first terminator, which discards it. That is right for a branch to the arm's own
+/// selection merge (control just falls out of the `if`), but a branch to the SWITCH's
+/// merge is a `break` out of the switch, and dropping it let the statements after the
+/// `if` run on a path that should have exited. graphicsfuzz_081 emitted `if v36 { }`
+/// where MSL emits `if (v38) { break; }`. Silent-wrong: the output still compiles.
+fn emitSwitchBreakIfMerge(module: *const ParsedModule, idx: usize, switch_merge: u32, w: anytype, depth: u32) !void {
+    if (idx >= module.instructions.len) return;
+    const term = module.instructions[idx];
+    if (term.op != .Branch or term.words.len < 2) return;
+    if (term.words[1] != switch_merge) return;
+    try writeIndentStatic(w, depth);
+    try w.writeAll("break;\n");
+}
+
 fn wgslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
     const inst = getDef(module, type_id) orelse {
         last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unresolved type id {d}", .{type_id}) catch null;
@@ -6543,6 +6560,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                             if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
                                                             try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                         }
+                                                        // The arm's terminator was skipped by the loop above. When it branches
+                                                        // to the SWITCH's merge it is a `break` out of the switch, and dropping
+                                                        // it let the statements after the `if` run on a path that should have
+                                                        // exited (graphicsfuzz_081 emitted `if v36 { }`). MSL emits
+                                                        // `if (v38) { break; }` for the same shader.
+                                                        try emitSwitchBreakIfMerge(module, ti, merge_label.?, w, body_ind + 1);
                                                         break;
                                                     }
                                                 }
@@ -6560,6 +6583,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                                 if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
                                                                 try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                             }
+                                                            try emitSwitchBreakIfMerge(module, fi, merge_label.?, w, body_ind + 1);
                                                             break;
                                                         }
                                                     }
@@ -6659,6 +6683,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                                 if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
                                                                 try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                             }
+                                                            try emitSwitchBreakIfMerge(module, ti, merge_label.?, w, body_ind + 1);
                                                             break;
                                                         }
                                                     }
@@ -6676,6 +6701,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                                     if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
                                                                     try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                                 }
+                                                                try emitSwitchBreakIfMerge(module, fi, merge_label.?, w, body_ind + 1);
                                                                 break;
                                                             }
                                                         }
