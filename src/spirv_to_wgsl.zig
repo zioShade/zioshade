@@ -6139,7 +6139,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                     }
                 }
-                if (lead_count >= 2 and lead_source != null and !src_is_aggregate) {
+                // The emit path additionally refuses to collapse when the RESULT is a
+                // struct or a matrix, and this pre-scan must agree with it exactly. It
+                // did not: for `mat4x4(m[0], m[1], m[2], m[3])` the pre-scan marked the
+                // four column extracts dead while the emit path kept them as separate
+                // arguments, so the arguments referenced names nothing ever defined
+                // (graphicsfuzz_056: `mat4x4f(v20, v21, v22, v23)` with no v20..v23).
+                // A matrix has no swizzle form for its columns, so there is nothing to
+                // collapse into in the first place.
+                const dead_is_struct_result = isStructType(module, scan_inst.words[1]);
+                const dead_is_matrix_result = isMatrixType(module, scan_inst.words[1]);
+                if (lead_count >= 2 and lead_source != null and !src_is_aggregate and !dead_is_struct_result and !dead_is_matrix_result) {
                     // Mark the leading CompositeExtract results as dead
                     // ONLY if they're not used elsewhere (single use absorbed by swizzle)
                     for (scan_inst.words[3..], 0..) |comp_id, ci| {
