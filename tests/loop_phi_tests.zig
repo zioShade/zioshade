@@ -447,6 +447,25 @@ test "continue advances a Private-var counter in HLSL (#loop-continue-deadincr)"
     }
 }
 
+// #switch-case-continue: a switch case whose body branches to the enclosing
+// LOOP's continue target must emit `continue;`, not `break;`. zioshade emitted
+// `break` (switch break) so the post-switch code ran on the continue path ->
+// silent-wrong (loop-dominator-and-switch-default; a clean repro adds ~100x per
+// iteration). The fix extends g_loop_merge_ctx with the loop's continue label and
+// emits `continue` in emitBlock for an OpBranch to it. Fixture is deterministic
+// (gl_FragCoord-derived input, no UB, no uniform).
+const SWITCH_CASE_CONTINUE_SPV = @embedFile("fixtures/switch_case_continue.spv");
+
+test "GLSL continues the outer loop from a switch case (#switch-case-continue)" {
+    const glsl = try crossGlsl(SWITCH_CASE_CONTINUE_SPV);
+    defer alloc.free(glsl);
+    const di = std.mem.indexOf(u8, glsl, "default:") orelse return error.MissingDefault;
+    if (std.mem.indexOf(u8, glsl[di..], "continue;") == null) {
+        std.debug.print("GLSL switch default does not continue the outer loop:\n{s}\n", .{glsl});
+        return error.SwitchCaseNotContinued;
+    }
+}
+
 fn crossWgsl(spv_bytes: []const u8) ![]const u8 {
     const spv = try wordsFromBytes(spv_bytes);
     defer alloc.free(spv);

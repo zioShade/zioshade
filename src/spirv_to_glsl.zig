@@ -953,10 +953,12 @@ threadlocal var g_hoist_stripping: bool = false;
 // operands) — needs GL_EXT_shader_integer_mix (core GLSL mix is genType=float
 // only). Read by spliceRequiredExtensions.
 threadlocal var g_int_mix_needed: bool = false;
-// #loop-break-on-selection-merge: the enclosing loop's merge label, so an
-// OpBranch to it from a side-effecting break block can emit `break;` (mirrors
-// MSL's g_loop_merge_ctx). Set per-loop by emitWhileLoop, saved/restored for nesting.
-const LoopMergeCtx = struct { merge_label: u32 };
+// #loop-break-on-selection-merge: the enclosing loop's merge AND continue labels,
+// so an OpBranch to the merge from a side-effecting break block can emit `break;`
+// and an OpBranch to the continue (e.g. a switch case that continues the outer
+// loop) can emit `continue;`. Mirrors MSL's g_loop_merge_ctx. Set per-loop by
+// emitWhileLoop, saved/restored for nesting.
+const LoopMergeCtx = struct { merge_label: u32, continue_label: u32 };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 const max_emit_while_depth: u32 = 256;
 threadlocal var g_ewl_depth: u32 = 0;
@@ -3922,7 +3924,7 @@ fn emitWhileLoop(
     defer g_ewl_depth -= 1;
     if (g_ewl_depth > max_emit_while_depth) return error.CrossCompileUnsupported;
     const saved_lmc = g_loop_merge_ctx;
-    g_loop_merge_ctx = .{ .merge_label = merge_lbl };
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .continue_label = cont_lbl };
     defer g_loop_merge_ctx = saved_lmc;
     // #413: declare loop-carried phi update temps ABOVE the loop. The top-of-
     // loop carry copy (#237) reads them on every iteration after the first;
@@ -4532,6 +4534,13 @@ fn emitBlock(
         }
         if (inst.op == .Branch) {
             if (is_switch) {
+                const sw_br_target = if (inst.words.len > 1) inst.words[1] else 0;
+                // A switch case that branches to the enclosing LOOP's continue is a
+                // structured continue, not a switch break (#switch-case-continue).
+                if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == sw_br_target) {
+                    try w.print("{s}    continue;\n", .{indent});
+                    break;
+                };
                 try w.print("{s}    break;\n", .{indent});
                 break;
             }
@@ -4541,6 +4550,15 @@ fn emitBlock(
             // break is silently dropped (mandelbrot-loop's escape exit). Mirrors MSL.
             if (g_loop_merge_ctx) |ctx| if (ctx.merge_label == br_target) {
                 try w.print("{s}    break;\n", .{indent});
+                break;
+            };
+            // #switch-case-continue: an OpBranch to the enclosing LOOP's continue is a
+            // structured continue. A switch case (emitted with is_switch=false) that
+            // continues the outer loop would otherwise end the block here and fall through
+            // to the switch handler's unconditional `break;`, so the post-switch code runs
+            // on the continue path -> silent-wrong (loop-dominator-and-switch-default).
+            if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == br_target) {
+                try w.print("{s}    continue;\n", .{indent});
                 break;
             };
             // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
