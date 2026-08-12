@@ -5746,18 +5746,27 @@ fn emitBlock(
         // AND a switch-case/nested-if continue would skip them. Narrow, not in the corpus,
         // not a regression (pre-PR the continue was dropped entirely). Shared follow-up.
         if (inst.op == .Branch and inst.words.len > 1) {
-            if (g_loop_merge_map_h) |lmm| {
-                var it = lmm.valueIterator();
-                var is_continue = false;
-                while (it.next()) |li| {
-                    if (li.cont == inst.words[1]) {
-                        is_continue = true;
+            // A branch INTO a (self-)loop header enters that loop (handled by the nested-
+            // loop entry below), it is not a continue of the enclosing loop. A self-loop's
+            // continue target IS its header, so without this guard the continue check below
+            // mis-fires on an OpBranch that ENTERS a self-loop and emits a bare `continue;`,
+            // dropping the whole loop (graphicsfuzz_015: three self-loops nested in selection
+            // arms -> silent-wrong). A self-loop's own back-edge is a BranchConditional, never
+            // an OpBranch, so an OpBranch to a loop header is always entering it from outside.
+            if (!blockIsLoopHeader(module, inst.words[1], label_map)) {
+                if (g_loop_merge_map_h) |lmm| {
+                    var it = lmm.valueIterator();
+                    var is_continue = false;
+                    while (it.next()) |li| {
+                        if (li.cont == inst.words[1]) {
+                            is_continue = true;
+                            break;
+                        }
+                    }
+                    if (is_continue) {
+                        try w.print("{s}    continue;\n", .{indent});
                         break;
                     }
-                }
-                if (is_continue) {
-                    try w.print("{s}    continue;\n", .{indent});
-                    break;
                 }
             }
         }

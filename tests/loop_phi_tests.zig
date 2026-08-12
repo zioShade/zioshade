@@ -673,6 +673,22 @@ test "HLSL lowers a self-loop with body-in-header (#selfloop)" {
     }
 }
 
+// #hlsl-selfloop-in-arm: a self-loop (continue target IS its header) nested in a selection
+// ARM was silently DROPPED by HLSL. emitBlock's #switch-case-continue check (an OpBranch to
+// any tracked loop's continue -> `continue;`) runs BEFORE the nested-loop entry, and a self-
+// loop's continue IS its header, so an OpBranch that ENTERS the self-loop matched the continue
+// check and emitted a bare `continue;`, dropping the whole loop. GLSL is unaffected (its
+// continue check uses only the innermost loop's continue). The top-level #selfloop fixture
+// above is reached via emitBody, so it missed this emitBlock path. Fixture: a self-loop nested
+// in an if-arm (spirv-as, vulkan1.2). Assert HLSL emits the loop.
+const SELFLOOP_IN_ARM_SPV = @embedFile("fixtures/selfloop_in_arm.spv");
+
+test "HLSL emits a self-loop nested in a selection arm (#hlsl-selfloop-in-arm)" {
+    const hlsl = try crossHlsl(SELFLOOP_IN_ARM_SPV);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "while (true)") != null);
+}
+
 // WGSL used to emit BROKEN code (exit 0) on the self-loop: the loop-header phi's
 // back-edge predecessor IS the header (same block, before the phi), so the index-based
 // init/update attribution misread the back-edge incoming as the init
