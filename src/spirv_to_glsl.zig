@@ -4561,14 +4561,32 @@ fn emitBlock(
                 try w.print("{s}    continue;\n", .{indent});
                 break;
             };
-            // #69: a non-switch OpBranch to a LOOP HEADER must be followed, not treated as
-            // end-of-branch. Otherwise a nested loop is silently dropped (early_return2: the
-            // else branch flows into a for-loop; emitBlock stopped at the OpBranch and never
-            // reached the OpLoopMerge -> emitWhileLoop). Other OpBranches terminate here.
+            // #69 / #pattern-b-loop-in-arm: a non-switch OpBranch to a LOOP HEADER must be
+            // followed, not treated as end-of-branch. Otherwise a loop nested in this arm is
+            // silently dropped (early_return2: the else branch flows into a for-loop; emitBlock
+            // stopped at the OpBranch and never reached the OpLoopMerge -> emitWhileLoop), and
+            // so is every instruction after it in the arm. A loop header block is OpLabel,
+            // <phi/cond body>, OpLoopMerge, <Branch|BranchConditional>; the OpLoopMerge may sit
+            // anywhere in that block, not only immediately after the phis. Pattern-B loops
+            // (BranchConditional right after the OpLoopMerge) compute the exit condition IN the
+            // header between the phis and the OpLoopMerge -- zioshade's own frontend emits this
+            // shape for `for`. The old Phi-only scan landed on that condition, failed the check,
+            // and broke here, dropping the loop. Scan the whole header block up to the
+            // OpLoopMerge; any block terminator (Label/Branch/BranchConditional/Return/Kill)
+            // before it means this OpBranch does not target a loop header.
             if (lm.get(br_target)) |hi| {
                 var hi2 = hi + 1;
-                while (hi2 < m.instructions.len and m.instructions[hi2].op == .Phi) : (hi2 += 1) {}
-                if (hi2 < m.instructions.len and m.instructions[hi2].op == .LoopMerge) continue;
+                var is_loop_header = false;
+                while (hi2 < m.instructions.len) : (hi2 += 1) {
+                    const hop = m.instructions[hi2].op;
+                    if (hop == .LoopMerge) {
+                        is_loop_header = true;
+                        break;
+                    }
+                    if (hop == .Label or hop == .Branch or hop == .BranchConditional or
+                        hop == .Return or hop == .ReturnValue or hop == .Kill) break;
+                }
+                if (is_loop_header) continue;
             }
             break;
         }
