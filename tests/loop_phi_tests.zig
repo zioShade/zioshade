@@ -1113,3 +1113,91 @@ test "GLSL: no-OpPhi Function-counter loop has no use-before-declaration (#for-l
         return err;
     };
 }
+
+// ── #loop-in-selection-arm ────────────────────────────────────────────────
+//
+// A loop nested in a SELECTION arm (an `if`/`else` body or a switch case) was
+// dropped whole by the GLSL backend, together with every statement after it in
+// that arm. The output still compiled, so no validity gate could see it.
+//
+// emitBlock followed an OpBranch into a loop header only when the OpLoopMerge
+// sat immediately after the header's leading OpPhis. That is glslang's shape
+// (Pattern A: the header branches to a separate condition block). zioshade's
+// OWN frontend emits Pattern B, computing the loop condition IN the header:
+//
+//     %15 = OpLabel
+//     %19 = OpPhi %int %int_0 %11 %24 %17
+//     %20 = OpSLessThan %bool %19 %int_3     <-- blocked the phi-only scan
+//           OpLoopMerge %18 %17 None
+//
+// so the branch read as end-of-arm and the loop never reached emitWhileLoop.
+//
+// These tests drive the frontend on purpose. tools/glsl_faithfulness.sh cannot
+// catch this class: it re-lowers the source through glslangValidator, which
+// only ever produces Pattern A.
+
+const LOOP_IN_IF_SRC =
+    \\#version 450
+    \\out vec4 FragColor;
+    \\void main() {
+    \\    float s = 0.0;
+    \\    if (gl_FragCoord.x < 10.0) {
+    \\        for (int i = 0; i < 3; i++) { s += float(i); }
+    \\        s += 100.0;
+    \\    }
+    \\    FragColor = vec4(s, 0.0, 0.0, 1.0);
+    \\}
+;
+
+const LOOP_IN_SWITCH_CASE_SRC =
+    \\#version 450
+    \\out vec4 FragColor;
+    \\void main() {
+    \\    int sel = int(gl_FragCoord.x) % 3;
+    \\    int outv = 0;
+    \\    switch (sel) {
+    \\        case 0:
+    \\            for (int i = 0; i < 3; i++) { outv += i; }
+    \\            outv += 7;
+    \\            break;
+    \\        default:
+    \\            outv = 200;
+    \\            break;
+    \\    }
+    \\    FragColor = vec4(float(outv), 0.0, 0.0, 1.0);
+    \\}
+;
+
+test "GLSL: a loop in an if arm is not dropped (#loop-in-selection-arm)" {
+    const glsl = try compileToGlsl(LOOP_IN_IF_SRC);
+    defer alloc.free(glsl);
+    if (std.mem.indexOf(u8, glsl, "while (true)") == null) {
+        std.debug.print("GLSL dropped the loop nested in the if arm:\n{s}\n", .{glsl});
+        return error.LoopDropped;
+    }
+    // The statement AFTER the loop shares the loop's fate: dropping the loop
+    // ended the arm, so `s += 100.0` vanished too.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "100.0") != null);
+}
+
+test "GLSL: a loop in a switch case body is not dropped (#loop-in-selection-arm)" {
+    const glsl = try compileToGlsl(LOOP_IN_SWITCH_CASE_SRC);
+    defer alloc.free(glsl);
+    if (std.mem.indexOf(u8, glsl, "while (true)") == null) {
+        std.debug.print("GLSL dropped the loop nested in the switch case:\n{s}\n", .{glsl});
+        return error.LoopDropped;
+    }
+    // Buggy output was `case 0: { break; }` -- the loop AND the trailing add
+    // gone, while the untouched default case still emitted its assignment.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "200") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "7") != null);
+}
+
+test "MSL agrees: the same loops survive in the reference backend" {
+    const a = try compileToMsl(LOOP_IN_IF_SRC);
+    defer alloc.free(a);
+    const b = try compileToMsl(LOOP_IN_SWITCH_CASE_SRC);
+    defer alloc.free(b);
+    try std.testing.expect(std.mem.indexOf(u8, a, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, b, "while (true)") != null);
+}

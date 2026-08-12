@@ -1022,6 +1022,41 @@ fn isDeferredHdrGLSL(idx: usize) bool {
     return dh.contains(idx);
 }
 
+/// True if `label` heads a loop, i.e. its block carries an OpLoopMerge.
+///
+/// The block is scanned to its terminator rather than only past its leading
+/// OpPhis. A Pattern-B header computes the loop condition (and whatever else it
+/// needs) BETWEEN the phis and the OpLoopMerge, so for a plain
+/// `for (int i = 0; i < 3; i++)` the OpSLessThan sits in the way. A phi-only
+/// scan concludes "not a loop header" and whoever asked treats the branch into
+/// the loop as the end of its region -- which is how a loop nested in a
+/// selection arm came to be dropped whole (#loop-in-selection-arm).
+///
+/// An OpSelectionMerge terminates the scan: a selection header is not a loop
+/// header, and its own merge instruction must not be mistaken for one.
+fn isLoopHeaderGLSL(m: *const ParsedModule, lm: *const std.AutoHashMap(u32, usize), label: u32) bool {
+    const hi = lm.get(label) orelse return false;
+    var i: usize = hi + 1;
+    while (i < m.instructions.len) : (i += 1) {
+        switch (m.instructions[i].op) {
+            .LoopMerge => return true,
+            .Label,
+            .SelectionMerge,
+            .Branch,
+            .BranchConditional,
+            .Switch,
+            .Return,
+            .ReturnValue,
+            .Kill,
+            .Unreachable,
+            .FunctionEnd,
+            => return false,
+            else => {},
+        }
+    }
+    return false;
+}
+
 /// True if `rid` is a loop back-edge carrier hoisted above its loop by the #413
 /// pre-scan (recorded in g_hoisted_ids). Such a phi is the loop-header phi's
 /// update; the loop-top carry copy reads its carrier name, so a body selection
@@ -4541,6 +4576,12 @@ fn emitBlock(
                     try w.print("{s}    continue;\n", .{indent});
                     break;
                 };
+                // The #69 loop-header follow, which the switch path never had: a case body
+                // that flows into a loop branches to the loop HEADER, and ending the case
+                // here emitted `case 0: { break; }` with the loop and everything after it
+                // gone (tests/spirv-cross/loop_in_case.frag). The branch to the switch's own
+                // merge is already handled above, so this only ever follows a real loop.
+                if (isLoopHeaderGLSL(m, lm, sw_br_target)) continue;
                 try w.print("{s}    break;\n", .{indent});
                 break;
             }
@@ -4565,29 +4606,9 @@ fn emitBlock(
             // followed, not treated as end-of-branch. Otherwise a loop nested in this arm is
             // silently dropped (early_return2: the else branch flows into a for-loop; emitBlock
             // stopped at the OpBranch and never reached the OpLoopMerge -> emitWhileLoop), and
-            // so is every instruction after it in the arm. A loop header block is OpLabel,
-            // <phi/cond body>, OpLoopMerge, <Branch|BranchConditional>; the OpLoopMerge may sit
-            // anywhere in that block, not only immediately after the phis. Pattern-B loops
-            // (BranchConditional right after the OpLoopMerge) compute the exit condition IN the
-            // header between the phis and the OpLoopMerge -- zioshade's own frontend emits this
-            // shape for `for`. The old Phi-only scan landed on that condition, failed the check,
-            // and broke here, dropping the loop. Scan the whole header block up to the
-            // OpLoopMerge; any block terminator (Label/Branch/BranchConditional/Return/Kill)
-            // before it means this OpBranch does not target a loop header.
-            if (lm.get(br_target)) |hi| {
-                var hi2 = hi + 1;
-                var is_loop_header = false;
-                while (hi2 < m.instructions.len) : (hi2 += 1) {
-                    const hop = m.instructions[hi2].op;
-                    if (hop == .LoopMerge) {
-                        is_loop_header = true;
-                        break;
-                    }
-                    if (hop == .Label or hop == .Branch or hop == .BranchConditional or
-                        hop == .Return or hop == .ReturnValue or hop == .Kill) break;
-                }
-                if (is_loop_header) continue;
-            }
+            // so is every instruction after it in the arm. isLoopHeaderGLSL carries the scan
+            // rule; see its doc comment for why a phi-only scan misses Pattern B.
+            if (isLoopHeaderGLSL(m, lm, br_target)) continue;
             break;
         }
         if (inst.op == .BranchConditional) {
