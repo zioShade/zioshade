@@ -205,13 +205,19 @@ prove-integer:
 chaos-classify dir="tests/spirv-cross":
     @bash tools/chaos_classify.sh {{dir}}
 
-# WGSL structural-drop sweep: does the emitted WGSL still contain every loop, switch and
-# nested-selection switch-break the INPUT SPIR-V requires? A drop is silent-wrong — the
-# output compiles, it just skips control flow. The 2026-07-28 count sweep proved MSL/GLSL/
-# HLSL clean but never covered WGSL, and PR #581 found four dropped switch-breaks there.
-# Calibrated: against the pre-#581 binary it reports graphicsfuzz_081 (4 required, 0 emitted).
-wgsl-structural-drop:
-    @python3 tools/wgsl_structural_drop_sweep.py
+# Structural-drop sweep, all four backends: does the emitted source still contain every
+# loop and switch the INPUT SPIR-V requires? A drop is silent-wrong — the output compiles,
+# it just skips control flow, so no validity gate can see it. Three signals: cross-backend
+# dissent, the SPIR-V floor (single-iteration loops subtracted, since flattening a
+# `do{}while(false)` structured goto is correct), and WGSL nested-selection switch-breaks.
+# NOT YET A GATE: it currently reports 14 known GLSL drops (10 CTS, 4 spirv-cross) from the
+# loop-in-switch-case bug, and 0 for MSL/HLSL/WGSL. It becomes a gate when GLSL is fixed or
+# refuses. The 2026-07-28 count sweep certified MSL/GLSL/HLSL clean, but it compared against
+# raw OpLoopMerge counts and ran only over tests/spirv-cross; it missed all fourteen.
+#   just structural-drop                      # both corpora, all backends
+#   just structural-drop cts msl,glsl         # scope it down
+structural-drop corpus="both" backends="msl,glsl,hlsl,wgsl":
+    @python3 tools/structural_drop_sweep.py --corpus {{corpus}} --backends {{backends}}
 
 # GLSL faithfulness check (non-proxy ground truth for zioshade-GLSL). Renders naga(zioshade-
 # GLSL(source)->glslang) vs zioshade-MSL(source) [the proven-correct reference] — an
