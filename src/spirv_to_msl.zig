@@ -1585,7 +1585,7 @@ threadlocal var g_switch_chain: ?[]const ChainPhiEntry = null;
 // "did we return?" flag stayed stale (early_return2, maxdiff). This context (set
 // around each loop's body emission, saved/restored for nesting) lets emitBlock,
 // at a branch to the loop merge, emit the loop-merge-phi copy + a `break;`.
-const LoopMergeCtx = struct { merge_label: u32, phis: []const Instruction };
+const LoopMergeCtx = struct { merge_label: u32, phis: []const Instruction, continue_label: u32 };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
 // Bound on emitWhileLoopMSL's mutual recursion with emitBlock. Same guard, and same
@@ -7176,7 +7176,7 @@ fn emitWhileLoopMSL(
     // the loop merge) can emit the loop-merge-phi copy + `break;`. Saved/restored
     // for nesting.
     const saved_lmc = g_loop_merge_ctx;
-    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .phis = loop_mphis.items };
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .phis = loop_mphis.items, .continue_label = cont_lbl };
 
     if (dw_native) {
         try w.writeAll("    do\n    {\n");
@@ -7747,6 +7747,24 @@ fn emitBlock(
                 if (g_loop_merge_ctx) |ctx| if (ctx.merge_label == inst.words[1]) {
                     for (ctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
                     try w.print("{s}    break;\n", .{indent});
+                };
+            }
+            // #switch-case-continue (MSL): a branch to the enclosing LOOP's continue
+            // is a structured continue (e.g. `if (c) continue;` inside a switch case or
+            // if-body). Without this emitBlock drops the OpBranch (the branch body is
+            // empty) and the continue never fires -> silent-wrong. Mirrors GLSL #584 and
+            // the WGSL/HLSL backends (which already track the continue label). The `break`
+            // (matching GLSL #584) exits the emitBlock loop; redundant with the centralized
+            // break below today, but defensive.
+            // TODO(latch-phi): this emits a bare `continue;` with no latch-phi copies, so a
+            // loop with divergent continue-block phis (loop-continue-break class) AND a
+            // switch-case/nested-if continue would skip them. Narrow, not in the corpus
+            // (prove_opt 0 NEW DIFFER), and not a regression (pre-PR the continue was
+            // dropped entirely). Track as a follow-up.
+            if (inst.words.len > 1) {
+                if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == inst.words[1]) {
+                    try w.print("{s}    continue;\n", .{indent});
+                    break;
                 };
             }
             // #multi-return: branch to the enclosing switch merge past this block's
