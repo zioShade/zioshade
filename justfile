@@ -451,7 +451,7 @@ c-abi:
 # the hosted runners cannot run them.
 #
 # the workflow's job set, run locally on this OS with Zig 0.15.2
-ci: fmt-check check-min-word-count build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion fuzz-smoke c-abi
+ci: fmt-check check-min-word-count build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion structural-drop fuzz-smoke c-abi
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED (this OS, Zig 0.15.2 only)"

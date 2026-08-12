@@ -245,6 +245,44 @@ jobs:
       - name: Run CTS ingestion sweep
         run: bash tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz
 
+  # Structural-drop gate (PR #588 sweep, gated once #589 + #590 closed the class). The
+  # worst silent-wrong this compiler can make: a loop or switch present in the SPIR-V is
+  # missing from the emitted source, the output still compiles, and no validity gate sees
+  # it. Three independent signals (cross-backend strictly-below-all-peers, SPIR-V floor
+  # after subtracting provably single-iteration loops, WGSL nested-selection breaks) are
+  # 0/0/0/0 across MSL/GLSL/HLSL/WGSL over both corpora after #589 (GLSL Pattern-B loop
+  # nested in a selection arm) and #590 (HLSL self-loop nested in a selection arm); this
+  # job turns that into a non-regression gate so the class cannot silently return. Exits
+  # non-zero on any drop. Runs over BOTH corpora (spirv-cross + CTS GraphicsFuzz); the CTS
+  # .spv leg needs spirv-dis (spirv-tools) for the SPIR-V floor. Ubuntu only -- the result
+  # is OS-independent (pure zioshade backend logic + spirv-dis), matching cts-ingestion.
+  structural-drop:
+    name: structural-drop (no loop/switch dropped)
+    needs: build-test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          use-cache: true
+
+      - name: Install spirv-tools (spirv-dis for the SPIR-V floor)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y spirv-tools
+
+      - name: Verify spirv-dis on PATH
+        run: spirv-dis --version
+
+      - name: Build CLI
+        run: zig build cli
+
+      - name: Run structural-drop sweep (both corpora, all backends)
+        run: python3 tools/structural_drop_sweep.py --corpus both --backends msl,glsl,hlsl,wgsl
+
   # MSL leg of the two SPIR-V-input sweeps, on a real Metal compiler. The Linux jobs
   # above skip MSL and HLSL (no Metal, no DXC), so until this job and hlsl-validity
   # existed, the two backends wintty actually links -- MSL on macOS, HLSL on Windows --
