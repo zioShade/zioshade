@@ -533,6 +533,21 @@ test "MSL continues the outer loop from a switch case (#switch-case-continue)" {
     }
 }
 
+// #switch-case-continue (HLSL): the HLSL twin. HLSL's LoopInfo already tracked the
+// continue label (`.cont`) but emitBlock (the branch-arm emitter) didn't act on a
+// Branch to it, so the arm body emitted empty -> the continue was dropped ->
+// silent-wrong. Same fix shape as GLSL #584 / MSL #586.
+const SWITCH_CASE_CONTINUE_HLSL_SPV = @embedFile("fixtures/switch_case_continue_hlsl.spv");
+
+test "HLSL continues the outer loop from a switch case (#switch-case-continue)" {
+    const hlsl = try crossHlsl(SWITCH_CASE_CONTINUE_HLSL_SPV);
+    defer alloc.free(hlsl);
+    if (std.mem.indexOf(u8, hlsl, "continue;") == null) {
+        std.debug.print("HLSL drops the loop continue from the switch case:\n{s}\n", .{hlsl});
+        return error.HlslSwitchCaseContinueDropped;
+    }
+}
+
 // #phi-carrier (PR #579): a loop-carried OpPhi whose back-edge update is itself a
 // selection-merge OpPhi (the Collatz step `x = (x & 1) ? 3*x+1 : x/2` in
 // graphicsfuzz_002). zioshade hoists the carrier above the loop (#413) and the loop-top
