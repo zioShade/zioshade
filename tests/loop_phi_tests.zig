@@ -597,6 +597,24 @@ test "GLSL emits a loop nested in an else branch (#69)" {
     try std.testing.expect(std.mem.indexOf(u8, glsl, "while") != null);
 }
 
+// #pattern-b-loop-in-arm: a loop nested in a selection arm whose header computes the exit
+// condition IN-HEADER (OpPhi; <cond>; OpLoopMerge; OpBranchConditional -- the "Pattern B"
+// shape zioshade's OWN frontend emits for `for`) was silently DROPPED, along with every
+// instruction after it in the arm. The #69 follow-branch check in emitBlock detected a loop
+// header by skipping header Phis and demanding an OpLoopMerge immediately after; the
+// in-header condition sits between them, so the check failed and emitBlock broke at the
+// OpBranch. glslang lowers the same source to Pattern A (condition in a separate block), so
+// the #69 fixture above missed this. Fixture compiled by zioshade's own frontend -- the
+// exact shape the structural-drop sweep flags on loop_in_case/early_return2/for-loop-init
+// and 8 CTS shaders. Assert the loop survives.
+const PATB_LOOP_IN_ARM_SPV = @embedFile("fixtures/patb_loop_in_arm.spv");
+
+test "GLSL emits a Pattern-B loop nested in a selection arm (#pattern-b-loop-in-arm)" {
+    const glsl = try crossGlsl(PATB_LOOP_IN_ARM_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while") != null);
+}
+
 // #70: multiple early return points in a function were silently DROPPED — OpReturn skipped
 // emitting `return;` for fragment shaders (assumed all returns were final), AND emitBlock
 // continued past an early return into the merge block, nesting+duplicating the subsequent
