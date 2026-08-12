@@ -227,6 +227,57 @@ fn scanBareAssigns(src: []const u8, out: *std.StringHashMap(void)) !void {
     }
 }
 
+/// True if every variable read on the RHS of a loop-top carry copy
+/// (`if (!_loopfirst...) { vA = vB; }`, the #413/#237 back-edge carrier read) is itself
+/// bare-assigned somewhere in the loop body. Guards the #phi-carrier silent-wrong
+/// (PR #579): a loop-carried OpPhi whose back-edge update is a selection-merge OpPhi
+/// (the Collatz step `x = (x & 1) ? 3*x+1 : x/2` in graphicsfuzz_002) had its carrier
+/// read at loop top but only a disconnected `vN_phi` temp written in the body, leaving
+/// the carrier uninitialized. The GLSL frontend lowers loop counters to Function vars,
+/// so external OpPhi SPIR-V is the only way to reach the path.
+fn loopCarriersAssigned(src: []const u8) !bool {
+    var arena_state = std.heap.ArenaAllocator.init(alloc);
+    defer arena_state.deinit();
+    const a = arena_state.allocator();
+
+    const body = loopBody(src) orelse return true; // no while(true)/loop{} -> vacuous
+    const lf = std.mem.indexOf(u8, body, "_loopfirst") orelse return true; // no carry block
+    var bi = lf;
+    while (bi < body.len and body[bi] != '{') bi += 1;
+    if (bi >= body.len) return true;
+    const carry_start = bi + 1;
+    var depth: i32 = 1;
+    var ce = carry_start;
+    while (ce < body.len) : (ce += 1) {
+        if (body[ce] == '{') depth += 1;
+        if (body[ce] == '}') {
+            depth -= 1;
+            if (depth == 0) break;
+        }
+    }
+    if (depth != 0) return true;
+    const carry = body[carry_start..ce];
+
+    // carriers = RHS identifiers of bare `vA = vB;` copies inside the carry block
+    var carriers = std.StringHashMap(void).init(a);
+    var i: usize = 0;
+    while (i < carry.len) : (i += 1) {
+        if (parseAssignAt(carry, i) == null) continue;
+        var e = i + 1;
+        while (e < carry.len and carry[e] != ';') e += 1;
+        try collectIdents(carry[i + 1 .. e], &carriers);
+    }
+
+    var assigned = std.StringHashMap(void).init(a);
+    try scanBareAssigns(body, &assigned);
+
+    var it = carriers.iterator();
+    while (it.next()) |e| {
+        if (e.key_ptr.*.len > 0 and !assigned.contains(e.key_ptr.*)) return false;
+    }
+    return true;
+}
+
 fn compileToHlsl(source: [:0]const u8) ![]const u8 {
     const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
@@ -463,6 +514,24 @@ test "GLSL continues the outer loop from a switch case (#switch-case-continue)" 
     if (std.mem.indexOf(u8, glsl[di..], "continue;") == null) {
         std.debug.print("GLSL switch default does not continue the outer loop:\n{s}\n", .{glsl});
         return error.SwitchCaseNotContinued;
+    }
+}
+
+// #phi-carrier (PR #579): a loop-carried OpPhi whose back-edge update is itself a
+// selection-merge OpPhi (the Collatz step `x = (x & 1) ? 3*x+1 : x/2` in
+// graphicsfuzz_002). zioshade hoists the carrier above the loop (#413) and the loop-top
+// carry reads it, so the body selection MUST write the carrier -- not a disconnected
+// `vN_phi` temp that leaves it uninitialized (silent-wrong). The GLSL frontend lowers loop
+// counters to Function vars, so this external-OpPhi SPIR-V shape is the only way to reach
+// the path. Fixture is tests/cts/graphicsfuzz/graphicsfuzz_002.spv.
+const PHI_CARRIER_SPV = @embedFile("fixtures/phi_carrier_collatz.spv");
+
+test "GLSL assigns a loop carrier updated by a selection (#phi-carrier)" {
+    const glsl = try crossGlsl(PHI_CARRIER_SPV);
+    defer alloc.free(glsl);
+    if (!try loopCarriersAssigned(glsl)) {
+        std.debug.print("GLSL leaves a loop-top carry carrier unassigned:\n{s}\n", .{glsl});
+        return error.LoopCarrierUnassigned;
     }
 }
 
