@@ -5735,6 +5735,33 @@ fn emitBlock(
         // Branch to merge = end of this block
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
 
+        // #switch-case-continue (HLSL): a Branch to the enclosing LOOP's continue is a
+        // structured continue (e.g. `if (c) continue;` inside a switch case or if-body
+        // -- emitBlock is the branch-arm emitter). Without this the arm's Branch-to-cont
+        // emits nothing (the continue is dropped) -> silent-wrong. Mirrors GLSL #584 /
+        // MSL #586. In structured SPIR-V a Branch to a loop's continue target is always
+        // the enclosing loop's continue, so matching any tracked loop's `cont` is safe.
+        // TODO(latch-phi): like MSL #586, this emits a bare `continue;` with no latch-phi
+        // copies, so a loop with divergent continue-block phis (loop-continue-break class)
+        // AND a switch-case/nested-if continue would skip them. Narrow, not in the corpus,
+        // not a regression (pre-PR the continue was dropped entirely). Shared follow-up.
+        if (inst.op == .Branch and inst.words.len > 1) {
+            if (g_loop_merge_map_h) |lmm| {
+                var it = lmm.valueIterator();
+                var is_continue = false;
+                while (it.next()) |li| {
+                    if (li.cont == inst.words[1]) {
+                        is_continue = true;
+                        break;
+                    }
+                }
+                if (is_continue) {
+                    try w.print("{s}    continue;\n", .{indent});
+                    break;
+                }
+            }
+        }
+
         // Skip structural instructions
         if (inst.op == .Label or inst.op == .SelectionMerge) continue;
         // #478: a switch in a branch arm (if/else) — emit it (was silently dropped).
