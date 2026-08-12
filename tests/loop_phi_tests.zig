@@ -517,6 +517,22 @@ test "GLSL continues the outer loop from a switch case (#switch-case-continue)" 
     }
 }
 
+// #switch-case-continue (MSL): the MSL twin of the above. MSL's LoopMergeCtx lacked
+// a continue_label (GLSL #584, WGSL, and HLSL all had one), so an OpBranch to the
+// enclosing loop's continue (e.g. `if (c) continue;` inside a switch case) was
+// DROPPED -- the if-body emitted empty -> the continue never fired -> silent-wrong.
+// Fixture is a deterministic conditional-continue inside a switch default.
+const SWITCH_CASE_CONTINUE_MSL_SPV = @embedFile("fixtures/switch_case_continue_msl.spv");
+
+test "MSL continues the outer loop from a switch case (#switch-case-continue)" {
+    const msl = try crossMsl(SWITCH_CASE_CONTINUE_MSL_SPV);
+    defer alloc.free(msl);
+    if (std.mem.indexOf(u8, msl, "continue;") == null) {
+        std.debug.print("MSL drops the loop continue from the switch case:\n{s}\n", .{msl});
+        return error.MslSwitchCaseContinueDropped;
+    }
+}
+
 // #phi-carrier (PR #579): a loop-carried OpPhi whose back-edge update is itself a
 // selection-merge OpPhi (the Collatz step `x = (x & 1) ? 3*x+1 : x/2` in
 // graphicsfuzz_002). zioshade hoists the carrier above the loop (#413) and the loop-top
