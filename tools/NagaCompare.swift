@@ -21,8 +21,14 @@ import Foundation
 // same trick ShaderCompare.swift uses for main0_in. Both sides get the SAME (zero) varyings,
 // so the pixel differential stays valid.
 //
-// Coverage: shaders whose interface is varyings + color out (no uniforms/textures) render
-// unaided. Shaders needing buffer/texture bindings skip-render (mirrors prove's skip model).
+// Coverage: shaders whose interface is varyings + color out render unaided; uniform/texture-
+// bound shaders get DETERMINISTIC bindings via pipeline reflection (bindDeterministicInputs):
+// each [[buffer(N)]] receives a fixed tame pattern, each [[texture(N)]] a fixed generated
+// image, each sampler a fixed state -- the SAME objects on both sides, so the pixel
+// differential stays valid for bound shaders too (same inputs -> different pixels means
+// different semantics). The synthetic pattern can still surface layout disagreements (a
+// genuine bug class: one backend mis-laying-out a UBO reads different bytes) -- triage by
+// hand per the HARD RULE above.
 //
 // Usage: NagaCompare <zioshade.msl> <naga.metal> [output_prefix]
 
@@ -49,7 +55,16 @@ func makeVertexLibrary(device: MTLDevice, stageInStructName: String, fragmentMSL
     // members. Guarding the empty name avoids structBody matching "struct " and pulling in
     // the fragment OUTPUT struct (e.g. main0_out's [[color(0)]] member) — which is an
     // invalid vertex output and crashed every varying-less shader into skip-render.
-    let members = stageInStructName.isEmpty ? "" : structBody(fragmentMSL, stageInStructName)
+    let membersRaw = stageInStructName.isEmpty ? "" : structBody(fragmentMSL, stageInStructName)
+    // A varying NAMED `position` collides with VertexOut's own `position [[position]]`
+    // member (duplicate-member compile error -> every such shader skip-rendered, e.g.
+    // ubo-mvp.frag). RENAME it (the [[user(locN)]] attribute is what links it to the
+    // fragment, not the member name); it stays zero-initialised like every other copied
+    // varying. Member syntax is `<type> <name> [[attr]];`.
+    let posMember = try! NSRegularExpression(pattern: #"position\s*\[\["#)
+    let ms = NSMutableString(string: membersRaw)
+    posMember.replaceMatches(in: ms, range: NSRange(location: 0, length: ms.length), withTemplate: "v_position [[")
+    let members = ms as String
     let vertMSL = """
 #include <metal_stdlib>
 using namespace metal;
@@ -69,7 +84,88 @@ vertex VertexOut full_screen_vertex(uint vid [[vertex_id]]) {
     return try! device.makeLibrary(source: vertMSL, options: nil)
 }
 
-func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, w: Int, h: Int) -> [UInt8] {
+// Deterministic binding inputs, shared bit-identically between both renders so a pixel
+// difference can only come from shader semantics. Buffers are filled with tame small
+// positive floats (avoid NaN/inf chaos); textures with a fixed 8x8 pattern.
+final class DeterministicInputs {
+    let device: MTLDevice
+    var buffers: [Int: MTLBuffer] = [:]
+    var texture: MTLTexture? = nil
+    var sampler: MTLSamplerState? = nil
+    init(device: MTLDevice) { self.device = device }
+
+    func bytes(for index: Int, count: Int) -> [UInt8] {
+        // LCG per binding index; values in (0.01, ~0.77] as float32, small ints for any
+        // integer-typed members land in the low bytes (also tame).
+        var state: UInt32 = 0xC0FFEE00 &+ UInt32(truncatingIfNeeded: index &* 2654435761)
+        var out = [UInt8](repeating: 0, count: count)
+        var i = 0
+        while i + 4 <= count {
+            state = state &* 1664525 &+ 1013904223
+            let v = Float(state % 97) / 128.0 + 0.01
+            let bits = v.bitPattern
+            out[i] = UInt8(truncatingIfNeeded: bits); out[i+1] = UInt8(truncatingIfNeeded: bits >> 8)
+            out[i+2] = UInt8(truncatingIfNeeded: bits >> 16); out[i+3] = UInt8(truncatingIfNeeded: bits >> 24)
+            i += 4
+        }
+        return out
+    }
+
+    func buffer(index: Int, size: Int) -> MTLBuffer {
+        if let b = buffers[index] { return b }
+        let n = max(size, 16)
+        let data = bytes(for: index, count: n)
+        let b = data.withUnsafeBytes { ptr -> MTLBuffer in
+            device.makeBuffer(bytes: ptr.baseAddress!, length: n, options: [])!
+        }
+        buffers[index] = b
+        return b
+    }
+
+    func sharedTexture() -> MTLTexture {
+        if let t = texture { return t }
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 8, height: 8, mipmapped: false)
+        d.usage = [.shaderRead]
+        let t = device.makeTexture(descriptor: d)!
+        var px = [UInt8](repeating: 0, count: 8*8*4)
+        for y in 0..<8 { for x in 0..<8 {
+            let o = (y*8+x)*4
+            px[o] = UInt8(x*32); px[o+1] = UInt8(y*32); px[o+2] = UInt8((x^y)*16+64); px[o+3] = 255
+        }}
+        px.withUnsafeBytes { ptr in t.replace(region: MTLRegionMake2D(0,0,8,8), mipmapLevel: 0, withBytes: ptr.baseAddress!, bytesPerRow: 8*4) }
+        texture = t
+        return t
+    }
+
+    func sharedSampler() -> MTLSamplerState {
+        if let s = sampler { return s }
+        let d = MTLSamplerDescriptor()
+        d.minFilter = .linear; d.magFilter = .linear; d.sAddressMode = .repeat; d.tAddressMode = .repeat
+        let s = device.makeSamplerState(descriptor: d)!
+        sampler = s
+        return s
+    }
+}
+
+// Reflect the built pipeline's fragment arguments and bind a deterministic input to each
+// (buffer/texture/sampler). Without this, bound shaders read unbound garbage.
+func bindDeterministicInputs(encoder: MTLRenderCommandEncoder, pipeline: MTLRenderPipelineState, reflection: MTLRenderPipelineReflection?, inputs: DeterministicInputs) {
+    guard let args = reflection?.fragmentArguments else { return }
+    for a in args where a.isActive {
+        switch a.type {
+        case .buffer:
+            encoder.setFragmentBuffer(inputs.buffer(index: a.index, size: a.bufferDataSize), offset: 0, index: a.index)
+        case .texture:
+            encoder.setFragmentTexture(inputs.sharedTexture(), index: a.index)
+        case .sampler:
+            encoder.setFragmentSamplerState(inputs.sharedSampler(), index: a.index)
+        default:
+            break
+        }
+    }
+}
+
+func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, w: Int, h: Int, inputs: DeterministicInputs) -> [UInt8] {
     let outDesc = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: w, height: h, mipmapped: false)
     outDesc.usage = [.renderTarget, .shaderRead]
     let outTexture = device.makeTexture(descriptor: outDesc)!
@@ -90,8 +186,10 @@ func renderFrame(device: MTLDevice, vertLib: MTLLibrary, fragLib: MTLLibrary, w:
     pipeDesc.vertexFunction = vertFunc
     pipeDesc.fragmentFunction = fragFunc
     pipeDesc.colorAttachments[0].pixelFormat = .rgba8Unorm
-    let pipeline = try! device.makeRenderPipelineState(descriptor: pipeDesc)
+    var refl: MTLRenderPipelineReflection? = nil
+    let pipeline = try! device.makeRenderPipelineState(descriptor: pipeDesc, options: [.argumentInfo], reflection: &refl)
     encoder.setRenderPipelineState(pipeline)
+    bindDeterministicInputs(encoder: encoder, pipeline: pipeline, reflection: refl, inputs: inputs)
     encoder.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
     encoder.endEncoding()
     cmdBuf.commit()
@@ -146,8 +244,12 @@ let vertLibN = makeVertexLibrary(device: device, stageInStructName: stageInStruc
 let libZ = try device.makeLibrary(source: zMSL, options: compileOpts)
 let libN = try device.makeLibrary(source: nMSL, options: compileOpts)
 
-let pz = renderFrame(device: device, vertLib: vertLibZ, fragLib: libZ, w: W, h: H)
-let pn = renderFrame(device: device, vertLib: vertLibN, fragLib: libN, w: W, h: H)
+// Shared deterministic binding inputs: the SAME buffer/texture/sampler objects go to both
+// renders, so any pixel difference is semantics, not inputs.
+let inputs = DeterministicInputs(device: device)
+
+let pz = renderFrame(device: device, vertLib: vertLibZ, fragLib: libZ, w: W, h: H, inputs: inputs)
+let pn = renderFrame(device: device, vertLib: vertLibN, fragLib: libN, w: W, h: H, inputs: inputs)
 
 let r = compareMax(pz, pn, count: W*H*4)
 print("""
