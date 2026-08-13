@@ -10,6 +10,15 @@
 # This sweep found #switch-break-vs-default-target (PR #596) after every
 # compile-only gate and the structural-drop sweep had passed.
 #
+# ARTIFACT CLASS 2 (uninitialized reads): a shader that READS an uninitialized
+# local (e.g. only some array elements assigned, then a dynamic index into it)
+# has undefined values, and the two renders may legitimately differ. The
+# conformance/stress corpus triage (2026-08-13): both UNFAITHFUL hits were this
+# (array_size_literal_led, const_expr_array_size) — confirmed by initializing
+# every element in a copy and re-running (both flipped to FAITHFUL).
+# DISCRIMINATOR: initialize all reads in a copy; FAITHFUL => UB artifact,
+# UNFAITHFUL => real bug.
+#
 # Usage: tools/glsl_faithful_sweep.sh [dir]     (default tests/spirv-cross)
 # Exit 0 always — read the tallies; triage UNFAITHFUL lines by hand.
 set -uo pipefail
