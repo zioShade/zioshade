@@ -18,6 +18,10 @@
         },
     },
     .paths = .{
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "NOTICE",
+        "THIRD_PARTY_NOTICES.md",
         "build.zig",
         "build.zig.zon",
         "build_compat.zig",
