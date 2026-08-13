@@ -548,6 +548,31 @@ test "HLSL continues the outer loop from a switch case (#switch-case-continue)" 
     }
 }
 
+// #switch-case-continue (WGSL): the last backend of the family. The comment on the
+// GLSL test above says WGSL already had a continue label -- it does TRACK one, but
+// neither switch case-body walker ever consulted it. Both walkers stop at the first
+// terminator and DISCARD it, which is right for a branch to the switch's merge (WGSL
+// cases do not fall through) and wrong for a branch to the loop's continue target.
+// All three fixtures reproduce it; naga ACCEPTS the output either way, so this is
+// silent-wrong rather than a validity failure. Assert on the default arm specifically:
+// a bare search for "continue;" would not be fooled by the `continuing` block, but
+// pinning the arm is what actually distinguishes the fix.
+test "WGSL continues the outer loop from a switch case (#switch-case-continue)" {
+    for ([_][]const u8{
+        SWITCH_CASE_CONTINUE_SPV,
+        SWITCH_CASE_CONTINUE_MSL_SPV,
+        SWITCH_CASE_CONTINUE_HLSL_SPV,
+    }) |spv| {
+        const wgsl = try crossWgsl(spv);
+        defer alloc.free(wgsl);
+        const di = std.mem.indexOf(u8, wgsl, "default:") orelse return error.MissingDefault;
+        if (std.mem.indexOf(u8, wgsl[di..], "continue;") == null) {
+            std.debug.print("WGSL switch default does not continue the outer loop:\n{s}\n", .{wgsl});
+            return error.WgslSwitchCaseContinueDropped;
+        }
+    }
+}
+
 // #phi-carrier (PR #579): a loop-carried OpPhi whose back-edge update is itself a
 // selection-merge OpPhi (the Collatz step `x = (x & 1) ? 3*x+1 : x/2` in
 // graphicsfuzz_002). zioshade hoists the carrier above the loop (#413) and the loop-top
