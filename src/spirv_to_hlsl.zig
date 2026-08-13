@@ -4924,7 +4924,13 @@ fn emitBody(
                     // the next case (loop_in_case: sel=0 -> 100 not 3). Stricter and safer
                     // than the t==ml test. Mirrors GLSL/WGSL.
                     const term = caseTerminatorTarget(module, &label_map, target_label);
-                    const fallthrough = if (term) |t| isSwitchCaseTarget(inst.words, t) else false;
+                    // `t != ml`: a branch to the switch's own MERGE is always a `break`,
+                    // never a fallthrough -- even when the merge is also the OpSwitch's
+                    // DEFAULT target (a no-default switch covering all cases: the default
+                    // operand IS the merge, and matching it here misread every case's break
+                    // as a fallthrough edge and dropped it -- cases cascaded, silent-wrong).
+                    // Mirrors GLSL/WGSL's merge guards.
+                    const fallthrough = if (term) |t| (t != ml and isSwitchCaseTarget(inst.words, t)) else false;
                     try w.writeAll(if (!fallthrough) "    break;\n    }\n" else "    }\n");
                 }
                 if (default_label != ml) {
