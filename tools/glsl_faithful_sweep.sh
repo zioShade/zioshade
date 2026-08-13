@@ -29,6 +29,10 @@ LIST=$(mktemp)
 trap 'rm -f "$LIST"' EXIT
 for f in "$DIR"/*.frag; do
   grep -qE '^[[:space:]]*(uniform|texture|sampler|buffer)' "$f" && continue
+  # ARTIFACT CLASS 3 (no output): a shader with no `out` declaration renders
+  # nothing defined, so the pixel comparison is garbage-vs-garbage (minimal_test.frag
+  # false-UNFAITHFUL; adding an output flips it to FAITHFUL). Skip them.
+  grep -qE '^[[:space:]]*(layout\([^)]*\)[[:space:]]+)?out[[:space:]]+[a-zA-Z]' "$f" || continue
   echo "$f"
 done > "$LIST"
 
