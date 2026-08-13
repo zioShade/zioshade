@@ -1922,12 +1922,7 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             var loop_stored_locals = std.DynamicBitSet.initEmpty(alloc, bound) catch continue;
             defer loop_stored_locals.deinit();
 
-            // Check if the loop is "simple" (no nested loops or switches)
-            // AC+Store tracking is only safe for simple loops to avoid
-            // breaking switch/loop dominance invariants
             // Note: skip the loop's own OpLoopMerge by tracking if we've seen it
-            var has_nested_struct = false;
-            var has_nested_switch = false;
             var saw_own_merge = false;
             var in_loop2 = false;
             pos = 5;
@@ -1944,12 +1939,6 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
                 if (in_loop2) {
                     if (op2 == 246 and !saw_own_merge) { // OpLoopMerge
                         saw_own_merge = true; // skip the loop's own merge
-                    } else if (op2 == 246) {
-                        has_nested_struct = true; // nested loop
-                    }
-                    if (op2 == 251) {
-                        has_nested_struct = true; // OpSwitch
-                        has_nested_switch = true;
                     }
                     if (op2 == 62 and wc2 >= 3) { // OpStore
                         const store_target = words[pos + 1];
@@ -1962,53 +1951,51 @@ pub fn deadLoopElim(alloc: std.mem.Allocator, words: []const u32) error{OutOfMem
             }
 
             // Track AccessChain+Store to composite (array/struct) func-locals so a loop that
-            // writes e.g. `values[i]` (read after the loop) is recognized as live. Extended to
-            // run when the loop contains a nested LOOP (previously gated on `!has_nested_struct`,
-            // which also excluded nested loops): a bubble-sort whose outer `pass` loop wraps the
-            // inner swap loop left `loop_stored_locals` empty and was silently deleted (unsorted
-            // output). Still SKIPPED when the loop contains a nested SWITCH — that is the
-            // separate loop-dominator-and-switch-default case whose frontend CFG is malformed;
-            // keeping its loop yields invalid SPIR-V, so leave that path unchanged (its own bug
-            // is fixed elsewhere). Keeping a loop is always correct, so this only ever adds
-            // keeps, never removals.
-            if (!has_nested_switch) {
-                var ac_to_base_dl = std.AutoHashMapUnmanaged(u32, u32).empty;
-                defer ac_to_base_dl.deinit(alloc);
-                in_loop2 = false;
-                pos = 5;
-                while (pos < words.len) {
-                    const hdr3 = words[pos];
-                    const wc3: u32 = hdr3 >> 16;
-                    const op3: u16 = @truncate(hdr3 & 0xFFFF);
-                    if (wc3 == 0) break;
-                    if (op3 == 248 and wc3 >= 2) {
-                        const lbl = words[pos + 1];
-                        if (lbl == header_label_id) in_loop2 = true;
-                        if (lbl == loop_info.merge_id) in_loop2 = false;
-                    }
-                    // Capture AccessChain→base mappings GLOBALLY, not just in-loop:
-                    // mergeAccessChains often HOISTS a struct/array member's access
-                    // chain (`%ac = OpAccessChain %a %0`) to BEFORE the loop, while
-                    // the in-loop store writes through that same hoisted `%ac`.
-                    // Gating capture on `in_loop2` missed the hoisted chain, so the
-                    // store below didn't resolve to base `%a` and the accumulator
-                    // var was never recorded — the loop was then wrongly eliminated
-                    // (#220). The store check stays in-loop; only capture is global.
-                    if (op3 == 65 and wc3 >= 4) { // OpAccessChain
-                        const ac_result = words[pos + 2];
-                        const ac_base = words[pos + 3];
-                        if (ac_base > 0 and ac_base < bound and func_vars.contains(ac_base) and ac_result > 0 and ac_result < bound) {
-                            ac_to_base_dl.put(alloc, ac_result, ac_base) catch {};
-                        }
-                    }
-                    if (in_loop2 and op3 == 62 and wc3 >= 3) { // OpStore
-                        const store_target = words[pos + 1];
-                        if (ac_to_base_dl.get(store_target)) |base_var| {
-                            if (base_var < bound) loop_stored_locals.set(base_var);
-                        }
-                    }
-                    pos += wc3;
+            // writes e.g. `values[i]` or `f4.y` (read after the loop) is recognized as live.
+            // Runs for ALL loops, including those with a nested switch. The only historical
+            // reason to skip nested-switch loops was the loop-dominator-and-switch-default
+            // case whose frontend CFG was MALFORMED (a dangling continue) -- keeping its loop
+            // then yielded invalid SPIR-V. That malformed-CFG bug is now fixed at the frontend
+            // (continue_stmt resolves the enclosing loop's continue), so nested-switch loops
+            // are well-formed and a live one must be kept. (Keeping a loop is always correct;
+            // this only ever adds keeps, never removals.) If a nested-switch loop is ever
+            // malformed again, hasMalformedCFG catches it on the raw output -> codegen_failed.
+            var ac_to_base_dl = std.AutoHashMapUnmanaged(u32, u32).empty;
+            defer ac_to_base_dl.deinit(alloc);
+            in_loop2 = false;
+            pos = 5;
+            while (pos < words.len) {
+                const hdr3 = words[pos];
+                const wc3: u32 = hdr3 >> 16;
+                const op3: u16 = @truncate(hdr3 & 0xFFFF);
+                if (wc3 == 0) break;
+                if (op3 == 248 and wc3 >= 2) {
+                    const lbl = words[pos + 1];
+                    if (lbl == header_label_id) in_loop2 = true;
+                    if (lbl == loop_info.merge_id) in_loop2 = false;
                 }
+                // Capture AccessChain->base mappings GLOBALLY, not just in-loop:
+                // mergeAccessChains often HOISTS a struct/array member's access
+                // chain (`%ac = OpAccessChain %a %0`) to BEFORE the loop, while
+                // the in-loop store writes through that same hoisted `%ac`.
+                // Gating capture on `in_loop2` missed the hoisted chain, so the
+                // store below didn't resolve to base `%a` and the accumulator
+                // var was never recorded -- the loop was then wrongly eliminated
+                // (#220). The store check stays in-loop; only capture is global.
+                if (op3 == 65 and wc3 >= 4) { // OpAccessChain
+                    const ac_result = words[pos + 2];
+                    const ac_base = words[pos + 3];
+                    if (ac_base > 0 and ac_base < bound and func_vars.contains(ac_base) and ac_result > 0 and ac_result < bound) {
+                        ac_to_base_dl.put(alloc, ac_result, ac_base) catch {};
+                    }
+                }
+                if (in_loop2 and op3 == 62 and wc3 >= 3) { // OpStore
+                    const store_target = words[pos + 1];
+                    if (ac_to_base_dl.get(store_target)) |base_var| {
+                        if (base_var < bound) loop_stored_locals.set(base_var);
+                    }
+                }
+                pos += wc3;
             }
 
             if (loop_stored_locals.count() == 0) continue;
