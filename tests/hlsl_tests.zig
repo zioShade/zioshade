@@ -16582,3 +16582,34 @@ test "S3: OpExecutionModeId LocalSizeId with OpSpecConstantOp -> [numthreads(8,1
     defer alloc.free(hlsl);
     try assertContains(hlsl, "[numthreads(8, 1, 1)]"); // sc(4) * two(OpConstant 2) = 8, NOT 1
 }
+
+// #switch-break-vs-default-target (HLSL twin of the GLSL fix): a switch covering ALL cases
+// with NO default makes the frontend use the switch MERGE as the OpSwitch default target, so
+// every case's `break` (OpBranch to merge) matched isSwitchCaseTarget's default-operand check
+// and was misread as a fallthrough edge -- break dropped, cases cascade, the last case's
+// value always wins (silent-wrong, compiles clean). A branch to the merge is a `break`, never
+// a fallthrough. Assert all four case breaks survive.
+test "HLSL emits case breaks when the switch default target is the merge (#switch-break-vs-default-target)" {
+    const src =
+        \\#version 430
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int c = int(clamp(gl_FragCoord.x, 0.0, 3.0));
+        \\    vec3 col = vec3(0.0);
+        \\    switch (c) {
+        \\        case 0: col = vec3(1.0, 0.0, 0.0); break;
+        \\        case 1: col = vec3(0.0, 1.0, 0.0); break;
+        \\        case 2: col = vec3(0.0, 0.0, 1.0); break;
+        \\        case 3: col = vec3(1.0, 1.0, 0.0); break;
+        \\    }
+        \\    o = vec4(col, 1.0);
+        \\    if (c < 0) discard;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, hlsl, i, "break;")) |pos| : (count += 1) i = pos + 1;
+    try std.testing.expect(count >= 4);
+}
