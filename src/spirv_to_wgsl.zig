@@ -511,6 +511,32 @@ fn isSwitchCaseTarget(switch_words: []const u32, lbl: u32) bool {
     return false;
 }
 
+/// Advance past a pure-trampoline break arm so its OpBranch is not walked twice.
+///
+/// `if (cond) break;` inside a loop body lowers to a selection whose arm block holds
+/// nothing but `OpBranch <loop merge>`. The BranchConditional handler emits the entire
+/// `if (cond) { break; }` from the branch alone, so that block has already been fully
+/// accounted for. Letting the walker reach it anyway made #loop-break-on-selection-merge
+/// emit a SECOND, unconditional `break;` right after the conditional one, which made the
+/// whole rest of the loop body unreachable: a plain `for` loop with an early exit
+/// accumulated nothing. naga accepts unreachable code, so no validity gate saw it, and
+/// the structural-drop sweep counts loops rather than reachability. 50 of 1468 corpus
+/// shaders were affected -- every mandelbrot, ray-march and search-loop in the corpus.
+///
+/// The arm block must be IMMEDIATELY after the branch. Scanning forward for the label
+/// instead would, in the `false_is_break` case, swallow the true arm that sits between
+/// them. Returns the index of the arm's OpBranch, so the caller's `i += 1` lands on the
+/// next block's label; returns `idx` unchanged whenever the shape is not exactly this.
+fn skipBreakArm(module: *const ParsedModule, idx: usize, arm_label: u32, loop_merge: u32) usize {
+    if (arm_label == loop_merge) return idx; // branch targets the merge directly: no arm block
+    if (idx + 2 >= module.instructions.len) return idx;
+    const lbl = module.instructions[idx + 1];
+    if (lbl.op != .Label or lbl.words.len < 2 or lbl.words[1] != arm_label) return idx;
+    const br = module.instructions[idx + 2];
+    if (br.op != .Branch or br.words.len < 2 or br.words[1] != loop_merge) return idx;
+    return idx + 2;
+}
+
 fn isPureBranchTrampoline(module: *const ParsedModule, label: u32, target: u32) bool {
     var idx: usize = 0;
     while (idx < module.instructions.len) : (idx += 1) {
@@ -7144,6 +7170,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try writeInd(w, indent);
                             try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
                             pending_merge = null;
+                            i = skipBreakArm(module, i, true_label, loop_merge_label.?);
                         } else if (false_is_break) {
                             // if (!(cond)) { break; }
                             const inlined3 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
@@ -7151,6 +7178,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try writeInd(w, indent);
                             try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
                             pending_merge = null;
+                            i = skipBreakArm(module, i, false_label, loop_merge_label.?);
                         } else if (true_is_continue) {
                             // Emit phi computation + updates before continue, inside the if block
                             // In SPIR-V, continue goes to continue block which computes phi values
