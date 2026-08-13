@@ -1226,3 +1226,86 @@ test "MSL agrees: the same loops survive in the reference backend" {
     try std.testing.expect(std.mem.indexOf(u8, a, "while (true)") != null);
     try std.testing.expect(std.mem.indexOf(u8, b, "while (true)") != null);
 }
+
+// ── #loop-break-arm-double-emit ───────────────────────────────────────────
+//
+// A loop body containing an early `if (cond) break;` emitted the correct
+// conditional break AND THEN a second, unconditional `break;`, which made the
+// entire rest of the loop body unreachable. A plain counting loop accumulated
+// nothing.
+//
+// The break lowers to a selection whose arm block holds only `OpBranch <loop
+// merge>`. The BranchConditional handler emits the whole `if (cond) { break; }`
+// from the branch alone, but did not advance past that arm block, so the main
+// walker reached it and #loop-break-on-selection-merge emitted the break again.
+//
+// naga accepts unreachable code, so no validity gate saw it, and the structural
+// -drop sweep counts loops rather than reachability. 36 of 1468 corpus shaders
+// were affected: every mandelbrot, ray-march and search-loop in the corpus.
+
+const LOOP_EARLY_BREAK_SRC =
+    \\#version 450
+    \\out vec4 FragColor;
+    \\void main() {
+    \\    float acc = 0.0;
+    \\    for (int i = 0; i < 10; i++) {
+    \\        if (float(i) > gl_FragCoord.x) { break; }
+    \\        acc += 1.0;
+    \\    }
+    \\    FragColor = vec4(acc, 0.0, 0.0, 1.0);
+    \\}
+;
+
+fn compileToWgsl(source: [:0]const u8) ![]const u8 {
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    return try zioshade.spirvToWGSL(alloc, spirv, .{});
+}
+
+/// Any statement following a statement-level `break;` in the same block is
+/// unreachable. `continuing {` does not count: it is part of the enclosing
+/// `loop` construct rather than a statement, and it legitimately follows a
+/// break.
+fn assertNoStatementAfterBreak(src: []const u8) !void {
+    var it = std.mem.splitScalar(u8, src, '\n');
+    var pending_indent: ?usize = null;
+    while (it.next()) |raw| {
+        // Only `std.mem.trim` is spelled the same on both 0.15.2 and 0.16, so the
+        // indent is counted by hand rather than via a trimLeft/trimStart pair.
+        const trimmed = std.mem.trim(u8, raw, " \t\r");
+        if (trimmed.len == 0) continue;
+        var indent: usize = 0;
+        while (indent < raw.len and (raw[indent] == ' ' or raw[indent] == '\t')) indent += 1;
+        if (pending_indent) |bi| {
+            pending_indent = null;
+            if (indent >= bi and
+                !std.mem.startsWith(u8, trimmed, "}") and
+                !std.mem.startsWith(u8, trimmed, "continuing"))
+            {
+                std.debug.print("unreachable statement after break: `{s}`\n", .{trimmed});
+                return error.UnreachableAfterBreak;
+            }
+        }
+        if (std.mem.eql(u8, trimmed, "break;")) pending_indent = indent;
+    }
+}
+
+test "WGSL: an early break does not orphan the rest of the loop body (#loop-break-arm-double-emit)" {
+    const wgsl = try compileToWgsl(LOOP_EARLY_BREAK_SRC);
+    defer alloc.free(wgsl);
+    assertNoStatementAfterBreak(wgsl) catch |err| {
+        std.debug.print("WGSL:\n{s}\n", .{wgsl});
+        return err;
+    };
+    // The accumulate must survive: it is the statement the spurious break orphaned.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "+ 1.0f") != null);
+}
+
+test "the other backends agree the body is live" {
+    const g = try compileToGlsl(LOOP_EARLY_BREAK_SRC);
+    defer alloc.free(g);
+    const m = try compileToMsl(LOOP_EARLY_BREAK_SRC);
+    defer alloc.free(m);
+    try std.testing.expect(std.mem.indexOf(u8, g, "+ 1.0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, m, "+ 1.0") != null);
+}
