@@ -5732,7 +5732,7 @@ test "msl: no same-scope name collision from OpName vs counter temps (#msl-name-
     // name); leaving a scope drops deeper entries (a sibling-scope redeclaration is
     // legal C). Keys are by VALUE (name/ty slice into `msl`), so nothing leaks.
     const Decl = struct { depth: usize, name: []const u8, ty: []const u8 };
-    var decls = std.ArrayList(Decl){};
+    var decls: std.ArrayListUnmanaged(Decl) = .empty;
     defer decls.deinit(alloc);
 
     var it = std.mem.splitScalar(u8, msl, '\n');
