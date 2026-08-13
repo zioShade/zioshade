@@ -229,6 +229,14 @@ structural-drop corpus="both" backends="msl,glsl,hlsl,wgsl":
 glsl-faithful frags="tests/spirv-cross/early_return2.frag tests/spirv-cross/loop-dominator-and-switch-default.frag":
     @bash tools/glsl_faithfulness.sh {{frags}}
 
+# Value-level silent-wrong sweep: glsl-faithful over EVERY pure-gl_FragCoord fragment
+# (no uniform/texture/sampler decls — the artifact-free subset). A UNFAITHFUL hit is a
+# real GLSL emission bug that compiles clean. Found #switch-break-vs-default-target
+# (PR #596) after all compile-only gates had passed. NON-GATING (needs swiftc+naga and
+# ~3 min); run it after any GLSL backend control-flow change.
+glsl-faithful-sweep dir="tests/spirv-cross":
+    @bash tools/glsl_faithful_sweep.sh {{dir}}
+
 # WGSL faithfulness check (non-proxy, mirror of glsl-faithful). CAVEAT: confounded by the
 # naga-wgsl-vs-glslang frontend difference (no clean WGSL source to compare against), so
 # UNFAITHFUL is suggestive not decisive — verify directly or via a wgpu render.

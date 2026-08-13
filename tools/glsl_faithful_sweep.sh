@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# GLSL faithfulness SWEEP — the value-level silent-wrong detector.
+#
+# Runs tools/glsl_faithfulness.sh over every pure-gl_FragCoord fragment in
+# tests/spirv-cross (no uniform/texture/sampler/buffer declarations — the subset
+# where the render-proxy is artifact-free; uniform-bound shaders read unbound
+# garbage in NagaCompare and false-UNFAITHFUL). A single UNFAITHFUL hit here is
+# a REAL zioshade-GLSL emission bug that compiles clean: the construct-count
+# gates (structural-drop) cannot see wrong VALUES, only missing constructs.
+# This sweep found #switch-break-vs-default-target (PR #596) after every
+# compile-only gate and the structural-drop sweep had passed.
+#
+# Usage: tools/glsl_faithful_sweep.sh [dir]     (default tests/spirv-cross)
+# Exit 0 always — read the tallies; triage UNFAITHFUL lines by hand.
+set -uo pipefail
+cd "$(dirname "$0")/.."
+
+DIR=${1:-tests/spirv-cross}
+LIST=$(mktemp)
+trap 'rm -f "$LIST"' EXIT
+for f in "$DIR"/*.frag; do
+  grep -qE '^[[:space:]]*(uniform|texture|sampler|buffer)' "$f" && continue
+  echo "$f"
+done > "$LIST"
+
+declare -A C
+bump() { C[$1]=$((${C[$1]:-0}+1)); }
+total=0; unfaith=0
+while IFS= read -r f; do
+  v=$(tools/glsl_faithfulness.sh "$f" 2>/dev/null | grep -E '\.frag: ' | head -1 | sed 's/.*: //')
+  [ -z "$v" ] && v=skip-nooutput
+  bump "$v"; total=$((total+1))
+  case "$v" in
+    UNFAITHFUL*) unfaith=$((unfaith+1)); echo "UNFAITHFUL: $f" ;;
+  esac
+done < "$LIST"
+
+echo ""
+echo "=== GLSL faithfulness sweep ($DIR, pure-gl_FragCoord only) ==="
+for k in FAITHFUL "FAITHFUL(edge)" "UNFAITHFUL(real GLSL bug)" skip-glslang skip-zglsl skip-zglslang skip-naga skip-render skip-nooutput; do
+  echo "  $k: ${C[$k]:-0}"
+done
+echo "  total: $total"
+[ "$unfaith" -eq 0 ] && echo "CLEAN: no value silent-wrongs in this subset." \
+                      || echo "TRIAGE: $unfaith UNFAITHFUL hit(s) above."
