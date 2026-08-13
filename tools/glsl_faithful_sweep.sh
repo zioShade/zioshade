@@ -19,6 +19,19 @@
 # DISCRIMINATOR: initialize all reads in a copy; FAITHFUL => UB artifact,
 # UNFAITHFUL => real bug.
 #
+#
+# ARTIFACT CLASS 4 (undefined-math domain at zero varyings): the harness feeds
+# ZERO varyings, so a shader whose math lands on an implementation-defined point
+# (pow(0,0), log(0), 1/0...) diverges legitimately (exp-log-pow.frag: uv=0 ->
+# pow(0,0), which backends may define differently even under safe math).
+# DISCRIMINATOR: perturb the inputs off the undefined point in a copy (e.g.
+# + 0.5); FAITHFUL => artifact, UNFAITHFUL => real bug.
+#
+# FULL-CORPUS VERDICT (2026-08-13, post-#596/#601): 1247 shaders incl.
+# uniform-bound, 1140 FAITHFUL, 2 UNFAITHFUL both triaged as artifacts (one
+# class 2, one class 4) => the entire spirv-cross fragment corpus is clean of
+# real value silent-wrongs under the 2-oracle render differential.
+#
 # Usage: tools/glsl_faithful_sweep.sh [dir]     (default tests/spirv-cross)
 # Exit 0 always — read the tallies; triage UNFAITHFUL lines by hand.
 set -uo pipefail
