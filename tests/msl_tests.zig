@@ -5710,3 +5710,70 @@ test "cuj: MSL -- a local sharing a PushConstant block's OpName is NOT mangled (
     try assertContains(msl, "float Globals;");
     try assertNotContains(msl, "float Globals_1");
 }
+
+// #msl-name-collision: a round-trip SPIR-V (zioshade-GLSL -> glslang) carries OpName debug
+// names like "v90" (glslang preserves zioshade's emitted GLSL names). The MSL counter pass
+// handed `v{counter}` to unnamed ids WITHOUT checking whether that spelling was already held
+// by another id's OpName -- two ids then declared `v90` (int vs float4x4) in ONE function
+// scope: Metal redefinition error, invalid MSL (found on the graphicsfuzz_028 round-trip via
+// the faithfulness harness; Metal rejected the compile). The counter now skips used names
+// (global uniqueness), and loop-phi decls take the `_phi` namespace like mslPhiVarName.
+// This test scans the WHOLE emitted MSL for same-scope redeclarations (name + different
+// type at the same brace depth in one function) -- the class of failure Metal rejects.
+test "msl: no same-scope name collision from OpName vs counter temps (#msl-name-collision)" {
+    const spv_bytes = @embedFile("fixtures/msl_name_collision.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    const msl = try zioshade.spirvToMSL(alloc, words, .{});
+    defer alloc.free(msl);
+
+    // Same-scope redeclaration scanner: a declaration is recorded per (brace depth,
+    // name); leaving a scope drops deeper entries (a sibling-scope redeclaration is
+    // legal C). Keys are by VALUE (name/ty slice into `msl`), so nothing leaks.
+    const Decl = struct { depth: usize, name: []const u8, ty: []const u8 };
+    var decls: std.ArrayListUnmanaged(Decl) = .empty;
+    defer decls.deinit(alloc);
+
+    var it = std.mem.splitScalar(u8, msl, '\n');
+    var depth: usize = 0;
+    var line_no: usize = 0;
+    const keywords = [_][]const u8{ "return", "if", "for", "while", "switch", "else", "discard", "break", "continue", "using", "namespace", "struct", "typedef" };
+    while (it.next()) |line_raw| {
+        line_no += 1;
+        const line = std.mem.trim(u8, line_raw, " \t\r");
+        if (depth >= 1 and line.len > 0) {
+            var tok = std.mem.tokenizeAny(u8, line, " \t");
+            const ty = tok.next() orelse "";
+            const nm = tok.next() orelse "";
+            const rest = std.mem.trim(u8, tok.rest(), " \t");
+            if (nm.len > 0 and ty.len > 0 and (std.ascii.isAlphabetic(ty[0]) or ty[0] == '_') and
+                (rest.len == 0 or rest[0] == '=' or rest[0] == ';' or rest[0] == '['))
+            {
+                var is_kw = false;
+                for (keywords) |k| if (std.mem.eql(u8, ty, k)) {
+                    is_kw = true;
+                };
+                if (!is_kw and !std.mem.endsWith(u8, line, "{") and !std.mem.endsWith(u8, line, "(")) {
+                    for (decls.items) |d| {
+                        if (d.depth == depth and std.mem.eql(u8, d.name, nm) and !std.mem.eql(u8, d.ty, ty)) {
+                            std.debug.print("same-scope redeclaration: `{s}` {s} vs {s} at line {d}\n", .{ nm, d.ty, ty, line_no });
+                            return error.TestSameScopeRedeclaration;
+                        }
+                    }
+                    try decls.append(alloc, .{ .depth = depth, .name = nm, .ty = ty });
+                }
+            }
+        }
+        for (line) |c| {
+            if (c == '{') depth += 1;
+            if (c == '}') {
+                var w: usize = decls.items.len;
+                while (w > 0) {
+                    w -= 1;
+                    if (decls.items[w].depth > depth) _ = decls.orderedRemove(w);
+                }
+            }
+        }
+    }
+}

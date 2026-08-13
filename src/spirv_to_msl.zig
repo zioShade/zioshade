@@ -1822,7 +1822,11 @@ fn tryEmitLoopPhiDeclMSL(m: *const ParsedModule, names: *std.AutoHashMap(u32, []
         if (pi.result_id != inst.words[2]) continue;
         const tyname = phiTypeNameMSL(m, pi.type_id);
         if (names.get(pi.result_id) == null) {
-            const nm = std.fmt.allocPrint(alloc, "v{d}", .{pi.result_id}) catch "vphi";
+            // `_phi` suffix, matching mslPhiVarName: a plain `v{rid}` is ID-derived and
+            // can numerically collide with a counter-derived temp name (phi %83 -> "v83"
+            // vs the 83rd temp "v83") -> both declared at function scope -> Metal
+            // redefinition error (invalid MSL; found on the graphicsfuzz_028 round-trip).
+            const nm = std.fmt.allocPrint(alloc, "v{d}_phi", .{pi.result_id}) catch "vphi";
             if (names.fetchPut(pi.result_id, nm) catch null) |old| alloc.free(old.value);
         }
         const vname = names.get(pi.result_id) orelse "vphi";
@@ -3838,16 +3842,30 @@ fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
 // ---- Collection passes ----
 fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8)) void {
     var counter: u32 = 0;
+    // Reverse index of every name handed out so far (OpName debug names, composite
+    // literals, aliases, counter temps). The counter pass below must NOT reuse a
+    // spelling another id already holds: an input can carry OpName "v90" (glslang
+    // preserves zioshade's own GLSL names on a round-trip), and giving a second id
+    // the same spelling made both declare `v90` in one function scope -> Metal
+    // redefinition error, invalid MSL (graphicsfuzz_028 round-trip).
+    var used_names = std.StringHashMap(void).init(alloc);
+    defer used_names.deinit();
+    {
+        var seedIt = names.iterator();
+        while (seedIt.next()) |e| used_names.put(e.value_ptr.*, {}) catch {};
+    }
     for (m.instructions) |inst| {
         if (inst.op == .Name and inst.words.len >= 3) {
             const id = inst.words[1];
             const ns = parseLitStr(alloc, inst.words[2..]) catch continue;
             const san = sanitizeName(alloc, ns) catch {
                 names.put(id, ns) catch {};
+                used_names.put(ns, {}) catch {};
                 continue;
             };
             alloc.free(ns);
             names.put(id, san) catch {};
+            used_names.put(san, {}) catch {};
         }
         if (inst.op == .Constant and inst.words.len > 3) {
             const rid = inst.words[2];
@@ -3949,9 +3967,19 @@ fn collectNames(alloc: std.mem.Allocator, m: *const ParsedModule, names: *std.Au
         }
         if (resultIdFromOp(inst.op, inst.words)) |rid| {
             if (!names.contains(rid)) {
-                const name = std.fmt.allocPrint(alloc, "v{}", .{counter}) catch continue;
-                counter += 1;
-                names.put(rid, name) catch {};
+                var name: ?[]const u8 = null;
+                while (name == null) {
+                    const cand = std.fmt.allocPrint(alloc, "v{}", .{counter}) catch break;
+                    counter += 1;
+                    if (used_names.contains(cand)) {
+                        alloc.free(cand);
+                        continue;
+                    }
+                    used_names.put(cand, {}) catch {};
+                    name = cand;
+                }
+                const nm = name orelse continue;
+                names.put(rid, nm) catch {};
             }
         }
     }
