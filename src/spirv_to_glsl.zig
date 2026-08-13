@@ -3802,6 +3802,18 @@ fn emitBody(
                     const cv = inst.words[wi];
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
+                    // #continue-in-switch: a case whose OpSwitch target IS the enclosing
+                    // loop's continue block (the shape zioshade's frontend emits for
+                    // `case N: continue;`) must emit a structured `continue;`. Walking into
+                    // the continue block instead mis-follows its back-edge to the loop
+                    // header. The loop counter update lives at the while-top (_loopfirst),
+                    // so a bare continue; advances it. (#584 handled a case BODY that
+                    // OpBranches to the continue; this is the case TARGET being the
+                    // continue.)
+                    if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
+                        try w.print("    case {d}: {{ continue; }}\n", .{cv});
+                        continue;
+                    };
                     // #switch-case-scope: wrap each case body in its own block. C switch
                     // cases share ONE scope, so a value declared in multiple cases (common
                     // when each case runs the same logic -- zioshade names the per-case
@@ -4462,6 +4474,11 @@ fn emitWhileLoop(
                         const cv = binst.words[wi];
                         const target = binst.words[wi + 1];
                         if (target == smv) continue;
+                        // #continue-in-switch (case target IS the loop continue): see emitBody.
+                        if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
+                            try w.print("        case {d}: {{ continue; }}\n", .{cv});
+                            continue;
+                        };
                         try w.print("        case {d}: {{\n", .{cv});
                         bi = try emitBlock(m, names, decs, target, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
@@ -4692,6 +4709,11 @@ fn emitBlock(
                     const cv = inst.words[wi];
                     const target = inst.words[wi + 1];
                     if (target == smv) continue;
+                    // #continue-in-switch (case target IS the loop continue): see emitBody.
+                    if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
+                        try w.print("{s}    case {d}: {{ continue; }}\n", .{ indent, cv });
+                        continue;
+                    };
                     try w.print("{s}    case {d}:\n", .{ indent, cv });
                     i = try emitBlock(m, names, decs, target, smv, lm, bm, w, alloc, is_frag, ovid, indent, true);
                 }

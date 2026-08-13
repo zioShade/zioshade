@@ -3928,11 +3928,26 @@ const Analyzer = struct {
                 try self.emitBranch(self.loop_stack.items[self.loop_stack.items.len - 1].merge_label);
             },
             .continue_stmt => {
-                if (self.loop_stack.items.len == 0) {
+                // A switch pushes a loop_stack entry with continue_label = 0 (it carries
+                // only a break target). A `continue` inside a switch case must target the
+                // enclosing LOOP's continue, so walk down past switch entries
+                // (continue_label == 0) to the nearest loop. The old top-of-stack read
+                // resolved 0 inside a switch -> OpBranch 0 -> malformed CFG (caught loudly
+                // by hasMalformedCFG, but then the whole shader could not compile -- a
+                // valid-GLSL construct glslang lowers, and it kept #584's switch-case-
+                // continue backend fix unreachable from source). No loop enclosing means
+                // `continue` is illegal: honest error.
+                var ci = self.loop_stack.items.len;
+                while (ci > 0) : (ci -= 1) {
+                    const cl = self.loop_stack.items[ci - 1].continue_label;
+                    if (cl != 0) {
+                        try self.emitBranch(cl);
+                        break;
+                    }
+                } else {
                     last_error_ctx = "continue-outside-loop";
                     return error.SemanticFailed;
                 }
-                try self.emitBranch(self.loop_stack.items[self.loop_stack.items.len - 1].continue_label);
             },
             .expr_stmt => {
                 if (node.data.children.len > 0) {
