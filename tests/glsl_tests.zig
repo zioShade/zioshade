@@ -3838,3 +3838,33 @@ test "sid: a local sharing a UBO block's OpName is NOT mangled (no regression)" 
     try assertContains(glsl, "float Globals;"); // local NOT mangled
     try assertNotContains(glsl, "float Globals_1"); // not mangled into block-naming space
 }
+
+// #continue-in-switch: a `continue` inside a switch case (inside a loop) must
+// target the enclosing LOOP's continue. A switch pushes a loop_stack entry with
+// continue_label = 0 (it only carries a break target); the old continue handler
+// read the top-of-stack, which resolved to 0 inside a switch -> OpBranch 0 ->
+// malformed CFG -> the frontend refused the whole shader (codegen_failed). The
+// construct is valid GLSL (glslang lowers it), so refusing it was a capability
+// gap that also kept the #584 switch-case-continue backend fix unreachable from
+// source. End-to-end (frontend + backend): the loop AND its continue survive.
+test "frontend + GLSL lower a continue inside a switch case (#continue-in-switch)" {
+    const src =
+        \\#version 430
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int sum = 0;
+        \\    for (int i = 0; i < 8; i++) {
+        \\        switch (int(gl_FragCoord.x + float(i)) % 3) {
+        \\            case 0: continue;
+        \\        }
+        \\        sum += i;
+        \\    }
+        \\    o = vec4(float(sum));
+        \\    if (sum < 0) discard;
+        \\}
+    ;
+    const glsl = try compileToGlsl(src);
+    defer alloc.free(glsl);
+    try assertContains(glsl, "while");
+    try assertContains(glsl, "continue;");
+}
