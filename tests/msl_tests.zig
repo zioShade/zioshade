@@ -5746,7 +5746,7 @@ test "msl: no same-scope name collision from OpName vs counter temps (#msl-name-
             var tok = std.mem.tokenizeAny(u8, line, " \t");
             const ty = tok.next() orelse "";
             const nm = tok.next() orelse "";
-            const rest = std.mem.trimLeft(u8, tok.rest(), " \t");
+            const rest = std.mem.trim(u8, tok.rest(), " \t");
             if (nm.len > 0 and ty.len > 0 and (std.ascii.isAlphabetic(ty[0]) or ty[0] == '_') and
                 (rest.len == 0 or rest[0] == '=' or rest[0] == ';' or rest[0] == '['))
             {
