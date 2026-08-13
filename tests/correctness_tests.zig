@@ -459,14 +459,18 @@ test "conflicting matrix layout on a shared struct type honest-errors, not silen
     alloc.free(spv);
 }
 
-// A `continue` inside a switch-default that itself contains a nested while-loop, all inside
-// an outer for-loop, made the frontend emit a control-flow instruction targeting id 0 (a
-// dangling continue label it could not resolve) = invalid SPIR-V. deadLoopElim could then
-// delete the whole malformed loop, turning a loud invalid into a silent-wrong render. The
-// hasMalformedCFG gate on the raw frontend output catches the dangling target and fails loud.
-test "a dangling continue target in a nested loop/switch honest-errors, not silent-wrong" {
+// A `continue` inside a switch-default (which itself contains a nested while-loop), all
+// inside an outer for-loop, used to make the frontend emit a control-flow instruction
+// targeting id 0 -- the switch pushed a loop_stack entry with continue_label = 0, and the
+// old continue handler read the top-of-stack, so the continue dangled. hasMalformedCFG
+// caught it loudly, but the construct then could not compile at all (and deadLoopElim could
+// delete the malformed loop -> silent-wrong render). continue_stmt now walks down past switch
+// entries to the enclosing loop's continue, so the continue resolves correctly and the
+// frontend emits well-formed SPIR-V. (If it ever dangles again, hasMalformedCFG gates the raw
+// output and compileToSPIRV fails -- so success here proves the continue resolved.)
+test "a continue in a nested loop/switch resolves to the enclosing loop (no dangling target)" {
     const alloc = std.testing.allocator;
-    const pathological =
+    const src =
         \\#version 310 es
         \\precision highp float;
         \\layout(location = 0) out vec4 fragColor;
@@ -484,7 +488,8 @@ test "a dangling continue target in a nested loop/switch honest-errors, not sile
         \\  fragColor = f4;
         \\}
     ;
-    try std.testing.expectError(error.CodegenFailed, zioshade.compileToSPIRV(alloc, pathological, .{ .stage = .fragment }));
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
 }
 
 // A loop-carried struct variable (`pt = spawn(uv); for(...) pt = update(pt, dt);`) must
