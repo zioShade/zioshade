@@ -3827,14 +3827,18 @@ fn emitBody(
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                     // #switch-fallthrough: omit `break;` ONLY when this case body's first
                     // OpBranch target is a real case/default label of THIS OpSwitch (a
-                    // SPIR-V fallthrough edge). Otherwise the case is terminal -- OpBranch to
-                    // the merge, a loop header, or a selection target -- and must `break;`.
-                    // The old `t == mval` test treated a loop-header / selection branch as
-                    // fallthrough and dropped the break, so a loop-in-case fell through into
-                    // the next case (loop_in_case: sel=0 returned 100 instead of 3).
-                    // Stricter and safer than the t==mval test. Mirrors HLSL/WGSL.
+                    // SPIR-V fallthrough edge) AND is not the merge. A branch to the
+                    // switch's own MERGE is always a `break` -- even when the merge is also
+                    // the OpSwitch's DEFAULT target, which happens exactly when the source
+                    // switch covers every case with no default (switch_func.frag: the
+                    // default operand IS the merge, so matching the default operand here
+                    // misread every case's break as a fallthrough edge and dropped it --
+                    // the cases then cascaded into each other, silent-wrong). Mirrors WGSL's
+                    // `tt != merge_label` guard. The old `t == mval`-only test had the
+                    // inverse bug (a loop-header/selection branch read as fallthrough;
+                    // loop_in_case: sel=0 returned 100 instead of 3).
                     const cterm = caseTerminatorTargetGLSL(m, &label_map, target);
-                    const fallthrough = if (cterm) |t| isSwitchCaseTargetGLSL(inst.words, t) else false;
+                    const fallthrough = if (cterm) |t| (t != mval and isSwitchCaseTargetGLSL(inst.words, t)) else false;
                     try w.writeAll(if (!fallthrough) "    break;\n" else "");
                     try w.writeAll("    }\n");
                 }

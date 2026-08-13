@@ -3868,3 +3868,39 @@ test "frontend + GLSL lower a continue inside a switch case (#continue-in-switch
     try assertContains(glsl, "while");
     try assertContains(glsl, "continue;");
 }
+
+// #switch-break-vs-default-target: a switch covering ALL cases with NO default makes the
+// frontend use the switch MERGE as the OpSwitch default target. Every case's `break` is an
+// OpBranch to that merge -- but the GLSL fallthrough check ("is the branch target a
+// case/default label of this switch?") matched the default operand, so every break was
+// misclassified as a fallthrough edge and DROPPED. The cases then fall through each other:
+// the last case's value always wins (switch_func.frag: col always vec3(1,1,0)) -- silent-
+// wrong, output compiles clean. A branch to the switch's own merge is a `break`, never a
+// fallthrough, even when the merge is also the default target (mirrors WGSL's
+// tt != merge_label guard). Assert the breaks survive.
+test "GLSL emits case breaks when the switch default target is the merge (#switch-break-vs-default-target)" {
+    const src =
+        \\#version 430
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    int c = int(clamp(gl_FragCoord.x, 0.0, 3.0));
+        \\    vec3 col = vec3(0.0);
+        \\    switch (c) {
+        \\        case 0: col = vec3(1.0, 0.0, 0.0); break;
+        \\        case 1: col = vec3(0.0, 1.0, 0.0); break;
+        \\        case 2: col = vec3(0.0, 0.0, 1.0); break;
+        \\        case 3: col = vec3(1.0, 1.0, 0.0); break;
+        \\    }
+        \\    o = vec4(col, 1.0);
+        \\    if (c < 0) discard;
+        \\}
+    ;
+    const glsl = try compileToGlsl(src);
+    defer alloc.free(glsl);
+    // Every terminal case must break (4 cases; the loop-exit `if (!(...)) break;` may add
+    // more, so count >= 4).
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, glsl, i, "break;")) |pos| : (count += 1) i = pos + 1;
+    try std.testing.expect(count >= 4);
+}
