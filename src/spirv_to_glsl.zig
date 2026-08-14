@@ -960,6 +960,15 @@ threadlocal var g_int_mix_needed: bool = false;
 // emitWhileLoop, saved/restored for nesting.
 const LoopMergeCtx = struct { merge_label: u32, continue_label: u32 };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
+
+// #switch-arm-break: the innermost enclosing SWITCH's merge + its merge phis, so
+// an if-arm (or any nested block) whose OpBranch targets the SWITCH's merge can
+// emit the per-edge phi copy + `break;` (a break out of the switch from inside a
+// selection — previously the walker ended at the OpBranch emitting NOTHING: the
+// early-exit never fired and the merge phi kept its stale value, silent-wrong;
+// graphicsfuzz_021). Mirrors MSL's g_switch_ctx.
+const SwitchCtxGLSL = struct { merge_label: u32, phis: []const Instruction };
+threadlocal var g_switch_ctx_glsl: ?SwitchCtxGLSL = null;
 const max_emit_while_depth: u32 = 256;
 threadlocal var g_ewl_depth: u32 = 0;
 
@@ -3328,6 +3337,18 @@ fn emitFunction(
 
 // #477: SWITCH-merge phi materialization (N incoming). Mirrors HLSL/MSL — declare a
 // `_phi` var per phi before the switch, assign the matching incoming at each case end.
+/// The block label containing the instruction at `idx` (nearest preceding
+/// OpLabel). Resolves the predecessor for a switch-merge phi copy at a
+/// branch-to-switch-merge: the branch's own block. Mirrors MSL's blockLabelOf.
+fn blockLabelOfGLSL(m: *const ParsedModule, idx: usize) u32 {
+    var j: usize = idx;
+    while (true) {
+        if (m.instructions[j].op == .Label and m.instructions[j].words.len > 1) return m.instructions[j].words[1];
+        if (j == 0) return 0;
+        j -= 1;
+    }
+}
+
 fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), ml: u32, list: *std.ArrayList(Instruction), alloc: std.mem.Allocator) void {
     const midx = label_map.get(ml) orelse return;
     var pj: usize = midx + 1;
@@ -3791,6 +3812,9 @@ fn emitBody(
                 defer sphis.deinit(alloc);
                 collectSwitchMergePhis(m, &label_map, mval, &sphis, alloc);
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                const saved_switch_ctx = g_switch_ctx_glsl;
+                g_switch_ctx_glsl = .{ .merge_label = mval, .phis = sphis.items };
+                defer g_switch_ctx_glsl = saved_switch_ctx;
                 try w.print("    switch ({s}) {{\n", .{sn});
                 // Emit case targets FIRST, then `default` LAST. Emitting default last lets
                 // a case whose body OpBranches to the default label (SPIR-V fallthrough INTO
@@ -4476,6 +4500,9 @@ fn emitWhileLoop(
                     defer sphis.deinit(alloc);
                     collectSwitchMergePhis(m, label_map, smv, &sphis, alloc);
                     try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                    const saved_switch_ctx = g_switch_ctx_glsl;
+                    g_switch_ctx_glsl = .{ .merge_label = smv, .phis = sphis.items };
+                    defer g_switch_ctx_glsl = saved_switch_ctx;
                     try w.print("        switch ({s}) {{\n", .{sn});
                     if (dl != smv) {
                         try w.writeAll("        default: {\n");
@@ -4586,6 +4613,18 @@ fn emitBlock(
             if (try tryEmitLoopPhiDeclGLSL(m, names, inst, w, alloc, phi_indent)) continue;
         }
         if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) {
+            // #switch-arm-break (fall-through edge): this walker's merge_label IS
+            // the switch merge when called from the switch case loop. A MULTI-BLOCK
+            // case's terminal OpBranch to the merge carries the case's fall-through
+            // switch-merge phi incoming — emit the per-pred copy (this block is the
+            // pred) before the case's trailing break, or the merge phi keeps a stale
+            // value on the fall-through path (graphicsfuzz_021: the texture sample's
+            // Y coordinate read the stale phi; R matched, G/B flipped). The case
+            // loop's emitSwitchPhiCaseCopy(case ENTRY label) misses multi-block
+            // cases — the branch's own block is the pred, not the entry.
+            if (g_switch_ctx_glsl) |sctx| if (sctx.merge_label == merge_label and !is_switch) {
+                try emitSwitchPhiCaseCopy(m, names, sctx.phis, blockLabelOfGLSL(m, i), w, alloc);
+            };
             if (is_switch) try w.print("{s}    break;\n", .{indent});
             break;
         }
@@ -4632,6 +4671,18 @@ fn emitBlock(
             // on the continue path -> silent-wrong (loop-dominator-and-switch-default).
             if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == br_target) {
                 try w.print("{s}    continue;\n", .{indent});
+                break;
+            };
+            // #switch-arm-break: an OpBranch to the enclosing SWITCH's merge is a
+            // `break` out of the switch from inside a selection arm. Previously the
+            // walker ended here emitting NOTHING — the early-exit never fired and the
+            // switch-merge phi kept its stale value on that path (silent-wrong;
+            // graphicsfuzz_021's `if (c) { phi_copy; break; }`). Emit the per-edge
+            // phi copy for THIS block (the branch's own block label) then `break;`.
+            // Mirrors MSL's g_switch_ctx handler.
+            if (g_switch_ctx_glsl) |sctx| if (sctx.merge_label == br_target) {
+                try emitSwitchPhiCaseCopy(m, names, sctx.phis, blockLabelOfGLSL(m, i), w, alloc);
+                try w.print("{s}    break;\n", .{indent});
                 break;
             };
             // #69 / #pattern-b-loop-in-arm: a non-switch OpBranch to a LOOP HEADER must be
