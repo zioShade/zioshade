@@ -4210,9 +4210,20 @@ fn emitWhileLoop(
     }
 
     if (!is_do_while) {
+        // #body-is-continue double execution: when the loop's BranchConditional
+        // body-target IS the continue label (single block serving as both — e.g.
+        // `for (i=3; i>=0; i--) a[i] -= x;` compiles to header-cond -> cont-block ->
+        // back-edge), the body walk below emits that block once per iteration. The
+        // continue replay here would emit it a SECOND time — benign for pure bodies
+        // (recomputation discarded) but SILENT-WRONG when the block STORES: the
+        // replay re-reads post-store state and compounds the effect (each `a[i]-=x`
+        // applied twice; found on graphicsfuzz_084's back-substitution loops). Emit
+        // only the phi assignments in the prologue; the update temps are still in
+        // scope from the previous iteration's body.
+        const body_is_cont = body_lbl == cont_lbl;
         try w.print("        if (!{s})\n        {{\n", .{first_flag});
         const cont_idx0 = label_map.get(cont_lbl) orelse m.instructions.len;
-        if (cont_idx0 < m.instructions.len) {
+        if (cont_idx0 < m.instructions.len and !body_is_cont) {
             var ci0: usize = cont_idx0 + 1;
             while (ci0 < m.instructions.len) : (ci0 += 1) {
                 const cinst = m.instructions[ci0];
