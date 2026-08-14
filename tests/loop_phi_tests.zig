@@ -1356,3 +1356,34 @@ test "WGSL: a loop whose only early exit is a return needs no continue (#selecti
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "return") != null);
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "1.0, 0.0, 0.0") != null);
 }
+
+// #body-is-continue: a Pattern-B loop whose BranchConditional body-target IS the
+// continue label (one block serving as both — `for (i=3; i>=0; i--) a[i] -= x;`)
+// was emitted TWICE per iteration: the _loopfirst carry replay re-executed the
+// block at the while-top AND the body walk emitted it again after the break. For
+// pure bodies the recomputation is discarded (benign); for a STORING body the
+// replay re-reads post-store state and compounds the effect — each `a[i] -= x`
+// applied twice (graphicsfuzz_084's back-substitution loops; found by the CTS
+// faithfulness sweep + two-way isolation, the last real candidate of the 9).
+// The prologue now emits only the phi assignments. Assert the store line appears
+// exactly once inside the while body.
+const BODY_IS_CONTINUE_STORE_SPV = @embedFile("fixtures/body_is_continue_store.spv");
+
+test "GLSL emits a body-is-continue store loop once per iteration (#body-is-continue)" {
+    const glsl = try crossGlsl(BODY_IS_CONTINUE_STORE_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while") != null);
+    // The read-modify-write store must appear exactly ONCE in the whole function
+    // (twice = the double-execution bug).
+    var count: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, glsl, i, "= v21;")) |pos| : (count += 1) i = pos + 1;
+    try std.testing.expect(count == 1);
+
+    // VALIDITY (review C1): the prologue's carry copy (`v17 = v22;`) references
+    // the phi-update temp, whose only declaration must therefore come BEFORE the
+    // `while` (the #413 hoist), not textually below the copy inside the loop --
+    // a below-declaration is a use-before-declaration compile error.
+    const prologue_use = std.mem.indexOf(u8, glsl, "v17 = v22;") orelse return error.TestUnexpectedFind;
+    try std.testing.expect(std.mem.indexOf(u8, glsl[0..prologue_use], "int v22") != null);
+}
