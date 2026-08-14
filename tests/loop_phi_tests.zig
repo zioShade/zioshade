@@ -1309,3 +1309,50 @@ test "the other backends agree the body is live" {
     try std.testing.expect(std.mem.indexOf(u8, g, "+ 1.0") != null);
     try std.testing.expect(std.mem.indexOf(u8, m, "+ 1.0") != null);
 }
+
+// ── #selection-merge-not-a-trampoline ─────────────────────────────────────
+//
+// A selection's own MERGE block was classified as a break/continue trampoline
+// whenever it went on to branch to the loop's continue or merge label. That is
+// just what the block after an `if` does, so the classification inverted the
+// selection: the arm that should have been guarded got emitted unconditionally,
+// and the continue block's instructions were replayed inline in the body.
+//
+// Where the loop has a `continuing { }` block the two forms happen to agree, so
+// 47 corpus shaders only got simpler. graphicsfuzz_061 has no continuing block,
+// and there the inline replay landed AFTER an unconditional `return`: the loop's
+// `canwalk` exit test could never run, the loop had no exit at all, and the
+// black path after it was dead. naga puts that test in `continuing { break if }`.
+//
+// The invariant asserted here is the one that distinguishes the two forms: a
+// loop whose only early exit is a `return` needs no `continue;` at all. The
+// pre-fix binary emits one, together with a duplicate of the continuing block's
+// increment.
+
+const RETURN_IN_LOOP_SRC =
+    \\#version 450
+    \\layout(location = 0) in vec2 uv;
+    \\layout(location = 0) out vec4 fragColor;
+    \\void main() {
+    \\    for (int i = 0; i < 10; i++) {
+    \\        if (uv.x > 0.9) {
+    \\            fragColor = vec4(1.0, 0.0, 0.0, 1.0);
+    \\            return;
+    \\        }
+    \\    }
+    \\    fragColor = vec4(0.0, 0.0, 1.0, 1.0);
+    \\}
+;
+
+test "WGSL: a loop whose only early exit is a return needs no continue (#selection-merge-not-a-trampoline)" {
+    const wgsl = try compileToWgsl(RETURN_IN_LOOP_SRC);
+    defer alloc.free(wgsl);
+    // The guarded arm must hold the return, not be inverted around it.
+    if (std.mem.indexOf(u8, wgsl, "continue;") != null) {
+        std.debug.print("WGSL inverted the selection and emitted a continue:\n{s}\n", .{wgsl});
+        return error.SelectionInverted;
+    }
+    // And the early return must still be there, inside a guard.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "return") != null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "1.0, 0.0, 0.0") != null);
+}
