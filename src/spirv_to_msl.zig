@@ -79,6 +79,25 @@ const FragOutput = struct {
 };
 
 // ---- Helpers ----
+
+/// Format an OpSwitch case literal with the SELECTOR's signedness.
+///
+/// SPIR-V stores the literal as the selector's raw bit pattern, so for a signed
+/// selector 0xFFFFFFFF means -1, not 4294967295. Metal rejects the wide literal
+/// outright ("case value evaluates to 4294967295, which cannot be narrowed to
+/// type 'int'"), and the C-family backends silently emit a case the selector can
+/// never equal -- that arm just never runs. graphicsfuzz_082 and _026 both carry
+/// such a case; neither reached this code until the #early-return-arm fix stopped
+/// refusing them.
+fn switchCaseLiteral(m: *const ParsedModule, selector_id: u32, cv: u32) i64 {
+    const tid = common.getTypeOf(m, selector_id) orelse return cv;
+    const t = getDef(m, tid) orelse return cv;
+    if (t.op == .TypeInt and t.words.len > 3 and t.words[3] != 0) {
+        return @as(i32, @bitCast(cv));
+    }
+    return cv;
+}
+
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (id >= m.id_defs.len) return null;
     const i = m.id_defs[id] orelse return null;
@@ -6909,7 +6928,7 @@ fn emitBody(
                     const cv = inst.words[wi];
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
-                    try w.print("    case {d}: {{\n", .{cv});
+                    try w.print("    case {d}: {{\n", .{switchCaseLiteral(m, inst.words[1], cv)});
                     _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                     // #switch-fallthrough: omit break if this case falls through to
@@ -7531,7 +7550,7 @@ fn emitWhileLoopMSL(
                         const cv = binst.words[swi];
                         const target = binst.words[swi + 1];
                         if (target == sml) continue;
-                        try w.print("        case {d}: {{\n", .{cv});
+                        try w.print("        case {d}: {{\n", .{switchCaseLiteral(m, binst.words[1], cv)});
                         _ = try emitBlock(m, names, decs, target, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                         try w.writeAll("        break;\n        }\n");
@@ -7833,7 +7852,7 @@ fn emitBlock(
                     const cv = inst.words[swi];
                     const target = inst.words[swi + 1];
                     if (target == sml) continue;
-                    try w.print("{s}    case {d}: {{\n", .{ indent, cv });
+                    try w.print("{s}    case {d}: {{\n", .{ indent, switchCaseLiteral(m, inst.words[1], cv) });
                     _ = try emitBlock(m, names, decs, target, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
                     try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                     try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
@@ -7981,6 +8000,19 @@ fn emitBlock(
             continue;
         }
         try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
+
+        // #early-return-arm: a return/discard TERMINATES this block, exactly as a Branch
+        // to the merge does above. Without it the walker carried on into the selection's
+        // MERGE block and emitted the whole continuation of the function inside the arm,
+        // after the return -- and then again at the correct scope once the arm closed.
+        // The duplicate is unreachable, so every path still returned the right value and
+        // no render diff could see it, but the copies nest: each early return in a chain
+        // duplicates everything below it, so `if/if/return` chains blow up the output.
+        // GLSL closes the arm here and is the reference. 54 corpus shaders were affected.
+        switch (inst.op) {
+            .Return, .ReturnValue, .Kill, .Unreachable => break,
+            else => {},
+        }
     }
     return i;
 }

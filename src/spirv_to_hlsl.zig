@@ -86,6 +86,24 @@ threadlocal var g_early_return_expr: ?[]const u8 = null;
 /// HLSL type name for a loop-phi variable declaration. Returns STATIC strings
 /// only (no allocation, so no free management) for the scalar/vector types loop
 /// phis realistically carry. Falls back to "int" for exotic (matrix/struct) phis.
+/// Format an OpSwitch case literal with the SELECTOR's signedness.
+///
+/// SPIR-V stores the literal as the selector's raw bit pattern, so for a signed
+/// selector 0xFFFFFFFF means -1, not 4294967295. Metal rejects the wide literal
+/// outright ("case value evaluates to 4294967295, which cannot be narrowed to
+/// type 'int'"), and the C-family backends silently emit a case the selector can
+/// never equal -- that arm just never runs. graphicsfuzz_082 and _026 both carry
+/// such a case; neither reached this code until the #early-return-arm fix stopped
+/// refusing them.
+fn switchCaseLiteral(module: *const ParsedModule, selector_id: u32, cv: u32) i64 {
+    const tid = getTypeOf(module, selector_id) orelse return cv;
+    const t = getDef(module, tid) orelse return cv;
+    if (t.op == .TypeInt and t.words.len > 3 and t.words[3] != 0) {
+        return @as(i32, @bitCast(cv));
+    }
+    return cv;
+}
+
 fn phiTypeNameHLSL(module: *const ParsedModule, type_id: u32) []const u8 {
     const tinst = getDef(module, type_id) orelse return "int";
     switch (tinst.op) {
@@ -4924,7 +4942,7 @@ fn emitBody(
                     const case_val = inst.words[wi];
                     const target_label = inst.words[wi + 1];
                     if (target_label == ml) continue; // skip branches to merge
-                    try w.print("    case {d}: {{\n", .{case_val});
+                    try w.print("    case {d}: {{\n", .{switchCaseLiteral(module, inst.words[1], case_val)});
                     _ = try emitBlock(module, names, decorations, target_label, ml, &label_map, &bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "    ");
                     try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
                     // #switch-fallthrough: omit `break;` ONLY when this case body's first
@@ -5533,7 +5551,7 @@ fn emitWhileLoopHLSL(
                         const case_val = binst.words[swi];
                         const target_label = binst.words[swi + 1];
                         if (target_label == sml) continue;
-                        try w.print("        case {d}: {{\n", .{case_val});
+                        try w.print("        case {d}: {{\n", .{switchCaseLiteral(module, binst.words[1], case_val)});
                         _ = try emitBlock(module, names, decorations, target_label, sml, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                         try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
                         try w.writeAll("        break;\n        }\n");
@@ -5813,7 +5831,7 @@ fn emitBlock(
                     const case_val = inst.words[swi];
                     const target_label = inst.words[swi + 1];
                     if (target_label == sml) continue;
-                    try w.print("{s}    case {d}: {{\n", .{ indent, case_val });
+                    try w.print("{s}    case {d}: {{\n", .{ indent, switchCaseLiteral(module, inst.words[1], case_val) });
                     _ = try emitBlock(module, names, decorations, target_label, sml, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, indent);
                     try emitSwitchPhiCaseCopyHLSL(module, names, sphis.items, target_label, w, alloc);
                     try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
@@ -5896,6 +5914,19 @@ fn emitBlock(
         // Note: we can't easily change the indentation of emitInstruction
         // since it always emits "    " prefix. For now, accept same indentation.
         try emitInstruction(module, names, decorations, inst, w, alloc, is_fragment, is_vertex, output_var_id);
+
+        // #early-return-arm: a return/discard TERMINATES this block, exactly as a Branch
+        // to the merge does above. Without it the walker carried on into the selection's
+        // MERGE block and emitted the whole continuation of the function inside the arm,
+        // after the return -- and then again at the correct scope once the arm closed.
+        // The duplicate is unreachable, so every path still returned the right value and
+        // no render diff could see it, but the copies nest: each early return in a chain
+        // duplicates everything below it, so `if/if/return` chains blow up the output.
+        // GLSL closes the arm here and is the reference. 54 corpus shaders were affected.
+        switch (inst.op) {
+            .Return, .ReturnValue, .Kill, .Unreachable => break,
+            else => {},
+        }
     }
     return i;
 }

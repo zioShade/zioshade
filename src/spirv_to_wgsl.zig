@@ -33,6 +33,24 @@ threadlocal var needs_inverse_4: bool = false;
 /// null if the operand is not a square float matrix of a supported size. Used by
 /// both the pre-emit helper-detection scan and the ExtInst arms so the chosen
 /// helper name (spvInverse2/3/4) and the emitted helper agree.
+/// Format an OpSwitch case literal with the SELECTOR's signedness.
+///
+/// SPIR-V stores the literal as the selector's raw bit pattern, so for a signed
+/// selector 0xFFFFFFFF means -1, not 4294967295. Metal rejects the wide literal
+/// outright ("case value evaluates to 4294967295, which cannot be narrowed to
+/// type 'int'"), and the C-family backends silently emit a case the selector can
+/// never equal -- that arm just never runs. graphicsfuzz_082 and _026 both carry
+/// such a case; neither reached this code until the #early-return-arm fix stopped
+/// refusing them.
+fn switchCaseLiteral(module: *const ParsedModule, selector_id: u32, cv: u32) i64 {
+    const tid = getTypeOf(module, selector_id) orelse return cv;
+    const t = getDef(module, tid) orelse return cv;
+    if (t.op == .TypeInt and t.words.len > 3 and t.words[3] != 0) {
+        return @as(i32, @bitCast(cv));
+    }
+    return cv;
+}
+
 fn inverseMatrixDim(module: *const ParsedModule, result_type_id: u32) ?u32 {
     const ti = getDef(module, result_type_id) orelse return null;
     if (ti.op != .TypeMatrix or ti.words.len < 4) return null;
@@ -6726,7 +6744,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const target_label = inst.words[wi + 1];
                             if (target_label == merge_label.?) continue;
                             try writeInd(w, case_ind);
-                            try w.print("case {d}: {{\n", .{case_val});
+                            try w.print("case {d}: {{\n", .{switchCaseLiteral(module, inst.words[1], case_val)});
                             // #switch-fallthrough: WGSL removed `fallthrough` from the spec, so a
                             // SPIR-V fallthrough chain is rendered by DUPLICATING each subsequent
                             // case's body into this one (cases share the accumulated variable, so the
