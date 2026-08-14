@@ -4402,8 +4402,12 @@ fn emitFunction(
     }
     defer g_early_return_expr = null;
 
-    // Emit body
-    try emitBody(module, names, decorations, func_idx, w, alloc, is_fragment, is_vertex, output_var_id);
+    // Emit body. Buffered so the epilogue below can tell whether the body already
+    // ended with the very statement it is about to append (#duplicate-entry-return).
+    var body_buf: std.ArrayList(u8) = .empty;
+    defer body_buf.deinit(alloc);
+    try emitBody(module, names, decorations, func_idx, compat.listWriter(&body_buf, alloc), alloc, is_fragment, is_vertex, output_var_id);
+    try w.writeAll(body_buf.items);
 
     // Return output var for fragment
     if (is_fragment and output_var_id != null) {
@@ -4417,7 +4421,15 @@ fn emitFunction(
             try w.writeAll("    return _mrt_out;\n");
         } else {
             const out_name = names.get(output_var_id.?) orelse "_out";
-            try w.print("    return {s};\n", .{out_name});
+            // The entry's own OpReturn already emits this via g_early_return_expr, so
+            // appending it unconditionally gave every fragment shader a dead duplicate
+            // (`return fragColor;` twice, 1463 of 1478 corpus outputs). Only append it
+            // when the body did NOT already end with exactly this statement -- an
+            // endsWith check rather than a control-flow claim, so a body whose returns
+            // all sit inside branches still gets the fallback HLSL needs.
+            const epilogue = try std.fmt.allocPrint(alloc, "    return {s};\n", .{out_name});
+            defer alloc.free(epilogue);
+            if (!std.mem.endsWith(u8, body_buf.items, epilogue)) try w.writeAll(epilogue);
         }
     } else if (is_fragment) {
         // Empty fragment shader — return default value
