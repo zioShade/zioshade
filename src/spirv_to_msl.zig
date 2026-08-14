@@ -487,7 +487,32 @@ fn fragCoordNeedsFullVec(m: *const ParsedModule, fcvid: u32) bool {
     for (m.instructions) |ld| {
         if (ld.op != .Load or ld.words.len < 4 or ld.words[3] != fcvid) continue;
         const loadid = ld.words[2];
+        // The frontend's canonical xy lowering IS a full v4 load + `VectorShuffle 0 1`
+        // — that stays float2-threaded. The full vec4 is needed when the WHOLE loaded
+        // vector is consumed: stored to a variable (`vec4 v = gl_FragCoord;`, glslang's
+        // materialization on a round-trip — graphicsfuzz_004/_020; later component
+        // reads hit the COPY, so the extract checks below see nothing), or shuffled
+        // with a literal index >= 2, or extracted with component >= 2. With only
+        // float2 threaded, a whole-vector use emits a float2-to-float4 assignment
+        // (invalid Metal).
         for (m.instructions) |u| {
+            if (u.op == .Store and u.words.len >= 3 and u.words[2] == loadid) return true;
+            // VectorShuffle: words[3]=vec1, words[4]=vec2, words[5..]=selectors.
+            // Selectors 0-3 index vec1, 4-7 index vec2 (component = sel-4); 0xFFFFFFFF
+            // is undef. If a selector that maps to a >=2 component OF THE LOAD is
+            // present, the full vec is needed.
+            if (u.op == .VectorShuffle and u.words.len >= 5 and (u.words[3] == loadid or u.words[4] == loadid)) {
+                var wi: usize = 4;
+                while (wi + 1 < u.words.len) : (wi += 1) {
+                    const sel = u.words[wi + 1];
+                    if (sel == 0xFFFFFFFF) continue;
+                    const comp: i64 = if (sel < 4)
+                        (if (u.words[3] == loadid) @as(i64, @intCast(sel)) else -1)
+                    else
+                        (if (u.words.len >= 5 and u.words[4] == loadid) @as(i64, @intCast(sel)) - 4 else -1);
+                    if (comp >= 2) return true;
+                }
+            }
             if (u.op == .CompositeExtract and u.words.len >= 5 and u.words[3] == loadid and u.words[4] >= 2) return true;
         }
     }
