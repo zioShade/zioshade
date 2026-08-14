@@ -1387,3 +1387,37 @@ test "GLSL emits a body-is-continue store loop once per iteration (#body-is-cont
     const prologue_use = std.mem.indexOf(u8, glsl, "v17 = v22;") orelse return error.TestUnexpectedFind;
     try std.testing.expect(std.mem.indexOf(u8, glsl[0..prologue_use], "int v22") != null);
 }
+
+// #switch-arm-break: an if-arm inside a switch case whose OpBranch targets the
+// SWITCH's merge (a break out of the switch from inside a selection — _021's
+// `if (c) { <phi assignment>; break; }` early-exit) was emitted as an EMPTY arm:
+// the walker ended at the OpBranch without emitting the switch-merge phi copy or
+// `break;`, so the early-exit never fired and the phi kept the wrong value on
+// that path — silent-wrong, compiles clean (graphicsfuzz_021's round-trip renders
+// differ on all 4096 pixels). MSL already had the mechanism (g_switch_ctx +
+// per-pred phi copy + break); this ports it to GLSL.
+const SWITCH_ARM_BREAK_SPV = @embedFile("fixtures/switch_arm_break.spv");
+
+test "GLSL emits a selection arm's break out of the enclosing switch (#switch-arm-break)" {
+    const glsl = try crossGlsl(SWITCH_ARM_BREAK_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "switch") != null);
+    // The early-exit arm (`if (v17)`) must NOT be empty: it must carry the
+    // switch-merge phi copy and the `break;`. (A bare break-count assertion
+    // passes spuriously — other breaks exist elsewhere in the function.)
+    const empty_arm = "if (v17)\n        {\n        }";
+    if (std.mem.indexOf(u8, glsl, empty_arm)) |_| {
+        std.debug.print("empty early-exit arm in output:\n{s}\n", .{glsl});
+        return error.TestEmptyEarlyExitArm;
+    }
+    // And the arm's break must exist right after the phi copy: find `if (v17)`
+    // and require a `break;` between it and the next `vec2` decl (the arm's
+    // successor statement in this fixture).
+    const ifpos = std.mem.indexOf(u8, glsl, "if (v17)") orelse return error.TestUnexpectedFind;
+    const window = glsl[ifpos..@min(ifpos + 200, glsl.len)];
+    try std.testing.expect(std.mem.indexOf(u8, window, "break;") != null);
+    // FALL-THROUGH edge: the default's terminal branch to the switch merge must
+    // copy the merge phi for ITS OWN block (the case entry label does not match
+    // on multi-block cases) — `v41_phi = v40_phi;` before the trailing break.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "v41_phi = v40_phi;") != null);
+}
