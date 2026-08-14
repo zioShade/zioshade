@@ -7148,10 +7148,26 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // the loop merge (glslang `-V`, unoptimized: `if(cond) break;`).
                         // Both must emit `break;` — missing the trampoline form dropped
                         // the branch → an empty `if (cond) { }` = silent-wrong. (#170)
+                        //
+                        // A target that IS this selection's own merge is never a trampoline,
+                        // however much it looks like one. The merge is where the two arms
+                        // rejoin; that it goes on to branch to the loop's continue or merge
+                        // block is just what the block after an `if` does. Classifying it as
+                        // a trampoline inverts the selection: graphicsfuzz_061 emitted
+                        // `if (!c) { continue; }` followed by the true arm UNCONDITIONALLY
+                        // and then the continue block's own instructions inline, so the
+                        // loop's `canwalk` exit test sat after an unconditional `return` and
+                        // could never run. The loop had no exit at all -- every iteration
+                        // either continued or returned white, and the black path after the
+                        // loop was dead. naga puts that test in `continuing { break if ... }`.
+                        // The DIRECT forms below stay unguarded: when the selection merge
+                        // genuinely IS the loop merge, branching there really is a break.
                         const true_is_break = in_loop and loop_merge_label != null and
-                            (true_label == loop_merge_label.? or isPureBranchTrampoline(module, true_label, loop_merge_label.?));
+                            (true_label == loop_merge_label.? or
+                                (true_label != merge_label and isPureBranchTrampoline(module, true_label, loop_merge_label.?)));
                         const false_is_break = in_loop and loop_merge_label != null and
-                            (false_label == loop_merge_label.? or isPureBranchTrampoline(module, false_label, loop_merge_label.?));
+                            (false_label == loop_merge_label.? or
+                                (false_label != merge_label and isPureBranchTrampoline(module, false_label, loop_merge_label.?)));
                         // Continue, like break, may be DIRECT (the branch target IS
                         // the loop continue block) or an INDIRECT pure trampoline that
                         // just `OpBranch`es to the continue block (glslang `-V`,
@@ -7160,9 +7176,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // trampoline form dropped the branch → an empty `if (cond) { }`
                         // = silent-wrong (the body ran when it should have skipped). (#170)
                         const true_is_continue = in_loop and loop_continue_label != null and
-                            (true_label == loop_continue_label.? or isPureBranchTrampoline(module, true_label, loop_continue_label.?));
+                            (true_label == loop_continue_label.? or
+                                (true_label != merge_label and isPureBranchTrampoline(module, true_label, loop_continue_label.?)));
                         const false_is_continue = in_loop and loop_continue_label != null and
-                            (false_label == loop_continue_label.? or isPureBranchTrampoline(module, false_label, loop_continue_label.?));
+                            (false_label == loop_continue_label.? or
+                                (false_label != merge_label and isPureBranchTrampoline(module, false_label, loop_continue_label.?)));
                         if (true_is_break) {
                             // if (cond) { break; }
                             const inlined2 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
