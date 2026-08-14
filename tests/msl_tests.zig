@@ -5793,3 +5793,19 @@ test "msl: a full-vec4 FragCoord load threads float4 (#fragcoord-full-vec)" {
     defer alloc.free(msl);
     try assertContains(msl, "float4 _fragCoord");
 }
+
+// #fragcoord-full-vec (review finding 1): VectorShuffle selector mapping must use
+// Vector1's ACTUAL component count (n1), not a hardcoded 4 — spirv-opt emits
+// shuffles with a non-vec4 Vector1: `vec4(vec2(0.5), fc.z, fc.w)` folds to
+// shuffle(vec2const, fcload, 0, 1, 4, 5) where n1=2 and selectors 4,5 are the
+// load's .z/.w. With the hardcoded split the detection missed it -> float2
+// threaded -> `_fragCoord[2]` on a float2 = invalid Metal.
+test "msl: a vec2-Vector1 shuffle reaching fc.zw threads float4 (#fragcoord-full-vec)" {
+    const spv_bytes = @embedFile("fixtures/fragcoord_shuffle_n1.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    const msl = try zioshade.spirvToMSL(alloc, words, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "float4 _fragCoord");
+}

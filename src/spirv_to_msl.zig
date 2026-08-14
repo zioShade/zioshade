@@ -7,6 +7,7 @@ const std = @import("std");
 const spirv = @import("spirv.zig");
 
 const common = @import("spirv_cross_common.zig");
+const compact_ids = @import("compact_ids.zig");
 const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
 const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
@@ -477,44 +478,120 @@ fn imageTypeIsDepth(m: *const ParsedModule, pointee: Instruction) bool {
 /// instead, or the body's `.z`/`.w` access exceeds the float2 (Metal rejects it).
 /// Detected via an OpAccessChain into the var with a constant index >= 2, or a
 /// CompositeExtract with component >= 2 from a load of the var.
+/// True iff instruction `u` references id `vid` in a genuine ID-OPERAND position
+/// (per the opcode's operand mask — literal/string words never match; a blind
+/// word scan false-positives on e.g. OpTypeVector's component count or embedded
+/// name strings). Mirrors the walker in compact_ids_passes' deadLoopElim Phase 3.
+fn opReferencesValue(u: Instruction, vid: u32) bool {
+    const info = compact_ids.getOpInfo(@intFromEnum(u.op)) orelse return false;
+    var wi: usize = 1;
+    switch (info.fixed) {
+        1 => wi = 2, // result_type
+        2 => wi = 3, // result_type + result
+        3 => wi = 2, // result only
+        else => wi = 1,
+    }
+    // Fixed-position ids first (the result type / result are NOT references).
+    for (info.ops) |ch| {
+        if (wi >= u.words.len) break;
+        switch (ch) {
+            'i' => {
+                if (u.words[wi] == vid) return true;
+                wi += 1;
+            },
+            'I' => {
+                while (wi < u.words.len) : (wi += 1) {
+                    if (u.words[wi] == vid) return true;
+                }
+            },
+            'M' => {
+                if (wi < u.words.len) wi += 1; // literal
+                while (wi < u.words.len) : (wi += 1) {
+                    if (u.words[wi] == vid) return true;
+                }
+            },
+            'W' => {
+                while (wi + 1 < u.words.len) {
+                    wi += 1;
+                    if (u.words[wi] == vid) return true;
+                    wi += 1;
+                }
+                if (wi < u.words.len) wi += 1;
+            },
+            'E' => {
+                while (wi < u.words.len) {
+                    const w = u.words[wi];
+                    wi += 1;
+                    if ((w & 0xFF) == 0 or ((w >> 8) & 0xFF) == 0 or ((w >> 16) & 0xFF) == 0 or ((w >> 24) & 0xFF) == 0) break;
+                }
+                while (wi < u.words.len) : (wi += 1) {
+                    if (u.words[wi] == vid) return true;
+                }
+            },
+            else => wi += 1, // literal / string / type-operand position: skip
+        }
+    }
+    return false;
+}
+
 fn fragCoordNeedsFullVec(m: *const ParsedModule, fcvid: u32) bool {
+    // Direct .z/.w indexing into the var.
     for (m.instructions) |inst| {
         if (inst.op == .AccessChain and inst.words.len >= 5 and inst.words[3] == fcvid) {
             const idxd = getDef(m, inst.words[4]);
             if (idxd != null and idxd.?.op == .Constant and idxd.?.words.len > 3 and idxd.?.words[3] >= 2) return true;
         }
     }
-    for (m.instructions) |ld| {
+    // Whole-vec loads: a full load aliases `_fragCoord` VERBATIM, so with only
+    // float2 threaded ANY whole-vector use emits a float2 into a float4 context
+    // (invalid Metal: stored whole, arithmetic, call arg, copy, extract >= 2,
+    // shuffle reaching >= 2). INVERTED CONTRACT (review of the first attempt,
+    // which whitelisted store/shuffle/extract and missed the rest): thread
+    // float4 UNLESS every use of every full load is PROVABLY xy-only. The
+    // frontend's canonical lowering (full load + VectorShuffle 0 1) stays
+    // float2; ambiguous shapes move to the safe float4.
+    for (m.instructions, 0..) |ld, li| {
         if (ld.op != .Load or ld.words.len < 4 or ld.words[3] != fcvid) continue;
         const loadid = ld.words[2];
-        // The frontend's canonical xy lowering IS a full v4 load + `VectorShuffle 0 1`
-        // — that stays float2-threaded. The full vec4 is needed when the WHOLE loaded
-        // vector is consumed: stored to a variable (`vec4 v = gl_FragCoord;`, glslang's
-        // materialization on a round-trip — graphicsfuzz_004/_020; later component
-        // reads hit the COPY, so the extract checks below see nothing), or shuffled
-        // with a literal index >= 2, or extracted with component >= 2. With only
-        // float2 threaded, a whole-vector use emits a float2-to-float4 assignment
-        // (invalid Metal).
-        for (m.instructions) |u| {
-            if (u.op == .Store and u.words.len >= 3 and u.words[2] == loadid) return true;
-            // VectorShuffle: words[3]=vec1, words[4]=vec2, words[5..]=selectors.
-            // Selectors 0-3 index vec1, 4-7 index vec2 (component = sel-4); 0xFFFFFFFF
-            // is undef. If a selector that maps to a >=2 component OF THE LOAD is
-            // present, the full vec is needed.
+        var used = false;
+        var provably_xy = true;
+        for (m.instructions, 0..) |u, ui| {
+            if (ui == li) continue;
+            // Does u reference the load in a real ID-operand position?
+            if (!opReferencesValue(u, loadid)) continue;
+            used = true;
+            if (u.op == .CompositeExtract and u.words.len >= 5 and u.words[3] == loadid and u.words[4] < 2) continue;
             if (u.op == .VectorShuffle and u.words.len >= 5 and (u.words[3] == loadid or u.words[4] == loadid)) {
+                // Selectors < n1 index Vector1, >= n1 index Vector2 (n1 =
+                // Vector1's component count — NOT hardcoded 4; spirv-opt emits
+                // shuffles with a non-vec4 Vector1). Every selector that maps to
+                // a component OF THE LOAD must map to < 2.
+                const v1def = getDef(m, u.words[3]);
+                const n1: u32 = if (v1def != null and v1def.?.words.len >= 2) typeRank(m, v1def.?.words[1]) else 4;
                 var wi: usize = 4;
+                var all_xy = true;
                 while (wi + 1 < u.words.len) : (wi += 1) {
                     const sel = u.words[wi + 1];
                     if (sel == 0xFFFFFFFF) continue;
-                    const comp: i64 = if (sel < 4)
-                        (if (u.words[3] == loadid) @as(i64, @intCast(sel)) else -1)
-                    else
-                        (if (u.words.len >= 5 and u.words[4] == loadid) @as(i64, @intCast(sel)) - 4 else -1);
-                    if (comp >= 2) return true;
+                    const comp: i64 = blk: {
+                        if (sel < n1) {
+                            if (u.words[3] == loadid) break :blk @as(i64, @intCast(sel));
+                            break :blk -1; // indexes the OTHER vector
+                        } else {
+                            if (u.words[4] == loadid and sel >= n1) break :blk @as(i64, @intCast(sel)) - @as(i64, @intCast(n1));
+                            break :blk -1;
+                        }
+                    };
+                    if (comp >= 2) {
+                        all_xy = false;
+                        break;
+                    }
                 }
+                if (all_xy) continue;
             }
-            if (u.op == .CompositeExtract and u.words.len >= 5 and u.words[3] == loadid and u.words[4] >= 2) return true;
+            provably_xy = false;
         }
+        if (!used or !provably_xy) return true;
     }
     return false;
 }
