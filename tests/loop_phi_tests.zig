@@ -1379,4 +1379,11 @@ test "GLSL emits a body-is-continue store loop once per iteration (#body-is-cont
     var i: usize = 0;
     while (std.mem.indexOfPos(u8, glsl, i, "= v21;")) |pos| : (count += 1) i = pos + 1;
     try std.testing.expect(count == 1);
+
+    // VALIDITY (review C1): the prologue's carry copy (`v17 = v22;`) references
+    // the phi-update temp, whose only declaration must therefore come BEFORE the
+    // `while` (the #413 hoist), not textually below the copy inside the loop --
+    // a below-declaration is a use-before-declaration compile error.
+    const prologue_use = std.mem.indexOf(u8, glsl, "v17 = v22;") orelse return error.TestUnexpectedFind;
+    try std.testing.expect(std.mem.indexOf(u8, glsl[0..prologue_use], "int v22") != null);
 }

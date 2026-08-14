@@ -2603,13 +2603,30 @@ pub fn loopPhiUpdateNeedsHoist(
     // replayed inside their loop — an update defined there is body-scoped too.
     if (deferred_hdr.contains(def_idx)) return true;
     if (def_idx <= loop_idx) return false;
+    // #body-is-continue: when the loop's BranchConditional body-target IS the
+    // continue label, the GLSL prologue replays NOTHING (only phi assignments —
+    // replaying the block would execute a storing body twice). So an update def
+    // in that block is NOT re-declared in the prologue; its only declaration
+    // would sit textually AFTER the prologue's carry copy (use-before-declaration,
+    // invalid GLSL). Hoist it instead (declare above the loop, type-stripped
+    // assignment in the body) via the #413 machinery.
+    var body_is_cont = false;
+    if (loop_idx + 1 < instructions.len) {
+        const nxt = instructions[loop_idx + 1];
+        if (nxt.op == .BranchConditional and nxt.words.len >= 4 and nxt.words[2] == minst.words[2]) {
+            body_is_cont = true;
+        }
+    }
     if (label_map.get(minst.words[2])) |cs| {
         var ce = cs + 1;
         while (ce < instructions.len) : (ce += 1) {
             const t = instructions[ce];
             if (t.op == .Label or t.op == .FunctionEnd or t.op == .Branch or t.op == .BranchConditional) break;
         }
-        if (def_idx > cs and def_idx < ce) return false;
+        if (def_idx > cs and def_idx < ce) {
+            if (body_is_cont) return true;
+            return false;
+        }
     }
     return true;
 }
