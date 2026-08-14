@@ -94,7 +94,26 @@ final class DeterministicInputs {
     var sampler: MTLSamplerState? = nil
     init(device: MTLDevice) { self.device = device }
 
+    // SHADERCOMPARE_BUFFER_FLOAT=f: fill every buffer with the SAME float f (e.g. 64.0
+    // as a sane "resolution"), instead of the per-index tame LCG pattern. For triaging
+    // shaders whose branching depends on a resolution-like uniform: the tame pattern's
+    // tiny values concentrate all threshold crossings into the top rows of the image.
+    func uniformFill(_ f: Float, _ count: Int) -> [UInt8] {
+        var out = [UInt8](repeating: 0, count: count)
+        let bits = f.bitPattern
+        var i = 0
+        while i + 4 <= count {
+            out[i] = UInt8(truncatingIfNeeded: bits); out[i+1] = UInt8(truncatingIfNeeded: bits >> 8)
+            out[i+2] = UInt8(truncatingIfNeeded: bits >> 16); out[i+3] = UInt8(truncatingIfNeeded: bits >> 24)
+            i += 4
+        }
+        return out
+    }
+
     func bytes(for index: Int, count: Int) -> [UInt8] {
+        if let fstr = ProcessInfo.processInfo.environment["SHADERCOMPARE_BUFFER_FLOAT"], let f = Float(fstr) {
+            return uniformFill(f, count)
+        }
         // LCG per binding index; values in (0.01, ~0.77] as float32, small ints for any
         // integer-typed members land in the low bytes (also tame).
         var state: UInt32 = 0xC0FFEE00 &+ UInt32(truncatingIfNeeded: index &* 2654435761)
