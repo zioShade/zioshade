@@ -3970,6 +3970,54 @@ fn emitSelfLoopBodyHeaderGLSL(
     return label_map.get(merge_lbl) orelse (loop_idx + 2);
 }
 
+/// #latch-phi: emit the CONTINUE block's leading-phi copies for predecessor
+/// `pred_lbl` (the block that branches to the continue). A continue-block phi
+/// (latch phi) carries per-path values into the loop header's carry; a bare
+/// `continue;` (or a silent branch-to-continue skip) left it unwritten on that
+/// path -- the header carry then read a stale/uninitialized value every
+/// iteration (graphicsfuzz_003: all three accumulators diverged; the TODO(latch-
+/// phi) documented since #586). The phi's own name resolves via `names`; the
+/// variable is declared by the carried-phi / hoist passes when the loop reads it.
+/// Number of leading phis at the continue block (cheap pre-check so the fast
+/// paths keep their one-line shape when there are no latch phis).
+fn latchPhiCountGLSL(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), cont_lbl: u32) usize {
+    const cidx = label_map.get(cont_lbl) orelse return 0;
+    var n: usize = 0;
+    var ci: usize = cidx + 1;
+    while (ci < m.instructions.len) : (ci += 1) {
+        if (m.instructions[ci].op != .Phi) break;
+        n += 1;
+    }
+    return n;
+}
+
+fn emitLatchPhiCopiesGLSL(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    label_map: *const std.AutoHashMap(u32, usize),
+    cont_lbl: u32,
+    pred_lbl: u32,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    const cidx = label_map.get(cont_lbl) orelse return;
+    var ci: usize = cidx + 1;
+    while (ci < m.instructions.len) : (ci += 1) {
+        const phi = m.instructions[ci];
+        if (phi.op != .Phi) break;
+        if (phi.words.len < 5) continue;
+        var pi: usize = 3;
+        while (pi + 1 < phi.words.len) : (pi += 2) {
+            if (phi.words[pi + 1] == pred_lbl) {
+                const vn = names.get(phi.words[2]) orelse break;
+                const ev = exprName(m, names, phi.words[pi], alloc);
+                try w.print("        {s} = {s};\n", .{ vn, ev });
+                break;
+            }
+        }
+    }
+}
+
 fn emitWhileLoop(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -4329,7 +4377,13 @@ fn emitWhileLoop(
             }
             if (binst.op == .SelectionMerge) continue;
             if (binst.op == .Branch) {
-                if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
+                if (binst.words.len > 1 and binst.words[1] == cont_lbl) {
+                    // #latch-phi: a branch to the continue carries this block's
+                    // latch-phi copies (the old skip dropped them silently).
+                    try emitLatchPhiCopiesGLSL(m, names, label_map, cont_lbl, blockLabelOfGLSL(m, bi), w, alloc);
+                    continue;
+                }
+                if (binst.words.len > 1 and binst.words[1] == merge_lbl) continue;
                 continue;
             }
             if (binst.op == .BranchConditional) {
@@ -4366,14 +4420,40 @@ fn emitWhileLoop(
                 };
                 if (nml) |nmv| {
                     const nhe = nfl != null and nfl.? != nmv;
-                    if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
-                        // if (cond) continue;
-                        try w.print("        if ({s}) continue;\n", .{ncn});
-                    } else if (tl_is_trivial_break and fl_is_trivial_continue) {
+                    // #latch-phi-trivial: the trivial continue/break fast paths below
+                    // emit a bare `if (c) continue;` with NO merge-phi materialization.
+                    // When the selection's merge carries phis (a loop-header phi's
+                    // update chain flows through here: v42 = v186_phi <- this if's
+                    // phi), skipping the copies left the phi UNWRITTEN on both arms --
+                    // the loop's accumulator read an uninitialized variable every
+                    // iteration (graphicsfuzz_003: all three accumulators diverged in
+                    // the round-trip). Route phi-bearing selections to the general
+                    // case, which materializes the phis; the trivial arms then emit
+                    // their continue/break through emitBlock's loop-ctx handlers.
+                    const merge_has_phis = blk: {
+                        const midx = label_map.get(nmv) orelse break :blk false;
+                        var pj: usize = midx + 1;
+                        while (pj < m.instructions.len) : (pj += 1) {
+                            if (m.instructions[pj].op == .Phi) break :blk true;
+                            if (m.instructions[pj].op != .Label) break;
+                        }
+                        break :blk false;
+                    };
+                    if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe) and !merge_has_phis) {
+                        // if (cond) continue;  (+ the true arm's latch-phi copies)
+                        const arm_lbl = if (ntl == cont_lbl) blockLabelOfGLSL(m, bi) else ntl;
+                        if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
+                            try w.print("        if ({s})\n        {{\n", .{ncn});
+                            try emitLatchPhiCopiesGLSL(m, names, label_map, cont_lbl, arm_lbl, w, alloc);
+                            try w.writeAll("        continue;\n        }\n");
+                        } else {
+                            try w.print("        if ({s}) continue;\n", .{ncn});
+                        }
+                    } else if (tl_is_trivial_break and fl_is_trivial_continue and !merge_has_phis) {
                         // if (cond) break; else continue;
                         try w.print("        if ({s}) break;\n", .{ncn});
                         try w.writeAll("        continue;\n");
-                    } else if (tl_is_trivial_continue and nhe) {
+                    } else if (tl_is_trivial_continue and nhe and !merge_has_phis) {
                         // if (cond) continue; else { ... }
                         try w.print("        if ({s}) continue;\n", .{ncn});
                         bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
@@ -4383,12 +4463,12 @@ fn emitWhileLoop(
                         if (nhe) {
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         }
-                    } else if (fl_is_trivial_continue) {
+                    } else if (fl_is_trivial_continue and !merge_has_phis) {
                         // if (cond) { ... } else continue;
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         try w.writeAll("        } continue;\n");
-                    } else if (fl_is_trivial_break and !nhe) {
+                    } else if (fl_is_trivial_break and !nhe and !merge_has_phis) {
                         // if (cond) { ... } else break; (no else = merge == false label)
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);

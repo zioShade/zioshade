@@ -1421,3 +1421,21 @@ test "GLSL emits a selection arm's break out of the enclosing switch (#switch-ar
     // on multi-block cases) — `v41_phi = v40_phi;` before the trailing break.
     try std.testing.expect(std.mem.indexOf(u8, glsl, "v41_phi = v40_phi;") != null);
 }
+
+// #latch-phi: a continue-block phi (latch phi) whose value differs per incoming
+// path (`v83_phi = v42` on the if-continue arm, `= v183_phi_phi` on the fall-
+// through) got NO copies anywhere: the loop walker's trivial-continue fast path
+// emitted a bare `if (c) continue;` and its branch-to-continue skip dropped the
+// rest silently. The loop-header carry then read an UNINITIALIZED variable every
+// iteration (graphicsfuzz_003: all three accumulators diverged in the round-trip
+// render). The live instance of the TODO(latch-phi) documented since #586.
+// Assert the latch phi is WRITTEN on both paths of the tail selection.
+const LATCH_PHI_CONTINUE_SPV = @embedFile("fixtures/latch_phi_continue.spv");
+
+test "GLSL writes the latch phi on both paths of a tail continue (#latch-phi)" {
+    const glsl = try crossGlsl(LATCH_PHI_CONTINUE_SPV);
+    defer alloc.free(glsl);
+    // The continue arm's copy and the fall-through's copy must BOTH exist.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "v186_phi = v42;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "v186_phi = v183_phi_phi;") != null);
+}
