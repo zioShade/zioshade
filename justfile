@@ -205,6 +205,21 @@ prove-integer:
 chaos-classify dir="tests/spirv-cross":
     @bash tools/chaos_classify.sh {{dir}}
 
+# Unreachable-statement scan: does the emitted source contain a statement AFTER a
+# statement-level break/continue/return/discard in the same block? If so the emitter
+# wrote a terminator it should not have and silently dropped the rest of that block.
+# The output still compiles, so no validity gate sees it, and structural-drop does not
+# either (that counts loops and switches, not reachability). Found #599 (WGSL emitted a
+# second unconditional break, orphaning 36 shaders' loop bodies) and #604 (a selection's
+# merge treated as a trampoline, leaving graphicsfuzz_061's loop with no exit).
+# DIAGNOSTIC, NOT YET A GATE. Baseline on both corpora: wgsl 0, glsl 1 (a dead break),
+# msl 54 and hlsl 1463 -- all the benign early-return duplication and duplicate-return
+# classes (bd zioshade-1hg). Gate it once those land.
+#   just unreachable-scan            # wgsl over both corpora
+#   just unreachable-scan msl        # another backend
+unreachable-scan backend="wgsl":
+    @python3 tools/unreachable_scan.py zig-out/bin/zioshade {{backend}} tests/spirv-cross/*.frag tests/cts/graphicsfuzz/*.spv
+
 # Structural-drop sweep, all four backends: does the emitted source still contain every
 # loop and switch the INPUT SPIR-V requires? A drop is silent-wrong — the output compiles,
 # it just skips control flow, so no validity gate can see it. Three signals: cross-backend
