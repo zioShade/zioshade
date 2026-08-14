@@ -3835,7 +3835,9 @@ fn emitBody(
                     // OpBranches to the continue; this is the case TARGET being the
                     // continue.)
                     if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
-                        try w.print("    case {d}: {{ continue; }}\n", .{cv});
+                        try w.print("    case {d}: {{\n", .{cv});
+                        if (g_loop_merge_ctx) |lctx| try emitLatchPhiCopiesGLSL(m, names, &label_map, lctx.continue_label, target, w, alloc);
+                        try w.writeAll("    continue;\n    }\n");
                         continue;
                     };
                     // #switch-case-scope: wrap each case body in its own block. C switch
@@ -4450,12 +4452,26 @@ fn emitWhileLoop(
                             try w.print("        if ({s}) continue;\n", .{ncn});
                         }
                     } else if (tl_is_trivial_break and fl_is_trivial_continue and !merge_has_phis) {
-                        // if (cond) break; else continue;
+                        // if (cond) break; else continue;  (+ the false arm's latch copies)
                         try w.print("        if ({s}) break;\n", .{ncn});
-                        try w.writeAll("        continue;\n");
+                        const farm_lbl = if (nfl.? == cont_lbl) blockLabelOfGLSL(m, bi) else nfl.?;
+                        if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
+                            try w.writeAll("        {\n");
+                            try emitLatchPhiCopiesGLSL(m, names, label_map, cont_lbl, farm_lbl, w, alloc);
+                            try w.writeAll("        continue;\n        }\n");
+                        } else {
+                            try w.writeAll("        continue;\n");
+                        }
                     } else if (tl_is_trivial_continue and nhe and !merge_has_phis) {
-                        // if (cond) continue; else { ... }
-                        try w.print("        if ({s}) continue;\n", .{ncn});
+                        // if (cond) continue; else { ... }  (+ the true arm's latch copies)
+                        const tarm_lbl = if (ntl == cont_lbl) blockLabelOfGLSL(m, bi) else ntl;
+                        if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
+                            try w.print("        if ({s})\n        {{\n", .{ncn});
+                            try emitLatchPhiCopiesGLSL(m, names, label_map, cont_lbl, tarm_lbl, w, alloc);
+                            try w.writeAll("        continue;\n        }\n");
+                        } else {
+                            try w.print("        if ({s}) continue;\n", .{ncn});
+                        }
                         bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                     } else if (tl_is_trivial_break) {
                         // if (cond) break;
@@ -4464,10 +4480,17 @@ fn emitWhileLoop(
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         }
                     } else if (fl_is_trivial_continue and !merge_has_phis) {
-                        // if (cond) { ... } else continue;
+                        // if (cond) { ... } else continue;  (+ the false arm's latch copies)
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
-                        try w.writeAll("        } continue;\n");
+                        const farm_lbl = if (nfl.? == cont_lbl) blockLabelOfGLSL(m, bi) else nfl.?;
+                        if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
+                            try w.writeAll("        }\n        {\n");
+                            try emitLatchPhiCopiesGLSL(m, names, label_map, cont_lbl, farm_lbl, w, alloc);
+                            try w.writeAll("        continue;\n        }\n");
+                        } else {
+                            try w.writeAll("        } continue;\n");
+                        }
                     } else if (fl_is_trivial_break and !nhe and !merge_has_phis) {
                         // if (cond) { ... } else break; (no else = merge == false label)
                         try w.print("        if ({s})\n        {{\n", .{ncn});
@@ -4598,7 +4621,9 @@ fn emitWhileLoop(
                         if (target == smv) continue;
                         // #continue-in-switch (case target IS the loop continue): see emitBody.
                         if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
-                            try w.print("        case {d}: {{ continue; }}\n", .{cv});
+                            try w.print("        case {d}: {{\n", .{cv});
+                            if (g_loop_merge_ctx) |lctx| try emitLatchPhiCopiesGLSL(m, names, label_map, lctx.continue_label, target, w, alloc);
+                            try w.writeAll("        continue;\n        }\n");
                             continue;
                         };
                         try w.print("        case {d}: {{\n", .{cv});
@@ -4724,6 +4749,8 @@ fn emitBlock(
                 // A switch case that branches to the enclosing LOOP's continue is a
                 // structured continue, not a switch break (#switch-case-continue).
                 if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == sw_br_target) {
+                    // #latch-phi: this block's continue carries its latch-phi copies.
+                    try emitLatchPhiCopiesGLSL(m, names, lm, ctx.continue_label, blockLabelOfGLSL(m, i), w, alloc);
                     try w.print("{s}    continue;\n", .{indent});
                     break;
                 };
@@ -4750,6 +4777,11 @@ fn emitBlock(
             // to the switch handler's unconditional `break;`, so the post-switch code runs
             // on the continue path -> silent-wrong (loop-dominator-and-switch-default).
             if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == br_target) {
+                // #latch-phi: this block's continue carries its latch-phi copies
+                // (the most common shape: `if (c) { <compute>; continue; }` walked
+                // here by emitBlock — leaving them out kept the loop-header carry
+                // unwritten on the continue path, review of the first cut).
+                try emitLatchPhiCopiesGLSL(m, names, lm, ctx.continue_label, blockLabelOfGLSL(m, i), w, alloc);
                 try w.print("{s}    continue;\n", .{indent});
                 break;
             };
@@ -4857,7 +4889,9 @@ fn emitBlock(
                     if (target == smv) continue;
                     // #continue-in-switch (case target IS the loop continue): see emitBody.
                     if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
-                        try w.print("{s}    case {d}: {{ continue; }}\n", .{ indent, cv });
+                        try w.print("{s}    case {d}: {{\n", .{ indent, cv });
+                        if (g_loop_merge_ctx) |lctx| try emitLatchPhiCopiesGLSL(m, names, lm, lctx.continue_label, target, w, alloc);
+                        try w.print("{s}    continue;\n{s}    }}\n", .{ indent, indent });
                         continue;
                     };
                     try w.print("{s}    case {d}:\n", .{ indent, cv });
