@@ -251,7 +251,21 @@ let inputs = DeterministicInputs(device: device)
 let pz = renderFrame(device: device, vertLib: vertLibZ, fragLib: libZ, w: W, h: H, inputs: inputs)
 let pn = renderFrame(device: device, vertLib: vertLibN, fragLib: libN, w: W, h: H, inputs: inputs)
 
-let r = compareMax(pz, pn, count: W*H*4)
+var r = compareMax(pz, pn, count: W*H*4)
+// SHADERCOMPARE_DUMP=n: print the first n differing pixel coordinates + values
+if let dumpStr = ProcessInfo.processInfo.environment["SHADERCOMPARE_DUMP"], let n = Int(dumpStr), r.maxDiff > 1 {
+    var shown = 0
+    var i = 0
+    while i < W*H && shown < n {
+        let a = [pz[i*4], pz[i*4+1], pz[i*4+2], pz[i*4+3]]
+        let b = [pn[i*4], pn[i*4+1], pn[i*4+2], pn[i*4+3]]
+        if a != b {
+            print("PIXEL x=\(i % W) y=\(i / W) z=[\(a)] n=[\(b)]")
+            shown += 1
+        }
+        i += 1
+    }
+}
 print("""
 === NagaCompare (2nd oracle) ===
 Resolution: \(W)x\(H)  Pixels: \(W*H)  Different: \(r.diffPixels)
