@@ -450,6 +450,13 @@ fmt:
 check-min-word-count:
     python3 tools/gen_min_word_count.py --check src/spirv_cross_common.zig
 
+# fail if build.zig.zon's .version and src/version.zig's version_string (what
+# `zioshade --version` prints) have drifted apart. The zon is not importable,
+# so the pair can only be kept honest by checking. Same gate-not-convention
+# rule as check-min-word-count. Offline: no network needed.
+check-version-sync:
+    python3 tools/check_version_sync.py
+
 # ── full CI pipeline ─────────────────────────────────────────────────
 
 # run everything CI would run (incl. backend oracle differentials)
@@ -463,7 +470,7 @@ c-abi:
     {{zig}} build run-c-example
 
 # One dependency per workflow step:
-#   fmt-check, check-min-word-count        -> job `fmt`
+#   fmt-check, check-min-word-count, check-version-sync -> job `fmt`
 #   build, cli, examples, test, test-hlsl  -> job `build-test`
 #   test-conformance, strict-gate          -> job `conformance`
 #   spv-validity                           -> job `spv-validity`
@@ -477,7 +484,7 @@ c-abi:
 # the hosted runners cannot run them.
 #
 # the workflow's job set, run locally on this OS with Zig 0.15.2
-ci: fmt-check check-min-word-count build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion structural-drop unreachable-scan-all fuzz-smoke c-abi
+ci: fmt-check check-min-word-count check-version-sync build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion structural-drop unreachable-scan-all fuzz-smoke c-abi
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED (this OS, Zig 0.15.2 only)"
