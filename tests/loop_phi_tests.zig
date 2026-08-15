@@ -1490,6 +1490,66 @@ test "GLSL keeps fallthrough-into-default for a phi-less switch in a selection a
     try std.testing.expect(std.mem.indexOf(u8, between, "break;") == null);
 }
 
+// #shortcircuit-loop-cond: a top-test loop whose condition is a SHORT-CIRCUIT chain
+// (`while ((i < n) && (coord.x > lim) || (coord.y > lim2))`) lowers (glslang /
+// GraphicsFuzz) to a Pattern-A loop whose "condition block" opens with a
+// SelectionMerge-guarded BranchConditional targeting NEITHER the merge NOR the
+// body -- a router of the chain. The loop emitter took that first router as the
+// exit test, emitted `if (!(a)) break;` (dropping every later operand), and only
+// the unclaimed-phi refusal kept it honest (UnsupportedShortCircuitLoopCond on
+// MSL; UnsupportedPhiAlias on GLSL/HLSL). The correct lowering is the NO-TOP-TEST
+// form: `while (true)` with the chain emitted as nested selections (their bool
+// phis materialized per arm) and the chain's FINAL BranchConditional -- the one
+// that actually targets the loop merge -- lowered as the guarded break. Fixture
+// (spirv-as): two-level chain (&& then ||) over function vars, exactly
+// graphicsfuzz_001/_068's shape. Render-verified: NagaCompare(msl(src) vs
+// naga(src)) MATCH.
+const SHORTCIRCUIT_LOOP_COND_SPV = @embedFile("fixtures/shortcircuit_loop_cond.spv");
+
+test "MSL lowers a short-circuit loop condition without dropping operands (#shortcircuit-loop-cond)" {
+    const msl = try crossMsl(SHORTCIRCUIT_LOOP_COND_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    // The loop must exit through the COMBINED condition, not the first operand:
+    // the guarded break's condition reads the chain's materialized bool phi
+    // (v<rid>_phi), which every router arm assigns -- not a bare `!(v9 < 4)`.
+    if (!try loopCounterAdvances(msl)) {
+        std.debug.print("MSL short-circuit loop cond dropped operands or froze the counter:\n{s}\n", .{msl});
+        return error.ShortCircuitLoopCondDropped;
+    }
+    // Both chain evals must survive (the second operand of each && / ||).
+    try std.testing.expect(std.mem.indexOf(u8, msl, "> 0.25") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "< 3.5") != null);
+}
+
+// #shortcircuit-loop-cond (glslang shape): glslang lowers `while (a || b)` with a
+// NEGATED router (BranchConditional !a, eval-second, merge), the polarity the
+// no-top-test lowering handles. Real glslang-produced SPIR-V (not hand-assembled)
+// pins that the frontend shape reaches the same correct lowering.
+const SHORTCIRCUIT_OR_GLSLANG_SPV = @embedFile("fixtures/shortcircuit_or_glslang.spv");
+
+test "MSL lowers glslang's while (a || b) chain (#shortcircuit-loop-cond)" {
+    const msl = try crossMsl(SHORTCIRCUIT_OR_GLSLANG_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "break;") != null);
+    // Both operands must survive.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "> 0.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "< 0.25") != null);
+}
+
+// #shortcircuit-loop-cond (dangerous polarity): a link whose TRUE target is its own
+// selection merge (a non-negated `||` router) is NOT lowerable by the no-else
+// selection form -- #474 would walk the MERGE block as the true arm (double body,
+// phi read before assignment, post-loop code inside the loop; confirmed by render
+// inspection of the pre-fix output). The chain verifier rejects it, so the backend
+// keeps its honest UnsupportedShortCircuitLoopCond rather than miscompiling.
+const SHORTCIRCUIT_OR_NONNEGATED_SPV = @embedFile("fixtures/shortcircuit_or_nonnegated.spv");
+
+test "MSL honest-errors a true-target-is-merge || link (#shortcircuit-loop-cond)" {
+    try std.testing.expectError(error.UnsupportedShortCircuitLoopCond, crossMsl(SHORTCIRCUIT_OR_NONNEGATED_SPV));
+}
+
 // #latch-phi (HLSL port of GLSL's fix/glsl-latch-phi, #613): a continue-block phi
 // (latch phi) whose value differs per incoming path got NO copies anywhere in the
 // HLSL backend: the loop walker's trivial-continue fast path emitted a bare
