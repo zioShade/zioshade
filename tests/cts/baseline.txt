@@ -4,8 +4,11 @@
 # mandate violation -- silent wrong). invalid-output and honest-error counts are non-gating
 # (breadth) and intentionally NOT tracked here. When a crash is fixed, lower the count.
 #
-# Count-based (not file-based): a fix + a different new crash at the same count would pass
-# silently; a file-level baseline is a future refinement.
+# FILE-LEVEL since 2026-08-15: each backend's exact crash files are listed in a
+# `crash-files:<backend>` section below. Any file that crashes NOW but is not listed is a
+# NEW crash and fails the gate; a listed file that no longer crashes prints a prune
+# reminder (a fix + a different new crash at the same count can no longer pass silently).
+# The <backend> <count> rows below are informational summaries kept for quick reading.
 #
 # glsl 0 = graphicsfuzz_032.spv crash FIXED (emitWhileLoop depth-bound -> honest-error, PR
 #          #522). It now refuses loudly instead of stack-exhausting. The deeper loop-
@@ -45,3 +48,9 @@ glsl 0
 wgsl 0
 msl 0
 hlsl 0
+
+# File-level crash baselines (one basename per line under each marker; empty = none).
+crash-files:glsl
+crash-files:wgsl
+crash-files:msl
+crash-files:hlsl
