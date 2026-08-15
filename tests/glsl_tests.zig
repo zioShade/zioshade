@@ -3794,6 +3794,71 @@ test "zm0: two structs sharing one OpName get distinct mangled decls (no silent-
     try assertContains(hlsl, "float _m2;");
 }
 
+test "vtx-sep: separate-variable builtin vertex outputs cross-compile honestly (external SPIR-V)" {
+    // vtx_mixed.spv: vertex Outputs in the SEPARATE-VARIABLE builtin form
+    // (external SPIR-V producers; glslang's gl_PerVertex BLOCK form is #471):
+    // %pos BuiltIn Position + %psize BuiltIn PointSize as their own OpVariables,
+    // plus a Location-0 user varying %uv, stores to all three, and NO OpName
+    // anywhere (spirv-as drops symbolic names, so every name-map lookup falls to
+    // the collectNames counter fallback). Two silent-wrongs pre-fix, both exit 0:
+    //   GLSL: the entry emitted as `void v11()` (the counter fallback name), so
+    //         the output was well-formed GLSL with NO entry point.
+    //   HLSL: PointSize has no HLSL semantic, so the VS_OUTPUT field was skipped
+    //         (the old `else => continue` TODO) but the store leaked as
+    //         `v9 = 1.0;`: a store to an undeclared identifier.
+    const spv_bytes = @embedFile("fixtures/vtx_mixed.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const glsl = try zioshade.spirvToGLSL(alloc, words, .{ .version = 450 });
+    defer alloc.free(glsl);
+    // Entry pinned to main (GLSL requires it); the separate builtin outputs map
+    // to their predefined gl_ names; the user varying is a real out declaration.
+    try assertContains(glsl, "void main()");
+    try assertContains(glsl, "gl_Position = vec4(1.0);");
+    try assertContains(glsl, "gl_PointSize = 1.0;");
+    try assertContains(glsl, "layout(location = 0) out vec2 v10;");
+    try assertContains(glsl, "v10 = vec2(1.0);");
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "void v11()") == null);
+
+    const hlsl = try zioshade.spirvToHLSL(alloc, words, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+    // Position and the user varying route into VS_OUTPUT; the body stores both.
+    try assertContains(hlsl, "float4 v8 : SV_Position;");
+    try assertContains(hlsl, "float2 v10 : TEXCOORD0;");
+    try assertContains(hlsl, "output.v8 = float4(1.0, 1.0, 1.0, 1.0);");
+    try assertContains(hlsl, "output.v10 = float2(1.0, 1.0);");
+    // gl_PointSize follows the #471 block-form decision: no field AND a
+    // suppressed store. Pre-fix the counter-named store leaked (`v9 = 1.0;`).
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v9") == null);
+    // The vertex epilogue must not append a dead duplicate `return output;`
+    // after the entry's own OpReturn already emitted one.
+    var ret_count: usize = 0;
+    var pos: usize = 0;
+    while (std.mem.indexOfPos(u8, hlsl, pos, "return output;")) |i| {
+        ret_count += 1;
+        pos = i + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), ret_count);
+
+    // PointSize-only fixture: same drop decision with no user varying present.
+    const ps_bytes = @embedFile("fixtures/vtx_psize.spv");
+    const ps_words = try alloc.alloc(u32, ps_bytes.len / 4);
+    defer alloc.free(ps_words);
+    @memcpy(std.mem.sliceAsBytes(ps_words), ps_bytes);
+    const hlsl_ps = try zioshade.spirvToHLSL(alloc, ps_words, .{ .shader_model = 60 });
+    defer alloc.free(hlsl_ps);
+    try assertContains(hlsl_ps, "float4 v6 : SV_Position;");
+    try assertContains(hlsl_ps, "output.v6 = float4(1.0, 1.0, 1.0, 1.0);");
+    try std.testing.expect(std.mem.indexOf(u8, hlsl_ps, "point_size") == null);
+    const glsl_ps = try zioshade.spirvToGLSL(alloc, ps_words, .{ .version = 450 });
+    defer alloc.free(glsl_ps);
+    try assertContains(glsl_ps, "void main()");
+    try assertContains(glsl_ps, "gl_Position = vec4(1.0);");
+    try assertContains(glsl_ps, "gl_PointSize = 1.0;");
+}
+
 test "sid: a function-local variable shadowing a global's name gets mangled" {
     // value_dedup_collision.spv: Input global OpName "a_b" + Function local
     // OpName "a-b" -> both sanitize to "a_b". The local would silently shadow
