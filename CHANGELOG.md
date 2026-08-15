@@ -4,6 +4,115 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
+### Changed
+
+- **`continue` inside a switch case now compiles from source (#593).** Three coupled defects: the frontend resolved
+  `continue_label = 0` from the switch's own loop-stack entry and emitted a dangling `OpBranch 0` (the whole shader
+  failed with `codegen_failed`); once the frontend was fixed, the GLSL backend mis-walked a case whose *target* is the
+  loop's continue block; and `deadLoopElim` could then delete the live loop. A `continue` in a switch case now lowers
+  end-to-end through GLSL and the loop survives optimization. This also removes
+  `loop-dominator-and-switch-default.frag` from the conformance suite's curated known-unsupported list (13 -> 12
+  XFAIL); `docs/STATUS.md` is regenerated to match.
+- `just ci` and the CI workflow gate on two new silent-wrong detectors: the structural-drop sweep (#588, gated in #592)
+  and the unreachable-statement scan (#605, gated once #610/#612/#614 closed the benign classes it used to report).
+  The `ci` recipe's one-dependency-per-workflow-step map was updated to include them.
+
+### Added
+
+- **Structural-drop sweep, all four backends, both corpora (#588, gated in #592).** A loop or switch present in the
+  input SPIR-V and missing from still-compiling output is silent-wrong that no validity gate can see. Three
+  independent signals (cross-backend dissent, a SPIR-V floor with provably single-iteration loops subtracted, and
+  WGSL nested-selection switch-breaks) report 0/0/0/0 across MSL/GLSL/HLSL/WGSL after #589/#590 closed the class; the
+  gate keeps it closed. The 2026-07-28 count sweep that certified MSL/GLSL/HLSL clean compared raw `OpLoopMerge`
+  counts over one corpus and missed all fourteen GLSL drops.
+- **Unreachable-statement scan (#605).** A statement after a statement-level `break`/`continue`/`return`/`discard` in
+  the same block means the emitter wrote a terminator it should not have and silently dropped the rest of the block.
+  Found #599 (WGSL emitted a second unconditional break, orphaning 36 shaders' loop bodies) and #604 (a selection's
+  own merge treated as a break/continue trampoline, leaving `graphicsfuzz_061`'s loop with no exit). Clean at
+  0/0/0/0 across both corpora and gated since #614.
+- **GLSL value-level faithfulness sweep, committed (`just glsl-faithful-sweep`, #597).** The render-proxy check that
+  found #596 after every compile-only gate had passed, over the artifact-free pure-`gl_FragCoord` subset. Artifact
+  classes are documented so hits can be triaged instead of chased: no-output shaders (#598), uninitialized inputs and
+  undefined math at the harness's zero varyings (#602). Full-corpus verdict (#602): the entire spirv-cross fragment
+  corpus is clean of real value silent-wrongs under the 2-oracle render differential.
+- **NagaCompare render-differential tooling.** Deterministic bindings from pipeline reflection plus a
+  `position`-varying rename unlock uniform/texture-bound shaders for the differential (#601);
+  `SHADERCOMPARE_DUMP=n` prints the first n differing pixels' coordinates and both sides' RGBA (#606);
+  `SHADERCOMPARE_BUFFER_FLOAT` fills buffers with one sane float, the artifact-class-5 discriminator that cleared 4 of
+  the 5 remaining CTS UNFAITHFUL candidates as threshold-cascade harness artifacts (#607).
+- The package ships its licences (`LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, `THIRD_PARTY_NOTICES.md` added to
+  `.paths`, #595), and the `ziojson`/`ziotime` pins moved to the first tags whose tarballs carry licence text (#600).
+
+### Fixed
+
+Headline: the CTS GraphicsFuzz (binary-ingestion) invalid-output breadth is driven from GLSL 54 / MSL 47 / HLSL 46
+(measured 2026-08-04) to GLSL 0 / MSL 0 / HLSL 0 / WGSL 2, and the newly-built z-z round-trip sweep (zioshade GLSL ->
+glslang -> zioshade, no naga leg needed) is render-clean on all 88 corpus shaders. Per-backend, measured today
+(2026-08-15, `tools/cts_ingestion_sweep.sh`): GLSL ok=62 invalid=0 honest-error=26; WGSL ok=61 candidate-invalid=2
+honest-error=25; MSL ok=66 honest-error=21 under the local swiftc oracle, whose single rejection was a Metal XPC
+service failure rather than a source rejection (the merged-PR record is invalid=0, reached at #569 for MSL and #572 for
+HLSL); the HLSL leg needs DXC and is enforced by the Windows CI job. CRASH stays 0/0/0/0 on all legs.
+
+- **Unnamed uniform blocks (#557, MSL+HLSL).** One bug class behind roughly half the GraphicsFuzz invalid output: a
+  `buffer`/`uniform` block with no instance name got no synthesized name, so every reference to it was an undeclared
+  identifier (MSL invalid-output 47 -> 10, HLSL 46 -> 14 in one fix).
+- **Private globals, MSL+HLSL (#558, #560, #561, #562, #563).** Metal forbids file-scope mutable variables and HLSL
+  mishandles several Private shapes: struct types and globals were emitted more than once or not at all, mutated
+  vector/matrix/struct Private globals were not declared or threaded through helper signatures, and fragment-input
+  builtins a helper reads stayed function-local. Fixed across six passes (#557-#563).
+- **`#phi-name` (#559 HLSL, #564 MSL; the GLSL port #577 was reverted in #578).** A materialized phi temp was named by
+  suffixing `_phi` to whatever `names` held, which maps ids to rendered *expressions*: `vec3(1.0)_phi` is not an
+  identifier. Phi variables are now derived from the result id and declared once.
+- **Unclaimed `OpPhi` whose predecessors carry different values (#565 MSL, #567 HLSL, #579 GLSL, guarded by #585).**
+  The generic OpPhi arm aliased the phi to its first incoming's name, which is only sound when every predecessor
+  carries the same id; otherwise the variable is read uninitialized. These now refuse loudly. #579 also stops
+  dropping a hoisted phi's init.
+- **A loop-header value read after the loop (#569 MSL, #570 HLSL, #574 GLSL).** SPIR-V only requires a definition to
+  dominate its uses and a loop header dominates everything downstream, but the Pattern-B replay puts the definition
+  inside `while (true) { ... }`, a sibling scope, so a later loop read it out of scope (`graphicsfuzz_072`,
+  undeclared identifier). The header value is now hoisted above the loop; MSL invalid-output reaches 0 (#569).
+- **HLSL: a hoisted phi gets one name and one declaration (#572)** (`graphicsfuzz_045`, DXC "Loop must have break"),
+  closing the HLSL invalid-output drive at 0; **HLSL lowers self-loop with body-in-header (#571)**, previously an
+  honest error.
+- **MSL: a loop whose top test is really a short-circuit chain is refused (#573)** rather than mis-lowered; MSL also
+  never reuses a name another id already holds (#603) - round-trip SPIR-V carries OpNames, and a counter-assigned
+  `v90` colliding with a real `v90` was a Metal redefinition error.
+- **GLSL: each switch case gets its own block scope (#575)** (`graphicsfuzz_022`/`_037`: identical ids in several
+  cases redeclared the same name), **a loop header is followed from a switch arm too (#591)**, and **case breaks are
+  emitted when the switch default target is the merge (#596)** - the single UNFAITHFUL hit of the 794-shader
+  faithfulness sweep.
+- **`#switch-case-continue` (#584 GLSL, #586 MSL, #587 HLSL, #594 WGSL).** A switch case whose body branches to the
+  enclosing loop's continue target was emitted as a switch `break`, so post-switch code ran on the continue path
+  (`loop-dominator-and-switch-default` ran an extra `f4.y += 0.5` per outer iteration). All four backends now emit
+  the continue.
+- **`#pattern-b-loop-in-arm` GLSL (#589) and `#hlsl-selfloop-in-arm` (#590).** A loop nested in a selection arm (or a
+  self-loop in one) was silently dropped along with every instruction after it in that arm; the emitted source still
+  compiled. GLSL structural drops went 14 -> 0, which is what made the structural-drop gate (#592) possible.
+- **WGSL control flow (#599, #604).** A loop with an early `if (cond) break;` got a second unconditional break,
+  orphaning the rest of the body (36 corpus shaders, every mandelbrot/ray-march/search-loop); and a selection's own
+  merge block was classified as a break/continue trampoline, inverting the selection. Plus: function-local var names
+  dedup before the name-resolution pre-scans (#576, `graphicsfuzz_050`), matrix column extracts no longer marked dead
+  (#580, `graphicsfuzz_056`), a switch-break taken from inside a selection is not dropped (#581), and an inline
+  expression is not cached over a late-renamed extract (#583).
+- **z-z round-trip silent-wrong classes (found by the new round-trip render sweep; each entry: class, mechanism,
+  example shader).**
+  - `#body-is-continue` GLSL (#608): a Pattern-B loop whose body-target IS the continue label emitted the body twice
+    per iteration, so every `a[i] -= x` was applied twice (`graphicsfuzz_084`, Gaussian back-substitution).
+  - `#fragcoord-full-vec` MSL (#609): a full v4 load of FragCoord stored whole to another variable was missed by the
+    `.z`/`.w` use-scan, so a float2 was assigned to a float4 local - invalid Metal (`graphicsfuzz_004`/`_020`). This
+    fix unlocked the round-trip sweep itself (the two Fatal cases were this).
+  - `#dup-entry-return` HLSL (#610): every fragment entry point ended with the same `return fragColor;` twice.
+  - `#switch-arm-break` GLSL (#611): a branch to the enclosing switch's merge from inside a selection arm emitted
+    nothing - the arm rendered empty and the merge phi kept a stale value on fall-through
+    (`graphicsfuzz_021`/`_043`/`_053`/`_081`).
+  - `#early-return-arm` MSL+HLSL (#612): after emitting a return, the block walker continued into the selection's
+    merge and emitted the rest of the function inside the arm; case literals are also printed signed.
+  - `#latch-phi` GLSL (#613): a continue-block phi with per-path incoming values got no copies anywhere, so the
+    loop-header carry read an uninitialized variable (`graphicsfuzz_003`). The last of the 88-shader round-trip
+    DIFFERs.
+  - `#dead-case-break` MSL/GLSL/HLSL (#614): a switch case whose body returns got an unreachable trailing `break;`.
+
+
 ## [0.5.0] - 2026-08-04
 
 ### Changed

@@ -102,7 +102,7 @@ Handled by **all 4**: $(wc -l < "$T/all4.txt" | tr -d ' ').  Handled by **>=1**:
 
 $(tr '\n' ' ' < "$T/none.txt")
 
-Sub-group: **module metadata** (Capability, Extension, ExtInstImport, MemoryModel) is processed structurally -- NOT a gap. The rest (~$(grep -vcE 'Capability|Extension|ExtInstImport|MemoryModel' "$T/none.txt" | tr -d ' ')) are real deferred areas: subgroup ballot/quad/shuffle, ray-query, ARM tensors, SubgroupAllEqualKHR.
+Sub-group: **module metadata** (Capability, Extension, ExtInstImport, MemoryModel) is processed structurally -- NOT a gap. The rest ($(grep -vcE 'Capability|Extension|ExtInstImport|MemoryModel' "$T/none.txt" | tr -d ' ')) are the real deferred areas: $(grep -vE 'Capability|Extension|ExtInstImport|MemoryModel' "$T/none.txt" | tr '\n' ' ')
 
 ## GLSLstd450 extended instructions
 
@@ -110,5 +110,5 @@ Universe: **${S450N}**. Per-backend static counts are omitted (GLSL/MSL/WGSL dis
 
 ## Scope statement this matrix supports
 
-zioshade models **${OPN}** Op opcodes; the real-fixture corpus exercises **${REACH_OP}** distinct opcodes, **${REACH_MODELLED}** of them modelled and handled (only debug-metadata unmodelled); the conformance corpora produce **0 unhandled** opcodes/std450. The correctness scope is therefore bounded and measurable, not implicit. Known deferred opcode areas (subgroup ballot/quad, ray-query, ARM tensors) are enumerated above and each is a named honest-error, never silent-wrong.
+zioshade models **${OPN}** Op opcodes; the real-fixture corpus exercises **${REACH_OP}** distinct opcodes, **${REACH_MODELLED}** of them modelled and handled (only debug-metadata unmodelled); the conformance corpora produce **0 unhandled** opcodes/std450. The correctness scope is therefore bounded and measurable, not implicit. Known deferred opcodes are enumerated above and each is a named honest-error, never silent-wrong.
 EOF

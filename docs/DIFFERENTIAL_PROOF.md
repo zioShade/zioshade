@@ -159,9 +159,17 @@ in control-flow (`early_return2`: source's for-loop + early return vanish entire
 `loop-dominator-and-switch-default`: 1 of 2 loops dropped; `multi-return-paths`: 4 returns
 dropped). zioshade-MSL handles these correctly (3-oracle AGREE on the source), so this is a
 zioshade-GLSL-specific bug in its loop/return lowering — the silent-wrong class, invisible
-to the source-3-oracle (which tests the MSL backend). **Tracked as #69.** This is exactly
-why the non-proxy check was needed: the proxy round-trip and the source-3-oracle could not
-see a backend-specific emission bug. 3 are SC-OUTLIER (`mandelbrot_iter`,
+to the source-3-oracle (which tests the MSL backend). **Fixed by the GLSL control-flow
+campaign after 0.5.0**: #589 (a Pattern-B loop nested in a selection arm, the
+`early_return2` / `loop_in_case` drops), #591 (a loop header reached from a switch arm),
+#596 (case breaks when the switch default target is the merge), #611 (a selection arm's
+break out of the enclosing switch) and #613 (the latch phi on every path to a continue).
+Two committed gates now hold the class closed: the structural-drop sweep reports zero
+dropped loops/switches across all four backends and both corpora (#588, gated in #592),
+and the value-level faithfulness sweep's full-corpus verdict is that no real GLSL
+value silent-wrong remains on the spirv-cross fragment corpus (#597, #598, #602). This is
+exactly why the non-proxy check was needed: the proxy round-trip and the source-3-oracle
+could not see a backend-specific emission bug. 3 are SC-OUTLIER (`mandelbrot_iter`,
 `mandelbrot3`, `weierstrass` — zioshade agrees with naga; spirv-cross is the outlier;
 chaos). 4 are hash-driven chaos (`loop_trackers`, `multi_return2`, `switch_in_loop`,
 `loop-dominator-and-switch-default` — same set as the MSL residuals). 2 are harness

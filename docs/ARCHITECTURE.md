@@ -65,7 +65,7 @@ prove correctness on the *unoptimized* IR -- some miscompiles only surface on on
 (the `#loop-continue-deadincr` class was invisible on optimized SPIR-V; `prove_naga`
 exercised it on the unoptimized path).
 
-The `Op` enum in `spirv.zig` is the set of SPIR-V opcodes zioshade models (251 today; see
+The `Op` enum in `spirv.zig` is the set of SPIR-V opcodes zioshade models (252 today; see
 [COVERAGE_MATRIX.md](COVERAGE_MATRIX.md)). Frontend constructs zioshade cannot translate
 faithfully are **honest-errors** (`error.CodegenFailed` / `error.SemanticFailed`), never
 silent-wrong output.
@@ -132,7 +132,7 @@ is enforced at three layers:
 - **Backends**: per-opcode honest-errors -- WGSL `UnsupportedOp`; GLSL `CrossCompileUnsupported`;
   HLSL/MSL `UnsupportedOpcode` -- fail loud when an unhandled opcode's result is consumed
   (see "The cross-compiler backends" for the per-backend nuance and the dead-result stub).
-  The 13 `XFAIL` fixtures in the conformance suite are these honest refusals, curated and
+  The 12 `XFAIL` fixtures in the conformance suite are these honest refusals, curated and
   documented, never silent passes.
 
 ## Correctness harnesses (how the above is proven)
@@ -140,7 +140,7 @@ is enforced at three layers:
 The gates live in the `justfile` and `tools/`; the strongest are render/exec differentials
 on a real Metal GPU:
 
-- `just strict-gate` -- spirv-val on every conformance fixture (~2.1k PASS / 13 XFAIL / 0
+- `just strict-gate` -- spirv-val on every conformance fixture (~2.1k PASS / 12 XFAIL / 0
   FP-regression; the live count is in [STATUS.md](STATUS.md), the single source of truth).
 - `just prove` / `prove-opt` / `prove-naga` / `prove-3oracle` -- render/exec diff vs
   independent references (glslang->SPIRV-Cross, naga) across fragment/vertex/compute.
@@ -154,7 +154,9 @@ on a real Metal GPU:
   consumption of external SPIR-V from glslang/DXC/spirv-opt) through all four backends and
   compile-checks each emission (glslang/naga/Metal/dxc), spirv-cross-discriminated. The
   GLSL-source sweeps only ever exercised zioshade's own frontend output; this one gates
-  robust arbitrary-SPIR-V consumption. Not in `just ci` while known bugs are open.
+  robust arbitrary-SPIR-V consumption. Runs in `just ci` and in the CI workflow (GLSL on
+  Linux with the complete glslang oracle, WGSL via naga; each leg skips gracefully where
+  its compiler is absent).
 - Where those sweeps run in CI: GLSL + WGSL on Linux, MSL on a macOS runner (real Metal
   compiler), HLSL on a Windows runner (the Vulkan SDK's DXC). Those last two are
   COMPILE-validation only -- render/exec differentials need a GPU, which hosted runners

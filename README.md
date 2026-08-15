@@ -151,7 +151,7 @@ Add zioshade to `build.zig.zon` with `zig fetch`, then `exe.root_module.addImpor
 ## Known limitations
 
 - **GLSL output is 430 only.** Other versions are not generated.
-- **WGSL backend is shallow** versus SPIRV-Cross: common opcodes only. Deepening it is tracked in [#170](https://github.com/zioshade/zioshade/issues/170).
+- **WGSL is the least-proven backend.** Its opcode coverage has grown well past the common core (a static lower bound of 222 of the 252 modelled opcodes, per [docs/COVERAGE_MATRIX.md](docs/COVERAGE_MATRIX.md)), but it has no direct render/exec differential proof (only naga compile validation plus indirect round-trip checks), and 2 shaders on the vendored GraphicsFuzz corpus still produce output naga rejects. Deepening remains tracked in [#170](https://github.com/zioshade/zioshade/issues/170).
 - **Cross-compiler control flow:** structured SPIR-V works on every backend; unstructured-but-reducible `if`/`switch` (missing `OpSelectionMerge`) is structurized transparently by a pre-pass. Unstructured loops (missing `OpLoopMerge`) and irreducible CFGs **fail loud** with `error.UnstructuredControlFlow` rather than miscompile. zioshade's own SPIR-V is always structured; this only affects externally-optimized or hand-authored input.
 - **Single contributor.** Treat as alpha if you are not the wintty project.
 
