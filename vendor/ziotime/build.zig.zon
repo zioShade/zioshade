@@ -1,0 +1,15 @@
+.{
+    .name = .ziotime,
+    .version = "0.1.1",
+    .fingerprint = 0xaf3da94c69cb1343,
+    .minimum_zig_version = "0.15.2",
+    .dependencies = .{},
+    .paths = .{
+        "LICENSE-APACHE",
+        "LICENSE-MIT",
+        "NOTICE",
+        "build.zig",
+        "build.zig.zon",
+        "src",
+    },
+}
