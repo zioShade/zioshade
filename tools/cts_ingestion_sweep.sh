@@ -13,9 +13,10 @@
 #
 # This is a CREDIBILITY REPORT, not a correctness gate. On a broad, unfamiliar corpus
 # INVALID output is EXPECTED (breadth the backends don't fully cover yet) and is NON-GATING.
-# The ONLY gate signal is a CRASH count that EXCEEDS the committed baseline
-# (tests/cts/baseline.txt): a NEW crash on valid input is a mandate violation (silent
-# wrong). Existing baseline crashes are tracked beads bugs; lower the baseline when fixed.
+# The ONLY gate signal is a crash NOT LISTED in the committed file-level baseline
+# (tests/cts/baseline.txt `crash-files:<backend>` sections): a NEW crash on valid input is
+# a mandate violation (silent wrong). Existing baseline crashes are tracked beads bugs;
+# prune them from the baseline when fixed (the gate prints a reminder).
 #
 # GLSL -> glslangValidator (complete oracle). WGSL -> naga (candidate oracle; spirv-cross
 # has no WGSL backend to discriminate). MSL -> the Metal compiler and HLSL -> DXC, via
@@ -96,10 +97,10 @@ dxc_profile() {
   esac
 }
 
-g_ok=0; g_inv=0; g_herr=0; g_crash=0; g_skip=0
-w_ok=0; w_inv=0; w_herr=0; w_crash=0
-m_ok=0; m_inv=0; m_herr=0; m_crash=0
-h_ok=0; h_inv=0; h_herr=0; h_crash=0; h_skip=0
+g_ok=0; g_inv=0; g_herr=0; g_crash=0; g_skip=0; g_crash_files=""
+w_ok=0; w_inv=0; w_herr=0; w_crash=0; w_crash_files=""
+m_ok=0; m_inv=0; m_herr=0; m_crash=0; m_crash_files=""
+h_ok=0; h_inv=0; h_herr=0; h_crash=0; h_skip=0; h_crash_files=""
 total=0; val_in=0; val_out=0
 
 shopt -s nullglob
@@ -115,7 +116,7 @@ for f in "$CORPUS"/*.spv; do
     else g_inv=$((g_inv+1)); fi
   else
     rc=$?
-    if is_crash "$TMP/e.glsl" "$rc"; then g_crash=$((g_crash+1)); echo "CRASH-GLSL $(basename "$f") (rc=$rc)"
+    if is_crash "$TMP/e.glsl" "$rc"; then g_crash=$((g_crash+1)); echo "CRASH-GLSL $(basename "$f") (rc=$rc)"; g_crash_files="${g_crash_files} $(basename "$f")"
     else g_herr=$((g_herr+1)); fi
   fi
   # ---- WGSL (naga; runs regardless of stage) ----
@@ -125,7 +126,7 @@ for f in "$CORPUS"/*.spv; do
       else w_inv=$((w_inv+1)); fi
     else
       rc=$?
-      if is_crash "$TMP/e.wgsl" "$rc"; then w_crash=$((w_crash+1)); echo "CRASH-WGSL $(basename "$f") (rc=$rc)"
+      if is_crash "$TMP/e.wgsl" "$rc"; then w_crash=$((w_crash+1)); echo "CRASH-WGSL $(basename "$f") (rc=$rc)"; w_crash_files="${w_crash_files} $(basename "$f")"
       else w_herr=$((w_herr+1)); fi
     fi
   fi
@@ -136,7 +137,7 @@ for f in "$CORPUS"/*.spv; do
       else m_inv=$((m_inv+1)); fi
     else
       rc=$?
-      if is_crash "$TMP/e.msl" "$rc"; then m_crash=$((m_crash+1)); echo "CRASH-MSL $(basename "$f") (rc=$rc)"
+      if is_crash "$TMP/e.msl" "$rc"; then m_crash=$((m_crash+1)); echo "CRASH-MSL $(basename "$f") (rc=$rc)"; m_crash_files="${m_crash_files} $(basename "$f")"
       else m_herr=$((m_herr+1)); fi
     fi
   fi
@@ -148,7 +149,7 @@ for f in "$CORPUS"/*.spv; do
       else h_inv=$((h_inv+1)); fi
     else
       rc=$?
-      if is_crash "$TMP/e.hlsl" "$rc"; then h_crash=$((h_crash+1)); echo "CRASH-HLSL $(basename "$f") (rc=$rc)"
+      if is_crash "$TMP/e.hlsl" "$rc"; then h_crash=$((h_crash+1)); echo "CRASH-HLSL $(basename "$f") (rc=$rc)"; h_crash_files="${h_crash_files} $(basename "$f")"
       else h_herr=$((h_herr+1)); fi
     fi
   else
@@ -177,29 +178,38 @@ if [ "$HAVE_DXC" = 1 ]; then
 else
   echo "  HLSL: skipped (no DXC: not on PATH and no dxc-oracle container)"
 fi
-echo "Gate: NEW crash only (count > tests/cts/baseline.txt). invalid-output is non-gating (breadth)."
+echo "Gate: file-level crash baseline (tests/cts/baseline.txt crash-files sections). invalid-output is non-gating (breadth)."
 
-# Crash-regression gate vs the committed baseline. A backend's current CRASH count may not
-# EXCEED its baseline; lowering it (a crash fixed) requires updating the baseline.
+# Crash-regression gate vs the committed baseline, FILE-LEVEL. The baseline lists the exact
+# corpus files each backend crashes on (a `crash-files:<backend>` section); any file that
+# crashes NOW but is not listed is a NEW crash (mandate violation) and fails the gate. This
+# closes the old count-based hole, where a fix + a different new crash at the same count
+# passed silently. A baseline file that no longer crashes is a FIXED crash: it does not
+# fail, it prints a reminder to prune the baseline (keeping it honest keeps the diff
+# meaningful).
 bad=0
-if [ -f "$BASELINE" ]; then
-  while read -r backend count; do
-    case "$backend" in ''|\#*) continue;; esac
-    case "$backend" in
-      glsl) cur=$g_crash;;
-      wgsl) cur=$w_crash;;
-      # A skipped backend reports 0 crashes and so can never exceed its baseline: an
-      # absent oracle cannot fail the gate, and cannot certify the backend either.
-      msl)  cur=$m_crash;;
-      hlsl) cur=$h_crash;;
-      *)    continue;;
-    esac
-    if [ "${cur:-0}" -gt "${count:-0}" ]; then
-      echo "REGRESSION: $backend CRASH=$cur exceeds baseline=$count"; bad=1
+for backend in glsl wgsl msl hlsl; do
+  case $backend in
+    glsl) cur_files=$g_crash_files;;
+    wgsl) cur_files=$w_crash_files;;
+    # A skipped backend reports no crash files and so can never fail the gate: an
+    # absent oracle cannot fail the gate, and cannot certify the backend either.
+    msl)  cur_files=$m_crash_files;;
+    hlsl) cur_files=$h_crash_files;;
+  esac
+  # Extract this backend's section from the baseline: lines after `crash-files:<backend>`
+  # until the next section marker (a line containing ':').
+  base_files=$(sed -n "/^crash-files:$backend\$/,/^[^#].*:/{/^crash-files:$backend$/d;/^[^#].*:/d;p;}" "$BASELINE" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$' || true)
+  for f in $cur_files; do
+    if ! printf '%s\n' "$base_files" | grep -qx "$f"; then
+      echo "REGRESSION: NEW crash on $backend: $f (not in baseline)"; bad=1
     fi
-  done < "$BASELINE"
-else
-  echo "NOTE: no baseline at $BASELINE (first run); commit one from this report."
-fi
-if [ "$bad" -eq 0 ]; then echo "No new crashes vs baseline."; else echo "FAIL: crash regression vs baseline."; fi
+  done
+  for f in $base_files; do
+    if ! printf '%s\n' "$cur_files" | grep -qx "$f"; then
+      echo "NOTE: baseline crash $backend/$f no longer crashes (fixed?) -- prune $BASELINE."
+    fi
+  done
+done
+if [ "$bad" -eq 0 ]; then echo "No new crashes vs baseline (file-level)."; else echo "FAIL: crash regression vs baseline."; fi
 exit $bad
