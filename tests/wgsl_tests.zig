@@ -7664,3 +7664,73 @@ test "zl3: WGSL struct AccessChain via a ptr param emits member access (not arra
     try assertContains(wgsl, "(*input).color");
     try assertNotContains(wgsl, "(*input)[");
 }
+
+// ---------------------------------------------------------------------------
+// #post-loop-header-use (WGSL port of MSL #569 / HLSL #570 / GLSL #574)
+// ---------------------------------------------------------------------------
+
+fn crossCtsToWgsl(comptime rel: []const u8) ![]const u8 {
+    const spv_bytes = @embedFile(rel);
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+    return try zioshade.spirvToWGSL(alloc, words, .{});
+}
+
+test "WGSL hoists a deferred loop-header value read after the merge (#post-loop-header-use)" {
+    // graphicsfuzz_015: values computed in a Pattern-B loop header (deferred and
+    // replayed INSIDE `loop {}`) are read after the loop's merge. SPIR-V only
+    // requires def-dominates-use; WGSL lexical scoping rejected the read (naga
+    // "no definition in scope for identifier: v119"). The hoist declares the
+    // var ABOVE the `loop {` and rewrites the replayed `let` into an assignment.
+    const wgsl = try crossCtsToWgsl("cts/graphicsfuzz/graphicsfuzz_015.spv");
+    defer alloc.free(wgsl);
+    // v118/v119: declared before the loop, assigned inside it, read after it.
+    try assertContains(wgsl, "var v118: vec3f;\n");
+    try assertContains(wgsl, "var v119: i32;\n");
+    try assertContains(wgsl, "\n            v118 = ");
+    try assertContains(wgsl, "\n            v119 = ");
+    try assertNotContains(wgsl, "let v118:");
+    try assertNotContains(wgsl, "let v119:");
+    try nagaValidateOrSkip(wgsl, "post-loop-header-use 015");
+}
+
+test "WGSL hoists a loop condition-block value read after the merge (#post-loop-header-use)" {
+    // graphicsfuzz_059: the value is computed in the loop's top-test CONDITION
+    // block (emitted inside `loop {}` by the main walk, not the deferred replay)
+    // and read after the merge (`v37`), so the hoist must cover body-block
+    // definitions too, not just the deferred header range.
+    const wgsl = try crossCtsToWgsl("cts/graphicsfuzz/graphicsfuzz_059.spv");
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var v37: i32;\n");
+    try assertContains(wgsl, "\n        v37 = i32(gl_FragCoord.x);");
+    try assertNotContains(wgsl, "let v37:");
+    try nagaValidateOrSkip(wgsl, "post-loop-header-use 059");
+}
+
+test "WGSL emits loop-carried phi updates at a BranchConditional back edge (#wrap-backedge)" {
+    // graphicsfuzz_059: a continue block ending in `OpBranchConditional %cond
+    // %header %merge` gets no `continuing {}` block and its back-edge is a
+    // BranchConditional, so the loop-carried phi update (`v34 = v50`) was
+    // silently DROPPED - the counter never advanced. It must now be emitted at
+    // the loop bottom, right after the break test. This also keeps `v34` a
+    // mutable `var`: promoted to a `let`, naga const-folds it to -1
+    // (firstTrailingBit(0)) and rejects the (dead) `A[v34]` as a negative index.
+    const wgsl = try crossCtsToWgsl("cts/graphicsfuzz/graphicsfuzz_059.spv");
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var v34: i32 = v33;");
+    try assertContains(wgsl, "\n        v34 = v50;");
+    try nagaValidateOrSkip(wgsl, "wrap-backedge 059");
+}
+
+test "WGSL classifies a far OpLoopMerge loop-header phi correctly (#phi-peek-window)" {
+    // graphicsfuzz_015: the loop header's OpLoopMerge sits 30 instructions past
+    // its OpPhi - exactly one past the old peek window - so the phi was
+    // misread as a SELECTION phi: sel_phis captured it, the .Phi arm suppressed
+    // its `var` (already_declared), and the branch-to-header emitted a bare
+    // update for a never-declared `v135` (naga "no definition in scope").
+    const wgsl = try crossCtsToWgsl("cts/graphicsfuzz/graphicsfuzz_015.spv");
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var v135: i32 = v23;");
+    try nagaValidateOrSkip(wgsl, "phi-peek-window 015");
+}

@@ -5674,9 +5674,17 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
+    // #post-loop-header-use: `w` below is a one-instruction pending buffer over
+    // the real writer (`w_out`). The emit loop flushes it at the top of every
+    // instruction so a hoisted loop value's `let` declaration can be rewritten
+    // into an assignment to the `var` declared above the loop BEFORE it is
+    // committed. Behavior is byte-identical when nothing is hoisted.
+    var hoist_pending: std.ArrayList(u8) = .empty;
+    defer hoist_pending.deinit(alloc);
+    const w = HoistWriter(@TypeOf(w_out)){ .real = w_out, .pending = &hoist_pending, .alloc = alloc };
     var indent: u32 = 1; // base function body indentation (4 spaces)
 
     // Helper to write current indentation
@@ -5747,8 +5755,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (scan_inst.op == .Phi and scan_inst.words.len >= 7) {
                 // Check if this phi belongs to a loop header (skip — loop phis are handled separately)
                 var is_loop_phi = false;
+                // #phi-peek-window: a loop-header phi's OpLoopMerge can sit far past
+                // the phi (graphicsfuzz_015 has a 30-instruction header body between
+                // them). The old 30-instruction cap misread such a phi as a SELECTION
+                // phi: sel_phis then contained it, the .Phi arm suppressed its `var`
+                // (already_declared), and the branch-to-header emitted a bare update
+                // for a never-declared identifier (naga "no definition in scope").
+                // The Label/SelectionMerge/FunctionEnd stops below already bound the
+                // scan to the phi's own block, so widening the horizon cannot reach a
+                // LoopMerge of a LATER block; 256 covers any real header.
                 var pk: usize = si + 1;
-                while (pk < @min(si + 30, module.instructions.len)) : (pk += 1) {
+                while (pk < @min(si + 256, module.instructions.len)) : (pk += 1) {
                     if (module.instructions[pk].op == .LoopMerge) {
                         is_loop_phi = true;
                         break;
@@ -6492,9 +6509,129 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
+    // #post-loop-header-use (WGSL port of the MSL #569 / HLSL #570 / GLSL #574
+    // hoist): a value the emitter places INSIDE `loop {}` may legally be read at
+    // or after the loop's MERGE - SPIR-V only requires def-dominates-use, and a
+    // loop header dominates everything downstream, so a header / condition-block
+    // value computed inside the emitted loop body is in scope for a LATER loop
+    // or for post-loop code in SPIR-V, but not in WGSL's lexical scoping (naga
+    // "no definition in scope", graphicsfuzz_015/_059). Two emit shapes land a
+    // definition inside the loop: the deferred header replay (the range between
+    // the header's last phi and the OpLoopMerge is re-emitted at the top of the
+    // loop body) and the body/condition blocks after the OpLoopMerge. Hoist:
+    // declare `var v: T;` BEFORE the `loop {` and rewrite the definition's
+    // `let v: T = expr;` into `v = expr;` (WGSL vars are function-scoped, so the
+    // in-loop assignment and the post-loop read both resolve to it). Sound
+    // because the definition executes on every path that reaches a post-loop
+    // read (SPIR-V dominance), and the var keeps the most recent execution's
+    // value, which is exactly the SSA value at the use. Over-approximates like
+    // the C ports: the scan sees SPIR-V refs the emitter may fold away, so some
+    // shaders get a redundant declare-then-assign split; semantically identical.
+    var hoisted_ids = std.AutoHashMap(u32, void).init(arena);
+    // LoopMerge instruction index -> hoisted result ids defined inside ITS loop.
+    var loop_hoists = std.AutoHashMap(usize, std.ArrayList(u32)).init(arena);
+    {
+        var label_idx = std.AutoHashMap(u32, usize).init(arena);
+        defer label_idx.deinit();
+        {
+            var si: usize = func_idx + 1;
+            while (si < module.instructions.len) : (si += 1) {
+                const s = module.instructions[si];
+                if (s.op == .FunctionEnd) break;
+                if (s.op == .Label and s.words.len > 1) label_idx.put(s.words[1], si) catch {};
+            }
+        }
+        var li: usize = func_idx + 1;
+        while (li < module.instructions.len) : (li += 1) {
+            const minst = module.instructions[li];
+            if (minst.op == .FunctionEnd) break;
+            if (minst.op != .LoopMerge or minst.words.len < 3) continue;
+            // The deferred range starts after the LAST header phi whose `.Phi`
+            // handler peek sees this LoopMerge - mirroring the defer trigger in
+            // the emit loop below (words.len >= 7 and LoopMerge within the
+            // 256-instruction peek window; each qualifying phi overwrites
+            // defer_start, so the last one wins). With no qualifying phi nothing
+            // is deferred and the in-loop region starts at the LoopMerge itself.
+            var last_phi: ?usize = null;
+            var pi: usize = li;
+            while (pi > func_idx) : (pi -= 1) {
+                const p = module.instructions[pi];
+                if (p.op == .Label) break; // start of the header block
+                if (p.op != .Phi or p.words.len < 7) continue;
+                if (li - pi >= 1 and li - pi < 256) {
+                    last_phi = pi;
+                    break;
+                }
+            }
+            const region_start = if (last_phi) |lp| lp + 1 else li + 1;
+            const merge_idx = label_idx.get(minst.words[1]) orelse continue;
+            // Skip the merge block's LEADING OpPhis: a merge phi naming the value
+            // is NOT a post-loop read (its incoming copy is made inside the loop,
+            // where the value is in scope) - same as the MSL/HLSL/GLSL ports.
+            var ci = merge_idx;
+            while (ci < module.instructions.len and (module.instructions[ci].op == .Label or module.instructions[ci].op == .Phi)) : (ci += 1) {}
+            var di = region_start;
+            while (di < merge_idx) : (di += 1) {
+                const dinst = module.instructions[di];
+                if (dinst.op == .Phi or dinst.op == .Label or dinst.op == .Branch or dinst.op == .BranchConditional or dinst.op == .SelectionMerge or dinst.op == .LoopMerge or dinst.op == .FunctionEnd) continue;
+                // Ops that emit no `let name: T = ...` statement (name bindings,
+                // in-place `var` declarations): hoisting them would emit a
+                // nonsense declaration or duplicate one. Their post-loop uses
+                // resolve through the names map instead.
+                if (dinst.op == .Variable or dinst.op == .AccessChain or dinst.op == .CompositeExtract or dinst.op == .CopyObject) continue;
+                const rid = common.resultIdFromOp(dinst.op, dinst.words) orelse continue;
+                if (hoisted_ids.contains(rid)) continue;
+                // The def must actually emit a fresh statement under this name:
+                // dead/inlined ids are folded into their users (no statement) and
+                // a propagated pointer name would collide with the pointer's own
+                // declaration.
+                if (dead_arith.contains(rid) or dead_conditions.contains(rid) or inline_loads.contains(rid)) continue;
+                const nm = names.get(rid) orelse continue;
+                if (nm.len == 0 or nm.len > 56) continue;
+                var ident = nm[0] == '_' or std.ascii.isAlphabetic(nm[0]);
+                if (ident) {
+                    for (nm[1..]) |c| {
+                        if (!(c == '_' or std.ascii.isAlphanumeric(c))) {
+                            ident = false;
+                            break;
+                        }
+                    }
+                }
+                if (!ident) continue;
+                var referenced = false;
+                var ri = ci;
+                while (ri < module.instructions.len) : (ri += 1) {
+                    const rinst = module.instructions[ri];
+                    if (rinst.op == .FunctionEnd) break;
+                    var wi: usize = 1;
+                    while (wi < rinst.words.len) : (wi += 1) {
+                        if (rinst.words[wi] == rid) {
+                            referenced = true;
+                            break;
+                        }
+                    }
+                    if (referenced) break;
+                }
+                if (!referenced) continue;
+                hoisted_ids.put(rid, {}) catch continue;
+                const gop = loop_hoists.getOrPut(li) catch continue;
+                if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(u32).initCapacity(arena, 2) catch continue;
+                gop.value_ptr.append(arena, rid) catch {};
+            }
+        }
+    }
+
     // Emit instructions
     while (i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
+
+        // #post-loop-header-use: the previous walk iteration may have emitted
+        // the definition of a hoisted loop value - rewrite its buffered
+        // declaration into an assignment to the var declared above the loop,
+        // then commit. Doing this HERE (rather than after the switch below)
+        // survives the many `continue` arms: the pending buffer holds exactly
+        // what was emitted since the last flush.
+        try hoistSweepAndFlush(&hoist_pending, alloc, &hoisted_ids, names, w_out);
 
         // If deferring loop header instructions, skip them for now
         // They will be emitted inside the loop body when LoopMerge is encountered
@@ -6522,6 +6659,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     try w.writeAll("}");
                     try w.writeAll("\n");
                 }
+                // #post-loop-header-use: the final instruction may itself be a
+                // hoisted definition - rewrite + commit before leaving.
+                try hoistSweepAndFlush(&hoist_pending, alloc, &hoisted_ids, names, w_out);
                 return;
             },
             .SelectionMerge => {
@@ -6942,6 +7082,26 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         emit_continuing = has_content and ends_in_branch;
                     }
                     try loop_stack.append(arena, .{ .merge = merge, .cont = cont, .header = header, .phi_start = phi_start, .phi_end = phi_end, .emit_continuing = emit_continuing, .continuing_open = false });
+                    // #post-loop-header-use: declare the loop's hoisted values
+                    // ABOVE the `loop {`. Their definition sites (the deferred
+                    // header replay below or a body block) are rewritten from
+                    // `let v: T = e;` to `v = e;` by the pending-writer hoist
+                    // sweep, so this pre-declared `var` is what every in-loop
+                    // and post-loop read resolves to.
+                    if (loop_hoists.get(i)) |hl| {
+                        for (hl.items) |rid| {
+                            const hname = names.get(rid) orelse continue;
+                            const hdef = common.getDef(module, rid) orelse continue;
+                            if (hdef.words.len < 2) continue;
+                            const hty = wgslType(module, hdef.words[1], names, arena) catch continue;
+                            // Written to the REAL writer, bypassing the pending
+                            // buffer: the sweep would otherwise rewrite/drop this
+                            // very declaration (it matches the `var name: T;`
+                            // shape it exists to eliminate at the DEF site).
+                            try writeInd(w_out, indent);
+                            try w_out.print("var {s}: {s};\n", .{ hname, hty });
+                        }
+                    }
                     try writeInd(w, indent);
                     try w.writeAll("loop {\n");
                     indent += 1;
@@ -6999,8 +7159,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     var lm_follows = false;
                     var lm_cont: ?u32 = null; // #selfloop: the LoopMerge's continue label
                     {
+                        // #phi-peek-window: see the sel_phis scan. Same widening, same
+                        // Label stop; must agree with that scan or a phi classified as a
+                        // loop phi here but as a selection phi there loses its declaration.
                         var pk = i + 1;
-                        while (pk < @min(i + 20, module.instructions.len)) : (pk += 1) {
+                        while (pk < @min(i + 256, module.instructions.len)) : (pk += 1) {
                             if (module.instructions[pk].op == .LoopMerge) {
                                 lm_follows = true;
                                 if (module.instructions[pk].words.len >= 3) lm_cont = module.instructions[pk].words[2];
@@ -7087,17 +7250,51 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // selection-merge phi overflow. Grow instead. (#170 no-panic.)
                         try phi_updates.append(arena, .{ .result_id = inst.words[2], .value_id = update_value_id });
                     }
-                    // Check if LoopMerge follows (within the next 30 instructions)
-                    // Don't stop at Labels — loop header may have Labels between Phi and LoopMerge
+                    // Check if LoopMerge follows. Two scans, so the legacy behavior
+                    // is preserved EXACTLY and only new territory gets stricter
+                    // bounds: (1) the original 30-instruction window that crosses
+                    // Labels (unchanged from before #phi-peek-window), and (2) an
+                    // extension to 256 that stops at a Label/SelectionMerge - a
+                    // LoopMerge past a Label belongs to a different (nested/later)
+                    // loop, and deferring across it would swallow that loop's header
+                    // into this one's replay (#phi-peek-window widened the sel_phis
+                    // and lm_follows scans, which already stopped at Labels; the
+                    // defer trigger needs the same reach for headers longer than 30
+                    // instructions, graphicsfuzz_015 has one at exactly +30).
                     var peek: usize = i + 1;
-                    const peek_end = @min(i + 30, module.instructions.len);
-                    while (peek < peek_end) : (peek += 1) {
+                    var defer_fired = false;
+                    const legacy_end = @min(i + 30, module.instructions.len);
+                    while (peek < legacy_end) : (peek += 1) {
                         if (module.instructions[peek].op == .LoopMerge) {
-                            defer_active = true;
-                            defer_start = i + 1;
+                            defer_fired = true;
                             break;
                         }
-                        if (module.instructions[peek].op == .FunctionEnd) break;
+                        if (module.instructions[peek].op == .FunctionEnd or module.instructions[peek].op == .SelectionMerge) break;
+                    }
+                    if (!defer_fired) {
+                        // #phi-peek-window extension: only a LoopMerge in the
+                        // phi's OWN block may be deferred to. Verified directly
+                        // (same enclosing Label), which is exact where window
+                        // heuristics are not: a loop header block is exactly
+                        // phis + straight-line instructions + LoopMerge, so a
+                        // LoopMerge reached across a Label/terminator belongs to
+                        // a different (nested/later) loop.
+                        peek = @max(peek, legacy_end);
+                        const ext_end = @min(i + 256, module.instructions.len);
+                        var phi_blk: usize = i;
+                        while (phi_blk > 0 and module.instructions[phi_blk].op != .Label) : (phi_blk -= 1) {}
+                        while (peek < ext_end) : (peek += 1) {
+                            if (module.instructions[peek].op == .LoopMerge) {
+                                var lm_blk: usize = peek;
+                                while (lm_blk > 0 and module.instructions[lm_blk].op != .Label) : (lm_blk -= 1) {}
+                                if (lm_blk == phi_blk) defer_fired = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (defer_fired) {
+                        defer_active = true;
+                        defer_start = i + 1;
                     }
                 }
             },
@@ -7158,6 +7355,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 try w.print("{s} = {s};\n", .{ rname, vname });
                             }
                         }
+                        // #wrap-backedge: if the other arm targets this loop's
+                        // header, the fall-through past the break IS the back edge
+                        // and the loop-carried phi updates belong right here -
+                        // otherwise they were silently dropped (counter never
+                        // advanced).
+                        try emitWrapBackedgePhiUpdates(module, names, &phi_updates, &loop_stack, loop_header_label, loop_continue_label, true_label, w, indent);
                     } else if (pending_merge != null) {
                         const merge_label = pending_merge.?;
                         // Check if this is a break/continue inside a loop. The break
@@ -7205,6 +7408,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (inlined2 != null) dead_conditions.put(inst.words[1], {}) catch {};
                             try writeInd(w, indent);
                             try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
+                            // #wrap-backedge: when the OTHER arm targets this loop's
+                            // header, the fall-through past the break IS the back edge
+                            // (a continue block ending in a BranchConditional); the
+                            // loop-carried phi updates belong right here. See the twin
+                            // comment in the loop-condition path above.
+                            try emitWrapBackedgePhiUpdates(module, names, &phi_updates, &loop_stack, loop_header_label, loop_continue_label, false_label, w, indent);
                             pending_merge = null;
                             i = skipBreakArm(module, i, true_label, loop_merge_label.?);
                         } else if (false_is_break) {
@@ -7213,6 +7422,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (inlined3 != null) dead_conditions.put(inst.words[1], {}) catch {};
                             try writeInd(w, indent);
                             try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
+                            // #wrap-backedge: twin of the true_is_break case (the
+                            // graphicsfuzz_059 shape: false->merge, true->header).
+                            try emitWrapBackedgePhiUpdates(module, names, &phi_updates, &loop_stack, loop_header_label, loop_continue_label, true_label, w, indent);
                             pending_merge = null;
                             i = skipBreakArm(module, i, false_label, loop_merge_label.?);
                         } else if (true_is_continue) {
@@ -9979,6 +10191,173 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
 }
 
 // Emit a single instruction — used for replaying deferred loop header instructions
+// #post-loop-header-use: writer wrapper that buffers every write into `pending`
+// so the statement(s) a single instruction produced can be rewritten in place
+// before they reach the real writer. The emit loop flushes at the top of every
+// instruction, so `pending` always holds exactly what was emitted since the
+// last flush - normally the previous instruction's statements.
+fn HoistWriter(comptime W: type) type {
+    return struct {
+        real: W,
+        pending: *std.ArrayList(u8),
+        alloc: std.mem.Allocator,
+
+        const Self = @This();
+
+        pub fn print(self: Self, comptime fmt: []const u8, args: anytype) !void {
+            return self.pending.print(self.alloc, fmt, args);
+        }
+
+        pub fn writeAll(self: Self, data: []const u8) !void {
+            return self.pending.appendSlice(self.alloc, data);
+        }
+
+        pub fn flush(self: Self) !void {
+            if (self.pending.items.len == 0) return;
+            try self.real.writeAll(self.pending.items);
+            self.pending.clearRetainingCapacity();
+        }
+    };
+}
+
+const PendingHoist = enum { rewrote, absent, unrecognized };
+
+/// True when everything between `line_start` and `kw_pos` is indentation.
+fn lineStartsStatement(text: []const u8, line_start: usize, kw_pos: usize) bool {
+    for (text[line_start..kw_pos]) |ch| {
+        if (ch != ' ' and ch != '\t') return false;
+    }
+    return true;
+}
+
+/// #post-loop-header-use: rewrite the buffered definition of a hoisted value
+/// from a declaration into an assignment so it stores into the `var name: T;`
+/// declared above the loop instead of shadowing it (a shadowing declaration
+/// would leave every post-loop read at the var's zero value: silent-wrong):
+///   `<indent>let name: T = expr;`  ->  `<indent>name = expr;`
+///   `<indent>var name: T = expr;`  ->  `<indent>name = expr;`  (emitCall,
+///                                     CompositeInsert write mutable locals)
+///   `<indent>var name: T;`         ->  line dropped (Select struct/array lowers
+///                                     to var + guarded assignments; the guards
+///                                     then target the hoisted var)
+/// Returns `absent` when no declaration for `name` is in the buffer (its
+/// definition has not been emitted yet, or emitted nothing), `unrecognized`
+/// when a declaration line exists but matches none of these shapes. The
+/// keyword must sit at a line start (indentation only before it) so a
+/// same-named identifier inside an expression can never be mistaken for the
+/// declaration.
+fn rewritePendingHoist(pending: *std.ArrayList(u8), alloc: std.mem.Allocator, name: []const u8) !PendingHoist {
+    var nbuf: [96]u8 = undefined;
+    var vbuf: [96]u8 = undefined;
+    const let_needle = std.fmt.bufPrint(&nbuf, "let {s}: ", .{name}) catch return .absent;
+    const var_needle = std.fmt.bufPrint(&vbuf, "var {s}: ", .{name}) catch return .absent;
+    var from: usize = 0;
+    while (std.mem.indexOfPos(u8, pending.items, from, let_needle)) |pos| {
+        const ls = if (std.mem.lastIndexOfScalar(u8, pending.items[0..pos], '\n')) |nl| nl + 1 else 0;
+        if (lineStartsStatement(pending.items, ls, pos)) {
+            const ty_start = pos + let_needle.len;
+            const eq = std.mem.indexOfPos(u8, pending.items, ty_start, " = ") orelse return .unrecognized;
+            if (std.mem.indexOfScalar(u8, pending.items[ty_start..eq], ';') != null) return .unrecognized;
+            // Strike out `let name: T`, keeping the name: [0..pos) + name + [eq..).
+            try pending.replaceRange(alloc, pos, eq - pos, name);
+            return .rewrote;
+        }
+        from = pos + 1;
+    }
+    from = 0;
+    while (std.mem.indexOfPos(u8, pending.items, from, var_needle)) |pos| {
+        const ls = if (std.mem.lastIndexOfScalar(u8, pending.items[0..pos], '\n')) |nl| nl + 1 else 0;
+        if (lineStartsStatement(pending.items, ls, pos)) {
+            const ty_start = pos + var_needle.len;
+            const eq = std.mem.indexOfPos(u8, pending.items, ty_start, " = ");
+            if (eq) |e| {
+                if (std.mem.indexOfScalar(u8, pending.items[ty_start..e], ';') != null) return .unrecognized;
+                try pending.replaceRange(alloc, pos, e - pos, name);
+                return .rewrote;
+            }
+            const semi = std.mem.indexOfScalarPos(u8, pending.items, ty_start, ';') orelse return .unrecognized;
+            const line_end = std.mem.indexOfScalarPos(u8, pending.items, semi, '\n') orelse pending.items.len;
+            if (std.mem.indexOfScalar(u8, pending.items[ty_start..semi], '=') != null) return .unrecognized;
+            // Declaration-only line: drop it; later guarded assignments target the
+            // hoisted var.
+            const drop_end = if (line_end < pending.items.len) line_end + 1 else line_end;
+            try pending.replaceRange(alloc, ls, drop_end - ls, "");
+            return .rewrote;
+        }
+        from = pos + 1;
+    }
+    return .absent;
+}
+
+/// #post-loop-header-use: rewrite every hoisted definition in the pending
+/// buffer, then commit it to the real writer. Sweeping the whole hoist set
+/// (instead of tracking which instruction was just emitted) covers every
+/// emission path at once: the main walk, the deferred header replay, and the
+/// switch/short-circuit case replays all write through the same pending
+/// buffer within one walk iteration. Honest-errors on an unrecognized shape -
+/// a declaration we cannot safely split must not be left shadowing the
+/// hoisted var.
+fn hoistSweepAndFlush(pending: *std.ArrayList(u8), alloc: std.mem.Allocator, hoisted: *const std.AutoHashMap(u32, void), names: *const std.AutoHashMap(u32, []const u8), real: anytype) !void {
+    if (pending.items.len > 0 and hoisted.count() > 0) {
+        var it = hoisted.iterator();
+        while (it.next()) |entry| {
+            const hname = names.get(entry.key_ptr.*) orelse continue;
+            switch (try rewritePendingHoist(pending, alloc, hname)) {
+                .rewrote, .absent => {},
+                .unrecognized => {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL post-loop header-value hoist cannot rewrite the loop-body definition of {s} (unrecognized emit shape)", .{hname}) catch null;
+                    return error.UnsupportedOp;
+                },
+            }
+        }
+    }
+    if (pending.items.len == 0) return;
+    try real.writeAll(pending.items);
+    pending.clearRetainingCapacity();
+}
+
+/// #wrap-backedge: emit a loop's carried-phi updates at the point where a
+/// BranchConditional back-edge was lowered to `if (...) { break; }`. A continue
+/// block that ends in a BranchConditional back-edge (increment, then
+/// `OpBranchConditional %cond %header %merge`) gets no `continuing {}` block
+/// (the continue scan requires a plain OpBranch terminator) and its back-edge is
+/// a BranchConditional, which the .Branch back-edge handler never sees - so the
+/// phi updates were silently DROPPED: the counter never advanced and the loop
+/// could only ever exit through a mid-body break (silent-wrong; visible on
+/// graphicsfuzz_059, whose `%88+1` increment never reached `%88`, also leaving
+/// the phi promotable to a `let` that naga const-folds into an invalid negative
+/// array index). After the break test the fall-through IS the back edge, so the
+/// updates belong at the loop bottom. Gated on the other arm targeting this
+/// loop's header (directly or via a pure trampoline); excludes the self-loop
+/// shape (handled by the #selfloop block) and loops whose updates already live
+/// in a `continuing {}` block.
+fn emitWrapBackedgePhiUpdates(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    phi_updates: anytype,
+    loop_stack: anytype,
+    loop_header_label: ?u32,
+    loop_continue_label: ?u32,
+    other_target: u32,
+    w: anytype,
+    indent: u32,
+) !void {
+    if (loop_stack.items.len == 0) return;
+    if (loop_header_label == null or loop_continue_label == null) return;
+    if (loop_continue_label.? == loop_header_label.?) return; // self-loop: #selfloop block owns these
+    if (other_target != loop_header_label.? and !isPureBranchTrampoline(module, other_target, loop_header_label.?)) return;
+    const cur = &loop_stack.items[loop_stack.items.len - 1];
+    if (cur.emit_continuing) return; // updates already live in `continuing {}`
+    var idx: usize = cur.phi_start;
+    while (idx < cur.phi_end) : (idx += 1) {
+        const pu = phi_updates.items[idx];
+        const rname = names.get(pu.result_id) orelse continue;
+        const vname = names.get(pu.value_id) orelse continue;
+        try writeIndentStatic(w, indent);
+        try w.print("{s} = {s};\n", .{ rname, vname });
+    }
+}
+
 fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput)) !void {
     switch (inst.op) {
         .Variable => {
