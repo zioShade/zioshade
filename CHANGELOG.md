@@ -4,8 +4,19 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
+- Nothing yet.
+
+## [0.6.0] - 2026-08-15
+
 ### Changed
 
+- **MSL lowers short-circuit loop conditions structurally instead of by refusal (#622).** A loop whose top
+  test is really a short-circuit chain (`while (a && b)`) is now lowered correctly in MSL rather than
+  honest-erroring; previously the first operand was mistaken for the whole exit test.
+- **The CLI grew `--version` (#616) and a `--help` that prints the usage (#623).** `--version` is backed by
+  a build.zig.zon drift gate (`just check-version-sync`, wired into the fmt CI job), so a shipped binary
+  always reports the tag it was cut from; `--help` used to exit silently with the text reachable only via
+  zero arguments.
 - **`continue` inside a switch case now compiles from source (#593).** Three coupled defects: the frontend resolved
   `continue_label = 0` from the switch's own loop-stack entry and emitted a dangling `OpBranch 0` (the whole shader
   failed with `codegen_failed`); once the frontend was fixed, the GLSL backend mis-walked a case whose *target* is the
