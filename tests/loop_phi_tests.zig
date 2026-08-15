@@ -1467,3 +1467,25 @@ test "GLSL materializes switch-merge phis for a switch in a selection arm (#thir
     }
     try std.testing.expect(hits == 3);
 }
+
+// #third-switch-site (no-phi path): the same emitBlock switch site also changed shape
+// for phi-less switches nested in a selection arm (braced cases, cases-before-default).
+// This fixture pins the fallthrough-into-default edge there: case 2 stores 0.75 and
+// OpBranches to the DEFAULT label (a SPIR-V fallthrough edge, not the merge), so the
+// emitted GLSL must NOT break after case 2 -- it must fall into default, whose 1.0
+// store wins (a wrongly-added break would render 0.75 for sel==2). The old default-
+// first order at this site put default before the case, silently dropping the
+// fallthrough accumulation.
+// Render-verified: z-z round-trip MATCH (NagaCompare sane-64).
+const SWITCH_IN_ARM_FALLTHROUGH_SPV = @embedFile("fixtures/switch_in_arm_fallthrough.spv");
+
+test "GLSL keeps fallthrough-into-default for a phi-less switch in a selection arm (#third-switch-site)" {
+    const glsl = try crossGlsl(SWITCH_IN_ARM_FALLTHROUGH_SPV);
+    defer alloc.free(glsl);
+    // case 2 must come BEFORE default and carry NO break (the fallthrough edge).
+    const ci = std.mem.indexOf(u8, glsl, "case 2:") orelse return error.MissingCase;
+    const di = std.mem.indexOf(u8, glsl, "default:") orelse return error.MissingDefault;
+    try std.testing.expect(ci < di);
+    const between = glsl[ci..di];
+    try std.testing.expect(std.mem.indexOf(u8, between, "break;") == null);
+}
