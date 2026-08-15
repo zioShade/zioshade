@@ -83,6 +83,19 @@ threadlocal var g_ewl_depth_h: u32 = 0;
 // (void), where the existing skip / `return;` behavior is kept.
 threadlocal var g_early_return_expr: ?[]const u8 = null;
 
+// #switch-arm-break (HLSL port of GLSL #611; mirrors MSL's g_switch_ctx): the
+// innermost enclosing SWITCH's merge + its merge phis, so a nested block whose
+// OpBranch targets the SWITCH's merge can emit the per-edge phi copy + `break;`
+// (a break out of the switch from inside a selection arm), and a multi-block
+// case's terminal OpBranch to the merge can emit its per-pred copy. Without it
+// the switch-merge phi carriers were declared before the switch but written
+// only on single-block-case paths (the case-entry copy), so any case whose
+// merge-phi predecessor is a nested if-arm block left the carrier
+// declared-but-never-written -- read as an uninitialized value (silent-wrong;
+// graphicsfuzz_003 = latch_phi_continue.spv: v244_phi/v415_phi/v586_phi).
+const SwitchCtxHLSL = struct { merge_label: u32, phis: []const Instruction };
+threadlocal var g_switch_ctx_hlsl: ?SwitchCtxHLSL = null;
+
 /// HLSL type name for a loop-phi variable declaration. Returns STATIC strings
 /// only (no allocation, so no free management) for the scalar/vector types loop
 /// phis realistically carry. Falls back to "int" for exotic (matrix/struct) phis.
@@ -376,6 +389,23 @@ fn emitSwitchPhiCaseCopyHLSL(module: *const ParsedModule, names: *std.AutoHashMa
                 try w.print("        {s} = {s};\n", .{ vn, hlslExprName(module, names, phi.words[pi], alloc) });
                 break;
             }
+        }
+    }
+}
+/// #switch-arm-break: assign one materialized switch-merge phi its incoming for
+/// predecessor `pred_lbl` (the branch's OWN block, not the case entry). Mirrors
+/// MSL's emitMergePhiCopyForPred. If `pred_lbl` is not among the phi's
+/// predecessors, emit nothing. The variable name is derived from the immutable
+/// result id (hlslPhiVarName), never from `names` -- this runs BEFORE
+/// finalizeSwitchPhisHLSL renames the id, so `names` still holds whatever the
+/// generic walker last aliased it to.
+fn emitMergePhiCopyForPredHLSL(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phi: Instruction, pred_lbl: u32, indent: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    var pi: usize = 3;
+    while (pi + 1 < phi.words.len) : (pi += 2) {
+        if (phi.words[pi + 1] == pred_lbl) {
+            const vn = hlslPhiVarName(names, phi.words[2], alloc);
+            try w.print("{s}    {s} = {s};\n", .{ indent, vn, hlslExprName(module, names, phi.words[pi], alloc) });
+            return;
         }
     }
 }
@@ -5031,6 +5061,10 @@ fn emitBody(
                 defer sphis.deinit(alloc);
                 collectSwitchMergePhisHLSL(module, &label_map, ml, &sphis, alloc);
                 try emitSwitchPhiDeclsHLSL(module, names, sphis.items, w, alloc);
+                // #switch-arm-break: publish this switch's merge + phis so nested
+                // blocks whose OpBranch targets the merge can copy + break (GLSL #611).
+                const saved_switch_ctx = g_switch_ctx_hlsl;
+                g_switch_ctx_hlsl = .{ .merge_label = ml, .phis = sphis.items };
                 try w.print("    switch ({s}) {{\n", .{selector_name});
                 // Brace each case body: a case that declares a variable makes the
                 // NEXT label's jump cross that declaration, which HLSL/DXC rejects
@@ -5093,6 +5127,7 @@ fn emitBody(
                     try w.writeAll("    }\n");
                 }
                 try w.writeAll("    }\n");
+                g_switch_ctx_hlsl = saved_switch_ctx;
                 finalizeSwitchPhisHLSL(names, sphis.items, alloc);
                 // Advance to merge label
                 if (label_map.get(ml)) |merge_idx| {
@@ -5662,6 +5697,9 @@ fn emitWhileLoopHLSL(
                     defer sphis.deinit(alloc);
                     collectSwitchMergePhisHLSL(module, label_map, sml, &sphis, alloc);
                     try emitSwitchPhiDeclsHLSL(module, names, sphis.items, w, alloc);
+                    // #switch-arm-break: publish this switch's merge + phis (GLSL #611).
+                    const saved_switch_ctx = g_switch_ctx_hlsl;
+                    g_switch_ctx_hlsl = .{ .merge_label = sml, .phis = sphis.items };
                     try w.print("        switch ({s}) {{\n", .{selector_name});
                     if (default_label != sml) {
                         try w.writeAll("        default: {\n");
@@ -5680,6 +5718,7 @@ fn emitWhileLoopHLSL(
                         try w.writeAll("        break;\n        }\n");
                     }
                     try w.writeAll("        }\n");
+                    g_switch_ctx_hlsl = saved_switch_ctx;
                     finalizeSwitchPhisHLSL(names, sphis.items, alloc);
                     if (label_map.get(sml)) |smi| bi = smi;
                 }
@@ -5927,8 +5966,20 @@ fn emitBlock(
         const inst = module.instructions[i];
         if (inst.op == .FunctionEnd) break;
 
-        // Branch to merge = end of this block
-        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) break;
+        // Branch to merge = end of this block.
+        // #switch-arm-break (fall-through edge): when this walker's merge_label IS
+        // the enclosing switch's merge (called from a switch site), a MULTI-BLOCK
+        // case's terminal OpBranch to the merge carries the case's own
+        // switch-merge phi incoming -- the site's case-entry copy misses it (the
+        // branch's own block is the pred, not the entry). Emit the copy for THIS
+        // block; the SITE emits the `break;` (its caseBodyTerminates check),
+        // matching GLSL #611 / MSL.
+        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == merge_label) {
+            if (g_switch_ctx_hlsl) |sctx| if (sctx.merge_label == merge_label) {
+                for (sctx.phis) |phi| try emitMergePhiCopyForPredHLSL(module, names, phi, blockLabelOfHLSL(module, i), indent, w, alloc);
+            };
+            break;
+        }
 
         // #switch-case-continue (HLSL): a Branch to the enclosing LOOP's continue is a
         // structured continue (e.g. `if (c) continue;` inside a switch case or if-body
@@ -5980,6 +6031,9 @@ fn emitBlock(
                 defer sphis.deinit(alloc);
                 collectSwitchMergePhisHLSL(module, label_map, sml, &sphis, alloc);
                 try emitSwitchPhiDeclsHLSL(module, names, sphis.items, w, alloc);
+                // #switch-arm-break: publish this switch's merge + phis (GLSL #611).
+                const saved_switch_ctx = g_switch_ctx_hlsl;
+                g_switch_ctx_hlsl = .{ .merge_label = sml, .phis = sphis.items };
                 try w.print("{s}    switch ({s}) {{\n", .{ indent, selector_name });
                 if (default_label != sml) {
                     try w.print("{s}    default: {{\n", .{indent});
@@ -6010,6 +6064,7 @@ fn emitBlock(
                     try w.print("{s}    }}\n", .{indent});
                 }
                 try w.print("{s}    }}\n", .{indent});
+                g_switch_ctx_hlsl = saved_switch_ctx;
                 finalizeSwitchPhisHLSL(names, sphis.items, alloc);
                 if (label_map.get(sml)) |smi| i = smi;
             }
@@ -6044,6 +6099,21 @@ fn emitBlock(
                 continue;
             }
             if (inst.words.len > 1 and blockIsLoopHeader(module, inst.words[1], label_map)) return error.UnsupportedNestedLoopInBranch;
+            // #switch-arm-break: an OpBranch to the enclosing SWITCH's merge from
+            // inside a nested selection arm is a `break` out of the switch.
+            // Previously the walker ended here emitting NOTHING -- the early-exit
+            // never fired and the switch-merge phi carrier kept its stale or
+            // uninitialized value on that path (declared-but-never-written,
+            // silent-wrong; graphicsfuzz_003: v244_phi/v415_phi/v586_phi). Emit the
+            // per-edge phi copy for THIS block (the branch's own block label) then
+            // `break;`. Mirrors GLSL #611 and MSL's g_switch_ctx handler.
+            if (inst.words.len > 1) {
+                if (g_switch_ctx_hlsl) |sctx| if (sctx.merge_label == inst.words[1]) {
+                    for (sctx.phis) |phi| try emitMergePhiCopyForPredHLSL(module, names, phi, blockLabelOfHLSL(module, i), indent, w, alloc);
+                    try w.print("{s}    break;\n", .{indent});
+                    break;
+                };
+            }
             break; // branch to somewhere else (e.g., loop back-edge)
         }
 
