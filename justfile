@@ -212,11 +212,14 @@ chaos-classify dir="tests/spirv-cross":
 # either (that counts loops and switches, not reachability). Found #599 (WGSL emitted a
 # second unconditional break, orphaning 36 shaders' loop bodies) and #604 (a selection's
 # merge treated as a trampoline, leaving graphicsfuzz_061's loop with no exit).
-# DIAGNOSTIC, NOT YET A GATE. Baseline on both corpora: wgsl 0, glsl 1 (a dead break),
-# msl 54 and hlsl 1463 -- all the benign early-return duplication and duplicate-return
-# classes (bd zioshade-1hg). Gate it once those land.
+# GATED in `just ci` and in the structural-drop CI job since #614: 0/0/0/0 across both
+# corpora once #610, #612 and #614 closed the three benign classes it used to report.
 #   just unreachable-scan            # wgsl over both corpora
 #   just unreachable-scan msl        # another backend
+# All four backends, the form `just ci` runs. Exits nonzero on any unreachable statement.
+unreachable-scan-all:
+    @for be in msl glsl hlsl wgsl; do python3 tools/unreachable_scan.py zig-out/bin/zioshade $be tests/spirv-cross/*.frag tests/cts/graphicsfuzz/*.spv || exit 1; done
+
 unreachable-scan backend="wgsl":
     @python3 tools/unreachable_scan.py zig-out/bin/zioshade {{backend}} tests/spirv-cross/*.frag tests/cts/graphicsfuzz/*.spv
 
@@ -474,7 +477,7 @@ c-abi:
 # the hosted runners cannot run them.
 #
 # the workflow's job set, run locally on this OS with Zig 0.15.2
-ci: fmt-check check-min-word-count build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion structural-drop fuzz-smoke c-abi
+ci: fmt-check check-min-word-count build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion structural-drop unreachable-scan-all fuzz-smoke c-abi
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED (this OS, Zig 0.15.2 only)"

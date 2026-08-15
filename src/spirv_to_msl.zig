@@ -79,6 +79,46 @@ const FragOutput = struct {
 };
 
 // ---- Helpers ----
+
+/// Format an OpSwitch case literal with the SELECTOR's signedness.
+///
+/// SPIR-V stores the literal as the selector's raw bit pattern, so for a signed
+/// selector 0xFFFFFFFF means -1, not 4294967295. Metal rejects the wide literal
+/// outright ("case value evaluates to 4294967295, which cannot be narrowed to
+/// type 'int'"), and the C-family backends silently emit a case the selector can
+/// never equal -- that arm just never runs. graphicsfuzz_082 and _026 both carry
+/// such a case; neither reached this code until the #early-return-arm fix stopped
+/// refusing them.
+/// True when an emitted case body already ends in a statement that leaves the
+/// switch, so a trailing `break;` after it would be unreachable.
+///
+/// Deliberately a check on the EMITTED TEXT rather than on the SPIR-V. The
+/// static caseTerminatorTarget helper returns null for several distinct reasons
+/// (label not found, next block reached, no Branch at all), so it cannot tell a
+/// case that returns from a case whose first block ends in a BranchConditional.
+/// The text answers exactly the question being asked, and it is the same
+/// question tools/unreachable_scan.py asks.
+fn caseBodyTerminates(s: []const u8) bool {
+    var it = std.mem.splitScalar(u8, s, '\n');
+    var last: []const u8 = "";
+    while (it.next()) |ln| {
+        const t = std.mem.trim(u8, ln, " \t\r");
+        if (t.len != 0) last = t;
+    }
+    if (std.mem.eql(u8, last, "break;") or std.mem.eql(u8, last, "continue;") or
+        std.mem.eql(u8, last, "discard;")) return true;
+    return std.mem.startsWith(u8, last, "return") and std.mem.endsWith(u8, last, ";");
+}
+
+fn switchCaseLiteral(m: *const ParsedModule, selector_id: u32, cv: u32) i64 {
+    const tid = common.getTypeOf(m, selector_id) orelse return cv;
+    const t = getDef(m, tid) orelse return cv;
+    if (t.op == .TypeInt and t.words.len > 3 and t.words[3] != 0) {
+        return @as(i32, @bitCast(cv));
+    }
+    return cv;
+}
+
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (id >= m.id_defs.len) return null;
     const i = m.id_defs[id] orelse return null;
@@ -6909,9 +6949,14 @@ fn emitBody(
                     const cv = inst.words[wi];
                     const target = inst.words[wi + 1];
                     if (target == mval) continue;
-                    try w.print("    case {d}: {{\n", .{cv});
-                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
+                    try w.print("    case {d}: {{\n", .{switchCaseLiteral(m, inst.words[1], cv)});
+                    // Buffered so the trailing `break;` below can be skipped when the body
+                    // already left the switch on its own (#dead-case-break).
+                    var cb: std.ArrayList(u8) = .empty;
+                    defer cb.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, compat.listWriter(&cb, alloc), alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, compat.listWriter(&cb, alloc), alloc);
+                    try w.writeAll(cb.items);
                     // #switch-fallthrough: omit break if this case falls through to
                     // another case target (the cross-case chain accumulates).
                     var falls_through = false;
@@ -6927,14 +6972,18 @@ fn emitBody(
                             }
                         }
                     }
-                    if (!falls_through) try w.writeAll("    break;\n");
+                    if (!falls_through and !caseBodyTerminates(cb.items)) try w.writeAll("    break;\n");
                     try w.writeAll("    }\n");
                 }
                 if (dl != mval) {
                     try w.writeAll("    default: {\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
-                    try w.writeAll("    break;\n    }\n");
+                    var db: std.ArrayList(u8) = .empty;
+                    defer db.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, compat.listWriter(&db, alloc), alloc, is_frag, output_var_id, "    ", cbuffers, textures, storage_buffers, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, compat.listWriter(&db, alloc), alloc);
+                    try w.writeAll(db.items);
+                    if (!caseBodyTerminates(db.items)) try w.writeAll("    break;\n");
+                    try w.writeAll("    }\n");
                 }
                 try w.writeAll("    }\n");
                 g_switch_ctx = saved_switch_ctx;
@@ -7531,7 +7580,7 @@ fn emitWhileLoopMSL(
                         const cv = binst.words[swi];
                         const target = binst.words[swi + 1];
                         if (target == sml) continue;
-                        try w.print("        case {d}: {{\n", .{cv});
+                        try w.print("        case {d}: {{\n", .{switchCaseLiteral(m, binst.words[1], cv)});
                         _ = try emitBlock(m, names, decs, target, sml, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                         try w.writeAll("        break;\n        }\n");
@@ -7824,19 +7873,31 @@ fn emitBlock(
                 try w.print("{s}    switch ({s}) {{\n", .{ indent, sn });
                 if (dl != sml) {
                     try w.print("{s}    default: {{\n", .{indent});
-                    _ = try emitBlock(m, names, decs, dl, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
-                    try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
+                    // Buffered so the trailing `break;` can be skipped when the body already
+                    // left the switch on its own (#dead-case-break).
+                    var nb1: std.ArrayList(u8) = .empty;
+                    defer nb1.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, dl, sml, lm, bm, compat.listWriter(&nb1, alloc), alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, compat.listWriter(&nb1, alloc), alloc);
+                    try w.writeAll(nb1.items);
+                    if (!caseBodyTerminates(nb1.items)) try w.print("{s}    break;\n", .{indent});
+                    try w.print("{s}    }}\n", .{indent});
                 }
                 var swi: usize = 3;
                 while (swi + 1 < inst.words.len) : (swi += 2) {
                     const cv = inst.words[swi];
                     const target = inst.words[swi + 1];
                     if (target == sml) continue;
-                    try w.print("{s}    case {d}: {{\n", .{ indent, cv });
-                    _ = try emitBlock(m, names, decs, target, sml, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
-                    try w.print("{s}    break;\n{s}    }}\n", .{ indent, indent });
+                    try w.print("{s}    case {d}: {{\n", .{ indent, switchCaseLiteral(m, inst.words[1], cv) });
+                    // Buffered so the trailing `break;` can be skipped when the body already
+                    // left the switch on its own (#dead-case-break).
+                    var nb0: std.ArrayList(u8) = .empty;
+                    defer nb0.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, target, sml, lm, bm, compat.listWriter(&nb0, alloc), alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, compat.listWriter(&nb0, alloc), alloc);
+                    try w.writeAll(nb0.items);
+                    if (!caseBodyTerminates(nb0.items)) try w.print("{s}    break;\n", .{indent});
+                    try w.print("{s}    }}\n", .{indent});
                 }
                 try w.print("{s}    }}\n", .{indent});
                 g_switch_ctx = saved_switch_ctx;
@@ -7981,6 +8042,19 @@ fn emitBlock(
             continue;
         }
         try emitInstruction(m, names, decs, inst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
+
+        // #early-return-arm: a return/discard TERMINATES this block, exactly as a Branch
+        // to the merge does above. Without it the walker carried on into the selection's
+        // MERGE block and emitted the whole continuation of the function inside the arm,
+        // after the return -- and then again at the correct scope once the arm closed.
+        // The duplicate is unreachable, so every path still returned the right value and
+        // no render diff could see it, but the copies nest: each early return in a chain
+        // duplicates everything below it, so `if/if/return` chains blow up the output.
+        // GLSL closes the arm here and is the reference. 54 corpus shaders were affected.
+        switch (inst.op) {
+            .Return, .ReturnValue, .Kill, .Unreachable => break,
+            else => {},
+        }
     }
     return i;
 }

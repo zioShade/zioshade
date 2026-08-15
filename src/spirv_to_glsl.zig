@@ -15,6 +15,46 @@ const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
 const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false, shadow: bool = false, is_ms: bool = false };
 
 // ---- Helpers ----
+
+/// Format an OpSwitch case literal with the SELECTOR's signedness.
+///
+/// SPIR-V stores the literal as the selector's raw bit pattern, so for a signed
+/// selector 0xFFFFFFFF means -1, not 4294967295. Metal rejects the wide literal
+/// outright ("case value evaluates to 4294967295, which cannot be narrowed to
+/// type 'int'"), and the C-family backends silently emit a case the selector can
+/// never equal -- that arm just never runs. graphicsfuzz_082 and _026 both carry
+/// such a case; neither reached this code until the #early-return-arm fix stopped
+/// refusing them.
+/// True when an emitted case body already ends in a statement that leaves the
+/// switch, so a trailing `break;` after it would be unreachable.
+///
+/// Deliberately a check on the EMITTED TEXT rather than on the SPIR-V. The
+/// static caseTerminatorTarget helper returns null for several distinct reasons
+/// (label not found, next block reached, no Branch at all), so it cannot tell a
+/// case that returns from a case whose first block ends in a BranchConditional.
+/// The text answers exactly the question being asked, and it is the same
+/// question tools/unreachable_scan.py asks.
+fn caseBodyTerminates(s: []const u8) bool {
+    var it = std.mem.splitScalar(u8, s, '\n');
+    var last: []const u8 = "";
+    while (it.next()) |ln| {
+        const t = std.mem.trim(u8, ln, " \t\r");
+        if (t.len != 0) last = t;
+    }
+    if (std.mem.eql(u8, last, "break;") or std.mem.eql(u8, last, "continue;") or
+        std.mem.eql(u8, last, "discard;")) return true;
+    return std.mem.startsWith(u8, last, "return") and std.mem.endsWith(u8, last, ";");
+}
+
+fn switchCaseLiteral(m: *const ParsedModule, selector_id: u32, cv: u32) i64 {
+    const tid = getTypeOf(m, selector_id) orelse return cv;
+    const t = getDef(m, tid) orelse return cv;
+    if (t.op == .TypeInt and t.words.len > 3 and t.words[3] != 0) {
+        return @as(i32, @bitCast(cv));
+    }
+    return cv;
+}
+
 fn getDef(m: *const ParsedModule, id: u32) ?Instruction {
     if (id >= m.id_defs.len) return null;
     const i = m.id_defs[id] orelse return null;
@@ -3835,7 +3875,7 @@ fn emitBody(
                     // OpBranches to the continue; this is the case TARGET being the
                     // continue.)
                     if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
-                        try w.print("    case {d}: {{\n", .{cv});
+                        try w.print("    case {d}: {{\n", .{switchCaseLiteral(m, inst.words[1], cv)});
                         if (g_loop_merge_ctx) |lctx| try emitLatchPhiCopiesGLSL(m, names, &label_map, lctx.continue_label, target, w, alloc);
                         try w.writeAll("    continue;\n    }\n");
                         continue;
@@ -3848,9 +3888,14 @@ fn emitBody(
                     // gives each case its own scope; spirv-cross does the same. The
                     // switch-merge phis are declared once BEFORE the switch and assigned
                     // per case inside this block, so they stay in scope after the switch.
-                    try w.print("    case {d}: {{\n", .{cv});
-                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
+                    try w.print("    case {d}: {{\n", .{switchCaseLiteral(m, inst.words[1], cv)});
+                    // Buffered so the trailing `break;` below can be skipped when the body
+                    // already left the switch on its own (#dead-case-break).
+                    var cb: std.ArrayList(u8) = .empty;
+                    defer cb.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, target, mval, &label_map, &bc_merge, compat.listWriter(&cb, alloc), alloc, is_frag, output_var_id, "    ", false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, compat.listWriter(&cb, alloc), alloc);
+                    try w.writeAll(cb.items);
                     // #switch-fallthrough: omit `break;` ONLY when this case body's first
                     // OpBranch target is a real case/default label of THIS OpSwitch (a
                     // SPIR-V fallthrough edge) AND is not the merge. A branch to the
@@ -3865,14 +3910,17 @@ fn emitBody(
                     // loop_in_case: sel=0 returned 100 instead of 3).
                     const cterm = caseTerminatorTargetGLSL(m, &label_map, target);
                     const fallthrough = if (cterm) |t| (t != mval and isSwitchCaseTargetGLSL(inst.words, t)) else false;
-                    try w.writeAll(if (!fallthrough) "    break;\n" else "");
+                    try w.writeAll(if (!fallthrough and !caseBodyTerminates(cb.items)) "    break;\n" else "");
                     try w.writeAll("    }\n");
                 }
                 if (dl != mval) {
                     try w.writeAll("    default: {\n");
-                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
-                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, w, alloc);
-                    try w.writeAll("    break;\n");
+                    var db: std.ArrayList(u8) = .empty;
+                    defer db.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, dl, mval, &label_map, &bc_merge, compat.listWriter(&db, alloc), alloc, is_frag, output_var_id, "    ", false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, compat.listWriter(&db, alloc), alloc);
+                    try w.writeAll(db.items);
+                    if (!caseBodyTerminates(db.items)) try w.writeAll("    break;\n");
                     try w.writeAll("    }\n");
                 }
                 try w.writeAll("    }\n");
@@ -4621,12 +4669,12 @@ fn emitWhileLoop(
                         if (target == smv) continue;
                         // #continue-in-switch (case target IS the loop continue): see emitBody.
                         if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
-                            try w.print("        case {d}: {{\n", .{cv});
+                            try w.print("        case {d}: {{\n", .{switchCaseLiteral(m, binst.words[1], cv)});
                             if (g_loop_merge_ctx) |lctx| try emitLatchPhiCopiesGLSL(m, names, label_map, lctx.continue_label, target, w, alloc);
                             try w.writeAll("        continue;\n        }\n");
                             continue;
                         };
-                        try w.print("        case {d}: {{\n", .{cv});
+                        try w.print("        case {d}: {{\n", .{switchCaseLiteral(m, binst.words[1], cv)});
                         bi = try emitBlock(m, names, decs, target, smv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         try emitSwitchPhiCaseCopy(m, names, sphis.items, target, w, alloc);
                         try w.writeAll("        break;\n");
@@ -4889,12 +4937,12 @@ fn emitBlock(
                     if (target == smv) continue;
                     // #continue-in-switch (case target IS the loop continue): see emitBody.
                     if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == target) {
-                        try w.print("{s}    case {d}: {{\n", .{ indent, cv });
+                        try w.print("{s}    case {d}: {{\n", .{ indent, switchCaseLiteral(m, inst.words[1], cv) });
                         if (g_loop_merge_ctx) |lctx| try emitLatchPhiCopiesGLSL(m, names, lm, lctx.continue_label, target, w, alloc);
                         try w.print("{s}    continue;\n{s}    }}\n", .{ indent, indent });
                         continue;
                     };
-                    try w.print("{s}    case {d}:\n", .{ indent, cv });
+                    try w.print("{s}    case {d}:\n", .{ indent, switchCaseLiteral(m, inst.words[1], cv) });
                     i = try emitBlock(m, names, decs, target, smv, lm, bm, w, alloc, is_frag, ovid, indent, true);
                 }
                 try w.print("{s}    }}\n", .{indent});
@@ -4929,7 +4977,7 @@ fn emitBlock(
                         const cv = inst.words[wi];
                         const target = inst.words[wi + 1];
                         if (target == sm2) continue;
-                        try w.print("{s}case {d}:\n", .{ indent, cv });
+                        try w.print("{s}case {d}:\n", .{ indent, switchCaseLiteral(m, inst.words[1], cv) });
                         i = try emitBlock(m, names, decs, target, sm2, lm, bm, w, alloc, is_frag, ovid, indent, true);
                     }
                     try w.print("{s}}}\n", .{indent});

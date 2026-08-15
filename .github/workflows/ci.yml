@@ -283,6 +283,21 @@ jobs:
       - name: Run structural-drop sweep (both corpora, all backends)
         run: python3 tools/structural_drop_sweep.py --corpus both --backends msl,glsl,hlsl,wgsl
 
+      # Unreachable-statement gate. A statement after a statement-level break/continue/
+      # return/discard in the same block was silently dropped from the program; the output
+      # still compiles, so no validity gate sees it, and structural-drop does not either
+      # (it counts loops and switches, not reachability). This detector found #599 (WGSL
+      # emitted a second unconditional break, orphaning 36 shaders' loop bodies) and #604
+      # (a selection merge read as a trampoline, leaving graphicsfuzz_061's loop with no
+      # exit). Clean at 0/0/0/0 across both corpora since #612 and #614; gate it so the
+      # class cannot come back. Shares this job because the CLI is already built.
+      - name: Run unreachable-statement scan (both corpora, all backends)
+        run: |
+          for be in msl glsl hlsl wgsl; do
+            python3 tools/unreachable_scan.py zig-out/bin/zioshade "$be" \
+              tests/spirv-cross/*.frag tests/cts/graphicsfuzz/*.spv
+          done
+
   # MSL leg of the two SPIR-V-input sweeps, on a real Metal compiler. The Linux jobs
   # above skip MSL and HLSL (no Metal, no DXC), so until this job and hlsl-validity
   # existed, the two backends wintty actually links -- MSL on macOS, HLSL on Windows --
