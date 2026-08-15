@@ -7073,6 +7073,58 @@ fn emitSelfLoopBodyHeaderMSL(
     return label_map.get(merge_lbl) orelse (loop_idx + 2);
 }
 
+/// #shortcircuit-loop-cond: verify that a short-circuit condition chain, starting at
+/// `chain_head` (the Pattern-A "condition block" whose first BranchConditional is a
+/// router, not the exit test), terminates at a BranchConditional whose target IS the
+/// loop merge -- the chain's real exit test. Walks block by block: every intermediate
+/// terminator must be a SelectionMerge-guarded BranchConditional whose merge block
+/// opens with a BOOL OpPhi (the combined condition of that link). Anything else
+/// (unconditional branch, plain if, missing bool phi, walk off the end) means the
+/// shape is not a verifiable chain, so the caller keeps its honest-error. Bounded by
+/// construction count, not instruction count.
+fn shortCircuitChainReachesMergeMSL(
+    m: *const ParsedModule,
+    chain_head: u32,
+    merge_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) bool {
+    var cur = chain_head;
+    var guard: usize = 0;
+    while (guard < 64) : (guard += 1) {
+        const ci = label_map.get(cur) orelse return false;
+        var bi: usize = ci + 1;
+        var bc_found: ?usize = null;
+        var sel_merge: ?u32 = null;
+        while (bi < m.instructions.len) : (bi += 1) {
+            const t = m.instructions[bi];
+            if (t.op == .SelectionMerge and t.words.len > 1) {
+                sel_merge = t.words[1];
+                continue;
+            }
+            if (t.op == .BranchConditional) {
+                bc_found = bi;
+                break;
+            }
+            // Any other terminator (or a stray Label) means this is not a chain link.
+            if (t.op == .Branch or t.op == .Label or t.op == .FunctionEnd or t.op == .Return or t.op == .ReturnValue or t.op == .Kill) return false;
+        }
+        const bidx = bc_found orelse return false;
+        const bc = m.instructions[bidx];
+        if (bc.words.len < 4) return false;
+        if (bc.words[2] == merge_lbl or bc.words[3] == merge_lbl) return true; // the real exit test
+        // A chain link: SelectionMerge-guarded, and the merge block opens with a bool phi.
+        const sm = sel_merge orelse return false;
+        const smi = label_map.get(sm) orelse return false;
+        if (smi + 1 >= m.instructions.len) return false;
+        const sphi = m.instructions[smi + 1];
+        if (sphi.op != .Phi or sphi.words.len < 2) return false;
+        const td = getDef(m, sphi.words[1]) orelse return false;
+        if (td.op != .TypeBool) return false;
+        cur = sm;
+    }
+    return false;
+}
+
 fn emitWhileLoopMSL(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -7122,6 +7174,11 @@ fn emitWhileLoopMSL(
     var cond_end: usize = loop_idx + 1;
     var is_do_while = false; // pattern C: condition tested at the back-edge (do-while)
     var dw_loop_when_true = true;
+    // #shortcircuit-loop-cond: the loop's top test is a short-circuit chain lowered
+    // structurally (while(true) + guarded break at the chain's final branch). The
+    // body walk then starts at the chain head instead of a condition block.
+    var no_top_test = false;
+    var sc_chain_head: u32 = 0;
 
     if (loop_idx + 1 >= m.instructions.len) {
         if (label_map.get(merge_lbl)) |mi| return mi;
@@ -7205,9 +7262,14 @@ fn emitWhileLoopMSL(
             // never written. It compiled cleanly (the phi prologue declares it), so no
             // compile-only gate could see it -- a silent-wrong, not a diagnosable one.
             //
-            // Lowering this shape needs a real no-top-test path (`while (true)` with the
-            // exit taken from a deeper BranchConditional to the merge); until then,
-            // refuse. Exactly two corpus shaders reach here, graphicsfuzz_001 and _068.
+            // Lowering this shape is the NO-TOP-TEST form: `while (true)` with the chain
+            // emitted as ordinary nested selections (their bool phis materialized per
+            // arm by the standard #474 machinery) and the chain's FINAL
+            // BranchConditional -- the one whose target IS the loop merge -- lowered as
+            // the guarded break (see the body walker's #shortcircuit-exit rule). Verify
+            // the chain actually terminates at such a branch first; a chain that never
+            // reaches the merge would emit an exit-less loop, so that shape still
+            // honest-errors. (graphicsfuzz_001 and _068 are the corpus instances.)
             const sbc = m.instructions[bc_idx];
             if (sbc.words.len >= 4 and sbc.words[2] != merge_lbl and sbc.words[3] != merge_lbl and
                 bc_idx > 0 and m.instructions[bc_idx - 1].op == .SelectionMerge and m.instructions[bc_idx - 1].words.len > 1)
@@ -7223,7 +7285,12 @@ fn emitWhileLoopMSL(
                         const sphi = m.instructions[smi + 1];
                         if (sphi.op == .Phi and sphi.words.len > 1) {
                             if (getDef(m, sphi.words[1])) |td| {
-                                if (td.op == .TypeBool) return error.UnsupportedShortCircuitLoopCond;
+                                if (td.op == .TypeBool) {
+                                    if (shortCircuitChainReachesMergeMSL(m, cond_lbl, merge_lbl, label_map)) {
+                                        no_top_test = true;
+                                        sc_chain_head = cond_lbl;
+                                    } else return error.UnsupportedShortCircuitLoopCond;
+                                }
                             }
                         }
                     }
@@ -7246,6 +7313,11 @@ fn emitWhileLoopMSL(
         return loop_idx + 1;
     }
     var body_lbl = bc.words[2];
+    // #shortcircuit-loop-cond: with the top test deferred to the chain's final branch,
+    // the "body" walk starts at the CHAIN HEAD -- the walker lowers each chain link as
+    // an ordinary selection (bool phi materialized per arm) and the final branch to the
+    // merge as the guarded break (#shortcircuit-exit rule below).
+    if (no_top_test) body_lbl = sc_chain_head;
 
     // #246: do-while emission. STRAIGHT-LINE body → keep `while(true){ body; if(!cond)break; }`.
     // Body WITH control flow → native `do { body } while(<inlined cond>);` when the back-edge
@@ -7486,6 +7558,12 @@ fn emitWhileLoopMSL(
 
     var cond_name: []const u8 = names.get(bc.words[1]) orelse "true";
 
+    // #shortcircuit-loop-cond: no separate condition block -- the chain is emitted by
+    // the body walk (starting at the chain head) as nested selections, and the exit
+    // test is the chain's final branch (handled by the walker's #shortcircuit-exit
+    // rule). Neither the Pattern-A cond replay nor the top test applies.
+    if (no_top_test) cond_start = null;
+
     // Emit condition block instructions (Pattern A)
     if (cond_start) |cs| {
         if (cs < cond_end) {
@@ -7496,7 +7574,7 @@ fn emitWhileLoopMSL(
                 try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid, cbuffers, textures, storage_buffers, arraylen_buf_index);
             }
         }
-    } else {
+    } else if (!no_top_test) {
         // Pattern B: replay the header's non-phi (condition) instructions inside the
         // loop so the comparison re-evaluates against the live loop counter.
         var hlabel: usize = loop_idx;
@@ -7512,7 +7590,7 @@ fn emitWhileLoopMSL(
         cond_name = names.get(bc.words[1]) orelse cond_name;
     }
 
-    if (!is_do_while) {
+    if (!is_do_while and !no_top_test) {
         // #loop-merge-phi fallback: assign each merge var its NORMAL-EXIT incoming
         // every iteration. This is the value used on a normal exit, AND the safe
         // fallback for any break path not explicitly handled below (a break that
@@ -7608,6 +7686,32 @@ fn emitWhileLoopMSL(
                 const ntl = binst.words[2];
                 const nfl = if (binst.words.len > 3) binst.words[3] else null;
                 const nml = bc_merge.get(bi);
+                // #shortcircuit-exit: on a NO-TOP-TEST loop (a short-circuit condition
+                // chain lowered structurally, #shortcircuit-loop-cond), the chain's FINAL
+                // BranchConditional -- the one whose target IS the loop merge -- is the
+                // loop's real exit test. cfg_structurize synthesizes a SelectionMerge
+                // keyed to the LOOP merge above it (or it has none), so it masquerades as
+                // a body selection whose merge is the loop merge; the ordinary arms would
+                // emit its non-merge target as an unguarded arm and the loop would have
+                // NO exit at all. Emit the breaking path's loop-merge-phi copies (this
+                // block is the normal-exit predecessor) + the guarded break, then keep
+                // walking into the non-breaking target (the loop body follows linearly).
+                // Gated on no_top_test so ordinary loops' BC handling is untouched.
+                if (no_top_test and (nml == null or nml.? == merge_lbl) and
+                    (ntl == merge_lbl or (nfl != null and nfl.? == merge_lbl)))
+                {
+                    const break_when_true = ntl == merge_lbl;
+                    if (loop_mphis.items.len > 0) {
+                        const bp = blockLabelOf(m, bi);
+                        for (loop_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, bp, "        ", w, alloc);
+                    }
+                    if (break_when_true) {
+                        try w.print("        if ({s}) break;\n", .{ncn});
+                    } else {
+                        try w.print("        if (!({s})) break;\n", .{ncn});
+                    }
+                    continue;
+                }
                 const tl_is_trivial_continue = blk: {
                     if (ntl == cont_lbl) break :blk true;
                     const tli = label_map.get(ntl) orelse break :blk false;

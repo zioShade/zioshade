@@ -1489,3 +1489,35 @@ test "GLSL keeps fallthrough-into-default for a phi-less switch in a selection a
     const between = glsl[ci..di];
     try std.testing.expect(std.mem.indexOf(u8, between, "break;") == null);
 }
+
+// #shortcircuit-loop-cond: a top-test loop whose condition is a SHORT-CIRCUIT chain
+// (`while ((i < n) && (coord.x > lim) || (coord.y > lim2))`) lowers (glslang /
+// GraphicsFuzz) to a Pattern-A loop whose "condition block" opens with a
+// SelectionMerge-guarded BranchConditional targeting NEITHER the merge NOR the
+// body -- a router of the chain. The loop emitter took that first router as the
+// exit test, emitted `if (!(a)) break;` (dropping every later operand), and only
+// the unclaimed-phi refusal kept it honest (UnsupportedShortCircuitLoopCond on
+// MSL; UnsupportedPhiAlias on GLSL/HLSL). The correct lowering is the NO-TOP-TEST
+// form: `while (true)` with the chain emitted as nested selections (their bool
+// phis materialized per arm) and the chain's FINAL BranchConditional -- the one
+// that actually targets the loop merge -- lowered as the guarded break. Fixture
+// (spirv-as): two-level chain (&& then ||) over function vars, exactly
+// graphicsfuzz_001/_068's shape. Render-verified: NagaCompare(msl(src) vs
+// naga(src)) MATCH.
+const SHORTCIRCUIT_LOOP_COND_SPV = @embedFile("fixtures/shortcircuit_loop_cond.spv");
+
+test "MSL lowers a short-circuit loop condition without dropping operands (#shortcircuit-loop-cond)" {
+    const msl = try crossMsl(SHORTCIRCUIT_LOOP_COND_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    // The loop must exit through the COMBINED condition, not the first operand:
+    // the guarded break's condition reads the chain's materialized bool phi
+    // (v<rid>_phi), which every router arm assigns -- not a bare `!(v9 < 4)`.
+    if (!try loopCounterAdvances(msl)) {
+        std.debug.print("MSL short-circuit loop cond dropped operands or froze the counter:\n{s}\n", .{msl});
+        return error.ShortCircuitLoopCondDropped;
+    }
+    // Both chain evals must survive (the second operand of each && / ||).
+    try std.testing.expect(std.mem.indexOf(u8, msl, "> 0.25") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "< 3.5") != null);
+}
