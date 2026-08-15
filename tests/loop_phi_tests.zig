@@ -1550,6 +1550,54 @@ test "MSL honest-errors a true-target-is-merge || link (#shortcircuit-loop-cond)
     try std.testing.expectError(error.UnsupportedShortCircuitLoopCond, crossMsl(SHORTCIRCUIT_OR_NONNEGATED_SPV));
 }
 
+// #shortcircuit-loop-cond (GLSL/HLSL ports of the MSL #622 lowering): both backends
+// previously refused these shapes via the unclaimed-phi net while carrying the same
+// router-as-exit-test misidentification. Same assertions as the MSL test, on the
+// same fixtures.
+test "GLSL lowers a short-circuit loop condition without dropping operands (#shortcircuit-loop-cond)" {
+    const glsl = try crossGlsl(SHORTCIRCUIT_LOOP_COND_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    if (!try loopCounterAdvances(glsl)) {
+        std.debug.print("GLSL short-circuit loop cond dropped operands or froze the counter:\n{s}\n", .{glsl});
+        return error.ShortCircuitLoopCondDropped;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "> 0.25") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "< 3.5") != null);
+}
+
+test "HLSL lowers a short-circuit loop condition without dropping operands (#shortcircuit-loop-cond)" {
+    const hlsl = try crossHlsl(SHORTCIRCUIT_LOOP_COND_SPV);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "while (true)") != null);
+    if (!try loopCounterAdvances(hlsl)) {
+        std.debug.print("HLSL short-circuit loop cond dropped operands or froze the counter:\n{s}\n", .{hlsl});
+        return error.ShortCircuitLoopCondDropped;
+    }
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "> 0.25") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "< 3.5") != null);
+}
+
+test "GLSL/HLSL lower glslang's while (a || b) chain (#shortcircuit-loop-cond)" {
+    const glsl = try crossGlsl(SHORTCIRCUIT_OR_GLSLANG_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "break;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "> 0.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "< 0.25") != null);
+    const hlsl = try crossHlsl(SHORTCIRCUIT_OR_GLSLANG_SPV);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "break;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "> 0.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "< 0.25") != null);
+}
+
+test "GLSL/HLSL honest-error a true-target-is-merge || link (#shortcircuit-loop-cond)" {
+    try std.testing.expectError(error.UnsupportedShortCircuitLoopCond, crossGlsl(SHORTCIRCUIT_OR_NONNEGATED_SPV));
+    try std.testing.expectError(error.UnsupportedShortCircuitLoopCond, crossHlsl(SHORTCIRCUIT_OR_NONNEGATED_SPV));
+}
+
 // #latch-phi (HLSL port of GLSL's fix/glsl-latch-phi, #613): a continue-block phi
 // (latch phi) whose value differs per incoming path got NO copies anywhere in the
 // HLSL backend: the loop walker's trivial-continue fast path emitted a bare

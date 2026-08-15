@@ -5274,6 +5274,11 @@ fn emitWhileLoopHLSL(
     var cond_end: usize = loop_idx + 1; // end of condition instructions
     var is_do_while = false; // pattern C: condition tested at the back-edge
     var dw_loop_when_true = true; // back-edge BranchConditional loops when cond is true
+    // #shortcircuit-loop-cond (port of the MSL #622 lowering): the loop's top test is
+    // a short-circuit chain lowered structurally (while(true) + guarded break at the
+    // chain's final branch). The body walk then starts at the chain head.
+    var no_top_test = false;
+    var sc_chain_head: u32 = 0;
 
     if (loop_idx + 1 >= module.instructions.len) {
         if (label_map.get(merge_lbl)) |mi| return mi;
@@ -5351,6 +5356,40 @@ fn emitWhileLoopHLSL(
                 return loop_idx + 1;
             }
             cond_end = bc_idx;
+            // #loopcond-not-exit / #shortcircuit-loop-cond (port of the MSL #622
+            // detection HLSL never had): the BranchConditional found in the "condition
+            // block" is only the loop's top test if one of its targets IS the loop
+            // merge. When neither is, the block is the first link of a SHORT-CIRCUIT
+            // chain (`while (a && b)`) whose real exit test lives further down. Taking
+            // it as the top test emits `if (!(a)) break;`, silently DROPPING every
+            // later operand (graphicsfuzz_001/_068: only the unclaimed-phi refusal kept
+            // HLSL honest). If the chain verifies, lower it structurally; else refuse.
+            {
+                const sbc = module.instructions[bc_idx];
+                if (sbc.words.len >= 4 and sbc.words[2] != merge_lbl and sbc.words[3] != merge_lbl and
+                    bc_idx > 0 and module.instructions[bc_idx - 1].op == .SelectionMerge and module.instructions[bc_idx - 1].words.len > 1)
+                {
+                    // The selection's merge block starting with a BOOL OpPhi is what
+                    // makes this a short-circuit chain rather than an ordinary `if` in
+                    // the first body block (the do{if(c)break;}while(false) idiom's
+                    // merge carries no bool phi).
+                    if (label_map.get(module.instructions[bc_idx - 1].words[1])) |smi| {
+                        if (smi + 1 < module.instructions.len) {
+                            const sphi = module.instructions[smi + 1];
+                            if (sphi.op == .Phi and sphi.words.len > 1) {
+                                if (getDef(module, sphi.words[1])) |td| {
+                                    if (td.op == .TypeBool) {
+                                        if (common.shortCircuitChainReachesMerge(module, cond_lbl, merge_lbl, label_map)) {
+                                            no_top_test = true;
+                                            sc_chain_head = cond_lbl;
+                                        } else return error.UnsupportedShortCircuitLoopCond;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     } else if (next_inst.op == .BranchConditional and next_inst.words.len >= 4) {
         // Pattern B: BranchConditional directly after LoopMerge
@@ -5369,6 +5408,10 @@ fn emitWhileLoopHLSL(
     }
     cond_name = names.get(bc.words[1]) orelse "true";
     body_lbl = bc.words[2];
+    // #shortcircuit-loop-cond: the body walk starts at the CHAIN HEAD; the walker
+    // lowers each link as an ordinary selection (bool phi materialized per arm) and
+    // the chain's final branch to the merge as the guarded break.
+    if (no_top_test) body_lbl = sc_chain_head;
     const false_lbl: ?u32 = if (bc.words.len > 3) bc.words[3] else null;
 
     // #246: do-while emission. STRAIGHT-LINE body → keep `while(true){ body; if(!cond)break; }`.
@@ -5602,6 +5645,10 @@ fn emitWhileLoopHLSL(
     }
 
     // Emit condition block instructions (for pattern A)
+    // #shortcircuit-loop-cond: no separate condition block -- the chain is emitted by
+    // the body walk (from the chain head) as nested selections, and the exit test is
+    // the chain's final branch (the walker's #shortcircuit-exit rule).
+    if (no_top_test) cond_start = null;
     if (cond_start) |cs| {
         if (cs < cond_end) {
             var ci: usize = cs;
@@ -5611,7 +5658,7 @@ fn emitWhileLoopHLSL(
                 try emitInstruction(module, names, decorations, cinst, w, alloc, is_fragment, is_vertex, output_var_id);
             }
         }
-    } else {
+    } else if (!no_top_test) {
         // Pattern B: the condition is computed in the HEADER block (deferred by the
         // caller). Replay the header's non-phi instructions HERE so the comparison
         // re-evaluates against the live loop counter each iteration; otherwise it is
@@ -5631,7 +5678,9 @@ fn emitWhileLoopHLSL(
     }
 
     // Emit: if (!(condition)) break;  — top-test only. A do-while tests at the bottom.
-    if (!is_do_while) try w.print("        if (!({s})) break;\n", .{cond_name});
+    // (#shortcircuit-loop-cond: skipped on a no-top-test loop; the chain's final
+    // branch is the exit test, emitted by the walker's #shortcircuit-exit rule.)
+    if (!is_do_while and !no_top_test) try w.print("        if (!({s})) break;\n", .{cond_name});
 
     // Emit body block
     const body_idx = label_map.get(body_lbl) orelse module.instructions.len;
@@ -5740,6 +5789,25 @@ fn emitWhileLoopHLSL(
                 const ntl = binst.words[2];
                 const nfl = if (binst.words.len > 3) binst.words[3] else null;
                 const nml = bc_merge_map.get(bi);
+                // #shortcircuit-exit (HLSL port of the MSL #622 rule): on a NO-TOP-TEST
+                // loop, the short-circuit chain's FINAL BranchConditional -- the one
+                // whose target IS the loop merge -- is the loop's real exit test.
+                // cfg_structurize synthesizes a SelectionMerge keyed to the LOOP merge
+                // above it (or it has none), so the ordinary arms would walk the merge
+                // block as a selection arm (post-loop code inside the loop) or skip the
+                // branch entirely (an exit-less while(true)). Emit the guarded break on
+                // the COMBINED condition, then keep walking into the non-breaking
+                // target. Gated on no_top_test so ordinary loops are untouched.
+                if (no_top_test and (nml == null or nml.? == merge_lbl) and
+                    (ntl == merge_lbl or (nfl != null and nfl.? == merge_lbl)))
+                {
+                    if (ntl == merge_lbl) {
+                        try w.print("        if ({s}) break;\n", .{ncn});
+                    } else {
+                        try w.print("        if (!({s})) break;\n", .{ncn});
+                    }
+                    continue;
+                }
                 // #latch-phi: cheap gate so the trivial fast paths below keep their
                 // one-line shape when the continue has no divergent leading phis.
                 const latch_cnt = latchPhiCountHLSL(module, label_map, cont_lbl);
