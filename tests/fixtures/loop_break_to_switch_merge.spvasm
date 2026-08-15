@@ -1,0 +1,91 @@
+; Minimal DETERMINISTIC reproducer for the nested-loop-break-to-switch-merge gap.
+; A switch case contains a top-test loop; the loop body contains a selection whose
+; true arm OpBranches DIRECTLY to the switch's merge block (%swmerge) -- a
+; multi-level break (out of BOTH the loop and the switch). C cannot express it
+; directly (spirv-cross lowers it with a flag + post-loop conditional break), so
+; the shape arises from structured producers / hand assembly.
+;   int r;
+;   switch (sel) {
+;     case 1: {
+;       for (int i = 0; i < 4; i++) {
+;         if (fragY > 0.5) { r = i*7 + 3; goto out; }   // multi-level break
+;         // acc++
+;       }
+;       r = acc + 100; break;                            // normal loop exit: 104
+;     }
+;     default: r = 9; break;
+;   }
+; out: outColor = vec4(float(r));
+; Expected: y>0.5 & sel==1 -> 3 (i==0); y<=0.5 & sel==1 -> 104; else 9.
+; In-bounds, no chaos, hand-computable, pure gl_FragCoord.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor %gl_FragCoord
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %outColor Location 0
+OpDecorate %gl_FragCoord BuiltIn FragCoord
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%bool = OpTypeBool
+%v4float = OpTypeVector %float 4
+%ptr_v4_in = OpTypePointer Input %v4float
+%ptr_v4_out = OpTypePointer Output %v4float
+
+%int_0 = OpConstant %int 0
+%int_1 = OpConstant %int 1
+%int_3 = OpConstant %int 3
+%int_4 = OpConstant %int 4
+%int_7 = OpConstant %int 7
+%int_9 = OpConstant %int 9
+%int_100 = OpConstant %int 100
+%float_0_5 = OpConstant %float 0.5
+%float_1 = OpConstant %float 1
+
+%outColor = OpVariable %ptr_v4_out Output
+%gl_FragCoord = OpVariable %ptr_v4_in Input
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%fc = OpLoad %v4float %gl_FragCoord
+%fx = OpCompositeExtract %float %fc 0
+%fy = OpCompositeExtract %float %fc 1
+%seli = OpConvertFToS %int %fx
+OpSelectionMerge %swmerge None
+OpSwitch %seli %default 1 %case1
+%case1 = OpLabel
+%i = OpPhi %int %int_0 %entry %inext %lcont
+%acc = OpPhi %int %int_0 %entry %accnext %lcont
+OpLoopMerge %lmerge %lcont None
+OpBranch %lcond
+%lcond = OpLabel
+%ictl = OpSLessThan %bool %i %int_4
+OpBranchConditional %ictl %lbody %lmerge
+%lbody = OpLabel
+%ygt = OpFOrdGreaterThanEqual %bool %fy %float_0_5
+OpSelectionMerge %lbmerge None
+OpBranchConditional %ygt %brk %lbmerge
+%brk = OpLabel
+%bval = OpIMul %int %i %int_7
+%bval2 = OpIAdd %int %bval %int_3
+OpBranch %swmerge
+%lbmerge = OpLabel
+OpBranch %lcont
+%lcont = OpLabel
+%inext = OpIAdd %int %i %int_1
+%accnext = OpIAdd %int %acc %int_1
+OpBranch %case1
+%lmerge = OpLabel
+%mval = OpIAdd %int %acc %int_100
+OpBranch %swmerge
+%default = OpLabel
+OpBranch %swmerge
+%swmerge = OpLabel
+%r = OpPhi %int %bval2 %brk %mval %lmerge %int_9 %default
+%rf = OpConvertSToF %float %r
+%color = OpCompositeConstruct %v4float %rf %rf %rf %float_1
+OpStore %outColor %color
+OpReturn
+OpFunctionEnd

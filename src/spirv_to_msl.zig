@@ -1712,6 +1712,23 @@ threadlocal var g_hoist_stripping: bool = false;
 const SwitchPhiCtx = struct { merge_label: u32, phis: []const Instruction };
 threadlocal var g_switch_ctx: ?SwitchPhiCtx = null;
 
+// #loop-break-out-of-switch: a branch from INSIDE a loop body to the enclosing
+// switch's merge block (a multi-level break, out of BOTH the loop and the switch)
+// cannot lower to a bare `break;` in C -- the break only exits the LOOP, and the
+// code after the loop in the case then runs and clobbers the switch-merge phi
+// (silent-wrong: the early-exit path rendered the fall-through value). spirv-val
+// rejects the shape (a loop-construct block may only branch within the construct,
+// to the loop's own merge, or to the continue target), so a VALID module never
+// carries it -- but zioshade ingests unvalidated SPIR-V, and whatever it accepts
+// must be honest. The lowering is the classic flag idiom (what spirv-cross does
+// for C-family multi-level breaks): each loop walker that finds such a branch
+// declares `bool _swbrk_N = false;` above the loop, every break-to-switch-merge
+// site inside the region sets it before its `break;`, and right after the loop
+// `if (_swbrk_N) break;` exits the switch (or, for a loop nested in another loop,
+// sets the parent flag and breaks ONE level -- each walker's post-loop guard
+// carries it the rest of the way out). Null while not inside an armed loop.
+threadlocal var g_swbrk_flag: ?[]const u8 = null;
+
 // #switch-fallthrough: a case-target block's cross-case chain phi (spirv-opt's
 // fallthrough lowering). `block` = the case-target block the phi lives at;
 // `entry_value` = the incoming from before the switch (the "initial"); `literal`
@@ -7088,6 +7105,44 @@ fn shortCircuitChainReachesMergeMSL(
     return common.shortCircuitChainReachesMerge(m, chain_head, merge_lbl, label_map);
 }
 
+// #loop-break-out-of-switch: does any OpBranch/OpBranchConditional in
+// [start_idx, end_idx) target `sw_merge` (the enclosing switch's merge)? Only a
+// heuristic arming decision for the flag lowering: a false negative keeps the old
+// behavior (nothing regresses), a false positive costs one unused bool. Valid
+// structured SPIR-V never has such a branch inside a loop region, so on the real
+// corpus this is always false.
+fn loopRegionBreaksToSwitchMSL(m: *const ParsedModule, start_idx: usize, end_idx: usize, sw_merge: u32) bool {
+    var i = start_idx;
+    while (i < end_idx and i < m.instructions.len) : (i += 1) {
+        const t = m.instructions[i];
+        if (t.op == .Branch and t.words.len > 1 and t.words[1] == sw_merge) return true;
+        if (t.op == .BranchConditional) {
+            if (t.words.len > 2 and t.words[2] == sw_merge) return true;
+            if (t.words.len > 3 and t.words[3] == sw_merge) return true;
+        }
+    }
+    return false;
+}
+
+// #switch-arm-break + #loop-break-out-of-switch: emit, at a branch site whose
+// target is the enclosing switch's merge, the switch-merge phi copy for
+// predecessor block `pred_lbl`, the armed-loop flag set (when inside one), and
+// the `break;`. Used by the BranchConditional arm sites in emitBlock and
+// emitWhileLoopMSL's body walker.
+fn emitSwitchMergeBreakMSL(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    sctx: SwitchPhiCtx,
+    pred_lbl: u32,
+    indent: []const u8,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    for (sctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, pred_lbl, indent, w, alloc);
+    if (g_swbrk_flag) |f| try w.print("{s}{s} = true;\n", .{ indent, f });
+    try w.print("{s}break;\n", .{indent});
+}
+
 fn emitWhileLoopMSL(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -7392,6 +7447,24 @@ fn emitWhileLoopMSL(
     const saved_lmc = g_loop_merge_ctx;
     g_loop_merge_ctx = .{ .merge_label = merge_lbl, .phis = loop_mphis.items, .continue_label = cont_lbl, .latch_phis = latch_mphis.items };
 
+    // #loop-break-out-of-switch: arm the flag when this loop sits inside a switch
+    // case AND something in its region branches straight to the switch's merge
+    // (the multi-level break). do-while paths already honest-error on such
+    // branches (their flat body scan rejects any OpBranch off the loop), so they
+    // never arm. The post-loop guard is emitted at the loop close below.
+    var swbrk: ?[]const u8 = null;
+    const saved_swbrk = g_swbrk_flag;
+    if (!is_do_while) {
+        if (g_switch_ctx) |sctx| {
+            const swm_idx = label_map.get(merge_lbl) orelse m.instructions.len;
+            if (loopRegionBreaksToSwitchMSL(m, loop_idx, swm_idx, sctx.merge_label)) {
+                swbrk = std.fmt.allocPrint(alloc, "_swbrk_{d}", .{loop_idx}) catch "_swbrk";
+                try w.print("    bool {s} = false;\n", .{swbrk.?});
+                g_swbrk_flag = swbrk;
+            }
+        }
+    }
+
     if (dw_native) {
         try w.writeAll("    do\n    {\n");
     } else {
@@ -7641,6 +7714,18 @@ fn emitWhileLoopMSL(
                     const fp = blockLabelOf(m, bi);
                     for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, fp, "        ", w, alloc);
                 }
+                // #loop-break-out-of-switch: a direct OpBranch to the enclosing
+                // switch's merge from the loop body's top level (the walker's old
+                // generic skip DROPPED it and kept walking into the merge block
+                // inline). Copy the switch-merge phi(s) for this predecessor, set
+                // the flag, `break;` the loop -- the post-loop guard exits the
+                // switch. (Invalid structured input; see g_swbrk_flag.)
+                if (g_switch_ctx) |sctx| if (binst.words.len > 1 and sctx.merge_label == binst.words[1]) {
+                    for (sctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, bi), "        ", w, alloc);
+                    if (g_swbrk_flag) |f| try w.print("        {s} = true;\n", .{f});
+                    try w.writeAll("        break;\n");
+                    break;
+                };
                 if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
                 continue;
             }
@@ -7649,6 +7734,52 @@ fn emitWhileLoopMSL(
                 const ntl = binst.words[2];
                 const nfl = if (binst.words.len > 3) binst.words[3] else null;
                 const nml = bc_merge.get(bi);
+                // #loop-break-out-of-switch: a BranchConditional arm DIRECTLY
+                // targeting the enclosing switch's merge (a multi-level break).
+                // Neither the trivial-break fast paths below (they compare the
+                // LOOP's merge) nor the general arm walk (it re-emits the switch's
+                // merge block inline, without this pred's phi copy) handles it.
+                // Lower as a guarded break: the phi copy for this block, the flag
+                // set, `break;` the loop -- the post-loop guard exits the switch --
+                // then walk the other arm. (Invalid structured input; see
+                // g_swbrk_flag -- a valid module cannot reach this branch.)
+                if (g_switch_ctx) |sctx| if (ntl == sctx.merge_label or (nfl != null and nfl.? == sctx.merge_label)) {
+                    const pred = blockLabelOf(m, bi);
+                    if (ntl == sctx.merge_label) {
+                        try w.print("        if ({s})\n        {{\n", .{ncn});
+                        try emitSwitchMergeBreakMSL(m, names, sctx, pred, "            ", w, alloc);
+                        try w.writeAll("        }\n");
+                        if (nfl != null and nfl.? != sctx.merge_label) {
+                            if (nml) |om| if (om != nfl.?) {
+                                _ = try emitBlock(m, names, decs, nfl.?, om, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
+                                if (label_map.get(om)) |omi| bi = omi;
+                            };
+                        }
+                    } else {
+                        const walked_else = blk: {
+                            if (nml) |om| {
+                                if (om != ntl) {
+                                    try w.print("        if ({s})\n        {{\n", .{ncn});
+                                    _ = try emitBlock(m, names, decs, ntl, om, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
+                                    try w.writeAll("        } else {\n");
+                                    try emitSwitchMergeBreakMSL(m, names, sctx, pred, "            ", w, alloc);
+                                    try w.writeAll("        }\n");
+                                    if (label_map.get(om)) |omi| bi = omi;
+                                    break :blk true;
+                                }
+                            }
+                            break :blk false;
+                        };
+                        if (!walked_else) {
+                            // true arm IS the selection merge (or no merge info):
+                            // guard only the break and keep walking linearly.
+                            try w.print("        if (!({s}))\n        {{\n", .{ncn});
+                            try emitSwitchMergeBreakMSL(m, names, sctx, pred, "            ", w, alloc);
+                            try w.writeAll("        }\n");
+                        }
+                    }
+                    continue;
+                };
                 // #shortcircuit-exit: on a NO-TOP-TEST loop (a short-circuit condition
                 // chain lowered structurally, #shortcircuit-loop-cond), the chain's FINAL
                 // BranchConditional -- the one whose target IS the loop merge -- is the
@@ -7902,6 +8033,20 @@ fn emitWhileLoopMSL(
         }
         try w.writeAll("    }\n");
     }
+    // #loop-break-out-of-switch: the flag's post-loop guard. A set flag means a
+    // break-to-switch-merge fired inside the loop: the case's remaining code must
+    // be SKIPPED (it would clobber the switch-merge phi copied at the site). With
+    // no enclosing armed loop the `break;` exits the switch itself; inside another
+    // loop it exits ONE level and propagates the parent flag, whose own post-loop
+    // guard carries it the rest of the way out.
+    if (swbrk) |f| {
+        if (saved_swbrk) |pf| {
+            try w.print("    if ({s})\n    {{\n    {s} = true;\n    break;\n    }}\n", .{ f, pf });
+        } else {
+            try w.print("    if ({s})\n    {{\n    break;\n    }}\n", .{f});
+        }
+    }
+    g_swbrk_flag = saved_swbrk;
     g_loop_merge_ctx = saved_lmc;
     if (label_map.get(merge_lbl)) |mi| return mi;
     return loop_idx + 1;
@@ -8068,6 +8213,11 @@ fn emitBlock(
             if (inst.words.len > 1) {
                 if (g_switch_ctx) |ctx| if (ctx.merge_label == inst.words[1]) {
                     for (ctx.phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
+                    // #loop-break-out-of-switch: inside an armed loop the bare
+                    // `break;` only exits the LOOP -- set the flag so the post-loop
+                    // guard skips the rest of the case (which would clobber the phi
+                    // copied just above) and exits the switch.
+                    if (g_swbrk_flag) |f| try w.print("{s}    {s} = true;\n", .{ indent, f });
                     try w.print("{s}    break;\n", .{indent});
                 };
             }
@@ -8114,19 +8264,38 @@ fn emitBlock(
                     }
                 }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
-                i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
-                for (mphis.items) |pv| {
-                    const vn = mslPhiVarName(names, pv.result_id, alloc);
-                    const true_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
-                    try w.print("{s}        {s} = {s};\n", .{ indent, vn, mslExprName(m, names, true_val, alloc) });
+                // #switch-arm-break (conditional): an arm DIRECTLY targeting the
+                // enclosing switch's merge is a conditional break out of the switch.
+                // The old path walked the arm, re-emitting the switch's MERGE block
+                // inline inside the arm without this predecessor's phi copy -- the
+                // merge phi kept whatever the normal path left in it (silent-wrong on
+                // a VALID shape: a producer-lowered flag break branches to the switch
+                // merge right after a loop, exactly this). The per-arm assignments
+                // below are suppressed for a breaking arm (dead after the break).
+                const sctx_bc = g_switch_ctx;
+                const tl_is_swbreak = if (sctx_bc) |s| tl == s.merge_label else false;
+                const fl_is_swbreak = if (sctx_bc) |s| (fl != null and fl.? == s.merge_label) else false;
+                if (tl_is_swbreak) {
+                    try emitSwitchMergeBreakMSL(m, names, sctx_bc.?, blockLabelOf(m, i), indent, w, alloc);
+                } else {
+                    i = try emitBlock(m, names, decs, tl, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
+                    for (mphis.items) |pv| {
+                        const vn = mslPhiVarName(names, pv.result_id, alloc);
+                        const true_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                        try w.print("{s}        {s} = {s};\n", .{ indent, vn, mslExprName(m, names, true_val, alloc) });
+                    }
                 }
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
-                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
-                    for (mphis.items) |pv| {
-                        const vn = mslPhiVarName(names, pv.result_id, alloc);
-                        const false_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
-                        try w.print("{s}        {s} = {s};\n", .{ indent, vn, mslExprName(m, names, false_val, alloc) });
+                    if (fl_is_swbreak) {
+                        try emitSwitchMergeBreakMSL(m, names, sctx_bc.?, blockLabelOf(m, i), indent, w, alloc);
+                    } else {
+                        i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, cbuffers, textures, storage_buffers, arraylen_buf_index);
+                        for (mphis.items) |pv| {
+                            const vn = mslPhiVarName(names, pv.result_id, alloc);
+                            const false_val = if (mslPhiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                            try w.print("{s}        {s} = {s};\n", .{ indent, vn, mslExprName(m, names, false_val, alloc) });
+                        }
                     }
                 }
                 try w.print("{s}    }}\n", .{indent});

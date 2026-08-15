@@ -1697,3 +1697,102 @@ test "HLSL writes switch-merge phis from nested if-arms (#switch-arm-break)" {
     const bi = std.mem.indexOf(u8, hlsl, "v244_phi = v98;").?;
     try std.testing.expect(std.mem.indexOf(u8, hlsl[bi..], "break;") != null);
 }
+
+// #loop-break-out-of-switch + #switch-arm-break (conditional): a branch from a
+// loop nested in a switch case to the SWITCH's merge. Two shapes:
+//   A (loop_break_to_switch_merge): the OpBranch originates INSIDE the loop body
+//     (a multi-level break). spirv-val REJECTS this (a loop-construct block may
+//     only branch within the construct, to the loop's own merge, or to the
+//     continue target), so a valid module never carries it -- but zioshade
+//     ingests unvalidated SPIR-V, and the old emitters were silent-wrong in all
+//     three C backends the SAME way (the cross-backend dissent signal is blind
+//     to it): the copy + `break;` fired inside the loop, the break only exited
+//     the LOOP, and the code after the loop in the case then ran and clobbered
+//     the switch-merge phi (spirv-cross miscompiles it identically). The fix is
+//     the classic flag idiom: `bool _swbrk_N = false;` above the loop, the site
+//     sets it before its `break;`, and `if (_swbrk_N) break;` right after the
+//     loop exits the switch and skips the clobbering tail.
+//   B (loop_break_const_valid): the BranchConditional ARM targets the switch
+//     merge directly (what a producer-lowered flag break looks like after block
+//     merging; VALID structured SPIR-V -- a graphicsfuzz-shaped input). The old
+//     emitBlock walked the arm, re-emitting the switch's MERGE block inline
+//     WITHOUT this predecessor's phi copy: MSL read the uninitialized merge-phi
+//     var on that path (silent-wrong, render-proven on graphicsfuzz_039/052/
+//     054/082), GLSL/HLSL refused (UnsupportedPhiAlias). The fix emits the
+//     per-pred copy + `break;` at the arm site. Render-verified on the corpus:
+//     those four went DIFFER/SKIP -> MATCH/MATCH on the 3-oracle vote.
+const LOOP_BREAK_TO_SWITCH_MERGE_SPV = @embedFile("fixtures/loop_break_to_switch_merge.spv");
+const LOOP_BREAK_CONST_VALID_SPV = @embedFile("fixtures/loop_break_const_valid.spv");
+
+fn expectOrdered(haystack: []const u8, first: []const u8, second: []const u8) !void {
+    const a = std.mem.indexOf(u8, haystack, first) orelse {
+        std.debug.print("missing: {s}\n in:\n{s}\n", .{ first, haystack });
+        return error.TestUnexpectedMissing;
+    };
+    const b = std.mem.indexOf(u8, haystack[a..], second) orelse {
+        std.debug.print("missing after {s}: {s}\n in:\n{s}\n", .{ first, second, haystack });
+        return error.TestUnexpectedMissing;
+    };
+    _ = b;
+}
+
+test "MSL lowers a loop-body break to the switch merge via the flag idiom (#loop-break-out-of-switch)" {
+    const msl = try crossMsl(LOOP_BREAK_TO_SWITCH_MERGE_SPV);
+    defer alloc.free(msl);
+    // The flag is declared above the loop, set at the break site (after the
+    // phi copy), and guarded right after the loop -- BEFORE the case tail that
+    // would clobber the phi (v44_phi = v23 on the fall-through path).
+    try expectOrdered(msl, "bool _swbrk_", " = false;");
+    try expectOrdered(msl, "v44_phi = v20;", "_swbrk_");
+    try expectOrdered(msl, "_swbrk_", " = true;");
+    const guard = std.mem.indexOf(u8, msl, "if (_swbrk_").?;
+    const clobber = std.mem.indexOf(u8, msl, "v44_phi = v23;").?;
+    try std.testing.expect(guard < clobber);
+    // The guard's body must break (out of the switch), not fall through.
+    try std.testing.expect(std.mem.indexOf(u8, msl[guard..], "break;") != null);
+}
+
+test "GLSL lowers a loop-body break to the switch merge via the flag idiom (#loop-break-out-of-switch)" {
+    const glsl = try crossGlsl(LOOP_BREAK_TO_SWITCH_MERGE_SPV);
+    defer alloc.free(glsl);
+    try expectOrdered(glsl, "bool _swbrk_", " = false;");
+    try expectOrdered(glsl, "v24_phi = v20;", "_swbrk_");
+    const guard = std.mem.indexOf(u8, glsl, "if (_swbrk_").?;
+    const clobber = std.mem.indexOf(u8, glsl, "v24_phi = v23;").?;
+    try std.testing.expect(guard < clobber);
+    try std.testing.expect(std.mem.indexOf(u8, glsl[guard..], "break;") != null);
+}
+
+test "HLSL lowers a loop-body break to the switch merge via the flag idiom (#loop-break-out-of-switch)" {
+    const hlsl = try crossHlsl(LOOP_BREAK_TO_SWITCH_MERGE_SPV);
+    defer alloc.free(hlsl);
+    try expectOrdered(hlsl, "bool _swbrk_", " = false;");
+    try expectOrdered(hlsl, "v44_phi = v20;", "_swbrk_");
+    const guard = std.mem.indexOf(u8, hlsl, "if (_swbrk_").?;
+    const clobber = std.mem.indexOf(u8, hlsl, "v44_phi = v23;").?;
+    try std.testing.expect(guard < clobber);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl[guard..], "break;") != null);
+}
+
+test "MSL copies the switch-merge phi for a BranchConditional arm targeting the switch merge (#switch-arm-break)" {
+    const msl = try crossMsl(LOOP_BREAK_CONST_VALID_SPV);
+    defer alloc.free(msl);
+    // The break arm must assign the merge phi for ITS predecessor (v48_phi = 3)
+    // and break out of the switch; baseline emitted the merge block's
+    // continuation inline reading v48_phi uninitialized.
+    try expectOrdered(msl, "v48_phi = 3;", "break;");
+}
+
+test "GLSL copies the switch-merge phi for a BranchConditional arm targeting the switch merge (#switch-arm-break)" {
+    // Baseline: UnsupportedPhiAlias refusal (the arm walked into the merge
+    // block, whose non-degenerate phi the generic walker cannot materialize).
+    const glsl = try crossGlsl(LOOP_BREAK_CONST_VALID_SPV);
+    defer alloc.free(glsl);
+    try expectOrdered(glsl, "v25_phi = 3;", "break;");
+}
+
+test "HLSL copies the switch-merge phi for a BranchConditional arm targeting the switch merge (#switch-arm-break)" {
+    const hlsl = try crossHlsl(LOOP_BREAK_CONST_VALID_SPV);
+    defer alloc.free(hlsl);
+    try expectOrdered(hlsl, "v48_phi = 3;", "break;");
+}
