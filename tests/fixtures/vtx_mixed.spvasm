@@ -1,0 +1,33 @@
+; Vertex Outputs in the SEPARATE-VARIABLE builtin form (external SPIR-V
+; producers): %pos BuiltIn Position + %psize BuiltIn PointSize as their own
+; OpVariables, plus a Location-0 user varying %uv. main stores to all three.
+; Assembled WITHOUT OpName instructions (spirv-as drops symbolic names) to
+; exercise the counter-fallback naming paths. vulkan1.0, spirv-val valid.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %pos %psize %uv
+               OpDecorate %pos BuiltIn Position
+               OpDecorate %psize BuiltIn PointSize
+               OpDecorate %uv Location 0
+
+      %void = OpTypeVoid
+     %func = OpTypeFunction %void
+    %float = OpTypeFloat 32
+  %v4float = OpTypeVector %float 4
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%v2float = OpTypeVector %float 2
+%_ptr_Output_v2float = OpTypePointer Output %v2float
+%_ptr_Output_float = OpTypePointer Output %float
+       %pos = OpVariable %_ptr_Output_v4float Output
+      %psize = OpVariable %_ptr_Output_float Output
+    %float1 = OpConstant %float 1
+%uv = OpVariable %_ptr_Output_v2float Output
+%v2_1 = OpConstantComposite %v2float %float1 %float1
+%v4float_1 = OpConstantComposite %v4float %float1 %float1 %float1 %float1
+       %main = OpFunction %void None %func
+      %label = OpLabel
+               OpStore %pos %v4float_1
+               OpStore %psize %float1
+               OpStore %uv %v2_1
+               OpReturn
+               OpFunctionEnd

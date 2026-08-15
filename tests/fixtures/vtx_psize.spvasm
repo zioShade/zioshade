@@ -1,0 +1,26 @@
+; Position + PointSize only (no user varying), separate-variable builtin form,
+; stores to both. PointSize has no HLSL representation: the #471 block-form
+; decision (drop the field, suppress the store) applies to this form too.
+; vulkan1.0, spirv-val valid, no OpName instructions.
+               OpCapability Shader
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Vertex %main "main" %pos %psize
+               OpDecorate %pos BuiltIn Position
+               OpDecorate %psize BuiltIn PointSize
+
+      %void = OpTypeVoid
+     %func = OpTypeFunction %void
+    %float = OpTypeFloat 32
+  %v4float = OpTypeVector %float 4
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%_ptr_Output_float = OpTypePointer Output %float
+       %pos = OpVariable %_ptr_Output_v4float Output
+      %psize = OpVariable %_ptr_Output_float Output
+    %float1 = OpConstant %float 1
+%v4float_1 = OpConstantComposite %v4float %float1 %float1 %float1 %float1
+       %main = OpFunction %void None %func
+      %label = OpLabel
+               OpStore %pos %v4float_1
+               OpStore %psize %float1
+               OpReturn
+               OpFunctionEnd

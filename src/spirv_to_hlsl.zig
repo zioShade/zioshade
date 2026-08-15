@@ -3452,6 +3452,22 @@ fn perVertexMemberWritten(module: *const ParsedModule, var_id: u32, member_idx: 
     return false;
 }
 
+/// True if standalone (separate-variable) Output `var_id` is WRITTEN: some OpStore
+/// targets it directly, or targets an AccessChain/InBoundsAccessChain rooted at it.
+/// The var-level analog of perVertexMemberWritten (same skip-declared-drop-written
+/// discipline for the separate-variable builtin form reached from external SPIR-V).
+fn outputVarWritten(module: *const ParsedModule, var_id: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op != .Store or inst.words.len < 2) continue;
+        const ptr = inst.words[1];
+        if (ptr == var_id) return true;
+        // Store through an access chain rooted at the var.
+        const ac = getDef(module, ptr) orelse continue;
+        if (ac.op == .AccessChain and ac.words.len >= 4 and ac.words[3] == var_id) return true;
+    }
+    return false;
+}
+
 fn emitFunction(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3759,11 +3775,38 @@ fn emitFunction(
             const tname = try hlslType(module, fld.type_id, names, alloc);
             if (fld.builtin) |b| {
                 const bi: spirv.BuiltIn = @enumFromInt(b);
-                const semantic: []const u8 = switch (bi) {
-                    .position => posSemantic(shader_model),
-                    else => continue, // unsupported vertex output builtin (gl_PointSize, gl_ClipDistance, ...) — TODO
-                };
-                try w.print("    {s} {s} : {s};\n", .{ tname, fld.orig_name, semantic });
+                if (bi == .position) {
+                    try w.print("    {s} {s} : {s};\n", .{ tname, fld.orig_name, posSemantic(shader_model) });
+                } else if (bi == .viewport_index or bi == .layer) {
+                    // gl_ViewportIndex / gl_Layer as separate-variable vertex
+                    // OUTPUTS (external SPIR-V producers): DX10 system values
+                    // exist for both, so route them into VS_OUTPUT instead of
+                    // skipping the field (pre-fix the store leaked as
+                    // `gl_ViewportIndex = 0;`, an undeclared identifier). Both
+                    // semantics must be uint; the frontend types the builtin int,
+                    // so force the field type (the body's int store converts).
+                    try w.print("    uint {s} : {s};\n", .{
+                        fld.orig_name,
+                        if (bi == .viewport_index) "SV_ViewportArrayIndex" else "SV_RenderTargetArrayIndex",
+                    });
+                } else if (bi == .point_size) {
+                    // gl_PointSize in SEPARATE-variable form (external SPIR-V
+                    // producers; the gl_PerVertex BLOCK form is #471 above): no
+                    // HLSL semantic exists, so follow the #471 decision and drop
+                    // the VS_OUTPUT field + suppress the store. Recording the var
+                    // id in pv_dropped makes the OpStore handler drop `v9 = ...`
+                    // instead of emitting a store to an undeclared identifier
+                    // (silent-wrong; OpStore's pointer operand is the var itself).
+                    pv_dropped.put(fld.id, {}) catch {};
+                } else if (outputVarWritten(module, fld.id)) {
+                    // Any other WRITTEN builtin output gets no VS_OUTPUT field;
+                    // its store would hit an undeclared identifier. clip/cull
+                    // already honest-errored in the module pre-scan
+                    // (UnsupportedBuiltinStageOutput); this guards anything exotic
+                    // per the skip-declared-drop-written discipline. Unwritten:
+                    // skip the declaration (skip-declared only).
+                    return error.UnsupportedBuiltinStageOutput;
+                }
             } else {
                 const interp = hlslInterpPrefix(decorations, fld.id);
                 try w.print("    {s}{s} {s} : TEXCOORD{d};\n", .{ interp, tname, fld.orig_name, fld.location orelse 0 });
@@ -3836,7 +3879,8 @@ fn emitFunction(
             if (fld.builtin) |b| {
                 const bi: spirv.BuiltIn = @enumFromInt(b);
                 switch (bi) {
-                    .position => {},
+                    .position, .viewport_index, .layer => {},
+                    .point_size => continue, // field dropped; its store is suppressed via pv_dropped
                     else => continue,
                 }
             }
@@ -4614,8 +4658,13 @@ fn emitFunction(
         // Empty fragment shader — return default value
         try w.writeAll("    return float4(0.0, 0.0, 0.0, 0.0);\n");
     } else if (is_vertex) {
-        // Vertex entry: return the populated output struct.
-        try w.writeAll("    return output;\n");
+        // Vertex entry: return the populated output struct. Same endsWith guard
+        // as the fragment path above: the entry's own OpReturn already emits
+        // `return output;` (g_early_return_expr), so appending unconditionally
+        // gave every vertex shader a dead duplicate return.
+        if (!std.mem.endsWith(u8, body_buf.items, "    return output;\n")) {
+            try w.writeAll("    return output;\n");
+        }
     }
 
     try w.writeAll("}\n");

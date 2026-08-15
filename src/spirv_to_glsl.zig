@@ -2028,6 +2028,17 @@ pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: 
     // any forward reference. GLSL requires a prototype before use, and the source's
     // prototypes are not preserved in SPIR-V. A prototype plus a matching definition
     // is valid GLSL, so this is emitted unconditionally for all helpers.
+    //
+    // The entry is pinned to `main` in emitFunction; a helper whose OpName is also
+    // `main` would collide with it (redefinition). Rename such helpers first
+    // (spirv-cross does the same when it re-homes a non-main entry).
+    for (func_ids.items) |fid| {
+        if (fid == entry_id) continue;
+        if (std.mem.eql(u8, names.get(fid) orelse "", "main")) {
+            const rn = aa.dupe(u8, "main_1") catch continue;
+            if (names.fetchPut(fid, rn) catch null) |old| aa.free(old.value);
+        }
+    }
     var emitted_any_proto = false;
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue;
@@ -3179,7 +3190,14 @@ fn emitFunction(
     }
 
     const func_idx = if (func_id < m.id_defs.len) m.id_defs[func_id] orelse return else return;
-    const func_name = names.get(func_id) orelse "func";
+    // GLSL requires the stage entry point to be named `main`. A module without an
+    // OpName on the entry function (external SPIR-V: spirv-as drops symbolic names,
+    // and the OpEntryPoint name string is not a name-map entry) would otherwise
+    // emit the collectNames counter fallback, e.g. `void v11()`: well-formed GLSL
+    // with no entry point. Pin the entry regardless of its OpName; helpers keep
+    // theirs (a helper literally named `main` is renamed by the driver to avoid a
+    // definition collision with the pinned entry).
+    const func_name: []const u8 = if (is_entry) "main" else (names.get(func_id) orelse "func");
 
     var param_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer param_ids.deinit(alloc);
