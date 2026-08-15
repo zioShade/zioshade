@@ -1522,6 +1522,34 @@ test "MSL lowers a short-circuit loop condition without dropping operands (#shor
     try std.testing.expect(std.mem.indexOf(u8, msl, "< 3.5") != null);
 }
 
+// #shortcircuit-loop-cond (glslang shape): glslang lowers `while (a || b)` with a
+// NEGATED router (BranchConditional !a, eval-second, merge), the polarity the
+// no-top-test lowering handles. Real glslang-produced SPIR-V (not hand-assembled)
+// pins that the frontend shape reaches the same correct lowering.
+const SHORTCIRCUIT_OR_GLSLANG_SPV = @embedFile("fixtures/shortcircuit_or_glslang.spv");
+
+test "MSL lowers glslang's while (a || b) chain (#shortcircuit-loop-cond)" {
+    const msl = try crossMsl(SHORTCIRCUIT_OR_GLSLANG_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "break;") != null);
+    // Both operands must survive.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "> 0.5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "< 0.25") != null);
+}
+
+// #shortcircuit-loop-cond (dangerous polarity): a link whose TRUE target is its own
+// selection merge (a non-negated `||` router) is NOT lowerable by the no-else
+// selection form -- #474 would walk the MERGE block as the true arm (double body,
+// phi read before assignment, post-loop code inside the loop; confirmed by render
+// inspection of the pre-fix output). The chain verifier rejects it, so the backend
+// keeps its honest UnsupportedShortCircuitLoopCond rather than miscompiling.
+const SHORTCIRCUIT_OR_NONNEGATED_SPV = @embedFile("fixtures/shortcircuit_or_nonnegated.spv");
+
+test "MSL honest-errors a true-target-is-merge || link (#shortcircuit-loop-cond)" {
+    try std.testing.expectError(error.UnsupportedShortCircuitLoopCond, crossMsl(SHORTCIRCUIT_OR_NONNEGATED_SPV));
+}
+
 // #latch-phi (HLSL port of GLSL's fix/glsl-latch-phi, #613): a continue-block phi
 // (latch phi) whose value differs per incoming path got NO copies anywhere in the
 // HLSL backend: the loop walker's trivial-continue fast path emitted a bare
