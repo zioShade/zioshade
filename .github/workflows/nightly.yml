@@ -5,10 +5,20 @@ name: nightly
 # minutes to every push for a signal that is statistical rather than per-change, so it
 # lives here instead, once a day against main.
 #
-# Deliberately NOT here: the render-differential proof (`just prove`, `just prove-naga`,
-# tools/*_render_check.sh). It needs a real GPU and hosted runners do not have one, so it
-# stays a local gate. A nightly that silently skipped it would be worse than not having
-# one, because the summary would imply coverage that never ran.
+# Also here since 2026-08-15: the two CPU-or-Metal gates that used to be runnable only by
+# hand. `ub-contract` (integer-corpus UB-free contract, pure CPU) and `metamorphic`
+# (equivalent-integer-pairs render-diff, macOS Metal). The macOS runner's MTLDevice works
+# (the per-PR msl-validity job has used makeLibrary there for weeks) and metamorphic_check.sh
+# FAILS CLOSED on harness breakage, so if the runner turns out unable to RENDER (as opposed
+# to compile), the job goes red rather than silently passing -- one loud signal, then we
+# drop the job. If that first red night materializes, remove the metamorphic job; do not
+# add a skip.
+#
+# Deliberately NOT here: the cross-compiler render-differential proofs (`just prove`,
+# `just prove-naga`, `just prove-3oracle`, tools/*_render_check.sh). Those compare
+# zioshade against spirv-cross/naga reference renders and need the local oracle stack;
+# they stay local gates. A nightly that silently skipped them would be worse than not
+# having one, because the summary would imply coverage that never ran.
 on:
   schedule:
     # 03:17 UTC. Deliberately off the hour: GitHub queues scheduled jobs at :00 heavily
@@ -44,3 +54,54 @@ jobs:
       # deliberately when you want new ground, so the change is in the diff.
       - name: Run the full structured GLSL fuzz
         run: zig build fuzz -Doptimize=ReleaseFast -- --count 1000000 --seed 1
+
+  # Integer-corpus UB-free contract guard (r2d.4): machine-checks that no corpus shader
+  # contains OpUndef or an integer div/mod by constant 0 / INT_MIN-by-minus-1. This is
+  # what makes `just prove-integer` an airtight "any DIFFER is a real bug" claim, so
+  # corpus drift that would silently void that claim must fail a gate. CPU-only.
+  ub-contract:
+    name: integer-corpus UB-free contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.15.2
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+          use-cache: true
+
+      # Pre-build the CLI so the script never reaches for its mise fallback (mise is
+      # not installed on runners; the script only calls it when zig-out/bin/zioshade
+      # is missing).
+      - name: Build the CLI
+        run: zig build cli
+
+      - name: Run the UB-free contract check
+        run: bash tools/integer_corpus_ub_check.sh
+
+  # Metamorphic equivalence oracle (r2d.5): both members of each provably-equivalent
+  # integer-pair cross-compile to MSL and render-diff on Metal. A DIFFER is a guaranteed
+  # miscompilation (the operand-level class cross-compiler differentials cannot reach).
+  # See the header comment for the fail-closed-on-runner-limitations rationale.
+  metamorphic:
+    name: metamorphic integer-pair equivalence
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      # 0.16.0, not 0.15.2: 0.15.2 cannot link the modern macOS SDK (same reason the
+      # per-PR build-test matrix runs macOS on 0.16.0 only).
+      - name: Install Zig 0.16.0
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+          use-cache: true
+
+      - name: Build the CLI
+        run: zig build cli
+
+      - name: Run the metamorphic check
+        run: bash tools/metamorphic_check.sh
