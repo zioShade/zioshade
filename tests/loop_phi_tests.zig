@@ -1598,6 +1598,33 @@ test "GLSL/HLSL honest-error a true-target-is-merge || link (#shortcircuit-loop-
     try std.testing.expectError(error.UnsupportedShortCircuitLoopCond, crossHlsl(SHORTCIRCUIT_OR_NONNEGATED_SPV));
 }
 
+// #shortcircuit-loop-cond (WGSL pin): WGSL lowers ALL THREE chain shapes correctly --
+// including the true-target-is-merge || polarity GLSL/HLSL/MSL must refuse. Its
+// `loop { ... }` lowering emits the whole chain inline (no Pattern-A cond-block
+// walker), so the router-as-exit-test misidentification the other backends had does
+// not exist there: the link lowers as `var r = a; if (a) { r = b; }` (false-arm
+// polarity) or `var r = a; if (a) { } else { r = b; }` (true-arm polarity -- the
+// empty true arm is exactly a || b). Render-verified on all three fixtures:
+// naga(wgsl) vs naga(source) MATCH, 0/4096 px. Pinned so the class stays closed on
+// all four backends.
+test "WGSL lowers all short-circuit chain loop-condition polarities (#shortcircuit-loop-cond)" {
+    for ([_][]const u8{
+        SHORTCIRCUIT_LOOP_COND_SPV,
+        SHORTCIRCUIT_OR_GLSLANG_SPV,
+        SHORTCIRCUIT_OR_NONNEGATED_SPV,
+    }) |spv| {
+        const wgsl = try crossWgsl(spv);
+        defer alloc.free(wgsl);
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, "loop {") != null);
+        // The exit must be a guarded break on the COMBINED condition (a bool temp
+        // assigned in both arms), not a bare first-operand test.
+        const brk = "if (!(";
+        const bi = std.mem.indexOf(u8, wgsl, brk) orelse return error.MissingGuardedBreak;
+        _ = bi;
+        try std.testing.expect(std.mem.indexOf(u8, wgsl, ") { break; }") != null);
+    }
+}
+
 // #latch-phi (HLSL port of GLSL's fix/glsl-latch-phi, #613): a continue-block phi
 // (latch phi) whose value differs per incoming path got NO copies anywhere in the
 // HLSL backend: the loop walker's trivial-continue fast path emitted a bare
