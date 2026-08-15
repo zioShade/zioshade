@@ -4925,11 +4925,22 @@ fn emitBlock(
             const dl = inst.words[2];
             const sml = bm.get(i);
             if (sml) |smv| {
+                // #third-switch-site: this is emitBlock's own OpSwitch handler (a switch
+                // nested in a selection arm or a case) -- the third GLSL switch site.
+                // Materialize the switch-merge phis and ctx-wire the walker exactly as
+                // emitBody's site does (port of MSL, which wires all three sites): without
+                // this, the merge phi fell through to the generic OpPhi walker, which
+                // honest-errored UnsupportedPhiAlias (MSL compiles the same shader).
+                var sphis: std.ArrayList(Instruction) = .empty;
+                defer sphis.deinit(alloc);
+                collectSwitchMergePhis(m, lm, smv, &sphis, alloc);
+                try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
+                const saved_switch_ctx = g_switch_ctx_glsl;
+                g_switch_ctx_glsl = .{ .merge_label = smv, .phis = sphis.items };
+                defer g_switch_ctx_glsl = saved_switch_ctx;
                 try w.print("{s}    switch ({s}) {{\n", .{ indent, sn });
-                if (dl != smv) {
-                    try w.print("{s}    default:\n", .{indent});
-                    i = try emitBlock(m, names, decs, dl, smv, lm, bm, w, alloc, is_frag, ovid, indent, true);
-                }
+                // Emit case targets FIRST, then `default` LAST (fallthrough-into-default,
+                // matching emitBody's site). Braces per case: #switch-case-scope.
                 var wi: usize = 3;
                 while (wi + 1 < inst.words.len) : (wi += 2) {
                     const cv = inst.words[wi];
@@ -4942,10 +4953,33 @@ fn emitBlock(
                         try w.print("{s}    continue;\n{s}    }}\n", .{ indent, indent });
                         continue;
                     };
-                    try w.print("{s}    case {d}:\n", .{ indent, switchCaseLiteral(m, inst.words[1], cv) });
-                    i = try emitBlock(m, names, decs, target, smv, lm, bm, w, alloc, is_frag, ovid, indent, true);
+                    try w.print("{s}    case {d}: {{\n", .{ indent, switchCaseLiteral(m, inst.words[1], cv) });
+                    // Buffered so the trailing `break;` can be skipped when the body
+                    // already left the switch on its own (#dead-case-break).
+                    var cb: std.ArrayList(u8) = .empty;
+                    defer cb.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, target, smv, lm, bm, compat.listWriter(&cb, alloc), alloc, is_frag, ovid, indent, false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, target, compat.listWriter(&cb, alloc), alloc);
+                    try w.writeAll(cb.items);
+                    // #switch-fallthrough: omit `break;` only on a real fallthrough edge
+                    // into another case of THIS switch (never the merge) -- see emitBody.
+                    const cterm = caseTerminatorTargetGLSL(m, lm, target);
+                    const fallthrough = if (cterm) |t| (t != smv and isSwitchCaseTargetGLSL(inst.words, t)) else false;
+                    if (!fallthrough and !caseBodyTerminates(cb.items)) try w.print("{s}    break;\n", .{indent});
+                    try w.print("{s}    }}\n", .{indent});
+                }
+                if (dl != smv) {
+                    try w.print("{s}    default: {{\n", .{indent});
+                    var db: std.ArrayList(u8) = .empty;
+                    defer db.deinit(alloc);
+                    _ = try emitBlock(m, names, decs, dl, smv, lm, bm, compat.listWriter(&db, alloc), alloc, is_frag, ovid, indent, false);
+                    try emitSwitchPhiCaseCopy(m, names, sphis.items, dl, compat.listWriter(&db, alloc), alloc);
+                    try w.writeAll(db.items);
+                    if (!caseBodyTerminates(db.items)) try w.print("{s}    break;\n", .{indent});
+                    try w.print("{s}    }}\n", .{indent});
                 }
                 try w.print("{s}    }}\n", .{indent});
+                finalizeSwitchPhis(names, sphis.items, alloc);
                 if (lm.get(smv)) |smi| {
                     i = smi;
                 }

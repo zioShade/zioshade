@@ -1439,3 +1439,53 @@ test "GLSL writes the latch phi on both paths of a tail continue (#latch-phi)" {
     try std.testing.expect(std.mem.indexOf(u8, glsl, "v186_phi = v42;") != null);
     try std.testing.expect(std.mem.indexOf(u8, glsl, "v186_phi = v183_phi_phi;") != null);
 }
+
+// #third-switch-site: a switch nested in a SELECTION ARM is emitted by emitBlock's own
+// OpSwitch handler -- the third GLSL switch site (emitBody and emitWhileLoop are the
+// other two, both ctx-wired by #611). That third site never materialized switch-merge
+// phis: it emitted bare `case N:` labels, jumped past the merge block, and the generic
+// OpPhi walker then refused the merge phi (UnsupportedPhiAlias) -- loud, but a construct
+// MSL already lowers correctly (it wires all three sites). Port of MSL's third-site
+// shape: phi decls before the switch + SwitchCtxGLSL + per-case copies. Fixture: an
+// if-arm containing a switch whose merge phi selects a different constant per case;
+// the outer merge phi carries the value out (spirv-as, vulkan1.0).
+const SWITCH_IN_ARM_PHI_SPV = @embedFile("fixtures/switch_in_arm_phi.spv");
+
+test "GLSL materializes switch-merge phis for a switch in a selection arm (#third-switch-site)" {
+    const glsl = try crossGlsl(SWITCH_IN_ARM_PHI_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "switch (") != null);
+    // The switch-merge phi must be declared before the switch and assigned per case
+    // (a `_phi;` decl + copies naming all three distinct case constants).
+    const sw = std.mem.indexOf(u8, glsl, "switch (").?;
+    const decl_before = std.mem.lastIndexOf(u8, glsl[0..sw], "_phi;");
+    try std.testing.expect(decl_before != null);
+    const after = glsl[sw..];
+    var hits: usize = 0;
+    for ([_][]const u8{ "vec2(0.25", "vec2(0.5", "vec2(0.75" }) |lit| {
+        if (std.mem.indexOf(u8, after, lit) != null) hits += 1;
+    }
+    try std.testing.expect(hits == 3);
+}
+
+// #third-switch-site (no-phi path): the same emitBlock switch site also changed shape
+// for phi-less switches nested in a selection arm (braced cases, cases-before-default).
+// This fixture pins the fallthrough-into-default edge there: case 2 stores 0.75 and
+// OpBranches to the DEFAULT label (a SPIR-V fallthrough edge, not the merge), so the
+// emitted GLSL must NOT break after case 2 -- it must fall into default, whose 1.0
+// store wins (a wrongly-added break would render 0.75 for sel==2). The old default-
+// first order at this site put default before the case, silently dropping the
+// fallthrough accumulation.
+// Render-verified: z-z round-trip MATCH (NagaCompare sane-64).
+const SWITCH_IN_ARM_FALLTHROUGH_SPV = @embedFile("fixtures/switch_in_arm_fallthrough.spv");
+
+test "GLSL keeps fallthrough-into-default for a phi-less switch in a selection arm (#third-switch-site)" {
+    const glsl = try crossGlsl(SWITCH_IN_ARM_FALLTHROUGH_SPV);
+    defer alloc.free(glsl);
+    // case 2 must come BEFORE default and carry NO break (the fallthrough edge).
+    const ci = std.mem.indexOf(u8, glsl, "case 2:") orelse return error.MissingCase;
+    const di = std.mem.indexOf(u8, glsl, "default:") orelse return error.MissingDefault;
+    try std.testing.expect(ci < di);
+    const between = glsl[ci..di];
+    try std.testing.expect(std.mem.indexOf(u8, between, "break;") == null);
+}
