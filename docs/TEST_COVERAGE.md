@@ -1,6 +1,6 @@
 # Test Coverage
 
-What `zig build conformance` actually validates: every shader listed below is compiled GLSL → SPIR-V by zioshade and the resulting SPIR-V binary is checked with `spirv-val`. **Authoritative counts live in [`docs/STATUS.md`](STATUS.md)** (the single source of truth; do not hardcode counts here). Latest reconcile (2026-08-04, `zig build strict-gate`): **2,108 PASS, 13 XFAIL, 0 FP-regression, 2,121 total, suite exits 0**. The XFAIL fixtures are known-unsupported or deliberately-rejected constructs that are **honestly rejected** rather than silently miscompiled; the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig` and they do not count as regressions. The 13 currently cover: `fp64.desktop.comp` / `int64.desktop.comp` / `spv.double.comp` (64-bit float/int), `newTexture.frag` / `spv.newTexture.frag` (OpExtInst new-form texture), `shader_ballot.comp` / `gcn_shader.comp` / `spv.nvAtomicFp16Vec.frag` (AMD/NV extensions), `shader-clock.frag` (clock extension), `spv.AofA.frag` (arrays-of-arrays) and `struct-material.frag` (all `error.SemanticFailed`), plus `ubo_layout.frag` (conflicting matrix layout on a shared struct type) and `loop-dominator-and-switch-default.frag` (an unstructurizable `continue`), both `error.CodegenFailed`.
+What `zig build conformance` actually validates: every shader listed below is compiled GLSL → SPIR-V by zioshade and the resulting SPIR-V binary is checked with `spirv-val`. **Authoritative counts live in [`docs/STATUS.md`](STATUS.md)** (the single source of truth; do not hardcode counts here). Latest reconcile (2026-08-15, `zig build conformance`): **2,109 PASS, 12 XFAIL, 8 SKIP, 2,129 total (PASS + XFAIL + SKIP == TOTAL), 0 failures, suite exits 0**. The XFAIL fixtures are known-unsupported or deliberately-rejected constructs that are **honestly rejected** rather than silently miscompiled; the live list is `KNOWN_UNSUPPORTED` in `tests/runner.zig` and they do not count as regressions. The 12 currently cover: `fp64.desktop.comp` / `int64.desktop.comp` / `spv.double.comp` (64-bit float/int), `newTexture.frag` / `spv.newTexture.frag` (OpExtInst new-form texture), `shader_ballot.comp` / `gcn_shader.comp` / `spv.nvAtomicFp16Vec.frag` (AMD/NV extensions), `shader-clock.frag` (clock extension), `spv.AofA.frag` (arrays-of-arrays) and `struct-material.frag` (all `error.SemanticFailed`), plus `ubo_layout.frag` (conflicting matrix layout on a shared struct type, `error.CodegenFailed`). `loop-dominator-and-switch-default.frag` left the list in #593: a `continue` inside a switch-default now structurizes from source and its loop survives `deadLoopElim`, so it compiles and passes.
 
 ## Test corpora
 
@@ -45,7 +45,7 @@ Each stress case is a single-purpose shader that, when broken in zioshade, would
 
 | Backend | Where it's exercised | Approx count |
 |---|---|---:|
-| **SPIR-V output (the conformance oracle)** | All entries above | 2,108 PASS / 13 XFAIL (honest rejections) / 0 FP-regression, exits 0 (counts: `docs/STATUS.md`) |
+| **SPIR-V output (the conformance oracle)** | All entries above | 2,109 PASS / 12 XFAIL (honest rejections) / 0 FP-regression, exits 0 (counts: `docs/STATUS.md`) |
 | **HLSL backend (SM 6.0)** | `zig build test-hlsl` (793 tests) + DXC compilation of the prebuilt SPIR-V fixtures via `tools/dxc_batch_test.zig` (counts in [BENCHMARKS.md](../BENCHMARKS.md#dxc-validation-snapshots)) | 793 + DXC snapshot |
 | **MSL backend** | `zig build test` (108 msl-tests) + cross-compile of every stress fixture | 108 + 457 |
 | **GLSL round-trip** | `zig build test` (122 glsl-tests) + reference suite | 122 |
@@ -56,7 +56,7 @@ Each stress case is a single-purpose shader that, when broken in zioshade, would
 
 ```bash
 zig build conformance               # spirv-val the whole corpus, exits 0 (counts: docs/STATUS.md)
-zig build strict-gate               # FP-regression check: 2,108 curated-valid fixtures compile, 13 XFAIL, 0 FP-regression
+zig build strict-gate               # FP-regression check: 2,109 curated-valid fixtures compile, 12 XFAIL, 0 FP-regression
 zig build test --summary all        # unit tests across all modules
 zig build test-hlsl --summary all   # 793 HLSL backend tests
 zig build fuzz -- --count 50000     # 50k random GLSL inputs, structured fuzzer

@@ -475,8 +475,13 @@ c-abi:
 #   test-conformance, strict-gate          -> job `conformance`
 #   spv-validity                           -> job `spv-validity`
 #   cts-ingestion                          -> job `cts-ingestion`
+#   structural-drop, unreachable-scan-all  -> job `structural-drop` (one job: the scan
+#                                             reuses the CLI the sweep already built)
 #   fuzz-smoke                             -> job `fuzz-smoke`
 #   c-abi                                  -> job `c-abi`
+# (job `package-smoke` has no `just` twin: its whole point is assembling a copy of the
+# tree from build.zig.zon's .paths, which only makes sense on a fresh checkout, not in
+# a developer worktree.)
 # Keep this list in step with the workflow: a gate that runs in only one of the two
 # is a gate nobody is really watching. The difference is coverage, not job set: this
 # runs one OS and one toolchain, CI runs the same jobs across 3 OSes and both 0.15.2

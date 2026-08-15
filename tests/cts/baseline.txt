@@ -10,7 +10,10 @@
 # glsl 0 = graphicsfuzz_032.spv crash FIXED (emitWhileLoop depth-bound -> honest-error, PR
 #          #522). It now refuses loudly instead of stack-exhausting. The deeper loop-
 #          lowering fix (handle the cyclic/self-referential LoopMerge correctly rather than
-#          refusing) is a follow-up; the GLSL invalid-output=54 breadth is separate triage.
+#          refusing) is a follow-up. The invalid-output breadth this leg opened with
+#          (54 at the 2026-08-04 first measurement) has since been driven to 0 (PRs
+#          #574/#575/#579/#584/#589/#591/#593/#596/#611/#613); 2026-08-15 sweep:
+#          ok=62 invalid-output=0 honest-error=26.
 # msl 0 = the FIRST run of this leg (2026-08-04) found graphicsfuzz_022.spv and
 #         graphicsfuzz_082.spv CRASHING (SIGSEGV, rc=139, no diagnostic):
 #         emitWhileLoopMSL and emitBlock recursed into each other on the SAME loop
@@ -20,10 +23,20 @@
 #         by porting the GLSL max_emit_while_depth guard (PR #522) to the MSL backend:
 #         it now refuses loudly (CrossCompileUnsupported), moving both files from CRASH
 #         to honest-error (MSL honest-error 19 -> 21). Lowering these loops correctly
-#         instead of refusing is the same follow-up as glsl/gf032. The MSL
-#         invalid-output=47 breadth is separate triage.
+#         instead of refusing is the same follow-up as glsl/gf032. The invalid-output
+#         breadth this leg opened with (47) reached 0 in the merged-PR record (#566,
+#         #569); the 2026-08-15 local sweep (swiftc oracle under the CommandLineTools
+#         SDK, no Xcode) reported ok=66 honest-error=21 and one rejection that was an
+#         MTLLibrary XPC_ERROR_CONNECTION_INTERRUPTED (oracle service failure, not a
+#         source rejection) -- the macOS CI job with the real Metal toolchain is the
+#         authoritative leg.
 # hlsl 0 = no crash on this corpus at the row's first measurement (2026-08-04, DXC
-#          1.9.0.5191; ok=20 invalid-output=46 honest-error=22).
+#          1.9.0.5191; ok=20 invalid-output=46 honest-error=22). The invalid-output
+#          breadth reached 0 in the merged-PR record (#557-#563, #567, #572); this leg
+#          needs DXC and is enforced by the Windows CI job, not locally.
+# wgsl 0 = 2026-08-15 sweep: ok=61 candidate-invalid=2 honest-error=25. The two
+#          candidate-invalids are the known WGSL residue (naga rejects; no second
+#          WGSL-producing oracle exists to discriminate real-bug vs oracle-strictness).
 #
 # The msl and hlsl legs only RUN where their compiler exists (macOS Metal, DXC), so on a
 # Linux runner they skip and report 0, which can never exceed the baseline. The macos and
