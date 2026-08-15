@@ -1727,7 +1727,11 @@ threadlocal var g_switch_chain: ?[]const ChainPhiEntry = null;
 // "did we return?" flag stayed stale (early_return2, maxdiff). This context (set
 // around each loop's body emission, saved/restored for nesting) lets emitBlock,
 // at a branch to the loop merge, emit the loop-merge-phi copy + a `break;`.
-const LoopMergeCtx = struct { merge_label: u32, phis: []const Instruction, continue_label: u32 };
+// #latch-phi: latch_phis carries the loop's latch (continue-block) phis so the
+// same context can wire copies at emitBlock's branch-to-continue (below), the
+// way `phis` already does for the loop-merge break. Empty for do-while loops,
+// where latch_mphis is not collected (the back-edge conditional owns the latch).
+const LoopMergeCtx = struct { merge_label: u32, phis: []const Instruction, continue_label: u32, latch_phis: []const Instruction };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
 // Bound on emitWhileLoopMSL's mutual recursion with emitBlock. Same guard, and same
@@ -7355,7 +7359,7 @@ fn emitWhileLoopMSL(
     // the loop merge) can emit the loop-merge-phi copy + `break;`. Saved/restored
     // for nesting.
     const saved_lmc = g_loop_merge_ctx;
-    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .phis = loop_mphis.items, .continue_label = cont_lbl };
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .phis = loop_mphis.items, .continue_label = cont_lbl, .latch_phis = latch_mphis.items };
 
     if (dw_native) {
         try w.writeAll("    do\n    {\n");
@@ -7636,9 +7640,16 @@ fn emitWhileLoopMSL(
                 };
                 if (nml) |nmv| {
                     const nhe = nfl != null and nfl.? != nmv;
+                    // #latch-phi: resolve each copy's predecessor with blockLabelOf(m, bi)
+                    // (this BranchConditional's own block), not cur_body_lbl - the walker
+                    // jumps over block Labels after a nested switch/loop (bi = merge idx +
+                    // loop increment), so a tracked "current label" can be stale here, same
+                    // Label-skip staleness the branch-to-continue fall-through below
+                    // documents. A stale pred matches no phi incoming -> NO copy emitted
+                    // -> the loop-header carry read a stale carrier (silent-wrong).
                     if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
                         if (latch_mphis.items.len > 0) {
-                            const cp = if (ntl == cont_lbl) cur_body_lbl else ntl;
+                            const cp = if (ntl == cont_lbl) blockLabelOf(m, bi) else ntl;
                             for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, cp, "        ", w, alloc);
                         }
                         try w.print("        if ({s}) continue;\n", .{ncn});
@@ -7648,10 +7659,20 @@ fn emitWhileLoopMSL(
                             for (loop_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, bp, "        ", w, alloc);
                         }
                         try w.print("        if ({s}) break;\n", .{ncn});
+                        // #latch-phi: the `continue;` below is unconditional on the
+                        // non-break path - the FALSE arm's latch copy must precede it
+                        // (this fast path previously emitted none; the copy above the
+                        // break only covers the loop-MERGE phis, a different mechanism).
+                        // The copy also runs on the break path, harmlessly: a break path
+                        // never reads the latch carrier again (HLSL #619 placement).
+                        if (latch_mphis.items.len > 0) {
+                            const cp = if (nfl.? == cont_lbl) blockLabelOf(m, bi) else nfl.?;
+                            for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, cp, "        ", w, alloc);
+                        }
                         try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
                         if (latch_mphis.items.len > 0) {
-                            const cp = if (ntl == cont_lbl) cur_body_lbl else ntl;
+                            const cp = if (ntl == cont_lbl) blockLabelOf(m, bi) else ntl;
                             for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, cp, "        ", w, alloc);
                         }
                         try w.print("        if ({s}) continue;\n", .{ncn});
@@ -7667,7 +7688,21 @@ fn emitWhileLoopMSL(
                         }
                     } else if (fl_is_trivial_continue) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
+                        // #latch-phi: capture this branch's block BEFORE emitBlock
+                        // reassigns bi (blockLabelOf of the post-jump index could land
+                        // inside the emitted arm).
+                        const bc_lbl = blockLabelOf(m, bi);
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", cbuffers, textures, storage_buffers, arraylen_buf_index);
+                        // #latch-phi: the `} continue;` below is unconditional on the
+                        // non-true path - the FALSE arm's latch copy must precede it.
+                        // On the true arm's own continue path a copy INSIDE the arm
+                        // (emitBlock's branch-to-continue) precedes this one, so the last
+                        // write before any `continue;` is the correct one; a merge/return
+                        // path never reads the carrier again (HLSL #619 placement).
+                        if (latch_mphis.items.len > 0) {
+                            const cp = if (nfl.? == cont_lbl) bc_lbl else nfl.?;
+                            for (latch_mphis.items) |phi| try emitMergePhiCopyForPred(m, names, phi, cp, "        ", w, alloc);
+                        }
                         try w.writeAll("        } continue;\n");
                     } else if (fl_is_trivial_break and !nhe) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
@@ -7947,13 +7982,17 @@ fn emitBlock(
             // the WGSL/HLSL backends (which already track the continue label). The `break`
             // (matching GLSL #584) exits the emitBlock loop; redundant with the centralized
             // break below today, but defensive.
-            // TODO(latch-phi): this emits a bare `continue;` with no latch-phi copies, so a
-            // loop with divergent continue-block phis (loop-continue-break class) AND a
-            // switch-case/nested-if continue would skip them. Narrow, not in the corpus
-            // (prove_opt 0 NEW DIFFER), and not a regression (pre-PR the continue was
-            // dropped entirely). Track as a follow-up.
+            // #latch-phi (closes the former TODO(latch-phi) from #586; port of GLSL's
+            // fix/glsl-latch-phi #613 and HLSL's #619): this continue also carries this
+            // block's latch-phi copies - the continue block's divergent leading phis
+            // select the back-edge value per predecessor, and without the copy the
+            // loop-header carry read an uninitialized/stale carrier on this path
+            // (silent-wrong; latch_phi_switch_continue.spv: both case arms continued
+            // with v57_phi never written). A degenerate latch phi (all incomings equal)
+            // is skipped by collectLoopMergePhis, same as the walker's latch_mphis.
             if (inst.words.len > 1) {
                 if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == inst.words[1]) {
+                    for (ctx.latch_phis) |phi| try emitMergePhiCopyForPred(m, names, phi, blockLabelOf(m, i), indent, w, alloc);
                     try w.print("{s}    continue;\n", .{indent});
                     break;
                 };
