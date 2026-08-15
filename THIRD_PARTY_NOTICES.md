@@ -100,3 +100,13 @@ the repository's MIT/Apache-2.0 dual license. The `scripts/fetch_shadertoy.py` h
 can download real Shadertoy shaders for local testing, but its output directory
 (`shadertoy_test_cache/`) is gitignored: Shadertoy shaders default to
 CC BY-NC-SA 3.0 (non-commercial) and must never be committed here.
+
+## Vendored dependencies
+
+`vendor/ziotime` and `vendor/ziojson` are vendored copies of the founder's own
+MIT/Apache-2.0 licensed packages (github.com/deblasis/ziotime at v0.1.1 and
+github.com/deblasis/ziojson at v0.4.2), stripped of their build caches. Their
+licence texts live beside their sources (`vendor/<name>/LICENSE-MIT`,
+`vendor/<name>/LICENSE-APACHE`, `vendor/<name>/NOTICE`). Upstream remains the
+canonical home; the vendor trees exist so builds and CI cold runs never depend
+on GitHub archive availability.

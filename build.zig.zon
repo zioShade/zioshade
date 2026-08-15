@@ -3,18 +3,22 @@
     .version = "0.6.0",
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
+        // Both dependencies are VENDORED under vendor/ (path deps) rather than
+        // fetched as GitHub tarballs: a cold CI run that hits a codeload 503
+        // fails a random job with no retry anywhere in the workflow, and the
+        // tarballs themselves shipped .zig-cache directories (31MB for ziotime).
+        // Vendored at the same tags (ziotime v0.1.1, ziojson v0.4.2), caches
+        // stripped; their licences live in vendor/<name>/LICENSE-*.
         // Dual-version (0.15.2 + 0.16) monotonic-clock lib. compat.zig's
         // Timer/monotonic shim delegates to it (this is ziotime's reason to
         // exist: centralize the 0.16 std.Io.Clock churn in one place).
         .ziotime = .{
-            .url = "https://github.com/deblasis/ziotime/archive/refs/tags/v0.1.1.tar.gz",
-            .hash = "ziotime-0.1.1-QxPLaTtlAABJbgiJuTs7d3ZN_vMPRKVuzSCVqG8Qzzsg",
+            .path = "vendor/ziotime",
         },
         // Dual-version JSON escaper over std.Io.Writer (present on both 0.15.2
         // and 0.16). reflection.zig's hand-rolled string escaper delegates to it.
         .ziojson = .{
-            .url = "https://github.com/deblasis/ziojson/archive/refs/tags/v0.4.2.tar.gz",
-            .hash = "ziojson-0.4.2-5G9pUsfZAABpZ1uCjrArX5qn7j5tjUolykMfiptcVJvT",
+            .path = "vendor/ziojson",
         },
     },
     .paths = .{
@@ -28,6 +32,7 @@
         "include",
         "src",
         "examples",
+        "vendor",
     },
     .fingerprint = 0x8a823918dadacdf2,
 }
