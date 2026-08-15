@@ -327,6 +327,15 @@ fn mslPhiDeclare(rid: u32) bool {
 }
 fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
+        // #switch-merge-phi-hoist-shadow: an id the #413 pre-scan hoisted above the
+        // enclosing loop is ALREADY declared there, under this same name (mslPhiVarName
+        // keeps the hoisted name). Declaring it again here shadows the hoisted variable:
+        // the case copies below then write the per-iteration shadow while the top-of-loop
+        // carry copy (`vN = <this phi>;`) reads the never-written hoisted original, so
+        // the carried value is undef on every iteration (graphicsfuzz_022: the BST
+        // search counter stayed 0 and the shader rendered the wrong constant color).
+        // Skip; the hoisted declaration sits above the loop and covers this scope.
+        if (g_hoisted_ids) |h| if (h.contains(phi.words[2])) continue;
         if (!mslPhiDeclare(phi.words[2])) continue;
         const t = try mslValueType(m, phi.words[1], names, alloc);
         const vn = mslPhiVarName(names, phi.words[2], alloc);
@@ -6943,6 +6952,11 @@ fn emitBody(
                 }
                 try emitSwitchPhiDecls(m, names, sphis.items, w, alloc);
                 for (chain_entries.items) |ce| {
+                    // #switch-merge-phi-hoist-shadow: same exclusion as
+                    // emitSwitchPhiDecls - a #413-hoisted id is already declared
+                    // above the enclosing loop under this name; redeclaring here
+                    // shadows it and the case copies write the wrong variable.
+                    if (g_hoisted_ids) |h| if (h.contains(ce.phi.words[2])) continue;
                     if (!mslPhiDeclare(ce.phi.words[2])) continue;
                     const t = try mslValueType(m, ce.phi.words[1], names, alloc);
                     const vn = mslPhiVarName(names, ce.phi.words[2], alloc);
