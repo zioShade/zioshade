@@ -40,6 +40,13 @@ jobs:
       - name: minWordCount table is not hand-edited
         run: python3 tools/gen_min_word_count.py --check src/spirv_cross_common.zig
 
+      # `zioshade --version` prints src/version.zig, but the tag a release is
+      # cut from is build.zig.zon's .version. The zon is not importable, so the
+      # pair can only be kept honest by checking; drift means a shipped binary
+      # reports a version it was not. Offline: no network.
+      - name: version strings are in sync
+        run: python3 tools/check_version_sync.py
+
   build-test:
     name: build & test (${{ matrix.os }}, zig ${{ matrix.zig }})
     strategy:

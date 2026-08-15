@@ -60,6 +60,7 @@ fn run() !void {
             \\  --json                (reflect) Emit spirv-cross-style reflection JSON
             \\  --stdin               Read input from stdin
             \\  --help                Show this help
+            \\  --version             Print the version and exit
             \\
         , .{});
         std.process.exit(2);
@@ -67,6 +68,13 @@ fn run() !void {
 
     const command = args[1];
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) return;
+    // Printed from src/version.zig, kept in sync with build.zig.zon's .version by
+    // tools/check_version_sync.py (a CI gate): a deployed binary must be traceable
+    // back to the tag it was cut from for bug reports to mean anything.
+    if (std.mem.eql(u8, command, "--version") or std.mem.eql(u8, command, "-v")) {
+        std.debug.print("zioshade {s}\n", .{@import("version.zig").version_string});
+        return;
+    }
 
     var input_path: ?[]const u8 = null;
     var output_path: ?[]const u8 = null;
