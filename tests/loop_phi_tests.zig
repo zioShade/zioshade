@@ -1527,3 +1527,34 @@ test "HLSL writes the latch phi on a switch-case continue (#latch-phi)" {
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "v57_phi = v13;") != null);
     try std.testing.expect(std.mem.indexOf(u8, hlsl, "v57_phi = v16;") != null);
 }
+
+// #latch-phi (MSL port of GLSL's fix/glsl-latch-phi #613 and HLSL's #619): pin the
+// walker's already-wired tail-selection copies on the same fixture GLSL/HLSL use  --
+// the continue arm's speculative copy (before `if (v185) continue;`) and the
+// fall-through's copy after it. Both must exist or the loop-header carry
+// (`v42 = v83_phi;`) reads an unwritten carrier.
+test "MSL writes the latch phi on both paths of a tail continue (#latch-phi)" {
+    const msl = try crossMsl(LATCH_PHI_CONTINUE_SPV);
+    defer alloc.free(msl);
+    // The continue arm's copy and the fall-through's copy must BOTH exist.
+    try std.testing.expect(std.mem.indexOf(u8, msl, "v83_phi = v42;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "v83_phi = v244_phi;") != null);
+}
+
+// #latch-phi (MSL, emitBlock site  --  closes the TODO(latch-phi) from #586): a switch
+// case that branches straight to the enclosing loop's continue emitted a bare
+// `continue;` with no latch-phi copies, so the loop-header carry read an
+// uninitialized carrier whenever the case fired. Fixture (glslang + spirv-opt -O
+// of a `switch (i) { case 0: acc += 1.0; continue; case 1: acc += 2.0; continue;
+// default: break; }` loop, shared with the HLSL port) has a 3-incoming divergent
+// latch phi at the continue block: both case arms continue via emitBlock, the
+// post-switch fall-through via the walker's branch-to-continue skip. All three
+// copies must exist (baseline emitted only the fall-through -- silent-wrong on
+// both case paths).
+test "MSL writes the latch phi on a switch-case continue (#latch-phi)" {
+    const msl = try crossMsl(LATCH_PHI_SWITCH_CONTINUE_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "v57_phi = v12;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "v57_phi = v13;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "v57_phi = v16;") != null);
+}
