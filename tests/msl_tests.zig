@@ -5188,6 +5188,46 @@ test "msl: raymarcher with inlined-function loops has no use-before-declaration 
     try assertNoUseBeforeDecl(out);
 }
 
+// #switch-merge-phi-hoist-shadow (graphicsfuzz_022 wrong render): a switch inside
+// a loop body whose MERGE phi is the direct back-edge value of a loop-carried phi.
+// The #413 pre-scan hoists that merge phi's declaration above the loop (the
+// top-of-loop carry copy reads it before the body defines it), but the switch
+// emitter's phi prologue (emitSwitchPhiDecls) then declared it AGAIN inside the
+// loop body under the same name - a C++ shadow. The case copies wrote the
+// per-iteration shadow while the carry copy read the never-written hoisted
+// original, so every carried value was undef; graphicsfuzz_022's BST search
+// counter stayed 0 and the shader rendered a solid wrong color (z vs spirv-cross:
+// 65536/65536 pixels differing, stable across repeat renders; vs naga the same).
+// The fix skips the redeclaration for hoisted ids. Pinned via assertNoUseBeforeDecl,
+// which fires on any SSA temp declared twice (the shadow was exactly that).
+test "#switch-merge-phi-hoist-shadow: switch-merge phi carried by a loop phi is not shadow-redeclared inside the loop (graphicsfuzz_022)" {
+    const spirv = compileFragOptToSpirv("switch_merge_phi_hoist",
+        \\#version 430
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    int carry = -1;
+        \\    int count = 0;
+        \\    for (int i = 0; i < 8; i++) {
+        \\        switch (i) {
+        \\        case 0: carry = 3; break;
+        \\        case 1: carry = 5; break;
+        \\        default: carry = -1; break;
+        \\        }
+        \\        switch (i) {
+        \\        case 0: count++; break;
+        \\        default: count += 2; break;
+        \\        }
+        \\    }
+        \\    fragColor = ((carry == -1) && (count == 15)) ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0, 0.0, 1.0, 1.0);
+        \\}
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const msl = try zioshade.spirvToMSL(alloc, spirv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "switch");
+    try assertNoUseBeforeDecl(msl);
+}
+
 test "T417.LOOSE: loose non-block uniforms are gathered into struct _Globals" {
     // #417: MSL has no bare global uniform, so loose (non-block) uniforms are
     // synthesized into a single `struct _Globals` bound as `_Globals_1`. Body
