@@ -18,6 +18,47 @@ fn main_0_16(init: compat.MainInit) !void {
     return run();
 }
 
+// The usage text lives here (not inline in run) so BOTH entry points reach it:
+// zero arguments (exit 2, the historical behaviour) and --help/-h (exit 0).
+fn printUsage() void {
+    std.debug.print(
+        \\zioshade - GLSL/SPIR-V shader compiler
+        \\
+        \\Usage: zioshade <command> <input> [options]
+        \\
+        \\Commands:
+        \\  compile   Compile GLSL to SPIR-V binary
+        \\  hlsl      Cross-compile GLSL/SPIR-V to HLSL
+        \\  glsl      Cross-compile GLSL/SPIR-V to GLSL (round-trip)
+        \\  msl       Cross-compile GLSL/SPIR-V to MSL
+        \\  wgsl      Cross-compile GLSL/SPIR-V to WGSL
+        \\  reflect   Reflect on SPIR-V binary (add --json for spirv-cross-style JSON)
+        \\  validate  Validate SPIR-V binary with spirv-val
+        \\
+        \\Options:
+        \\  -o <path>             Output file (default: stdout)
+        \\  --stage <stage>       Shader stage: vertex, fragment, compute, geometry, ...
+        \\  --entry-point <name>  Entry point name (default: main)
+        \\  -I <path>             Add include search path (repeatable)
+        \\  -D<name>[=<value>]    Define preprocessor macro
+        \\  --spec-const <ID=VAL> Override spec constant value (repeatable).
+        \\                        VAL can be decimal int, 0x-hex, or true/false.
+        \\  --glsl-version <ver>  GLSL output version: 330-460 (default: 430)
+        \\  --shader-model <ver>  HLSL shader model: 50, 60 (default: 60)
+        \\  --metal-version <ver> MSL version: 21, 24, 30 (default: 21)
+        \\  --msl-argument-buffers
+        \\                        Emit Metal 2+ argument buffers (spvDescriptorSetBufferN)
+        \\  --bind <set:bind:reg> Remap a (set, binding) to an explicit HLSL register /
+        \\                        MSL slot number (repeatable). Class b/t/s/u (HLSL) or
+        \\                        buffer/texture/sampler (MSL) is inferred from the type.
+        \\  --json                (reflect) Emit spirv-cross-style reflection JSON
+        \\  --stdin               Read input from stdin
+        \\  --help                Show this help
+        \\  --version             Print the version and exit
+        \\
+    , .{});
+}
+
 fn run() !void {
     var gpa_impl = compat.Gpa(.{}){};
     defer _ = gpa_impl.deinit();
@@ -27,47 +68,18 @@ fn run() !void {
     defer compat.argsFree(alloc, args);
 
     if (args.len < 2) {
-        std.debug.print(
-            \\zioshade - GLSL/SPIR-V shader compiler
-            \\
-            \\Usage: zioshade <command> <input> [options]
-            \\
-            \\Commands:
-            \\  compile   Compile GLSL to SPIR-V binary
-            \\  hlsl      Cross-compile GLSL/SPIR-V to HLSL
-            \\  glsl      Cross-compile GLSL/SPIR-V to GLSL (round-trip)
-            \\  msl       Cross-compile GLSL/SPIR-V to MSL
-            \\  wgsl      Cross-compile GLSL/SPIR-V to WGSL
-            \\  reflect   Reflect on SPIR-V binary (add --json for spirv-cross-style JSON)
-            \\  validate  Validate SPIR-V binary with spirv-val
-            \\
-            \\Options:
-            \\  -o <path>             Output file (default: stdout)
-            \\  --stage <stage>       Shader stage: vertex, fragment, compute, geometry, ...
-            \\  --entry-point <name>  Entry point name (default: main)
-            \\  -I <path>             Add include search path (repeatable)
-            \\  -D<name>[=<value>]    Define preprocessor macro
-            \\  --spec-const <ID=VAL> Override spec constant value (repeatable).
-            \\                        VAL can be decimal int, 0x-hex, or true/false.
-            \\  --glsl-version <ver>  GLSL output version: 330–460 (default: 430)
-            \\  --shader-model <ver>  HLSL shader model: 50, 60 (default: 60)
-            \\  --metal-version <ver> MSL version: 21, 24, 30 (default: 21)
-            \\  --msl-argument-buffers
-            \\                        Emit Metal 2+ argument buffers (spvDescriptorSetBufferN)
-            \\  --bind <set:bind:reg> Remap a (set, binding) to an explicit HLSL register /
-            \\                        MSL slot number (repeatable). Class b/t/s/u (HLSL) or
-            \\                        buffer/texture/sampler (MSL) is inferred from the type.
-            \\  --json                (reflect) Emit spirv-cross-style reflection JSON
-            \\  --stdin               Read input from stdin
-            \\  --help                Show this help
-            \\  --version             Print the version and exit
-            \\
-        , .{});
+        printUsage();
         std.process.exit(2);
     }
 
     const command = args[1];
-    if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) return;
+    // --help now prints the usage instead of exiting silently: the text was only
+    // reachable with ZERO arguments, so `zioshade --help` printed nothing (and a
+    // user could not discover the commands without reading the source).
+    if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "-h")) {
+        printUsage();
+        return;
+    }
     // Printed from src/version.zig, kept in sync with build.zig.zon's .version by
     // tools/check_version_sync.py (a CI gate): a deployed binary must be traceable
     // back to the tag it was cut from for bug reports to mean anything.
