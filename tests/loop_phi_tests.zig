@@ -1558,3 +1558,34 @@ test "MSL writes the latch phi on a switch-case continue (#latch-phi)" {
     try std.testing.expect(std.mem.indexOf(u8, msl, "v57_phi = v13;") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "v57_phi = v16;") != null);
 }
+
+// #switch-arm-break (HLSL port of GLSL #611; mirrors MSL's g_switch_ctx): a
+// switch-merge phi whose predecessors are nested if-arms INSIDE a case
+// (multi-block cases) was declared but never written -- the case-entry copy only
+// fires when a phi pred IS the case entry label, and an if-arm's OpBranch to the
+// switch's merge ended emitBlock's walk emitting NOTHING. The carrier
+// (`v244_phi`, and its two siblings) read as an uninitialized value even with no
+// continue involved; #619's latch-phi copies then propagated it (`v83_phi =
+// v244_phi;`). The fix threads a SwitchCtxHLSL through all three HLSL switch
+// sites (emitBody, emitWhileLoopHLSL, emitBlock) and teaches emitBlock's two
+// OpBranch-to-switch-merge paths to emit the per-pred copy: the ARM path (copy +
+// `break;` out of the switch from inside a selection) and the case-tail
+// fall-through edge (copy only; the site emits the break). Fixture is
+// graphicsfuzz_003 itself: each switch's merge phi %244 has 9 incoming, 8 from
+// if-arms and 1 from the case tail.
+test "HLSL writes switch-merge phis from nested if-arms (#switch-arm-break)" {
+    const hlsl = try crossHlsl(LATCH_PHI_CONTINUE_SPV);
+    defer alloc.free(hlsl);
+    // The four constant-valued arm copies, one arm-computed copy, and the
+    // case-tail fall-through copy must ALL exist (baseline: none -- the
+    // carrier was declared at line level and never assigned).
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v244_phi = float3(0.0, 0.0, 0.0);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v244_phi = v98;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v244_phi = v182;") != null);
+    // The other two switches in the same shader carry the same shape.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v415_phi = float3(0.0, 0.0, 0.0);") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v586_phi = float3(0.0, 0.0, 0.0);") != null);
+    // Every carrier write is paired with the arm's break out of the switch.
+    const bi = std.mem.indexOf(u8, hlsl, "v244_phi = v98;").?;
+    try std.testing.expect(std.mem.indexOf(u8, hlsl[bi..], "break;") != null);
+}
