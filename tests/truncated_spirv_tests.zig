@@ -57,17 +57,18 @@ test "positive control: the untruncated module is not rejected as truncated" {
     defer alloc.free(words);
 
     // The control exists to show the truncation check rejects the TRUNCATION, not the
-    // module. It cannot assert successful cross-compilation any more: this module is
-    // graphicsfuzz_001 (the truncated_vectorshuffle fixture is generated from it), whose
-    // loop condition is a short-circuit `&&` that the GLSL backend now refuses rather
-    // than miscompiling -- it used to emit code that dropped the second operand
-    // entirely. So accept either a clean compile or that one documented semantic
-    // refusal, and fail on anything else, InvalidSpirvTruncated above all.
+    // module. This module is graphicsfuzz_001 (the truncated_vectorshuffle fixture is
+    // generated from it), whose loop condition is a short-circuit `&&` chain. The GLSL
+    // backend now LOWERS that chain correctly (#shortcircuit-loop-cond); before that it
+    // refused (UnsupportedPhiAlias via the unclaimed-phi net, and before #579 it
+    // miscompiled by dropping the second operand). Accept a clean compile or either
+    // documented semantic refusal, and fail on anything else, InvalidSpirvTruncated
+    // above all.
     if (zioshade.spirvToGLSL(alloc, words, .{})) |out| {
         defer alloc.free(out);
         try std.testing.expect(out.len > 0);
     } else |err| {
         try std.testing.expect(err != error.InvalidSpirvTruncated);
-        try std.testing.expectEqual(error.UnsupportedPhiAlias, err);
+        try std.testing.expect(err == error.UnsupportedPhiAlias or err == error.UnsupportedShortCircuitLoopCond);
     }
 }

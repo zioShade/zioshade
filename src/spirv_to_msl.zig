@@ -7077,75 +7077,15 @@ fn emitSelfLoopBodyHeaderMSL(
     return label_map.get(merge_lbl) orelse (loop_idx + 2);
 }
 
-/// #shortcircuit-loop-cond: verify that a short-circuit condition chain, starting at
-/// `chain_head` (the Pattern-A "condition block" whose first BranchConditional is a
-/// router, not the exit test), terminates at a BranchConditional whose target IS the
-/// loop merge -- the chain's real exit test. Walks block by block: every intermediate
-/// terminator must be a SelectionMerge-guarded BranchConditional whose merge block
-/// opens with a BOOL OpPhi (the combined condition of that link). Anything else
-/// (unconditional branch, plain if, missing bool phi, walk off the end) means the
-/// shape is not a verifiable chain, so the caller keeps its honest-error. Bounded by
-/// construction count, not instruction count.
+/// #shortcircuit-loop-cond: the chain verifier lives in spirv_cross_common
+/// (shared with the GLSL/HLSL ports -- single source, no per-backend drift).
 fn shortCircuitChainReachesMergeMSL(
     m: *const ParsedModule,
     chain_head: u32,
     merge_lbl: u32,
     label_map: *const std.AutoHashMap(u32, usize),
 ) bool {
-    var cur = chain_head;
-    var guard: usize = 0;
-    while (guard < 64) : (guard += 1) {
-        const ci = label_map.get(cur) orelse return false;
-        var bi: usize = ci + 1;
-        var bc_found: ?usize = null;
-        var sel_merge: ?u32 = null;
-        while (bi < m.instructions.len) : (bi += 1) {
-            const t = m.instructions[bi];
-            if (t.op == .SelectionMerge and t.words.len > 1) {
-                sel_merge = t.words[1];
-                continue;
-            }
-            if (t.op == .BranchConditional) {
-                bc_found = bi;
-                break;
-            }
-            // Any other terminator (or a stray Label) means this is not a chain link.
-            // LoopMerge/Switch/Unreachable too: a link block is a plain short-circuit
-            // router, never a nested loop header / switch block / unreachable edge.
-            if (t.op == .Branch or t.op == .Label or t.op == .FunctionEnd or t.op == .Return or t.op == .ReturnValue or t.op == .Kill or t.op == .LoopMerge or t.op == .Switch or t.op == .Unreachable) return false;
-        }
-        const bidx = bc_found orelse return false;
-        const bc = m.instructions[bidx];
-        if (bc.words.len < 4) return false;
-        if (bc.words[2] == merge_lbl or bc.words[3] == merge_lbl) {
-            // The real exit test. Its own SelectionMerge (if any -- cfg_structurize
-            // synthesizes one keyed to the LOOP merge) must agree, or the walker's
-            // #shortcircuit-exit rule (which matches nml == merge_lbl or null) would
-            // not fire and the loop would emit with no exit at all.
-            if (bidx > 0 and m.instructions[bidx - 1].op == .SelectionMerge and m.instructions[bidx - 1].words.len > 1) {
-                if (m.instructions[bidx - 1].words[1] != merge_lbl) return false;
-            }
-            return true;
-        }
-        // A chain link: SelectionMerge-guarded, and the merge block opens with a bool phi.
-        const sm = sel_merge orelse return false;
-        // Polarity: only the FALSE-arm-to-merge router shape is lowered correctly
-        // (the walker's #474 no-else form: `phi = <fall-through init>; if (c) { eval;
-        // phi = <true val>; }`). A link whose TRUE target is its own merge
-        // (glslang-independent producers' non-negated `||`) makes #474 treat the MERGE
-        // block as the true arm and walk the whole rest of the loop nested inside it
-        // -- double body, phi read before assignment, post-loop code inside the loop
-        // (confirmed by fixture). Reject: keep the honest-error for that polarity.
-        if (bc.words[2] == sm) return false;
-        const smi = label_map.get(sm) orelse return false;
-        if (smi + 1 >= m.instructions.len) return false;
-        const sphi = m.instructions[smi + 1];
-        if (sphi.op != .Phi or sphi.words.len < 2) return false;
-        const td = getDef(m, sphi.words[1]) orelse return false;
-        if (td.op != .TypeBool) return false;
-        cur = sm;
-    }
-    return false;
+    return common.shortCircuitChainReachesMerge(m, chain_head, merge_lbl, label_map);
 }
 
 fn emitWhileLoopMSL(

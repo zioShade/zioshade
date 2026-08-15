@@ -2857,6 +2857,75 @@ pub fn inlineShortCircuitPhi(
     return std.fmt.allocPrint(alloc, "({s}) ? ({s}) : ({s})", .{ cond, tve, fve }) catch null;
 }
 
+/// #shortcircuit-loop-cond: verify that a short-circuit condition chain, starting at
+/// `chain_head` (the Pattern-A "condition block" whose first BranchConditional is a
+/// router, not the exit test), terminates at a BranchConditional whose target IS the
+/// loop merge -- the chain's real exit test. Walks block by block: every intermediate
+/// terminator must be a SelectionMerge-guarded BranchConditional whose merge block
+/// opens with a BOOL OpPhi (the combined condition of that link). Anything else
+/// (unconditional branch, plain if, missing bool phi, walk off the end) means the
+/// shape is not a verifiable chain, so the caller keeps its honest-error. Bounded by
+/// construction count, not instruction count.
+///
+/// Polarity: a link whose TRUE target is its own selection merge (a non-negated `||`
+/// router -- not glslang's shape, which negates, but a shape other producers emit) is
+/// REJECTED: the no-else selection lowering would walk the MERGE block as the true
+/// arm (double body, phi read before assignment, post-loop code inside the loop).
+/// Only the false-arm-to-merge polarity is lowerable. The exit branch's own
+/// SelectionMerge (if any -- cfg_structurize synthesizes one keyed to the LOOP merge)
+/// must agree with the loop merge, or the walker's exit rule would not fire and the
+/// loop would emit with no exit at all.
+pub fn shortCircuitChainReachesMerge(
+    module: anytype,
+    chain_head: u32,
+    merge_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) bool {
+    var cur = chain_head;
+    var guard: usize = 0;
+    while (guard < 64) : (guard += 1) {
+        const ci = label_map.get(cur) orelse return false;
+        var bi: usize = ci + 1;
+        var bc_found: ?usize = null;
+        var sel_merge: ?u32 = null;
+        while (bi < module.instructions.len) : (bi += 1) {
+            const t = module.instructions[bi];
+            if (t.op == .SelectionMerge and t.words.len > 1) {
+                sel_merge = t.words[1];
+                continue;
+            }
+            if (t.op == .BranchConditional) {
+                bc_found = bi;
+                break;
+            }
+            // Any other terminator (or a stray Label) means this is not a chain link.
+            // LoopMerge/Switch/Unreachable too: a link block is a plain short-circuit
+            // router, never a nested loop header / switch block / unreachable edge.
+            if (t.op == .Branch or t.op == .Label or t.op == .FunctionEnd or t.op == .Return or t.op == .ReturnValue or t.op == .Kill or t.op == .LoopMerge or t.op == .Switch or t.op == .Unreachable) return false;
+        }
+        const bidx = bc_found orelse return false;
+        const bc = module.instructions[bidx];
+        if (bc.words.len < 4) return false;
+        if (bc.words[2] == merge_lbl or bc.words[3] == merge_lbl) {
+            if (bidx > 0 and module.instructions[bidx - 1].op == .SelectionMerge and module.instructions[bidx - 1].words.len > 1) {
+                if (module.instructions[bidx - 1].words[1] != merge_lbl) return false;
+            }
+            return true; // the real exit test
+        }
+        // A chain link: SelectionMerge-guarded, and the merge block opens with a bool phi.
+        const sm = sel_merge orelse return false;
+        if (bc.words[2] == sm) return false; // true-target-is-merge polarity: not lowerable
+        const smi = label_map.get(sm) orelse return false;
+        if (smi + 1 >= module.instructions.len) return false;
+        const sphi = module.instructions[smi + 1];
+        if (sphi.op != .Phi or sphi.words.len < 2) return false;
+        const td = localGetDef(module.instructions, module.id_defs, sphi.words[1]) orelse return false;
+        if (td.op != .TypeBool) return false;
+        cur = sm;
+    }
+    return false;
+}
+
 /// A do-while (bottom-test) loop's CONTINUE block ends in a back-edge
 /// `OpBranchConditional` whose two targets are exactly {header, merge}. A normal
 /// top-test loop's continue block ends in an unconditional `OpBranch header`.
