@@ -427,6 +427,99 @@ fn finalizeSwitchPhisHLSL(names: *std.AutoHashMap(u32, []const u8), phis: []cons
     }
 }
 
+// #latch-phi (HLSL port of GLSL's fix/glsl-latch-phi, PR #613; mirrors MSL's
+// latch_mphis machinery): the CONTINUE block's leading OpPhis are the latch phis
+// -- they select the back-edge value per predecessor of the continue. HLSL
+// declares each as a persistent `v<id>_phi` carrier BEFORE the loop (the
+// #false-loop-init carried-phi pass) and the top-of-loop carry reads it
+// (`v<hdr> = v<latch>_phi;`) on every re-entry. But a bare `continue;` (or a
+// silently skipped branch-to-continue) carried NO copies for it, so the carrier
+// was NEVER written: the loop-header carry read an uninitialized variable every
+// iteration (graphicsfuzz_003 = latch_phi_continue.spv: all three accumulators
+// diverged; the TODO(latch-phi) documented since #586). Emit one copy per
+// divergent leading phi, for predecessor `pred_lbl`, at EVERY site that emits a
+// `continue;` -- the loop walker's branch-to-continue skip, its four trivial
+// continue/break fast paths, and emitBlock's branch-arm continue. A degenerate
+// phi (all incomings the same id) aliases fine and needs no copy, so it is
+// skipped, exactly like MSL's collectLoopMergePhis.
+
+/// Number of DIVERGENT leading phis at the continue block `cont_lbl` (cheap
+/// pre-check so the fast paths keep their one-line shape when there are none).
+fn latchPhiCountHLSL(module: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), cont_lbl: u32) usize {
+    const cidx = label_map.get(cont_lbl) orelse return 0;
+    var n: usize = 0;
+    var ci: usize = cidx + 1;
+    while (ci < module.instructions.len) : (ci += 1) {
+        const phi = module.instructions[ci];
+        if (phi.op != .Phi) break;
+        if (phi.words.len < 7) continue; // need >=2 (value,pred) pairs to diverge
+        var pi: usize = 5;
+        while (pi < phi.words.len) : (pi += 2) {
+            if (phi.words[pi] != phi.words[3]) {
+                n += 1;
+                break;
+            }
+        }
+    }
+    return n;
+}
+
+/// Emit the continue block's leading-phi copies for predecessor `pred_lbl` (the
+/// block that branches to the continue). The phi's own name resolves via `names`
+/// -- a latch phi is renamed to its `v<id>_phi` carrier by the carried-phi pass,
+/// which is also what declares the variable; a name-less phi falls back to the
+/// same derivation so a missing declaration surfaces as an undeclared identifier
+/// in the output (a visible failure) instead of a silent omission.
+fn emitLatchPhiCopiesHLSL(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    label_map: *const std.AutoHashMap(u32, usize),
+    cont_lbl: u32,
+    pred_lbl: u32,
+    indent: []const u8,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    const cidx = label_map.get(cont_lbl) orelse return;
+    var ci: usize = cidx + 1;
+    while (ci < module.instructions.len) : (ci += 1) {
+        const phi = module.instructions[ci];
+        if (phi.op != .Phi) break;
+        if (phi.words.len < 7) continue;
+        var diverges = false;
+        var pi: usize = 5;
+        while (pi < phi.words.len) : (pi += 2) {
+            if (phi.words[pi] != phi.words[3]) {
+                diverges = true;
+                break;
+            }
+        }
+        if (!diverges) continue;
+        pi = 3;
+        while (pi + 1 < phi.words.len) : (pi += 2) {
+            if (phi.words[pi + 1] == pred_lbl) {
+                const vn = names.get(phi.words[2]) orelse hlslPhiVarName(names, phi.words[2], alloc);
+                try w.print("{s}{s} = {s};\n", .{ indent, vn, hlslExprName(module, names, phi.words[pi], alloc) });
+                break;
+            }
+        }
+    }
+}
+
+/// The block label containing the instruction at index `idx` (nearest preceding
+/// OpLabel). Resolves the predecessor for a latch-phi copy at a branch-to-
+/// continue: the branch's own block, independent of how the walker advanced its
+/// cursor (it skips block Labels, so a tracked "current label" would be stale).
+/// Mirrors MSL's blockLabelOf / GLSL's blockLabelOfGLSL.
+fn blockLabelOfHLSL(module: *const ParsedModule, idx: usize) u32 {
+    var j: usize = idx;
+    while (true) {
+        if (module.instructions[j].op == .Label and module.instructions[j].words.len > 1) return module.instructions[j].words[1];
+        if (j == 0) return 0;
+        j -= 1;
+    }
+}
+
 const Instruction = struct {
     op: spirv.Op,
     words: []const u32,
@@ -5593,7 +5686,14 @@ fn emitWhileLoopHLSL(
                 continue;
             }
             if (binst.op == .Branch) {
-                if (binst.words.len > 1 and (binst.words[1] == cont_lbl or binst.words[1] == merge_lbl)) continue;
+                if (binst.words.len > 1 and binst.words[1] == cont_lbl) {
+                    // #latch-phi: a branch to the continue carries this block's
+                    // latch-phi copies (the old skip dropped them silently, so the
+                    // loop-header carry read an uninitialized carrier).
+                    try emitLatchPhiCopiesHLSL(module, names, label_map, cont_lbl, blockLabelOfHLSL(module, bi), "        ", w, alloc);
+                    continue;
+                }
+                if (binst.words.len > 1 and binst.words[1] == merge_lbl) continue;
                 continue;
             }
             if (binst.op == .BranchConditional) {
@@ -5601,6 +5701,9 @@ fn emitWhileLoopHLSL(
                 const ntl = binst.words[2];
                 const nfl = if (binst.words.len > 3) binst.words[3] else null;
                 const nml = bc_merge_map.get(bi);
+                // #latch-phi: cheap gate so the trivial fast paths below keep their
+                // one-line shape when the continue has no divergent leading phis.
+                const latch_cnt = latchPhiCountHLSL(module, label_map, cont_lbl);
                 // Check if true/false labels are trivial continue/break
                 const tl_is_trivial_continue = blk: {
                     if (ntl == cont_lbl) break :blk true;
@@ -5631,11 +5734,31 @@ fn emitWhileLoopHLSL(
                 if (nml) |nmv| {
                     const nhe = nfl != null and nfl.? != nmv;
                     if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe)) {
+                        // #latch-phi: speculative copy for the CONTINUE arm's predecessor,
+                        // emitted before the `if` (MSL placement). On the fall-through path
+                        // a later continue site rewrites the carrier for that path's own
+                        // predecessor, so the last write before any `continue;` is the
+                        // correct one; a break/return path never reads the carrier again.
+                        if (latch_cnt > 0) {
+                            const cp = if (ntl == cont_lbl) blockLabelOfHLSL(module, bi) else ntl;
+                            try emitLatchPhiCopiesHLSL(module, names, label_map, cont_lbl, cp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) continue;\n", .{ncn});
                     } else if (tl_is_trivial_break and fl_is_trivial_continue) {
                         try w.print("        if ({s}) break;\n", .{ncn});
+                        // #latch-phi: the `continue;` below is unconditional on the
+                        // non-break path -- the false arm's latch copy must precede it.
+                        if (latch_cnt > 0) {
+                            const cp = if (nfl.? == cont_lbl) blockLabelOfHLSL(module, bi) else nfl.?;
+                            try emitLatchPhiCopiesHLSL(module, names, label_map, cont_lbl, cp, "        ", w, alloc);
+                        }
                         try w.writeAll("        continue;\n");
                     } else if (tl_is_trivial_continue and nhe) {
+                        // #latch-phi: speculative copy for the true (continue) arm, as above.
+                        if (latch_cnt > 0) {
+                            const cp = if (ntl == cont_lbl) blockLabelOfHLSL(module, bi) else ntl;
+                            try emitLatchPhiCopiesHLSL(module, names, label_map, cont_lbl, cp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) continue;\n", .{ncn});
                         bi = try emitBlock(module, names, decorations, nfl.?, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
                     } else if (tl_is_trivial_break) {
@@ -5646,6 +5769,12 @@ fn emitWhileLoopHLSL(
                     } else if (fl_is_trivial_continue) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(module, names, decorations, ntl, nmv, label_map, bc_merge_map, w, alloc, is_fragment, is_vertex, output_var_id, "        ");
+                        // #latch-phi: unconditional `continue;` on the non-true path --
+                        // the false arm's latch copy must precede it.
+                        if (latch_cnt > 0) {
+                            const cp = if (nfl.? == cont_lbl) blockLabelOfHLSL(module, bi) else nfl.?;
+                            try emitLatchPhiCopiesHLSL(module, names, label_map, cont_lbl, cp, "        ", w, alloc);
+                        }
                         try w.writeAll("        } continue;\n");
                     } else if (fl_is_trivial_break and !nhe) {
                         try w.print("        if ({s})\n        {{\n", .{ncn});
@@ -5807,10 +5936,11 @@ fn emitBlock(
         // emits nothing (the continue is dropped) -> silent-wrong. Mirrors GLSL #584 /
         // MSL #586. In structured SPIR-V a Branch to a loop's continue target is always
         // the enclosing loop's continue, so matching any tracked loop's `cont` is safe.
-        // TODO(latch-phi): like MSL #586, this emits a bare `continue;` with no latch-phi
-        // copies, so a loop with divergent continue-block phis (loop-continue-break class)
-        // AND a switch-case/nested-if continue would skip them. Narrow, not in the corpus,
-        // not a regression (pre-PR the continue was dropped entirely). Shared follow-up.
+        // #latch-phi (closes the former TODO(latch-phi) from #586): this continue also
+        // carries this block's latch-phi copies -- the continue block's divergent
+        // leading phis select the back-edge value per predecessor, and without the
+        // copy the loop-header carry read an uninitialized/stale carrier on this path
+        // (silent-wrong; graphicsfuzz_003). Port of GLSL's fix/glsl-latch-phi (#613).
         if (inst.op == .Branch and inst.words.len > 1) {
             // A branch INTO a (self-)loop header enters that loop (handled by the nested-
             // loop entry below), it is not a continue of the enclosing loop. A self-loop's
@@ -5830,6 +5960,7 @@ fn emitBlock(
                         }
                     }
                     if (is_continue) {
+                        try emitLatchPhiCopiesHLSL(module, names, label_map, inst.words[1], blockLabelOfHLSL(module, i), indent, w, alloc);
                         try w.print("{s}    continue;\n", .{indent});
                         break;
                     }

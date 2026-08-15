@@ -1521,3 +1521,41 @@ test "MSL lowers a short-circuit loop condition without dropping operands (#shor
     try std.testing.expect(std.mem.indexOf(u8, msl, "> 0.25") != null);
     try std.testing.expect(std.mem.indexOf(u8, msl, "< 3.5") != null);
 }
+
+// #latch-phi (HLSL port of GLSL's fix/glsl-latch-phi, #613): a continue-block phi
+// (latch phi) whose value differs per incoming path got NO copies anywhere in the
+// HLSL backend: the loop walker's trivial-continue fast path emitted a bare
+// `if (c) continue;`, its branch-to-continue skip dropped the rest silently, and
+// emitBlock's switch-case/nested-if continue emitted a bare `continue;`. The
+// loop-header carry (`v42 = v83_phi;`) then read an UNINITIALIZED carrier every
+// iteration (graphicsfuzz_003 = this fixture: all three accumulators diverged in
+// the round-trip render). HLSL declares the carrier (`float3 v83_phi;`) via the
+// carried-phi pass but nothing ever wrote it. Assert the latch phi is WRITTEN on
+// both paths of the tail selection: the continue arm's copy and the fall-through's
+// copy must BOTH exist.
+test "HLSL writes the latch phi on both paths of a tail continue (#latch-phi)" {
+    const hlsl = try crossHlsl(LATCH_PHI_CONTINUE_SPV);
+    defer alloc.free(hlsl);
+    // The continue arm's copy and the fall-through's copy must BOTH exist.
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v83_phi = v42;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v83_phi = v244_phi;") != null);
+}
+
+// #latch-phi (HLSL, emitBlock site): the same gap through emitBlock -- a switch
+// case that branches straight to the enclosing loop's continue emitted a bare
+// `continue;` with no latch-phi copies, so the loop-header carry read an
+// uninitialized carrier whenever the case fired. Fixture (glslang + spirv-opt -O
+// of a `switch (i) { case 0: acc += 1.0; continue; case 1: acc += 2.0; continue;
+// default: break; }` loop) has a 3-incoming divergent latch phi (%57) at the
+// continue block: both case arms continue via emitBlock, the post-switch
+// fall-through via the walker's branch-to-continue skip. All three copies must
+// exist (baseline emitted none -- silent-wrong).
+const LATCH_PHI_SWITCH_CONTINUE_SPV = @embedFile("fixtures/latch_phi_switch_continue.spv");
+
+test "HLSL writes the latch phi on a switch-case continue (#latch-phi)" {
+    const hlsl = try crossHlsl(LATCH_PHI_SWITCH_CONTINUE_SPV);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v57_phi = v12;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v57_phi = v13;") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "v57_phi = v16;") != null);
+}
