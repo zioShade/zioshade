@@ -998,7 +998,11 @@ threadlocal var g_int_mix_needed: bool = false;
 // and an OpBranch to the continue (e.g. a switch case that continues the outer
 // loop) can emit `continue;`. Mirrors MSL's g_loop_merge_ctx. Set per-loop by
 // emitWhileLoop, saved/restored for nesting.
-const LoopMergeCtx = struct { merge_label: u32, continue_label: u32 };
+// #loop-merge-phi: merge_phis carries this loop's divergent merge-block phis so
+// the same break site assigns each carrier its incoming for THAT predecessor
+// before the `break;` (a break without the copy leaves the carrier holding the
+// normal-exit fallback value, silently dropping the break path's distinct value).
+const LoopMergeCtx = struct { merge_label: u32, continue_label: u32, merge_phis: []const Instruction = &.{} };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
 // #switch-arm-break: the innermost enclosing SWITCH's merge + its merge phis, so
@@ -3424,6 +3428,65 @@ fn blockLabelOfGLSL(m: *const ParsedModule, idx: usize) u32 {
     }
 }
 
+// #loop-merge-phi (port of MSL's loop-merge-phi materialization; MSL is the
+// reference implementation): a phi at a loop's MERGE block selects between the
+// values arriving from each exit path (the normal exit + every break). Aliasing
+// it to a single incoming (the generic OpPhi handler's fallback) silently drops
+// the break path's distinct value, so the generic handler honest-errors
+// (UnsupportedPhiAlias) unless some mechanism owns the phi. This is that
+// mechanism: collect the DIVERGENT merge phis, declare a distinct `v<id>_lm`
+// carrier above the loop, and assign the per-exit-path incoming at every site
+// that leaves the loop. A non-diverging phi (all incomings equal) aliases fine
+// and is skipped, exactly like MSL's collectLoopMergePhis.
+fn collectLoopMergePhisGLSL(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), merge_lbl: u32, list: *std.ArrayList(Instruction), alloc: std.mem.Allocator) void {
+    const midx = label_map.get(merge_lbl) orelse return;
+    var pj: usize = midx + 1;
+    while (pj < m.instructions.len) : (pj += 1) {
+        const minst = m.instructions[pj];
+        if (minst.op != .Phi) break;
+        if (minst.words.len < 7) continue; // need >=2 (value,pred) pairs to diverge
+        var diverges = false;
+        var pi: usize = 5;
+        while (pi < minst.words.len) : (pi += 2) {
+            if (minst.words[pi] != minst.words[3]) {
+                diverges = true;
+                break;
+            }
+        }
+        if (diverges) list.append(alloc, minst) catch {};
+    }
+}
+
+/// The carrier name for a loop-merge phi, derived from the IMMUTABLE result id
+/// (never from `names`, which other passes may have rewritten in between -- the
+/// #559/#564 lesson). The `_lm` suffix is what tells the generic OpPhi handler
+/// this phi is owned here (mirrors the `_phi` ownership suffix).
+fn lmPhiVarNameGLSL(rid: u32, alloc: std.mem.Allocator) []const u8 {
+    return std.fmt.allocPrint(alloc, "v{d}_lm", .{rid}) catch "vlm";
+}
+
+/// Assign one loop-merge phi its incoming value for predecessor `pred_lbl`
+/// (the block that branches out of the loop). If `pred_lbl` is not among the
+/// phi's predecessors, emit nothing (the top-of-loop fallback covers unhandled
+/// paths). Mirrors MSL's emitMergePhiCopyForPred.
+fn emitLoopMergePhiCopyGLSL(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    phi: Instruction,
+    pred_lbl: u32,
+    indent: []const u8,
+    w: anytype,
+    alloc: std.mem.Allocator,
+) !void {
+    var pi: usize = 3;
+    while (pi + 1 < phi.words.len) : (pi += 2) {
+        if (phi.words[pi + 1] == pred_lbl) {
+            try w.print("{s}{s} = {s};\n", .{ indent, lmPhiVarNameGLSL(phi.words[2], alloc), exprName(m, names, phi.words[pi], alloc) });
+            return;
+        }
+    }
+}
+
 fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHashMap(u32, usize), ml: u32, list: *std.ArrayList(Instruction), alloc: std.mem.Allocator) void {
     const midx = label_map.get(ml) orelse return;
     var pj: usize = midx + 1;
@@ -4479,6 +4542,59 @@ fn emitWhileLoop(
     // gates the SelectionMerge honest-error in the top walker below.
     if (!is_do_while) try w.print("    bool {s} = true;\n", .{first_flag});
 
+    // #loop-merge-phi: collect DIVERGENT phis at the loop's merge block (top-test
+    // loops only; a do-while keeps the existing generic-handler refusal -- MSL has
+    // the same gate. TODO(loop-merge-phi-do-while): a do-while's bottom test would
+    // need the fallback copy placed before its bottom break, a different site).
+    // Also resolve the normal-exit predecessor (the smallest-index pred: the
+    // header/cond block precedes every body/break block). Port of MSL's loop_mphis
+    // machinery.
+    var loop_mphis: std.ArrayList(Instruction) = .empty;
+    defer loop_mphis.deinit(alloc);
+    var lm_norm_pred: u32 = 0;
+    if (!is_do_while) {
+        collectLoopMergePhisGLSL(m, label_map, merge_lbl, &loop_mphis, alloc);
+        if (loop_mphis.items.len > 0) {
+            var min_idx: usize = std.math.maxInt(usize);
+            var pi: usize = 3;
+            while (pi + 1 < loop_mphis.items[0].words.len) : (pi += 2) {
+                const pred = loop_mphis.items[0].words[pi + 1];
+                if (label_map.get(pred)) |pidx| {
+                    if (pidx < min_idx) {
+                        min_idx = pidx;
+                        lm_norm_pred = pred;
+                    }
+                }
+            }
+        }
+    }
+    // #loop-merge-phi: declare a distinct carrier per divergent merge phi (read
+    // after the loop) + rename its result id so the generic OpPhi handler does not
+    // re-alias it to a single incoming (the `_lm` suffix is that handler's
+    // ownership skip). Phis already owned by another mechanism (#413 hoist, a
+    // loop-header phi, a materialized switch-merge phi) keep their owner:
+    // re-declaring would shadow a variable that owner's assignments target
+    // (the #630 shadow-redeclaration class).
+    for (loop_mphis.items) |phi| {
+        const owned = (if (g_hoisted_ids) |h| h.contains(phi.words[2]) else false) or
+            (if (g_phi_hdr) |ph| ph.get(phi.words[2]) != null else false);
+        if (owned) continue;
+        if (names.get(phi.words[2])) |existing| {
+            if (std.mem.endsWith(u8, existing, "_phi") or std.mem.endsWith(u8, existing, "_lm")) continue;
+        }
+        const t = try glslType(m, phi.words[1], names, alloc);
+        const lm_name = lmPhiVarNameGLSL(phi.words[2], alloc);
+        if (names.fetchPut(phi.words[2], lm_name) catch null) |old| alloc.free(old.value);
+        try w.print("    {s} {s};\n", .{ t, lm_name });
+    }
+    // #loop-merge-phi: publish the carriers (filled above) to emitBlock's
+    // break-to-loop-merge handler. Re-assigned here (same labels as the entry
+    // assignment, which predates the collection) because the list must be
+    // complete first (a stored .items slice would go stale on append). Do-while
+    // loops publish the labels but no carriers: their merge phis keep the
+    // generic-handler refusal.
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .continue_label = cont_lbl, .merge_phis = if (!is_do_while) loop_mphis.items else &.{} };
+
     // Loop-carried body phis: an OpPhi materialized inside the loop body (a
     // selection merge, e.g. `j = cond ? 40u : 30u`) whose result the CONTINUE
     // block reads (`i += int(j)`) runs a full iteration behind — the #237 hoist
@@ -4618,7 +4734,19 @@ fn emitWhileLoop(
         }
         cond_name = names.get(bc.words[1]) orelse cond_name;
     }
-    if (!is_do_while and !no_top_test) try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
+    if (!is_do_while and !no_top_test) {
+        // #loop-merge-phi fallback: assign each carrier its NORMAL-EXIT incoming
+        // every iteration. This is the value used on a normal exit, AND the safe
+        // fallback for any break path not explicitly handled below (a break that
+        // does not overwrite the carrier leaves the normal-exit value -- exactly
+        // the old alias-to-first-incoming behavior, so no regression on
+        // currently-passing loops). Handled break paths overwrite with the
+        // correct break incoming. Port of MSL.
+        for (loop_mphis.items) |phi| {
+            try emitLoopMergePhiCopyGLSL(m, names, phi, lm_norm_pred, "        ", w, alloc);
+        }
+        try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
+    }
     const body_idx = label_map.get(body_lbl) orelse m.instructions.len;
     if (body_idx < m.instructions.len) {
         var bi: usize = body_idx + 1;
@@ -4689,6 +4817,15 @@ fn emitWhileLoop(
                 if (no_top_test and (nml == null or nml.? == merge_lbl) and
                     (ntl == merge_lbl or (nfl != null and nfl.? == merge_lbl)))
                 {
+                    // #loop-merge-phi: the breaking path's exit test carries this
+                    // block's merge-phi copies (this BranchConditional's own block
+                    // is the exiting predecessor; blockLabelOf, not a tracked
+                    // current-label -- the walker jumps over Labels after nested
+                    // constructs, so a tracked one would be stale). Port of MSL's
+                    // #shortcircuit-exit copies.
+                    for (loop_mphis.items) |phi| {
+                        try emitLoopMergePhiCopyGLSL(m, names, phi, blockLabelOfGLSL(m, bi), "        ", w, alloc);
+                    }
                     if (ntl == merge_lbl) {
                         try w.print("        if ({s}) break;\n", .{ncn});
                     } else {
@@ -4802,6 +4939,14 @@ fn emitWhileLoop(
                         }
                     } else if (tl_is_trivial_break and fl_is_trivial_continue and !merge_has_phis) {
                         // if (cond) break; else continue;  (+ the false arm's latch copies)
+                        // #loop-merge-phi: the break carries the merge-phi copies for
+                        // the breaking arm's predecessor (the trivial break block
+                        // itself, or this branch's own block when the arm targets
+                        // the merge directly). Port of MSL.
+                        for (loop_mphis.items) |phi| {
+                            const bp = if (ntl == merge_lbl) blockLabelOfGLSL(m, bi) else ntl;
+                            try emitLoopMergePhiCopyGLSL(m, names, phi, bp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) break;\n", .{ncn});
                         const farm_lbl = if (nfl.? == cont_lbl) blockLabelOfGLSL(m, bi) else nfl.?;
                         if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
@@ -4824,6 +4969,12 @@ fn emitWhileLoop(
                         bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                     } else if (tl_is_trivial_break) {
                         // if (cond) break;
+                        // #loop-merge-phi: the break carries the merge-phi copies
+                        // for the breaking arm's predecessor (as above).
+                        for (loop_mphis.items) |phi| {
+                            const bp = if (ntl == merge_lbl) blockLabelOfGLSL(m, bi) else ntl;
+                            try emitLoopMergePhiCopyGLSL(m, names, phi, bp, "        ", w, alloc);
+                        }
                         try w.print("        if ({s}) break;\n", .{ncn});
                         if (nhe) {
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
@@ -4859,6 +5010,15 @@ fn emitWhileLoop(
                             while (pj < m.instructions.len) : (pj += 1) {
                                 const minst = m.instructions[pj];
                                 if (minst.op != .Phi) break;
+                                // #loop-merge-phi: a carrier renamed to `v<id>_lm` by
+                                // this loop's own pre-scan is owned there (declared
+                                // above the loop, assigned per exit path). This can
+                                // only happen when the selection's merge IS the
+                                // loop's merge; re-materializing it as a `_phi` temp
+                                // would shadow the carrier the exit paths write.
+                                if (names.get(minst.words[2])) |ex| {
+                                    if (std.mem.endsWith(u8, ex, "_lm")) continue;
+                                }
                                 if (minst.words.len >= 7) {
                                     body_phis.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
                                 }
@@ -5129,7 +5289,15 @@ fn emitBlock(
             // #loop-break-on-selection-merge: an OpBranch (from a side-effecting break
             // block) to the enclosing LOOP's merge is a structured break. Without this the
             // break is silently dropped (mandelbrot-loop's escape exit). Mirrors MSL.
+            // #loop-merge-phi: the break ALSO assigns each merge-phi carrier its
+            // incoming for THIS predecessor (the branch's own block), or the carrier
+            // keeps the top-of-loop normal-exit fallback and the post-loop read
+            // silently takes the wrong exit path's value.
             if (g_loop_merge_ctx) |ctx| if (ctx.merge_label == br_target) {
+                const cp_indent = std.fmt.allocPrint(alloc, "{s}    ", .{indent}) catch indent;
+                for (ctx.merge_phis) |phi| {
+                    try emitLoopMergePhiCopyGLSL(m, names, phi, blockLabelOfGLSL(m, i), cp_indent, w, alloc);
+                }
                 try w.print("{s}    break;\n", .{indent});
                 break;
             };
@@ -5190,6 +5358,15 @@ fn emitBlock(
                     while (mi3 < m.instructions.len) : (mi3 += 1) {
                         const minst = m.instructions[mi3];
                         if (minst.op != .Phi) break;
+                        // #loop-merge-phi: a carrier renamed to `v<id>_lm` by the
+                        // enclosing loop is owned there (reachable when this arm's
+                        // selection merge IS the loop's merge, e.g. a synthesized
+                        // SelectionMerge keyed to the loop merge); materializing it
+                        // as a `_phi` temp would shadow the carrier the loop's exit
+                        // paths write.
+                        if (names.get(minst.words[2])) |ex2| {
+                            if (std.mem.endsWith(u8, ex2, "_lm")) continue;
+                        }
                         if (minst.words.len >= 7) {
                             phi_decls2.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
                         }
@@ -5556,6 +5733,10 @@ fn emitInstruction(
             // If this Phi was already handled by emitBlock (name ends with _phi), skip
             if (names.get(inst.words[2])) |existing| {
                 if (std.mem.endsWith(u8, existing, "_phi")) return;
+                // #loop-merge-phi: a carrier renamed to `v<id>_lm` by the loop
+                // walker is owned there (declared above the loop, assigned per
+                // exit path). Same skip, same reason.
+                if (std.mem.endsWith(u8, existing, "_lm")) return;
             }
             if (inst.words.len < 4) return;
             // A #413-hoisted phi and a loop-header phi already have a correct variable
