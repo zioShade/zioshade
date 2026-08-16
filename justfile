@@ -417,6 +417,23 @@ cts-ingestion:
     {{zig}} build cli
     tools/cts_ingestion_sweep.sh tests/cts/graphicsfuzz
 
+# r2d.1: WebGPU CTS (webgpu:shader) ingestion credibility harness, WGSL backend leg.
+# The CTS tests are written IN WGSL and compiled by the implementation under test;
+# zioshade goes SPIR-V -> WGSL and cannot ingest WGSL, so the harness runs the only
+# available round trip on the CTS's own corpus (vendored at tests/webgpu_cts, extracted
+# from gpuweb/cts by driving the CTS's case enumeration headlessly):
+#   CTS WGSL --naga--> SPIR-V --zioshade--> WGSL --naga--> verdict
+# Per case: roundtrip-valid / upstream-convert-failed / zioshade-refused /
+# zioshade-invalid (exit 0 but broken output: the silent-wrong class) / CRASH.
+# NON-GATING, report-only (like cts-ingestion's breadth half): it does NOT claim any
+# WebGPU CTS pass (nothing executes; this is ingestion/lowering validity on a
+# CTS-derived slice, not conformance) and invalid output is expected breadth. The
+# committed reference is tests/webgpu_cts/baseline.txt. Fails LOUD on harness breakage
+# (missing naga, empty or manifest-inconsistent corpus) rather than a green zero.
+webgpu-cts:
+    {{zig}} build cli
+    tools/webgpu_cts_sweep.sh tests/webgpu_cts
+
 # ── benchmarks ───────────────────────────────────────────────────────
 
 # run wintty shader benchmark (ReleaseFast, 50 iterations)
