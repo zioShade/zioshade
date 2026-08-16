@@ -2875,6 +2875,92 @@ pub fn inlineShortCircuitPhi(
 /// SelectionMerge (if any -- cfg_structurize synthesizes one keyed to the LOOP merge)
 /// must agree with the loop merge, or the walker's exit rule would not fire and the
 /// loop would emit with no exit at all.
+/// #dowhile-nested-body: is a do-while whose body nests a loop/switch SAFE to lower
+/// natively on THIS loop? The native do-while path was only ever exercised on phi-free
+/// loops (#246's trivial bodies); the phi surfaces it never handled are:
+///   - DIVERGENT phis at the loop MERGE (the _lm copies reference body temps whose
+///     declarations sit below the copy -- invalid output, confirmed on _027),
+///   - leading phis at the CONTINUE/latch (latch-phi copies in a do-while context),
+///   - phis in the loop HEADER (loop-carried values -- the #237 top-hoist is skipped
+///     for do-while, so the carry machinery does not apply).
+/// With none of those, the body walker + bottom test is self-contained (verified by
+/// render on the glslang-produced fixture matrix). Anything else keeps its honest-error.
+/// #loopcond-not-exit: does the loop's CONTINUE region (cont_lbl .. its terminator)
+/// contain a conditional exit of its own (a BranchConditional targeting the loop
+/// merge -- a do-while back-edge)? A no-top-test while(true) emits only the BODY
+/// region's exits; an exit living in the continue region would be dropped and the
+/// loop would hang (review finding: a do-while whose compound back-edge condition
+/// defeats detectDoWhileBackEdge's single-level descent, with an if-with-break
+/// first body block). True => the caller keeps its honest error.
+pub fn continueRegionHasExit(
+    module: anytype,
+    cont_lbl: u32,
+    merge_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) bool {
+    const ci = label_map.get(cont_lbl) orelse return false;
+    var i: usize = ci + 1;
+    while (i < module.instructions.len) : (i += 1) {
+        const inst = module.instructions[i];
+        if (inst.op == .FunctionEnd) return false;
+        if (inst.op == .BranchConditional) {
+            if (inst.words.len >= 4 and (inst.words[2] == merge_lbl or inst.words[3] == merge_lbl)) return true;
+            return false; // a back-edge (or odd branch) without a merge target: not an exit
+        }
+        if (inst.op == .Branch or inst.op == .Label) return false; // unconditional latch: no exit
+    }
+    return false;
+}
+
+pub fn dowhileNestedBodyPhiSafe(
+    module: anytype,
+    loop_idx: usize,
+    merge_lbl: u32,
+    cont_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) bool {
+    // Loop-header phis: between the header Label and the LoopMerge at loop_idx.
+    var hi = loop_idx;
+    while (hi > 0) : (hi -= 1) {
+        if (module.instructions[hi].op == .Label) break;
+    }
+    var pi = hi + 1;
+    while (pi < loop_idx) : (pi += 1) {
+        if (module.instructions[pi].op == .Phi) return false;
+    }
+    // Divergent leading phis at the merge block.
+    if (label_map.get(merge_lbl)) |mi| {
+        var pj: usize = mi + 1;
+        while (pj < module.instructions.len) : (pj += 1) {
+            const minst = module.instructions[pj];
+            if (minst.op != .Phi) break;
+            if (minst.words.len < 7) continue; // <2 incoming pairs cannot diverge
+            var first_val: u32 = 0;
+            var diverges = false;
+            var wi: usize = 3;
+            while (wi + 1 < minst.words.len) : (wi += 2) {
+                if (wi == 3) {
+                    first_val = minst.words[wi];
+                } else if (minst.words[wi] != first_val) {
+                    diverges = true;
+                    break;
+                }
+            }
+            if (diverges) return false;
+        }
+    }
+    // Leading phis at the continue/latch block.
+    if (label_map.get(cont_lbl)) |ci| {
+        var ck: usize = ci + 1;
+        while (ck < module.instructions.len) : (ck += 1) {
+            const cinst = module.instructions[ck];
+            if (cinst.op != .Phi) break;
+            return false;
+        }
+    }
+    return true;
+}
+
 pub fn shortCircuitChainReachesMerge(
     module: anytype,
     chain_head: u32,

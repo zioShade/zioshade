@@ -5413,6 +5413,32 @@ fn emitSwitchMergeBreakHLSL(
     try w.print("{s}break;\n", .{indent});
 }
 
+/// #loopcond-not-exit: does the loop body (from `body_lbl` to the continue/merge
+/// labels) contain ANY branch whose target is the loop merge? A no-top-test
+/// while(true) needs at least one exit; verify before lowering.
+fn loopBodyReachesMergeHLSL(
+    module: *const ParsedModule,
+    body_lbl: u32,
+    merge_lbl: u32,
+    cont_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) bool {
+    const start = label_map.get(body_lbl) orelse return false;
+    var i: usize = start + 1;
+    while (i < module.instructions.len) : (i += 1) {
+        const inst = module.instructions[i];
+        if (inst.op == .FunctionEnd) return false;
+        if (inst.op == .Label and inst.words.len > 1 and (inst.words[1] == cont_lbl or inst.words[1] == merge_lbl)) return false;
+        if ((inst.op == .Branch or inst.op == .BranchConditional) and inst.words.len > 1) {
+            var wi: usize = if (inst.op == .Branch) 1 else 2;
+            while (wi < inst.words.len) : (wi += 1) {
+                if (inst.words[wi] == merge_lbl) return true;
+            }
+        }
+    }
+    return false;
+}
+
 fn emitWhileLoopHLSL(
     module: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -5573,12 +5599,13 @@ fn emitWhileLoopHLSL(
             // later operand (graphicsfuzz_001/_068: only the unclaimed-phi refusal kept
             // HLSL honest). If the chain verifies, lower it structurally; else refuse.
             {
+                var is_chain = false;
                 const sbc = module.instructions[bc_idx];
                 if (sbc.words.len >= 4 and sbc.words[2] != merge_lbl and sbc.words[3] != merge_lbl and
                     bc_idx > 0 and module.instructions[bc_idx - 1].op == .SelectionMerge and module.instructions[bc_idx - 1].words.len > 1)
                 {
                     // The selection's merge block starting with a BOOL OpPhi is what
-                    // makes this a short-circuit chain rather than an ordinary `if` in
+                    // makes this a SHORT-CIRCUIT chain rather than an ordinary `if` in
                     // the first body block (the do{if(c)break;}while(false) idiom's
                     // merge carries no bool phi).
                     if (label_map.get(module.instructions[bc_idx - 1].words[1])) |smi| {
@@ -5586,15 +5613,27 @@ fn emitWhileLoopHLSL(
                             const sphi = module.instructions[smi + 1];
                             if (sphi.op == .Phi and sphi.words.len > 1) {
                                 if (getDef(module, sphi.words[1])) |td| {
-                                    if (td.op == .TypeBool) {
-                                        if (common.shortCircuitChainReachesMerge(module, cond_lbl, merge_lbl, label_map)) {
-                                            no_top_test = true;
-                                            sc_chain_head = cond_lbl;
-                                        } else return error.UnsupportedShortCircuitLoopCond;
-                                    }
+                                    if (td.op == .TypeBool) is_chain = true;
                                 }
                             }
                         }
+                    }
+                    if (is_chain) {
+                        if (common.shortCircuitChainReachesMerge(module, cond_lbl, merge_lbl, label_map)) {
+                            no_top_test = true;
+                            sc_chain_head = cond_lbl;
+                        } else return error.UnsupportedShortCircuitLoopCond;
+                    } else {
+                        // #loopcond-not-exit (general form, mirror of GLSL): a cond-block
+                        // BranchConditional whose targets are NEITHER the loop merge is
+                        // NOT the exit test -- it is the FIRST STATEMENT of the body
+                        // (graphicsfuzz_017's `if (y<30) { ...; break; } else { ... }`
+                        // loop; taking it as the top test INVERTS the loop). Lower as
+                        // no-top-test; verify the body reaches the merge or refuse.
+                        if (loopBodyReachesMergeHLSL(module, cond_lbl, merge_lbl, cont_lbl, label_map) and !common.continueRegionHasExit(module, cont_lbl, merge_lbl, label_map)) {
+                            no_top_test = true;
+                            sc_chain_head = cond_lbl;
+                        } else return error.UnsupportedLoopCondBlock;
                     }
                 }
             }
@@ -5627,6 +5666,7 @@ fn emitWhileLoopHLSL(
     // condition can be rebuilt over persistent vars (so a body `continue` re-evaluates it at
     // the bottom test, outside the body block scope). Else honest-error.
     var body_has_cf = false;
+    var body_nested = false; // #dowhile-nested-body: nested loop/switch -> native do-while
     var dw_inlined: ?[]const u8 = null;
     if (is_do_while) {
         // The body is the LoopMerge's OpBranch target, NOT the back-edge BranchCond
@@ -5636,8 +5676,27 @@ fn emitWhileLoopHLSL(
         dw_loop_when_true = (bc.words[2] == header_lbl);
 
         const bidx = label_map.get(body_lbl) orelse module.instructions.len;
+        // #dowhile-nested-body: PRE-SCAN the body region (body -> continue label)
+        // for a nested loop/switch BEFORE the strict trivial-body validation: the
+        // strict scan rejects a branch into the nested region (a target that is
+        // neither the continue nor the merge) before it could ever reach the
+        // nested LoopMerge. A nested body routes to the NATIVE do-while (its body
+        // emission runs through the full walker, and a body continue re-evaluates
+        // the test -- pattern C skips it, fixture-proven miscompile).
+        {
+            var pidx = bidx + 1;
+            while (pidx < module.instructions.len) : (pidx += 1) {
+                const t = module.instructions[pidx];
+                if (t.op == .Label and t.words.len > 1 and t.words[1] == cont_lbl) break;
+                if (t.op == .FunctionEnd) break;
+                if (t.op == .LoopMerge or t.op == .Switch) {
+                    body_nested = true;
+                    break;
+                }
+            }
+        }
         var sidx = bidx + 1;
-        while (sidx < module.instructions.len) : (sidx += 1) {
+        while (!body_nested and sidx < module.instructions.len) : (sidx += 1) {
             const t = module.instructions[sidx];
             if (t.op == .Label and t.words.len > 1 and t.words[1] == cont_lbl) break;
             if (t.op == .FunctionEnd) break;
@@ -5657,10 +5716,17 @@ fn emitWhileLoopHLSL(
         // `do { body } while(<cond>);`. If a phi cond cannot be rebuilt, fail LOUD:
         // the straight-line break-test path would otherwise read an unmaterialised phi
         // (silent-wrong — the hazard that kept #77 honest-errored until S1+S2 landed).
+        // #dowhile-nested-body: the native path is only verified for phi-free
+        // do-whiles (the _lm/latch/carry machinery was never exercised here; _027
+        // emits use-before-declaration merge-phi copies under pattern C). Keep the
+        // honest error when any of those phi surfaces exists.
+        if (body_nested and !common.dowhileNestedBodyPhiSafe(module, loop_idx, merge_lbl, cont_lbl, label_map)) {
+            return error.UnsupportedDoWhileNestedBody;
+        }
         const cond_is_phi = if (getDef(module, bc.words[1])) |cdef| cdef.op == .Phi else false;
         if (cond_is_phi) {
             dw_inlined = common.tryInlineDoWhileCond(module, names, bc.words[1], label_map, alloc, std450NameU32) orelse return error.UnsupportedDoWhileCompoundCond;
-        } else if (body_has_cf) {
+        } else if (body_has_cf or body_nested) {
             dw_inlined = common.tryInlineDoWhileCond(module, names, bc.words[1], label_map, alloc, std450NameU32) orelse return error.UnstructuredControlFlow;
         }
     }
@@ -6061,6 +6127,13 @@ fn emitWhileLoopHLSL(
                 continue;
             }
             if (binst.op == .Branch) {
+                // #loopcond-not-exit: on a no-top-test loop, a walker-level OpBranch to
+                // the loop merge is the loop exit -- emit the break (arm-walker form is
+                // handled by emitBlock). The old silent skip left the loop exit-less.
+                if (no_top_test and binst.words.len > 1 and binst.words[1] == merge_lbl) {
+                    try w.writeAll("        break;\n");
+                    continue;
+                }
                 if (binst.words.len > 1 and binst.words[1] == cont_lbl) {
                     // #latch-phi: a branch to the continue carries this block's
                     // latch-phi copies (the old skip dropped them silently, so the
@@ -6585,6 +6658,24 @@ fn emitBlock(
                     try w.print("{s}    break;\n", .{indent});
                     break;
                 };
+            }
+            // #loop-break-on-selection-merge (HLSL twin of GLSL/MSL): an OpBranch to
+            // the enclosing LOOP's merge from inside a nested selection arm is a
+            // `break` out of the loop. Previously emitBlock ended SILENTLY here --
+            // the loop exit never fired (loopcond_not_exit: the `acc = 2.0;` arm's
+            // break vanished and the loop spun forever). Structured SPIR-V forbids
+            // an arm branch to a non-enclosing loop's merge, so map iteration is
+            // safe (same argument as the #switch-case-continue check above).
+            if (inst.words.len > 1) {
+                if (g_loop_merge_map_h) |lmm| {
+                    var lit = lmm.valueIterator();
+                    while (lit.next()) |li| {
+                        if (li.merge == inst.words[1]) {
+                            try w.print("{s}    break;\n", .{indent});
+                            break;
+                        }
+                    }
+                }
             }
             break; // branch to somewhere else (e.g., loop back-edge)
         }
