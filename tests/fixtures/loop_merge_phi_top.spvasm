@@ -1,0 +1,74 @@
+; Minimal DETERMINISTIC reproducer for the top-level loop-merge-phi shape
+; (#635 follow-up; sibling of loop_break_flag_valid.spv). The same divergent
+; phi at a LOOP's merge block (a value differing on the normal exit vs the
+; break), but at TOP LEVEL (the emitBody path) and with a TRIVIAL break block
+; (Label + Branch only), so the break-path copy comes from the walker's
+; trivial-break fast path (`if (c) break;` with no arm body).
+;   int acc = 0;
+;   for (int i = 0; i < 4; i++) { if (fragY >= 0.5) break; acc += 1; }
+;   // rv = (broke early) ? i*7 : acc+100
+;   outColor = vec4(float(rv));
+; Expected: y>=0.5 -> 0 (break at i==0, 0*7); y<0.5 -> 104 (4 iterations).
+; In-bounds, no chaos, hand-computable, gl_FragCoord.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor %gl_FragCoord
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %outColor Location 0
+OpDecorate %gl_FragCoord BuiltIn FragCoord
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%bool = OpTypeBool
+%v4float = OpTypeVector %float 4
+%ptr_v4_in = OpTypePointer Input %v4float
+%ptr_v4_out = OpTypePointer Output %v4float
+
+%int_0 = OpConstant %int 0
+%int_1 = OpConstant %int 1
+%int_4 = OpConstant %int 4
+%int_7 = OpConstant %int 7
+%int_100 = OpConstant %int 100
+%float_0_5 = OpConstant %float 0.5
+%float_1 = OpConstant %float 1
+
+%outColor = OpVariable %ptr_v4_out Output
+%gl_FragCoord = OpVariable %ptr_v4_in Input
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%fc = OpLoad %v4float %gl_FragCoord
+%fy = OpCompositeExtract %float %fc 1
+OpBranch %lhdr
+%lhdr = OpLabel
+%i = OpPhi %int %int_0 %entry %inext %lcont
+OpLoopMerge %lmerge %lcont None
+OpBranch %lcond
+%lcond = OpLabel
+%ictl = OpSLessThan %bool %i %int_4
+%normval = OpIAdd %int %i %int_100
+OpBranchConditional %ictl %lbody %lmerge
+%lbody = OpLabel
+; padding value: keeps the emitted-name numbering stable (v16) so the break
+; value is v17 and the break condition v18, matching the pinned test strings.
+%pad = OpIAdd %int %i %int_1
+%brkval = OpIMul %int %i %int_7
+%ygt = OpFOrdGreaterThanEqual %bool %fy %float_0_5
+OpSelectionMerge %lbmerge None
+OpBranchConditional %ygt %brk %lbmerge
+%brk = OpLabel
+OpBranch %lmerge
+%lbmerge = OpLabel
+OpBranch %lcont
+%lcont = OpLabel
+%inext = OpIAdd %int %i %int_1
+OpBranch %lhdr
+%lmerge = OpLabel
+%rv = OpPhi %int %normval %lcond %brkval %brk
+%rf = OpConvertSToF %float %rv
+%color = OpCompositeConstruct %v4float %rf %rf %rf %float_1
+OpStore %outColor %color
+OpReturn
+OpFunctionEnd
