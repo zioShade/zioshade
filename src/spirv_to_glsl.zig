@@ -4358,7 +4358,7 @@ fn emitWhileLoop(
                         // body are the exits (emitBlock's #loop-break-on-selection-merge
                         // + the walker's no_top_test break rules). Verify the body
                         // actually reaches the merge, else the loop would be exit-less.
-                        if (loopBodyReachesMergeGLSL(m, cond_lbl, merge_lbl, cont_lbl, label_map)) {
+                        if (loopBodyReachesMergeGLSL(m, cond_lbl, merge_lbl, cont_lbl, label_map) and !common.continueRegionHasExit(m, cont_lbl, merge_lbl, label_map)) {
                             no_top_test = true;
                             sc_chain_head = cond_lbl;
                         } else return error.UnsupportedLoopCondBlock;

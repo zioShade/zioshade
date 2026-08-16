@@ -5532,7 +5532,7 @@ fn emitWhileLoopHLSL(
                         // (graphicsfuzz_017's `if (y<30) { ...; break; } else { ... }`
                         // loop; taking it as the top test INVERTS the loop). Lower as
                         // no-top-test; verify the body reaches the merge or refuse.
-                        if (loopBodyReachesMergeHLSL(module, cond_lbl, merge_lbl, cont_lbl, label_map)) {
+                        if (loopBodyReachesMergeHLSL(module, cond_lbl, merge_lbl, cont_lbl, label_map) and !common.continueRegionHasExit(module, cont_lbl, merge_lbl, label_map)) {
                             no_top_test = true;
                             sc_chain_head = cond_lbl;
                         } else return error.UnsupportedLoopCondBlock;

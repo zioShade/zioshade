@@ -2885,6 +2885,33 @@ pub fn inlineShortCircuitPhi(
 ///     for do-while, so the carry machinery does not apply).
 /// With none of those, the body walker + bottom test is self-contained (verified by
 /// render on the glslang-produced fixture matrix). Anything else keeps its honest-error.
+/// #loopcond-not-exit: does the loop's CONTINUE region (cont_lbl .. its terminator)
+/// contain a conditional exit of its own (a BranchConditional targeting the loop
+/// merge -- a do-while back-edge)? A no-top-test while(true) emits only the BODY
+/// region's exits; an exit living in the continue region would be dropped and the
+/// loop would hang (review finding: a do-while whose compound back-edge condition
+/// defeats detectDoWhileBackEdge's single-level descent, with an if-with-break
+/// first body block). True => the caller keeps its honest error.
+pub fn continueRegionHasExit(
+    module: anytype,
+    cont_lbl: u32,
+    merge_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) bool {
+    const ci = label_map.get(cont_lbl) orelse return false;
+    var i: usize = ci + 1;
+    while (i < module.instructions.len) : (i += 1) {
+        const inst = module.instructions[i];
+        if (inst.op == .FunctionEnd) return false;
+        if (inst.op == .BranchConditional) {
+            if (inst.words.len >= 4 and (inst.words[2] == merge_lbl or inst.words[3] == merge_lbl)) return true;
+            return false; // a back-edge (or odd branch) without a merge target: not an exit
+        }
+        if (inst.op == .Branch or inst.op == .Label) return false; // unconditional latch: no exit
+    }
+    return false;
+}
+
 pub fn dowhileNestedBodyPhiSafe(
     module: anytype,
     loop_idx: usize,
