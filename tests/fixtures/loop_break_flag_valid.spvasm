@@ -1,0 +1,102 @@
+; Minimal DETERMINISTIC reproducer for the loop-merge-phi + break-to-switch-merge
+; gap (#628 follow-up). Same VALID shape as loop_break_const_valid.spv (a
+; BranchConditional arm of the loop-merge block targets the switch merge), but the
+; LOOP's merge block now ALSO carries phis: a bool flag (%fg: false on the normal
+; exit, true on the break) and an int value (%rv), both incoming from the loop's
+; two exits (%lcond normal, %brk break). This is what a producer-lowered flag break
+; looks like when the value is carried through the loop merge instead of being
+; recomputed as a constant there.
+;   int r;
+;   switch (sel) {
+;     case 1: {
+;       int rv; bool out = false;
+;       for (int i = 0; i < 4; i++) {
+;         if (fragY >= 0.5) { rv = i*7 + 3; out = true; break; }
+;       }
+;       if (out) { r = rv; goto out_of_switch; }
+;       r = rv + 1; break;
+;     }
+;     default: r = 9; break;
+;   }
+; out_of_switch: outColor = vec4(float(r));
+; Expected: y>=0.5 & sel==1 -> 3 (break at i==0); y<0.5 & sel==1 -> 105 (4
+; iterations, acc==4); else 9. In-bounds, no chaos, hand-computable, gl_FragCoord.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor %gl_FragCoord
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %outColor Location 0
+OpDecorate %gl_FragCoord BuiltIn FragCoord
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%bool = OpTypeBool
+%v4float = OpTypeVector %float 4
+%ptr_v4_in = OpTypePointer Input %v4float
+%ptr_v4_out = OpTypePointer Output %v4float
+
+%int_0 = OpConstant %int 0
+%int_1 = OpConstant %int 1
+%int_3 = OpConstant %int 3
+%int_4 = OpConstant %int 4
+%int_7 = OpConstant %int 7
+%int_9 = OpConstant %int 9
+%int_100 = OpConstant %int 100
+%float_0_5 = OpConstant %float 0.5
+%float_1 = OpConstant %float 1
+%false = OpConstantFalse %bool
+%true = OpConstantTrue %bool
+
+%outColor = OpVariable %ptr_v4_out Output
+%gl_FragCoord = OpVariable %ptr_v4_in Input
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%fc = OpLoad %v4float %gl_FragCoord
+%fx = OpCompositeExtract %float %fc 0
+%fy = OpCompositeExtract %float %fc 1
+%seli = OpConvertFToS %int %fx
+OpSelectionMerge %swmerge None
+OpSwitch %seli %default 1 %case1
+%case1 = OpLabel
+%i = OpPhi %int %int_0 %entry %inext %lcont
+%acc = OpPhi %int %int_0 %entry %accnext %lcont
+OpLoopMerge %lmerge %lcont None
+OpBranch %lcond
+%lcond = OpLabel
+%ictl = OpSLessThan %bool %i %int_4
+%normval = OpIAdd %int %acc %int_100
+OpBranchConditional %ictl %lbody %lmerge
+%lbody = OpLabel
+%ygt = OpFOrdGreaterThanEqual %bool %fy %float_0_5
+OpSelectionMerge %lbmerge None
+OpBranchConditional %ygt %brk %lbmerge
+%brk = OpLabel
+%bval = OpIMul %int %i %int_7
+%bval2 = OpIAdd %int %bval %int_3
+OpBranch %lmerge
+%lbmerge = OpLabel
+OpBranch %lcont
+%lcont = OpLabel
+%inext = OpIAdd %int %i %int_1
+%accnext = OpIAdd %int %acc %int_1
+OpBranch %case1
+%lmerge = OpLabel
+%fg = OpPhi %bool %false %lcond %true %brk
+%rv = OpPhi %int %normval %lcond %bval2 %brk
+OpSelectionMerge %afterl None
+OpBranchConditional %fg %swmerge %afterl
+%afterl = OpLabel
+%mval = OpIAdd %int %rv %int_1
+OpBranch %swmerge
+%default = OpLabel
+OpBranch %swmerge
+%swmerge = OpLabel
+%r = OpPhi %int %rv %lmerge %mval %afterl %int_9 %default
+%rf = OpConvertSToF %float %r
+%color = OpCompositeConstruct %v4float %rf %rf %rf %float_1
+OpStore %outColor %color
+OpReturn
+OpFunctionEnd

@@ -1823,3 +1823,107 @@ test "HLSL copies the switch-merge phi for a BranchConditional arm targeting the
     defer alloc.free(hlsl);
     try expectOrdered(hlsl, "v48_phi = 3;", "break;");
 }
+
+// #loop-merge-phi (port of MSL's loop-merge-phi materialization to GLSL/HLSL):
+// a phi at a loop's MERGE block selects between the values arriving from each
+// exit path (the normal exit + every break). GLSL/HLSL had no mechanism owning
+// such a phi, so their generic OpPhi handler honest-errored UnsupportedPhiAlias
+// while MSL lowered it (declared a `v<id>_lm` carrier above the loop, assigned
+// the per-exit-path incoming at every site that leaves the loop). Two fixtures,
+// one per entry path:
+//   * loop_break_flag_valid: #628 Shape B (a BranchConditional arm of the
+//     loop-merge block targets the switch merge) where the loop's merge ALSO
+//     carries phis (a bool break flag + the carried value). The loop sits in a
+//     switch case: emitBody's switch walker -> emitBlock -> emitWhileLoop (the
+//     emitBlock path), and the break block is side-effecting (computes then
+//     branches), so the copies come from emitBlock's break-to-loop-merge site.
+//   * loop_merge_phi_top: the same phi shape at TOP LEVEL (the emitBody path),
+//     with a TRIVIAL break block (Label + Branch), so the copies come from the
+//     walker's trivial-break fast path (`if (c) break;` with no arm body).
+// Both are VALID structured SPIR-V (spirv-val clean) and hand-computable.
+const LOOP_BREAK_FLAG_VALID_SPV = @embedFile("fixtures/loop_break_flag_valid.spv");
+const LOOP_MERGE_PHI_TOP_SPV = @embedFile("fixtures/loop_merge_phi_top.spv");
+const LOOP_BREAK_IN_IF_SPV = @embedFile("fixtures/loop_break_in_if.spv");
+
+test "MSL materializes a loop-merge phi in a switch case as a carrier written on every exit path (#loop-merge-phi)" {
+    const msl = try crossMsl(LOOP_BREAK_FLAG_VALID_SPV);
+    defer alloc.free(msl);
+    // The carriers (bool flag %fg -> v46_lm, value %rv -> v47_lm) are declared
+    // above the loop and written on BOTH exit paths: the top-of-loop
+    // normal-exit fallback (before the top test) and the break site (before its
+    // break). Post-loop, the merge block's branch reads the flag carrier.
+    try expectOrdered(msl, "bool v46_lm;", "while (true)");
+    try expectOrdered(msl, "int v47_lm;", "while (true)");
+    try expectOrdered(msl, "v47_lm = v18;", "if (!(v17)) break;");
+    try expectOrdered(msl, "v46_lm = true;", "break;");
+    try expectOrdered(msl, "v47_lm = v21;", "break;");
+    try expectOrdered(msl, "if (v46_lm)", "v50_phi = v47_lm;");
+}
+
+test "GLSL materializes a loop-merge phi in a switch case as a carrier written on every exit path (#loop-merge-phi)" {
+    // Baseline: UnsupportedPhiAlias refusal (the merge-block phi reached the
+    // generic OpPhi walker, which refuses rather than alias to one incoming).
+    const glsl = try crossGlsl(LOOP_BREAK_FLAG_VALID_SPV);
+    defer alloc.free(glsl);
+    try expectOrdered(glsl, "bool v46_lm;", "while (true)");
+    try expectOrdered(glsl, "int v47_lm;", "while (true)");
+    try expectOrdered(glsl, "v47_lm = v18;", "if (!(v17)) break;");
+    try expectOrdered(glsl, "v46_lm = true;", "break;");
+    try expectOrdered(glsl, "v47_lm = v21;", "break;");
+    try expectOrdered(glsl, "if (v46_lm)", "v27_phi = v47_lm;");
+}
+
+test "HLSL materializes a loop-merge phi in a switch case as a carrier written on every exit path (#loop-merge-phi)" {
+    // Baseline: UnsupportedPhiAlias refusal, same as GLSL.
+    const hlsl = try crossHlsl(LOOP_BREAK_FLAG_VALID_SPV);
+    defer alloc.free(hlsl);
+    try expectOrdered(hlsl, "bool v46_lm;", "while (true)");
+    try expectOrdered(hlsl, "int v47_lm;", "while (true)");
+    try expectOrdered(hlsl, "v47_lm = v18;", "if (!(v17)) break;");
+    try expectOrdered(hlsl, "v46_lm = true;", "break;");
+    try expectOrdered(hlsl, "v47_lm = v21;", "break;");
+    try expectOrdered(hlsl, "if (v46_lm)", "v50_phi = v47_lm;");
+}
+
+test "MSL materializes a top-level loop-merge phi with a trivial break block (#loop-merge-phi)" {
+    const msl = try crossMsl(LOOP_MERGE_PHI_TOP_SPV);
+    defer alloc.free(msl);
+    // Normal-exit fallback (%normval -> v15) before the top test; the trivial
+    // break arm's copy (%x -> v17) before its `if (c) break;`; the post-loop
+    // read uses the carrier.
+    try expectOrdered(msl, "int v36_lm;", "while (true)");
+    try expectOrdered(msl, "v36_lm = v15;", "if (!(v14)) break;");
+    try expectOrdered(msl, "v36_lm = v17;", "if (v18) break;");
+    try std.testing.expect(std.mem.indexOf(u8, msl, "float(v36_lm);") != null);
+}
+
+test "GLSL materializes a top-level loop-merge phi with a trivial break block (#loop-merge-phi)" {
+    // Baseline: UnsupportedPhiAlias refusal.
+    const glsl = try crossGlsl(LOOP_MERGE_PHI_TOP_SPV);
+    defer alloc.free(glsl);
+    try expectOrdered(glsl, "int v36_lm;", "while (true)");
+    try expectOrdered(glsl, "v36_lm = v15;", "if (!(v14)) break;");
+    try expectOrdered(glsl, "v36_lm = v17;", "if (v18) break;");
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "float(v36_lm);") != null);
+}
+
+test "HLSL materializes a top-level loop-merge phi with a trivial break block (#loop-merge-phi)" {
+    // Baseline: UnsupportedPhiAlias refusal.
+    const hlsl = try crossHlsl(LOOP_MERGE_PHI_TOP_SPV);
+    defer alloc.free(hlsl);
+    try expectOrdered(hlsl, "int v36_lm;", "while (true)");
+    try expectOrdered(hlsl, "v36_lm = v15;", "if (!(v14)) break;");
+    try expectOrdered(hlsl, "v36_lm = v17;", "if (v18) break;");
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "(float)(v36_lm);") != null);
+}
+
+test "HLSL emits the break for a side-effecting break block inside a selection (#loop-break-on-selection-merge)" {
+    // Baseline (HLSL-only): the arm's terminal OpBranch to the enclosing LOOP's
+    // merge emitted NOTHING -- the `if (c) { <compute>; } continue;` never broke,
+    // so the loop always ran to its top-test bound (silent-wrong; the
+    // mandelbrot-loop escape-exit class GLSL/MSL fixed long ago). The port is
+    // required by #loop-merge-phi: it is the break site the carrier copies ride on.
+    const hlsl = try crossHlsl(LOOP_BREAK_IN_IF_SPV);
+    defer alloc.free(hlsl);
+    try expectOrdered(hlsl, "int v16 = v13 + 1;", "break;");
+}
