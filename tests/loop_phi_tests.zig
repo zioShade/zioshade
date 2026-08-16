@@ -1911,7 +1911,7 @@ test "GLSL/MSL/HLSL do not invert a cond-block selection into the loop exit (#lo
 //     walker's trivial-break fast path (`if (c) break;` with no arm body).
 // Both are VALID structured SPIR-V (spirv-val clean) and hand-computable.
 const LOOP_BREAK_FLAG_VALID_SPV = @embedFile("fixtures/loop_break_flag_valid.spv");
-// // TODO(#635-followup): fixtures loop_merge_phi_top.spv / loop_break_in_if.spv were never committed; tests disabled until they land (main was red on the missing embedFiles).
+// const LOOP_MERGE_PHI_TOP_SPV = @embedFile("fixtures/loop_merge_phi_top.spv");
 // const LOOP_BREAK_IN_IF_SPV = @embedFile("fixtures/loop_break_in_if.spv");
 
 test "MSL materializes a loop-merge phi in a switch case as a carrier written on every exit path (#loop-merge-phi)" {
@@ -1954,7 +1954,8 @@ test "HLSL materializes a loop-merge phi in a switch case as a carrier written o
     try expectOrdered(hlsl, "if (v46_lm)", "v50_phi = v47_lm;");
 }
 
-// // TODO(#635-followup): uses the missing fixtures above.
+// TODO(#635-followup): disabled -- fixtures never committed; re-enable when they land.
+// test "MSL materializes a top-level loop-merge phi with a trivial break block (#loop-merge-phi)" {
 //     const msl = try crossMsl(LOOP_MERGE_PHI_TOP_SPV);
 //     defer alloc.free(msl);
 //     // Normal-exit fallback (%normval -> v15) before the top test; the trivial
@@ -1966,6 +1967,7 @@ test "HLSL materializes a loop-merge phi in a switch case as a carrier written o
 //     try std.testing.expect(std.mem.indexOf(u8, msl, "float(v36_lm);") != null);
 // }
 
+// TODO(#635-followup): disabled -- fixtures never committed; re-enable when they land.
 // test "GLSL materializes a top-level loop-merge phi with a trivial break block (#loop-merge-phi)" {
 //     // Baseline: UnsupportedPhiAlias refusal.
 //     const glsl = try crossGlsl(LOOP_MERGE_PHI_TOP_SPV);
@@ -1976,6 +1978,7 @@ test "HLSL materializes a loop-merge phi in a switch case as a carrier written o
 //     try std.testing.expect(std.mem.indexOf(u8, glsl, "float(v36_lm);") != null);
 // }
 
+// TODO(#635-followup): disabled -- fixtures never committed; re-enable when they land.
 // test "HLSL materializes a top-level loop-merge phi with a trivial break block (#loop-merge-phi)" {
 //     // Baseline: UnsupportedPhiAlias refusal.
 //     const hlsl = try crossHlsl(LOOP_MERGE_PHI_TOP_SPV);
@@ -1986,6 +1989,7 @@ test "HLSL materializes a loop-merge phi in a switch case as a carrier written o
 //     try std.testing.expect(std.mem.indexOf(u8, hlsl, "(float)(v36_lm);") != null);
 // }
 
+// TODO(#635-followup): disabled -- fixtures never committed; re-enable when they land.
 // test "HLSL emits the break for a side-effecting break block inside a selection (#loop-break-on-selection-merge)" {
 //     // Baseline (HLSL-only): the arm's terminal OpBranch to the enclosing LOOP's
 //     // merge emitted NOTHING -- the `if (c) { <compute>; } continue;` never broke,
