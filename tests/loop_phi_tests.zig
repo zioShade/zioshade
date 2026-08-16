@@ -1823,3 +1823,72 @@ test "HLSL copies the switch-merge phi for a BranchConditional arm targeting the
     defer alloc.free(hlsl);
     try expectOrdered(hlsl, "v48_phi = 3;", "break;");
 }
+
+// #dowhile-nested-body: a do-while whose body nests a loop/switch was flat-out
+// refused ("nested loop or switch sharing the do-while condition is not yet
+// supported") -- the single largest remaining CTS refusal class (14 shaders). The
+// body now routes to the NATIVE do{}while(): its body emission already runs through
+// the full walker, and a body `continue` re-evaluates the test. Pattern C
+// (while(true) + bottom test) is WRONG for body-continues: the emitted `continue`
+// skips the bottom test the source's continue would evaluate (fixture-proven
+// divergence; dowhile_body_continue.spv is the discriminating fixture). Fixtures
+// are glslang-produced real source. Render-verified MATCH vs naga (MSL) and via
+// the GLSL round-trip (naga both sides).
+const DOWHILE_NESTED_LOOP_SPV = @embedFile("fixtures/dowhile_nested_loop.spv");
+
+test "GLSL/MSL/HLSL lower a do-while with a nested loop body (#dowhile-nested-body)" {
+    const glsl = try crossGlsl(DOWHILE_NESTED_LOOP_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "} while (") != null);
+    const msl = try crossMsl(DOWHILE_NESTED_LOOP_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "} while (") != null);
+    const hlsl = try crossHlsl(DOWHILE_NESTED_LOOP_SPV);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "} while (") != null);
+}
+
+const DOWHILE_BODY_CONTINUE_SPV = @embedFile("fixtures/dowhile_body_continue.spv");
+
+test "GLSL/MSL/HLSL keep a do-while body continue's test semantics (#dowhile-nested-body)" {
+    const glsl = try crossGlsl(DOWHILE_BODY_CONTINUE_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "do\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "continue;") != null);
+    const msl = try crossMsl(DOWHILE_BODY_CONTINUE_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "do\n") != null);
+    const hlsl = try crossHlsl(DOWHILE_BODY_CONTINUE_SPV);
+    defer alloc.free(hlsl);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl, "do\n") != null);
+}
+
+// #loopcond-not-exit (general form): a Pattern-A cond-block BranchConditional whose
+// targets are NEITHER the loop merge is not the exit test at all -- it is the FIRST
+// STATEMENT of the body (a selection whose arms break/continue deeper). Taking it as
+// the top test INVERTS the loop (`if (!(c)) break;` -- the wrong arm exits; found as
+// graphicsfuzz_017's whole-frame stable divergence). Fixture: hand-assembled
+// `while(true) { if (i >= 1) { acc = 2.0; break; } else { acc += 0.5; i++; } }`:
+// the correct output runs the else once then breaks with acc = 2.0; the inverted
+// form breaks immediately with acc = 0.0. Render-verified MATCH vs naga (MSL).
+const LOOPCOND_NOT_EXIT_SPV = @embedFile("fixtures/loopcond_not_exit.spv");
+
+test "GLSL/MSL/HLSL do not invert a cond-block selection into the loop exit (#loopcond-not-exit)" {
+    const glsl = try crossGlsl(LOOPCOND_NOT_EXIT_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    const ai = std.mem.indexOf(u8, glsl, "acc = 2.0;") orelse return error.MissingArm;
+    try std.testing.expect(std.mem.indexOf(u8, glsl[ai..@min(ai + 80, glsl.len)], "break;") != null);
+    const msl = try crossMsl(LOOPCOND_NOT_EXIT_SPV);
+    defer alloc.free(msl);
+    try std.testing.expect(std.mem.indexOf(u8, msl, "while (true)") != null);
+    const mi2 = std.mem.indexOf(u8, msl, "acc = 2.0;") orelse return error.MissingArm;
+    try std.testing.expect(std.mem.indexOf(u8, msl[mi2..@min(mi2 + 80, msl.len)], "break;") != null);
+    const hlsl = try crossHlsl(LOOPCOND_NOT_EXIT_SPV);
+    defer alloc.free(hlsl);
+    const hi2 = std.mem.indexOf(u8, hlsl, "acc = 2.0;") orelse return error.MissingArm;
+    try std.testing.expect(std.mem.indexOf(u8, hlsl[hi2..@min(hi2 + 80, hlsl.len)], "break;") != null);
+}
