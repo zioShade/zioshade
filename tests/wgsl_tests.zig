@@ -7734,3 +7734,462 @@ test "WGSL classifies a far OpLoopMerge loop-header phi correctly (#phi-peek-win
     try assertContains(wgsl, "var v135: i32 = v23;");
     try nagaValidateOrSkip(wgsl, "phi-peek-window 015");
 }
+
+// ---------------------------------------------------------------------------
+// #wgsl-cts: undeclared-identifier / invalid-output classes found by the
+// WebGPU CTS round-trip harness (tools/webgpu_cts_sweep.sh). The SPIR-V shapes
+// below mirror what naga (the upstream WGSL -> SPIR-V leg) actually emits, which
+// glslang never produces, so each fixture is authored with spirv-as.
+// ---------------------------------------------------------------------------
+
+// OpConstantNull had no literal name in collectNames, so every null id kept its
+// generic v{N} counter name. Any use site then referenced an identifier nothing
+// declared: naga emits OpConstantNull for every plain `var x: T;` (as the
+// OpVariable initializer) and for zero-value composites, which made this the
+// largest undeclared-id source on naga-produced SPIR-V (39 CTS cases at the
+// first measurement). The null must fold to the zero literal of its own type.
+test "WGSL folds OpConstantNull uses to zero literals, not undeclared vN names (#wgsl-cts)" {
+    const spv = try assembleSpirv("null_uses",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\     %v3float = OpTypeVector %float 3
+        \\     %v4float = OpTypeVector %float 4
+        \\         %po4 = OpTypePointer Output %v4float
+        \\         %pf3 = OpTypePointer Function %v3float
+        \\       %null3 = OpConstantNull %v3float
+        \\       %null4 = OpConstantNull %v4float
+        \\           %o = OpVariable %po4 Output
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\          %t = OpVariable %pf3 Function %null3
+        \\               OpStore %o %null4
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // the local var initializer is the zero literal, and the output return is
+    // the zero composite, not a bare vN identifier
+    try assertContains(wgsl, "= vec3f();");
+    try assertContains(wgsl, "vec4f();");
+    try nagaValidateOrSkip(wgsl, "null-uses");
+}
+
+// naga lowers `return Struct()` in a flattened-entry shader to OpConstantNull of
+// the io struct plus one OpCompositeExtract per output. The io struct is never
+// declared in the output, so `<struct>().<member>` was an undeclared identifier;
+// the extract itself must fold to the zero literal of its own result type.
+test "WGSL folds OpCompositeExtract over an OpConstantNull struct to a zero literal (#wgsl-cts)" {
+    const spv = try assembleSpirv("null_struct_extract",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Vertex %main "main" %pos %col
+        \\               OpDecorate %pos BuiltIn Position
+        \\               OpDecorate %col Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\     %v4float = OpTypeVector %float 4
+        \\     %struct = OpTypeStruct %v4float %v4float
+        \\         %po4 = OpTypePointer Output %v4float
+        \\       %nulls = OpConstantNull %struct
+        \\         %pos = OpVariable %po4 Output
+        \\         %col = OpVariable %po4 Output
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %e0 = OpCompositeExtract %v4float %nulls 0
+        \\         %e1 = OpCompositeExtract %v4float %nulls 1
+        \\               OpStore %pos %e0
+        \\               OpStore %col %e1
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "= vec4f();");
+    // the old emission leaked the undeclared struct constructor + accessor
+    try assertNotContains(wgsl, "().x");
+    try nagaValidateOrSkip(wgsl, "null-struct-extract");
+}
+
+// A depth-ONLY fragment (no @location output) got a fabricated
+// `@location(0) color: vec4f` field no captured value could fill, its
+// OpStore/OpLoad pair on the FragDepth output referenced an undeclared name,
+// and the synthesized return hardcoded 0.0 (silent-wrong VALUE). The store skip
+// is now id-based, a read-back depth becomes a real local var, and the struct
+// carries only the depth field.
+test "WGSL lowers a depth-only fragment with read-back FragDepth honestly (#wgsl-cts)" {
+    const spv = try assembleSpirv("depth_only",
+        \\               OpCapability Shader
+        \\          %1 = OpExtInstImport "GLSL.std.450"
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %d
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpExecutionMode %main DepthReplacing
+        \\               OpDecorate %d BuiltIn FragDepth
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\          %pf = OpTypePointer Output %float
+        \\   %float_0_5 = OpConstant %float 0.5
+        \\     %float_0 = OpConstant %float 0
+        \\     %float_1 = OpConstant %float 1
+        \\           %d = OpVariable %pf Output
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\               OpStore %d %float_0_5
+        \\         %ld = OpLoad %float %d
+        \\         %cl = OpExtInst %float %1 FClamp %ld %float_0 %float_1
+        \\               OpStore %d %cl
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // only the depth field, no fabricated color slot
+    try assertContains(wgsl, "@builtin(frag_depth) depth: f32,\n}");
+    try assertNotContains(wgsl, "@location(0) color");
+    // the read-back depth is a real local the clamp reads and the return carries
+    try assertContains(wgsl, ": f32;\n");
+    try assertContains(wgsl, "return FragmentOutput(");
+    try nagaValidateOrSkip(wgsl, "depth-only");
+}
+
+// The MRT FragmentOutput fields hardcoded `vec4f`, but a WGSL-authored scalar
+// output (@location f32) then got a field its captured scalar value could never
+// satisfy. Field types now come from the output's real pointee type.
+test "WGSL MRT struct fields use the output's real type, not a hardcoded vec4f (#wgsl-cts)" {
+    const spv = try assembleSpirv("mrt_scalar",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o0 %o1
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o0 Location 1
+        \\               OpDecorate %o1 Location 2
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\          %pf = OpTypePointer Output %float
+        \\     %float_1 = OpConstant %float 1
+        \\     %float_2 = OpConstant %float 2
+        \\          %o0 = OpVariable %pf Output
+        \\          %o1 = OpVariable %pf Output
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\               OpStore %o0 %float_1
+        \\               OpStore %o1 %float_2
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "@location(1) ");
+    try assertContains(wgsl, ": f32,");
+    try assertNotContains(wgsl, ": vec4f,");
+    try nagaValidateOrSkip(wgsl, "mrt-scalar");
+}
+
+// A multi-entry module (naga lowers every WGSL entry point to its own
+// OpEntryPoint) also carries the UNSELECTED entries' bodies, and their Output
+// stores have no WGSL home: only the selected entry gets the output
+// reconstruction. Unreachable functions are now pruned instead of emitting
+// undeclared store targets.
+test "WGSL prunes functions unreachable from the selected entry point (#wgsl-cts)" {
+    const spv = try assembleSpirv("prune_unselected_entry",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Vertex %vtx "main" %pos
+        \\               OpEntryPoint Fragment %frg "frg" %col
+        \\               OpDecorate %pos BuiltIn Position
+        \\               OpDecorate %col Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\     %v4float = OpTypeVector %float 4
+        \\         %po4 = OpTypePointer Output %v4float
+        \\     %float_1 = OpConstant %float 1
+        \\     %float_9 = OpConstant %float 9
+        \\    %v4one = OpConstantComposite %v4float %float_1 %float_1 %float_1 %float_1
+        \\    %v4nine = OpConstantComposite %v4float %float_9 %float_9 %float_9 %float_9
+        \\         %pos = OpVariable %po4 Output
+        \\         %col = OpVariable %po4 Output
+        \\        %vtx = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\               OpStore %pos %v4one
+        \\               OpReturn
+        \\               OpFunctionEnd
+        \\        %frg = OpFunction %void None %3
+        \\          %6 = OpLabel
+        \\               OpStore %col %v4nine
+        \\               OpKill
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // the unselected fragment entry (and its output store) is gone entirely
+    try assertNotContains(wgsl, "discard");
+    try assertNotContains(wgsl, "vec4<f32>(9.0");
+    try nagaValidateOrSkip(wgsl, "prune-unselected-entry");
+}
+
+// A DEPTH texture sampled WITHOUT a Dref (OpImageSampleImplicitLod, not the
+// Dref variants) has WGSL forms that return a SCALAR f32, while SPIR-V's result
+// is the vec4. naga emits exactly this shape for every WGSL textureSample on a
+// depth texture. The value is widened back by splat so the declared vec4 let
+// still typechecks, and an ARRAYED depth texture's layer is split out of the
+// packed coordinate (vec4 = xyz direction + w layer for cube arrays).
+test "WGSL splats the scalar depth textureSample result and splits arrayed coords (#wgsl-cts)" {
+    const spv = try assembleSpirv("depth_sample",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %c %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %t DescriptorSet 0
+        \\               OpDecorate %t Binding 1
+        \\               OpDecorate %s DescriptorSet 0
+        \\               OpDecorate %s Binding 0
+        \\               OpDecorate %c Location 0
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\     %v4float = OpTypeVector %float 4
+        \\         %img = OpTypeImage %float Cube 1 1 0 1 Unknown
+        \\          %si = OpTypeSampledImage %img
+        \\        %samp = OpTypeSampler
+        \\         %pi4 = OpTypePointer Input %v4float
+        \\         %puimg = OpTypePointer UniformConstant %img
+        \\         %pusamp = OpTypePointer UniformConstant %samp
+        \\         %po4 = OpTypePointer Output %v4float
+        \\           %t = OpVariable %puimg UniformConstant
+        \\           %s = OpVariable %pusamp UniformConstant
+        \\           %c = OpVariable %pi4 Input
+        \\           %o = OpVariable %po4 Output
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %cl = OpLoad %v4float %c
+        \\        %sal = OpLoad %samp %s
+        \\        %tal = OpLoad %img %t
+        \\        %sii = OpSampledImage %si %tal %sal
+        \\          %r = OpImageSampleImplicitLod %v4float %sii %cl
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "vec4f(textureSample(");
+    try assertContains(wgsl, ", i32(round(");
+    try nagaValidateOrSkip(wgsl, "depth-sample");
+}
+
+// textureSampleLevel on a DEPTH texture takes an i32 level (naga rejects the
+// f32 overload) and returns a scalar f32, so the explicit-lod arm must both
+// convert the level and splat the result.
+test "WGSL converts the depth textureSampleLevel level to i32 and splats the result (#wgsl-cts)" {
+    const spv = try assembleSpirv("depth_sample_level",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %t DescriptorSet 0
+        \\               OpDecorate %t Binding 1
+        \\               OpDecorate %s DescriptorSet 0
+        \\               OpDecorate %s Binding 0
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\     %v3float = OpTypeVector %float 3
+        \\     %v4float = OpTypeVector %float 4
+        \\         %img = OpTypeImage %float 2D 1 1 0 1 Unknown
+        \\          %si = OpTypeSampledImage %img
+        \\        %samp = OpTypeSampler
+        \\         %puimg = OpTypePointer UniformConstant %img
+        \\         %pusamp = OpTypePointer UniformConstant %samp
+        \\         %po4 = OpTypePointer Output %v4float
+        \\           %t = OpVariable %puimg UniformConstant
+        \\           %s = OpVariable %pusamp UniformConstant
+        \\           %o = OpVariable %po4 Output
+        \\     %float_0 = OpConstant %float 0
+        \\     %float_h = OpConstant %float 0.5
+        \\      %coord = OpConstantComposite %v3float %float_0 %float_0 %float_h
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\        %sal = OpLoad %samp %s
+        \\        %tal = OpLoad %img %t
+        \\        %sii = OpSampledImage %si %tal %sal
+        \\          %r = OpImageSampleExplicitLod %v4float %sii %coord Lod %float_h
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "vec4f(textureSampleLevel(");
+    // the array layer splits out of the packed vec3 coordinate, the level is i32
+    try assertContains(wgsl, ", i32(round(");
+    try assertContains(wgsl, ", i32(0.5");
+    try nagaValidateOrSkip(wgsl, "depth-sample-level");
+}
+
+// A non-Dref OpImageGather on a DEPTH texture must use the CALL-SITE sampler:
+// the implicit `<tex>_sampler` partner for a depth texture is declared
+// sampler_comparison, and pairing it with a reference-less gather is a naga
+// "Comparison sampling mismatch" reject.
+test "WGSL depth gather uses the call-site sampler, not the comparison partner (#wgsl-cts)" {
+    const spv = try assembleSpirv("depth_gather",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpName %t "my_tex"
+        \\               OpName %s "my_samp"
+        \\               OpDecorate %t DescriptorSet 0
+        \\               OpDecorate %t Binding 1
+        \\               OpDecorate %s DescriptorSet 0
+        \\               OpDecorate %s Binding 0
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\     %v3float = OpTypeVector %float 3
+        \\     %v4float = OpTypeVector %float 4
+        \\         %img = OpTypeImage %float Cube 1 0 0 1 Unknown
+        \\          %si = OpTypeSampledImage %img
+        \\        %samp = OpTypeSampler
+        \\         %puimg = OpTypePointer UniformConstant %img
+        \\         %pusamp = OpTypePointer UniformConstant %samp
+        \\         %po4 = OpTypePointer Output %v4float
+        \\           %t = OpVariable %puimg UniformConstant
+        \\           %s = OpVariable %pusamp UniformConstant
+        \\           %o = OpVariable %po4 Output
+        \\        %uint = OpTypeInt 32 0
+        \\      %uint_0 = OpConstant %uint 0
+        \\     %float_0 = OpConstant %float 0
+        \\      %coord = OpConstantComposite %v3float %float_0 %float_0 %float_0
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\        %sal = OpLoad %samp %s
+        \\        %tal = OpLoad %img %t
+        \\        %sii = OpSampledImage %si %tal %sal
+        \\          %r = OpImageGather %v4float %sii %coord %uint_0
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureGather(0u, my_tex, my_samp,");
+    // the comparison partner must not be the one the gather CALLS (it may still
+    // be declared unused at module scope)
+    try assertNotContains(wgsl, "textureGather(0u, my_tex, my_tex_sampler");
+    try nagaValidateOrSkip(wgsl, "depth-gather");
+}
+
+// OpImageQuerySizeLod's conversion wrapper assumed a SIGNED (GLSL ivecN) result.
+// naga declares uvecN results, and wrapping the unsigned textureDimensions
+// output in vec2i inside a vec3u constructor mixes component types, which naga
+// rejects. The wrap now matches the query's own result signedness.
+test "WGSL wraps an image-size query to the query result's own signedness (#wgsl-cts)" {
+    const spv = try assembleSpirv("query_unsigned",
+        \\               OpCapability Shader
+        \\               OpCapability ImageQuery
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %t DescriptorSet 0
+        \\               OpDecorate %t Binding 1
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\       %uint = OpTypeInt 32 0
+        \\     %v3uint = OpTypeVector %uint 3
+        \\     %v4float = OpTypeVector %float 4
+        \\         %img = OpTypeImage %float 2D 0 1 0 1 Unknown
+        \\         %puimg = OpTypePointer UniformConstant %img
+        \\         %po4 = OpTypePointer Output %v4float
+        \\           %t = OpVariable %puimg UniformConstant
+        \\           %o = OpVariable %po4 Output
+        \\      %uint_0 = OpConstant %uint 0
+        \\     %float_0 = OpConstant %float 0
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\        %tal = OpLoad %img %t
+        \\          %q = OpImageQuerySizeLod %v3uint %tal %uint_0
+        \\          %l = OpCompositeExtract %uint %q 2
+        \\          %f = OpConvertUToF %float %l
+        \\          %r = OpCompositeConstruct %v4float %f %f %f %f
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "vec2u(textureDimensions(");
+    try assertContains(wgsl, "textureNumLayers(");
+    try assertNotContains(wgsl, "i32(textureNumLayers");
+    try nagaValidateOrSkip(wgsl, "query-unsigned");
+}
+
+// WGSL's textureDimensions has NO level overload for STORAGE textures (naga:
+// "Unable to operate on image class Storage"), but naga still emits
+// OpImageQuerySizeLod with lod 0 for them. The lod operand must be dropped.
+test "WGSL drops the lod operand of a storage-texture size query (#wgsl-cts)" {
+    const spv = try assembleSpirv("query_storage",
+        \\               OpCapability Shader
+        \\               OpCapability ImageQuery
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpName %t "stex"
+        \\               OpDecorate %t DescriptorSet 0
+        \\               OpDecorate %t Binding 1
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\       %uint = OpTypeInt 32 0
+        \\     %v3uint = OpTypeVector %uint 3
+        \\     %v4float = OpTypeVector %float 4
+        \\         %img = OpTypeImage %uint 2D 0 1 0 2 R32ui
+        \\         %puimg = OpTypePointer UniformConstant %img
+        \\         %po4 = OpTypePointer Output %v4float
+        \\           %t = OpVariable %puimg UniformConstant
+        \\           %o = OpVariable %po4 Output
+        \\      %uint_0 = OpConstant %uint 0
+        \\     %float_0 = OpConstant %float 0
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\        %tal = OpLoad %img %t
+        \\          %q = OpImageQuerySizeLod %v3uint %tal %uint_0
+        \\          %l = OpCompositeExtract %uint %q 2
+        \\          %f = OpConvertUToF %float %l
+        \\          %r = OpCompositeConstruct %v4float %f %f %f %f
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureDimensions(stex)");
+    try assertNotContains(wgsl, "textureDimensions(stex, ");
+    try nagaValidateOrSkip(wgsl, "query-storage");
+}
