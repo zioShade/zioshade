@@ -1996,4 +1996,8 @@ test "HLSL emits the break for a side-effecting break block inside a selection (
     const hlsl = try crossHlsl(LOOP_BREAK_IN_IF_SPV);
     defer alloc.free(hlsl);
     try expectOrdered(hlsl, "int v18 = v15 + 1;", "break;");
+    // The STORE is the side effect that makes the break path observable in the
+    // output; a regression dropping only the arm's store would keep the compute
+    // and break yet render 0 instead of 1 (review note).
+    try expectOrdered(hlsl, "v12 = v18;", "break;");
 }
