@@ -941,9 +941,15 @@ const ArrayedSampleShape = struct {
     /// Spatial component count: 1 (1D), 2 (2D), 3 (cube). The layer is the
     /// component just past these (.x→.y, .xy→.z, .xyz→.w).
     comps: u32,
-    /// True only for a non-depth arrayed sampled texture; false otherwise so the
+    /// True only for an arrayed sampled texture; false otherwise so the
     /// existing (non-array) emit path is used verbatim.
     arrayed: bool,
+    /// True when the OpTypeImage is a DEPTH texture (Depth=1) sampled WITHOUT a
+    /// Dref (OpImageSample*/OpImageGather, not the Dref variants). WGSL's
+    /// non-comparison depth forms return a SCALAR f32 and (for textureSampleLevel)
+    /// take an i32 level, so the emit arms must reshape both the result and the
+    /// level; see the sample arms. (#wgsl-cts)
+    depth: bool = false,
 };
 
 /// Derive the arrayed-sample reshape from the OpTypeImage behind a sampled-image
@@ -962,16 +968,20 @@ fn arrayedSampleShape(module: *const ParsedModule, sampled_image_value_id: u32) 
         inst = getDef(module, inst.words[2]) orelse return none;
     }
     if (inst.op != .TypeImage or inst.words.len <= 5) return none;
-    // Depth textures take the depth-compare path; not our concern here.
+    // A DEPTH texture sampled without a Dref still needs the arrayed coordinate
+    // split (naga packs the layer into the trailing coordinate component), and
+    // the sample arms additionally reshape result/level for WGSL's scalar-return
+    // depth forms, so report it instead of bailing. The Dref (compare) paths
+    // have their own depthCompareShape.
     const is_depth = inst.words.len > 4 and inst.words[4] == 1;
-    if (is_depth) return none;
     const arrayed = inst.words[5] == 1;
-    if (!arrayed) return none;
     const comps: u32 = switch (inst.words[3]) {
         0 => 1, // 1D family → vec1 spatial (scalar .x)
         3 => 3, // Cube → vec3 direction
         else => 2, // 2D family → vec2 spatial
     };
+    if (is_depth) return .{ .comps = comps, .arrayed = arrayed, .depth = true };
+    if (!arrayed) return none;
     return .{ .comps = comps, .arrayed = true };
 }
 
@@ -1098,7 +1108,7 @@ fn isIntegerSampledImage(module: *const ParsedModule, sampled_image_value_id: u3
 /// whole-matrix write into per-column writes. Keyed by the output variable id.
 const MatrixOutput = struct { base_name: []const u8, cols: u32, col_type: []const u8 };
 
-const ImageQueryShape = struct { arrayed: bool, spatial: u32 };
+const ImageQueryShape = struct { arrayed: bool, spatial: u32, storage: bool = false };
 fn imageQueryShape(module: *const ParsedModule, image_value_id: u32) ImageQueryShape {
     const fallback = ImageQueryShape{ .arrayed = false, .spatial = 2 };
     const type_id = getTypeOf(module, image_value_id) orelse return fallback;
@@ -1115,18 +1125,54 @@ fn imageQueryShape(module: *const ParsedModule, image_value_id: u32) ImageQueryS
         2 => 3, // 3D
         else => 2, // 2D / Cube
     };
-    return .{ .arrayed = inst.words[5] == 1, .spatial = spatial };
+    // OpTypeImage Sampled operand: 2 = storage-only image (WGSL texture_storage_*).
+    // WGSL's textureDimensions has NO level overload for storage textures, but
+    // naga emits OpImageQuerySizeLod (lod 0) for them anyway, so the lod must be
+    // dropped at emission. (#wgsl-cts)
+    const storage = inst.words.len > 7 and inst.words[7] == 2;
+    return .{ .arrayed = inst.words[5] == 1, .spatial = spatial, .storage = storage };
 }
 
 /// The signed WGSL vector/scalar type alias for `n` integer components
 /// (1→"i32", 2→"vec2i", 3→"vec3i"), used to convert an unsigned
 /// `textureDimensions` result to the signed GLSL query type.
 fn signedIntVecType(n: u32) []const u8 {
+    return intVecTypeFor(n, true);
+}
+
+/// The integer vector/scalar alias for `n` components with the given
+/// signedness (1 is "i32"/"u32", 2 is "vec2i"/"vec2u", 3 is "vec3i"/"vec3u").
+/// Used to wrap a `textureDimensions` result (always unsigned) into the SPIR-V
+/// query's OWN result signedness: glslang queries are ivecN, but naga's WGSL
+/// producers declare uvecN results, and wrapping those in the signed alias made
+/// the outer constructor mix component types (naga: "Composing 0's component
+/// type is not expected"). (#wgsl-cts)
+fn intVecTypeFor(n: u32, signed: bool) []const u8 {
+    if (signed) {
+        return switch (n) {
+            1 => "i32",
+            3 => "vec3i",
+            else => "vec2i",
+        };
+    }
     return switch (n) {
-        1 => "i32",
-        3 => "vec3i",
-        else => "vec2i",
+        1 => "u32",
+        3 => "vec3u",
+        else => "vec2u",
     };
+}
+
+/// Whether an integer scalar/vector type id is UNSIGNED (u32/vecNu). Defaults
+/// to signed (the GLSL query shape) when the type cannot be resolved.
+fn intTypeIsUnsigned(module: *const ParsedModule, type_id: u32) bool {
+    var t = getDef(module, type_id) orelse return false;
+    if (t.op == .TypeVector) {
+        if (t.words.len > 2) {
+            t = getDef(module, t.words[2]) orelse return false;
+        } else return false;
+    }
+    if (t.op != .TypeInt) return false;
+    return !(t.words.len > 3 and t.words[3] == 1);
 }
 
 /// The spatial-coordinate swizzle (".x"/".xy"/".xyz") and the layer-component
@@ -2170,6 +2216,29 @@ fn collectDecorations(alloc: std.mem.Allocator, module: *const ParsedModule, dec
     try common.collectDecorations(alloc, module, decorations);
 }
 
+/// The WGSL zero-value literal for a SPIR-V type: `0`/`0u` (int), `0.0` (float),
+/// `false` (bool), `T()` (vector/matrix/struct/array, where WGSL's value
+/// constructor with no components is the zero value). Null when the type has no
+/// WGSL value literal (pointer, image, sampler, sampled image): callers leave
+/// those ids on their generic name rather than invent a value. Caller owns the
+/// result.
+fn zeroLiteralOfType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ?[]const u8 {
+    const ti = getDef(module, type_id) orelse return null;
+    return switch (ti.op) {
+        .TypeInt => if (ti.words.len > 3 and ti.words[3] == 1)
+            std.fmt.allocPrint(alloc, "0", .{}) catch null
+        else
+            std.fmt.allocPrint(alloc, "0u", .{}) catch null,
+        .TypeFloat => std.fmt.allocPrint(alloc, "0.0", .{}) catch null,
+        .TypeBool => std.fmt.allocPrint(alloc, "false", .{}) catch null,
+        .TypeVector, .TypeMatrix, .TypeStruct, .TypeArray, .TypeRuntimeArray => blk: {
+            const tn = wgslType(module, type_id, names, alloc) catch break :blk null;
+            break :blk std.fmt.allocPrint(alloc, "{s}()", .{tn}) catch null;
+        },
+        else => null,
+    };
+}
+
 fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8)) void {
     common.collectNames(alloc, module, names);
 
@@ -2181,17 +2250,25 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
     // arm is a no-op; the value is inlined here. Matches spirv-cross (zero-inits undef).
     for (module.instructions) |inst| {
         if (inst.op != .Undef or inst.words.len <= 2) continue;
-        const ti = getDef(module, inst.words[1]);
-        const z: []const u8 = if (ti) |t| switch (t.op) {
-            .TypeInt => std.fmt.allocPrint(alloc, "0", .{}) catch continue,
-            .TypeFloat => std.fmt.allocPrint(alloc, "0.0", .{}) catch continue,
-            .TypeBool => std.fmt.allocPrint(alloc, "false", .{}) catch continue,
-            .TypeVector, .TypeMatrix, .TypeStruct, .TypeArray, .TypeRuntimeArray => blk: {
-                const tn = wgslType(module, inst.words[1], names, alloc) catch "vec4f";
-                break :blk std.fmt.allocPrint(alloc, "{s}()", .{tn}) catch continue;
-            },
-            else => std.fmt.allocPrint(alloc, "0", .{}) catch continue,
-        } else std.fmt.allocPrint(alloc, "0", .{}) catch continue;
+        const z: ?[]const u8 = zeroLiteralOfType(module, inst.words[1], names, alloc);
+        const lit = z orelse std.fmt.allocPrint(alloc, "0", .{}) catch continue;
+        if (names.fetchPut(inst.words[2], lit) catch null) |old| alloc.free(old.value);
+    }
+
+    // OpConstantNull: common.collectNames has no literal branch for it, so every
+    // null id falls through to the generic `v{N}` counter name, and since no
+    // emit switch ever declares that name, ANY use site referencing it produced
+    // an undeclared identifier at exit 0 (silent-wrong; naga rejects). naga's
+    // WGSL front end emits OpConstantNull for every plain `var x: T;` (as the
+    // OpVariable initializer) and for every zero-value composite, so this is the
+    // single largest undeclared-id source on naga-produced SPIR-V. Fold each null
+    // to the zero literal of its own type, exactly like the OpUndef fold above.
+    // Pointer/image/sampler-typed nulls have no WGSL value literal and keep their
+    // counter name (naga never emits them; a use site stays visibly broken rather
+    // than silently inventing a value). (#wgsl-cts)
+    for (module.instructions) |inst| {
+        if (inst.op != .ConstantNull or inst.words.len <= 2) continue;
+        const z = zeroLiteralOfType(module, inst.words[1], names, alloc) orelse continue;
         if (names.fetchPut(inst.words[2], z) catch null) |old| alloc.free(old.value);
     }
 
@@ -4487,6 +4564,40 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             func_idx_map.put(inst.words[2], i) catch {};
         }
     }
+    // Prune functions UNREACHABLE from the selected entry point. A multi-entry
+    // module (naga lowers every WGSL entry point to its own OpEntryPoint) also
+    // carries the UNSELECTED entries' bodies, and their Output stores have no
+    // WGSL home: only the selected entry gets the output-variable
+    // reconstruction. Emitting those bodies referenced Output variables nothing
+    // declared, leaving undeclared identifiers at exit 0. Pruning mirrors how
+    // the module is actually consumed (one entry per compile). (#wgsl-cts)
+    if (module.entry_point_id) |ep_id| {
+        var reachable = std.AutoHashMap(u32, void).init(arena);
+        var work = std.ArrayList(u32).initCapacity(arena, 8) catch return error.OutOfMemory;
+        try work.append(arena, ep_id);
+        try reachable.put(ep_id, {});
+        var wi: usize = 0;
+        while (wi < work.items.len) : (wi += 1) {
+            const fidx = func_idx_map.get(work.items[wi]) orelse continue;
+            var si: usize = fidx + 1;
+            while (si < module.instructions.len) : (si += 1) {
+                const ci = module.instructions[si];
+                if (ci.op == .FunctionEnd) break;
+                if (ci.op == .FunctionCall and ci.words.len > 3) {
+                    const callee = ci.words[3];
+                    if (!reachable.contains(callee)) {
+                        try reachable.put(callee, {});
+                        try work.append(arena, callee);
+                    }
+                }
+            }
+        }
+        var pruned = std.ArrayList(u32).initCapacity(arena, func_ids.items.len) catch return error.OutOfMemory;
+        for (func_ids.items) |fid| {
+            if (reachable.contains(fid)) try pruned.append(arena, fid);
+        }
+        func_ids = pruned;
+    }
     // Pre-scan: forward-declare structs used as local variable types in any function
     for (func_ids.items) |fid| {
         const fidx = func_idx_map.get(fid) orelse continue;
@@ -4726,8 +4837,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var use_frag_depth_struct = false;
     var use_frag_mrt_struct = false;
     if (is_fragment and depth_output_var_id != null) {
+        // A depth-only fragment (no @location output at all; naga emits this for
+        // `fn main() -> @builtin(frag_depth) f32`) must NOT get a fabricated
+        // `@location(0) color: vec4f` field: that invents an output the shader
+        // never had, and no captured value can fill it. Emit the depth field
+        // alone; the return then takes exactly one argument. (#wgsl-cts)
         try w.writeAll("struct FragmentOutput {\n");
-        try w.writeAll("    @location(0) color: vec4f,\n");
+        if (output_var_id != null) {
+            try w.writeAll("    @location(0) color: vec4f,\n");
+        }
         try w.writeAll("    @builtin(frag_depth) depth: f32,\n");
         try w.writeAll("}\n\n");
         use_frag_depth_struct = true;
@@ -4748,12 +4866,27 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 }
             }
         }
-        // Multiple render targets — emit FragmentOutput struct
+        // Multiple render targets: emit FragmentOutput struct. The field type is
+        // the output variable's REAL pointee type: a hardcoded `vec4f` matched
+        // the common GLSL MRT shape, but a scalar/other-typed output (a
+        // WGSL-authored `@location(n) out: f32`) then got a `vec4f` field that
+        // the synthesized `FragmentOutput(<captured scalar>)` return could never
+        // satisfy (naga: automatic-conversion reject). (#wgsl-cts)
         try w.writeAll("struct FragmentOutput {\n");
         for (output_vars.items, 0..) |ovid, i| {
             const loc = getDecVal(&decorations, ovid, .location) orelse i;
             const var_name = names.get(ovid) orelse continue;
-            try w.print("    @location({d}) {s}: vec4f,\n", .{ loc, var_name });
+            var field_type: []const u8 = "vec4f";
+            if (getDef(&module, ovid)) |ovi| {
+                if (ovi.words.len > 1) {
+                    var pt = ovi.words[1];
+                    if (getDef(&module, pt)) |pi| {
+                        if (pi.op == .TypePointer and pi.words.len > 3) pt = pi.words[3];
+                    }
+                    field_type = try wgslType(&module, pt, &names, arena);
+                }
+            }
+            try w.print("    @location({d}) {s}: {s},\n", .{ loc, var_name, field_type });
         }
         try w.writeAll("}\n\n");
         use_frag_mrt_struct = true;
@@ -5397,6 +5530,31 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
     }
 
+    // Depth-output scan. Runs independently of the block above, which is guarded
+    // on `output_var_id != null`: a depth-ONLY fragment (no @location output)
+    // has output_var_id == null, so without this scan its stored depth was never
+    // captured and the synthesized return hardcoded 0.0 (silent-wrong). Also
+    // detects a READ-BACK depth (naga emits OpLoad of the FragDepth output for
+    // `clamp(gl_FragDepth, ...)` read-modify-write shapes): the simple capture
+    // path leaves those loads pointing at an undeclared name, so a read-back
+    // depth needs a real local `var` instead. (#wgsl-cts)
+    var depth_is_read = false;
+    if (use_frag_depth_struct) {
+        const dvid = depth_output_var_id.?;
+        var sci: usize = entry_func_idx.? + 1;
+        while (sci < module.instructions.len) : (sci += 1) {
+            const si = module.instructions[sci];
+            if (si.op == .FunctionEnd) break;
+            if ((si.op == .Load or si.op == .AccessChain or si.op == .CopyObject) and si.words.len > 3 and si.words[3] == dvid) {
+                depth_is_read = true;
+            }
+            if (si.op == .Store and si.words.len >= 3 and si.words[1] == dvid) {
+                depth_return_value = names.get(si.words[2]);
+                depth_return_id = si.words[2];
+            }
+        }
+    }
+
     // Declare output variable(s) as local (skip if direct return)
     if (!skip_output_var_decl) {
         if (use_frag_mrt_struct and mrt_is_read) {
@@ -5468,6 +5626,28 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             try mrt_skip_set.put(ovid, {});
         }
     }
+    // Depth output, simple case: its stores feed the FragmentOutput return, so
+    // skip them in the body (ID-based; the legacy name-based skip missed every
+    // depth var not literally named `gl_FragDepth`, e.g. all naga-produced
+    // SPIR-V, leaving an undeclared `v3 = ...` store at exit 0). The read-back
+    // case instead declares the depth var as a real local and lets every
+    // store/load emit against it. (#wgsl-cts)
+    if (use_frag_depth_struct) {
+        const dvid = depth_output_var_id.?;
+        if (!depth_is_read) {
+            try mrt_skip_set.put(dvid, {});
+        } else {
+            var actual_type: u32 = getDef(&module, dvid).?.words[1];
+            if (getDef(&module, actual_type)) |pi| {
+                if (pi.op == .TypePointer and pi.words.len > 3) actual_type = pi.words[3];
+            }
+            const type_name = try wgslType(&module, actual_type, &names, arena);
+            const var_name = names.get(dvid) orelse "depth_out";
+            try w.print("    var {s}: {s};\n", .{ var_name, type_name });
+            depth_return_value = arena.dupe(u8, var_name) catch var_name;
+            depth_return_id = null;
+        }
+    }
 
     // Determine how a mid-body EARLY return assembles the entry output. The
     // trailing return (emitted after emitBody, below) collapses all paths into a
@@ -5520,9 +5700,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
 
     // Return output var
     if (use_frag_depth_struct) {
-        const color_val = direct_return_value orelse (if (output_var_id != null) names.get(output_var_id.?) orelse "vec4f()" else "vec4f()");
         const depth_val = depth_return_value orelse "0.0";
-        try w.print("    return FragmentOutput({s}, {s});\n", .{ color_val, depth_val });
+        // Depth-only fragment: the struct has just the @builtin(frag_depth)
+        // field (see its emission), so the constructor takes one argument.
+        if (output_var_id == null) {
+            try w.print("    return FragmentOutput({s});\n", .{depth_val});
+        } else {
+            const color_val = direct_return_value orelse (if (output_var_id != null) names.get(output_var_id.?) orelse "vec4f()" else "vec4f()");
+            try w.print("    return FragmentOutput({s}, {s});\n", .{ color_val, depth_val });
+        }
     } else if (use_frag_mrt_struct) {
         // Build FragmentOutput. Complex case (any output read/partially written):
         // the outputs are real local `var`s holding their final values, so return
@@ -6088,6 +6274,16 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // recomputed from the operands in the CompositeExtract arm. (#170)
             if (getDef(module, scan_inst.words[3])) |src_def| {
                 if (isAddCarryOrSubBorrow(src_def.op)) continue;
+                // A null-constant source folds to the zero literal of the extract's
+                // own result type (naga's `return Struct();` shape: the io struct is
+                // never declared, so `v3().x` would be an undefined identifier).
+                if (src_def.op == .ConstantNull) {
+                    if (zeroLiteralOfType(module, scan_inst.words[1], names, alloc)) |z| {
+                        if (try names.fetchPut(scan_inst.words[2], z)) |old| alloc.free(old.value);
+                        try inline_loads.put(scan_inst.words[2], {});
+                    }
+                    continue;
+                }
             }
             const result_id = scan_inst.words[2];
             const uses = use_count.get(result_id) orelse 0;
@@ -8100,6 +8296,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (dead_extracts.contains(inst.words[2]) or inline_loads.contains(inst.words[2])) continue;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
+                // Extracting from an OpConstantNull IS the zero value of the
+                // extract's own result type. naga emits this shape for every
+                // `return Struct();` in a flattened-entry shader (OpConstantNull of
+                // the io struct + one extract per builtin/location). The generic
+                // path below would emit `<StructName>().<member>`, but the io
+                // struct is NOT declared in the output (the entry signature was
+                // reconstructed to builtin returns), which is an undeclared
+                // identifier at exit 0. Fold the whole extract to the zero literal.
+                if (getDef(module, inst.words[3])) |bd| {
+                    if (bd.op == .ConstantNull) {
+                        if (zeroLiteralOfType(module, inst.words[1], names, alloc)) |z| {
+                            try writeInd(w, indent);
+                            try w.print("let {s}: {s} = {s};\n", .{ result_name, rt, z });
+                            continue;
+                        }
+                    }
+                }
                 // OpIAddCarry/OpISubBorrow extract: the struct result has no WGSL
                 // value (see the no-op arm). Recompute the requested member straight
                 // from the operands. Member 0 is the wrapping add/sub (WGSL unsigned
@@ -8446,6 +8659,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // textureSampleBias is FRAGMENT-ONLY in WGSL — a bias outside a
                     // fragment shader has no faithful form. Honest-error.
                     if (module.execution_model != .Fragment) return error.UnsupportedImageOperands;
+                    // And it has NO depth-texture overload at all: a biased sample of
+                    // a depth image has no faithful WGSL form. Honest-error rather
+                    // than emit a call naga rejects. (#wgsl-cts)
+                    if (shape.depth) return error.UnsupportedImageOperands;
                     // Operands follow bit order: bias (words[6]), then an optional
                     // ConstOffset (words[7]). Truncated/malformed SPIR-V honest-errors
                     // rather than indexing out of bounds (don't panic on bad input).
@@ -8489,10 +8706,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
                         try writeInd(w, indent);
-                        try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                        if (shape.depth) {
+                            // WGSL's non-comparison DEPTH sample returns a SCALAR f32,
+                            // while SPIR-V's result is the vec4: widen by splat so the
+                            // declared vec4 let still typechecks (naga's own WGSL
+                            // front lowers `textureSample(depth2d, ...)` to exactly
+                            // this OpImageSample* + extract-0 shape). (#wgsl-cts)
+                            try w.print("let {s}: {s} = {s}(textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                        } else {
+                            try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                        }
                     } else {
                         try writeInd(w, indent);
-                        try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
+                        if (shape.depth) {
+                            try w.print("let {s}: {s} = {s}(textureSample({s}, {s}, {s}{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, off_suffix });
+                        } else {
+                            try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
+                        }
                     }
                 }
             },
@@ -8516,6 +8746,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // beyond Grad|ConstOffset has no faithful WGSL form → honest-error.
                 if ((mask & 0x4) != 0) {
                     if ((mask & ~@as(u32, 0x4 | 0x8)) != 0) return error.UnsupportedImageOperands;
+                    // textureSampleGrad has NO depth-texture overload: a gradient
+                    // sample of a depth image has no faithful WGSL form. (#wgsl-cts)
+                    if (shape.depth) return error.UnsupportedImageOperands;
                     // A well-formed Grad carries BOTH gradients (ddx=words[6],
                     // ddy=words[7]); truncated/malformed SPIR-V honest-errors rather
                     // than indexing out of bounds (don't panic on bad input).
@@ -8562,14 +8795,29 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     }
                     // Arrayed: textureSampleLevel(t, s, coord.xy, i32(round(coord.z)), lod).
                     // Layer rounded for glslang parity (see ImageSampleImplicitLod).
+                    // DEPTH: WGSL's depth form takes an i32 level (naga rejects the
+                    // f32 overload) and returns a SCALAR f32, widened by splat to the
+                    // SPIR-V vec4 result like ImageSampleImplicitLod. (#wgsl-cts)
+                    const depth_level: []const u8 = if (shape.depth)
+                        try std.fmt.allocPrint(arena, "i32({s})", .{lod})
+                    else
+                        lod;
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
                         try writeInd(w, indent);
-                        try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, lod, off_suffix });
+                        if (shape.depth) {
+                            try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, cs, coord, ls, depth_level, off_suffix });
+                        } else {
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, depth_level, off_suffix });
+                        }
                     } else {
                         try writeInd(w, indent);
-                        try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lod, off_suffix });
+                        if (shape.depth) {
+                            try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}, {s}{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, depth_level, off_suffix });
+                        } else {
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, depth_level, off_suffix });
+                        }
                     }
                 }
             },
@@ -9134,28 +9382,50 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
                 const shape = imageQueryShape(module, inst.words[3]);
+                // Wrap to the query's OWN result signedness: glslang declares ivecN
+                // (signed wrap), naga declares uvecN (unsigned wrap, where
+                // textureNumLayers is already u32 and needs no i32() cast).
+                // (#wgsl-cts)
+                const unsigned_result = intTypeIsUnsigned(module, inst.words[1]);
+                const wrap = intVecTypeFor(shape.spatial, !unsigned_result);
+                const layers: []const u8 = if (unsigned_result)
+                    try std.fmt.allocPrint(arena, "textureNumLayers({s})", .{image})
+                else
+                    try std.fmt.allocPrint(arena, "i32(textureNumLayers({s}))", .{image});
                 try writeInd(w, indent);
                 if (shape.arrayed) {
-                    try w.print("let {s}: {s} = {s}({s}(textureDimensions({s})), i32(textureNumLayers({s})));\n", .{ result_name, rt, rt, signedIntVecType(shape.spatial), image, image });
+                    try w.print("let {s}: {s} = {s}({s}(textureDimensions({s})), {s});\n", .{ result_name, rt, rt, wrap, image, layers });
                 } else {
                     try w.print("let {s}: {s} = {s}(textureDimensions({s}));\n", .{ result_name, rt, rt, image });
                 }
             },
 
             // ImageQuerySizeLod — see ImageQuerySize: convert unsigned dims to the
-            // signed GLSL result type, appending textureNumLayers for arrayed
-            // samplers. (textureNumLayers takes NO lod argument.)
+            // query's own result signedness, appending textureNumLayers for arrayed
+            // samplers. (textureNumLayers takes NO lod argument.) A STORAGE image
+            // is single-mip: WGSL's textureDimensions has no level overload for
+            // storage textures, so the lod operand is dropped. (#wgsl-cts)
             .ImageQuerySizeLod => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const image = names.get(inst.words[3]) orelse "tex";
                 const lod = names.get(inst.words[4]) orelse "0";
                 const shape = imageQueryShape(module, inst.words[3]);
+                const unsigned_result = intTypeIsUnsigned(module, inst.words[1]);
+                const wrap = intVecTypeFor(shape.spatial, !unsigned_result);
+                const layers: []const u8 = if (unsigned_result)
+                    try std.fmt.allocPrint(arena, "textureNumLayers({s})", .{image})
+                else
+                    try std.fmt.allocPrint(arena, "i32(textureNumLayers({s}))", .{image});
+                const dims: []const u8 = if (shape.storage)
+                    try std.fmt.allocPrint(arena, "textureDimensions({s})", .{image})
+                else
+                    try std.fmt.allocPrint(arena, "textureDimensions({s}, {s})", .{ image, lod });
                 try writeInd(w, indent);
                 if (shape.arrayed) {
-                    try w.print("let {s}: {s} = {s}({s}(textureDimensions({s}, {s})), i32(textureNumLayers({s})));\n", .{ result_name, rt, rt, signedIntVecType(shape.spatial), image, lod, image });
+                    try w.print("let {s}: {s} = {s}({s}({s}), {s});\n", .{ result_name, rt, rt, wrap, dims, layers });
                 } else {
-                    try w.print("let {s}: {s} = {s}(textureDimensions({s}, {s}));\n", .{ result_name, rt, rt, image, lod });
+                    try w.print("let {s}: {s} = {s}({s});\n", .{ result_name, rt, rt, dims });
                 }
             },
 
@@ -9261,14 +9531,35 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // textureGather(component, t, s, coord.xy, i32(round(coord.z))).
                 // Layer rounded for glslang parity (see ImageSampleImplicitLod).
                 const shape = arrayedSampleShape(module, inst.words[3]);
+                // The sampler must be the call-site one when the OpSampledImage was
+                // built from separate texture+sampler (naga's only shape): for a
+                // DEPTH texture gathered WITHOUT a Dref, the implicit
+                // `<tex>_sampler` partner is declared sampler_comparison and naga
+                // rejects the pairing ("Comparison sampling mismatch ... reference
+                // was provided=false"). For the combined-sampler fallback there is
+                // no plain partner at all, so honest-error on depth. (#wgsl-cts)
+                var sampler_arg: []const u8 = try std.fmt.allocPrint(arena, "{s}_sampler", .{tex_name});
+                var has_call_site_sampler = false;
+                if (si_inst) |sii| {
+                    if (sii.op == .SampledImage and sii.words.len > 4) {
+                        if (names.get(sii.words[4])) |sn| {
+                            sampler_arg = sn;
+                            has_call_site_sampler = true;
+                        }
+                    }
+                }
+                if (shape.depth and !has_call_site_sampler) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL depth-texture gather without Dref needs a plain (non-comparison) sampler; the combined-sampler form has none", .{}) catch null;
+                    return error.UnsupportedImageOperands;
+                }
                 if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
                     try writeInd(w, indent);
-                    try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, cs, coord, ls, offset_suffix });
+                    try w.print("let {s}: {s} = textureGather({s}, {s}, {s}, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, component, tex_name, sampler_arg, coord, cs, coord, ls, offset_suffix });
                 } else {
                     try writeInd(w, indent);
-                    try w.print("let {s}: {s} = textureGather({s}, {s}, {s}_sampler, {s}{s});\n", .{ result_name, rt, component, tex_name, tex_name, coord, offset_suffix });
+                    try w.print("let {s}: {s} = textureGather({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, component, tex_name, sampler_arg, coord, offset_suffix });
                 }
             },
 
@@ -10419,6 +10710,17 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // expression used as a `var` name) which naga rejects.
             if (inst.words.len < 4) return;
             const result_id = inst.words[2];
+            // Extract from OpConstantNull: fold to the zero literal of the result
+            // type (see the main emit path; the composite's own type, e.g. a
+            // flattened io struct, may not be declared in the output).
+            if (getDef(module, inst.words[3])) |bd| {
+                if (bd.op == .ConstantNull) {
+                    if (zeroLiteralOfType(module, inst.words[1], names, alloc)) |z| {
+                        if (try names.fetchPut(result_id, z)) |old| alloc.free(old.value);
+                        return;
+                    }
+                }
+            }
             const composite = names.get(inst.words[3]) orelse "c";
             var expr = std.ArrayList(u8).initCapacity(alloc, 64) catch return;
             errdefer expr.deinit(alloc);

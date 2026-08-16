@@ -15,9 +15,9 @@
 # and 1,163 cases errored against the fake device (dump stats land next to the
 # dump when regenerating); both are dumper scope, not corpus curation.
 #
-# Environment of this measurement: zioshade 0.6.0 (467f8062), naga 30.0.0,
-# macOS. naga is BOTH the WGSL -> SPIR-V upstream converter and the output
-# validator.
+# Environment of this measurement: zioshade 0.6.0 (fix/wgsl-cts-undeclared-ids,
+# on top of 467f8062), naga 30.0.0, macOS. naga is BOTH the WGSL -> SPIR-V
+# upstream converter and the output validator.
 #
 # 2026-08-16 first measurement:
 #   roundtrip-valid          259  (67.8% of 382; 83.8% of the 309 cases that
@@ -29,6 +29,15 @@
 #   zioshade-refused          17  (honest errors incl. UnsupportedOp opcode
 #                                  228 atomics, texture type variants)
 #   zioshade-invalid          39  (exit 0, naga rejects the output)
+#   CRASH                      0
+#
+# 2026-08-16 after fix/wgsl-cts-undeclared-ids:
+#   roundtrip-valid          302  (79.1% of 382; 97.7% of the 309 cases that
+#                                  survived the upstream naga leg)
+#   upstream-convert-failed   67  (unchanged)
+#   zioshade-refused          13  (4 former refusals were raised from DEAD
+#                                  helpers that entry-point pruning removes)
+#   zioshade-invalid           0  (all 39 fixed; see the delta note below)
 #   CRASH                      0
 #
 # The zioshade-invalid class is the silent-wrong signal. Confirmed example:
@@ -43,9 +52,9 @@
 # date) when the corpus or the backend changes; the sweep itself is non-gating
 # and always exits 0 unless the HARNESS breaks (missing naga/CLI, empty or
 # inconsistent corpus, classifier losing cases).
-roundtrip-valid 259
+roundtrip-valid 302
 upstream-convert-failed 67
-zioshade-refused 17
-zioshade-invalid 39
+zioshade-refused 13
+zioshade-invalid 0
 crash 0
 total 382
