@@ -1,0 +1,72 @@
+; Minimal DETERMINISTIC reproducer for the HLSL arm-level loop-break gap
+; (#loop-break-on-selection-merge, required by #loop-merge-phi): a loop body
+; whose selection arm holds a SIDE-EFFECTING break block (computes a value,
+; stores it, then branches to the loop merge). The arm walker must emit the
+; computation AND the break; the pre-fix emitBlock ended silently at the
+; branch, dropping the break entirely (the loop ran to its top-test bound).
+;   int rv = 0;
+;   for (int i = 0; i < 4; i++) {
+;     if (fragY >= 0.5) { rv = i + 1; break; }
+;   }
+;   outColor = vec4(float(rv));
+; Expected: y>=0.5 -> 1 (break at i==0); y<0.5 -> 0.
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %outColor %gl_FragCoord
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %outColor Location 0
+OpDecorate %gl_FragCoord BuiltIn FragCoord
+
+%void = OpTypeVoid
+%voidfn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%int = OpTypeInt 32 1
+%bool = OpTypeBool
+%v4float = OpTypeVector %float 4
+%ptr_v4_in = OpTypePointer Input %v4float
+%ptr_v4_out = OpTypePointer Output %v4float
+%ptr_i_fn = OpTypePointer Function %int
+
+%int_0 = OpConstant %int 0
+%int_1 = OpConstant %int 1
+%int_4 = OpConstant %int 4
+%float_0_5 = OpConstant %float 0.5
+%float_1 = OpConstant %float 1
+
+%outColor = OpVariable %ptr_v4_out Output
+%gl_FragCoord = OpVariable %ptr_v4_in Input
+
+%main = OpFunction %void None %voidfn
+%entry = OpLabel
+%rv = OpVariable %ptr_i_fn Function
+OpStore %rv %int_0
+%fc = OpLoad %v4float %gl_FragCoord
+%fy = OpCompositeExtract %float %fc 1
+OpBranch %lhdr
+%lhdr = OpLabel
+%i = OpPhi %int %int_0 %entry %inext %lcont
+OpLoopMerge %lmerge %lcont None
+OpBranch %lcond
+%lcond = OpLabel
+%ictl = OpSLessThan %bool %i %int_4
+OpBranchConditional %ictl %lbody %lmerge
+%lbody = OpLabel
+%ygt = OpFOrdGreaterThanEqual %bool %fy %float_0_5
+OpSelectionMerge %lbmerge None
+OpBranchConditional %ygt %brk %lbmerge
+%brk = OpLabel
+%bval = OpIAdd %int %i %int_1
+OpStore %rv %bval
+OpBranch %lmerge
+%lbmerge = OpLabel
+OpBranch %lcont
+%lcont = OpLabel
+%inext = OpIAdd %int %i %int_1
+OpBranch %lhdr
+%lmerge = OpLabel
+%ld = OpLoad %int %rv
+%rf = OpConvertSToF %float %ld
+%color = OpCompositeConstruct %v4float %rf %rf %rf %float_1
+OpStore %outColor %color
+OpReturn
+OpFunctionEnd
