@@ -5711,6 +5711,48 @@ test "cgv: MSL -- two structs sharing one OpName get distinct mangled decls (no 
     try assertContains(msl, "float _m2;");
 }
 
+test "msl: a MUTATED Private array global is threaded as a spvUnsafeArray local (#173)" {
+    // #173 (the #private-array class): a Private `int data[4]` global that the
+    // shader STORES into (the glslang/zioshade shape; graphicsfuzz_000/017/061's
+    // data[] arrays) was flat-out refused (UndeclaredPrivateArrayGlobal) because
+    // Metal forbids file-scope mutable arrays and a C array cannot be passed by
+    // reference. Now it is declared as a spvUnsafeArray<T,N> LOCAL in the entry
+    // and threaded to helpers as `thread spvUnsafeArray<T,N>&` through the same
+    // 3-part machinery as scalar/struct Privates. Fixture: real glslang source
+    // (a helper reads data[i] -- exercising the threading). Render-verified
+    // MATCH vs naga; the three CTS shaders render MATCH too.
+    const spv_bytes = @embedFile("fixtures/private_array_global.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const msl = try zioshade.spirvToMSL(alloc, words, .{});
+    defer alloc.free(msl);
+    // The template preamble must be present (the local needs it).
+    try assertContains(msl, "struct spvUnsafeArray");
+    // Declared as a LOCAL of the wrapper type in the entry impl.
+    try assertContains(msl, "spvUnsafeArray<int, 4> data;");
+    // The helper takes it by thread reference (the threading machinery).
+    try assertContains(msl, "thread spvUnsafeArray<int, 4>& data");
+}
+
+test "msl: a spec-const-length Private array global keeps the honest error (#173)" {
+    // Review finding (confirmed): a MUTATED no-init Private array whose length is
+    // an OpSpecConstant suppressed the refusal while mslValueType rejected the
+    // length (UnresolvableArrayLength) and the collector's catch-continue dropped
+    // the variable SILENTLY -- rc=0 on undeclared-identifier MSL (data[0]
+    // referenced, declared nowhere). The refusal now also requires the length to
+    // be a plain OpConstant (the collector's resolvability), so this shape keeps
+    // its honest error. Fixture: real glslang source
+    // (layout(constant_id=0) const int N = 4; int data[N];).
+    const spv_bytes = @embedFile("fixtures/private_array_specconst_len.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    try std.testing.expectError(error.UndeclaredPrivateArrayGlobal, zioshade.spirvToMSL(alloc, words, .{}));
+}
+
 test "cuj: MSL -- a function-local shadowing a global's name gets mangled (no redefinition)" {
     // msl_value_shadow.spv: a Private global OpName "a_b" + Function local OpName
     // "a-b" -> both "a_b". MSL namespaces Input/Output into stage structs
