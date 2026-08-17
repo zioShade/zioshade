@@ -2976,9 +2976,12 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
             if (referenced) break;
         }
-        // Admitted by the threading path only when MUTATED and WITHOUT an
-        // initializer operand; anything else (read-only referenced, or
-        // initialized) still has no lowering -- keep the honest error.
+        // Admitted by the threading path only when MUTATED, WITHOUT an
+        // initializer operand, AND the length resolves to a plain OpConstant
+        // (mslValueType refuses anything else -- a spec-const length -- and the
+        // collector's catch-continue would then drop the variable SILENTLY while
+        // this refusal stays suppressed: rc=0 on undeclared-identifier MSL,
+        // found by review). Anything unadmitted keeps the honest error.
         var mutated_arr = false;
         for (module.instructions) |su| {
             if (su.op == .Store and su.words.len >= 3 and pointerRootsAt(&module, su.words[1], var_id)) {
@@ -2986,7 +2989,11 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
                 break;
             }
         }
-        if (referenced and !(mutated_arr and inst.words.len < 5)) return error.UndeclaredPrivateArrayGlobal;
+        const len_resolvable = blk: {
+            const len_def = getDef(&module, pe0.words[3]) orelse break :blk false;
+            break :blk len_def.op == .Constant and len_def.words.len > 3;
+        };
+        if (referenced and !(mutated_arr and inst.words.len < 5 and len_resolvable)) return error.UndeclaredPrivateArrayGlobal;
     }
 
     var member_offsets = std.AutoHashMap(MemberKey, u32).init(aa);
