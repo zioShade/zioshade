@@ -90,6 +90,17 @@ pub const Op = enum(u16) {
     AtomicXor = 242,
     AtomicExchange = 229,
     AtomicCompareExchange = 230,
+    // OpAtomicLoad/Store (227/228) and the weak/increment/decrement trio
+    // (231/232/233) were missing from this enum, so those opcodes parsed as
+    // unnamed `_` values and every backend reported them as
+    // "unsupported op 'unknown' (opcode N)" -- a support burden (no op name).
+    // Naming them upgrades the diagnostics; the WGSL backend lowers
+    // OpAtomicStore (228) as atomicStore.
+    AtomicLoad = 227,
+    AtomicStore = 228,
+    AtomicCompareExchangeWeak = 231,
+    AtomicIIncrement = 232,
+    AtomicIDecrement = 233,
     AtomicFAddEXT = 6035,
     ImageSampleWeightedQCOM = 4480,
     ImageBoxFilterQCOM = 4481,

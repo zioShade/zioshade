@@ -101,14 +101,30 @@
 # measurement. These are report-only findings (breadth on an unfamiliar
 # corpus), follow-up beads, NOT gate failures.
 #
+#
+# 2026-08-17 after fix/wgsl-cts-refusals (on top of #640):
+#   roundtrip-valid         1055  (65.3% of 1613; 65.5% of the 1611 cases
+#                                  that survived the upstream naga+tint leg)
+#   upstream-convert-failed    2  (unchanged)
+#   zioshade-refused         556  (31 lowered: 25 separate comparison samplers
+#                                  via sampler_comparison typing + arrayed/
+#                                  offset compare forms, 2 OpAtomicStore
+#                                  (opcode 228) via atomicStore, 4 replay-path
+#                                  textureSample-in-switch-default. Remainder:
+#                                  546 subgroup ops (naga cannot parse
+#                                  `enable subgroups`), 4 int64, 4 binding
+#                                  collisions, 2 point-size builtins)
+#   zioshade-invalid           0
+#   CRASH                      0
+#
 # ratchet: this file is a point-in-time credibility record. Refresh it (and the
 # date) when the corpus or the backend changes; the sweep itself is non-gating
 # and always exits 0 unless the HARNESS breaks (missing naga/CLI, empty or
 # inconsistent corpus, classifier losing cases, or a configured-but-broken
 # TINT).
-roundtrip-valid 1024
+roundtrip-valid 1055
 upstream-convert-failed 2
-zioshade-refused 587
+zioshade-refused 556
 zioshade-invalid 0
 crash 0
 total 1613

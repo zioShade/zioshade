@@ -1264,33 +1264,71 @@ fn emitDepthCompare(
 ) !void {
     const rt = try wgslType(module, inst.words[1], names, arena);
     const result_name = names.get(inst.words[2]) orelse "v";
-    const tex_name = names.get(inst.words[3]) orelse "tex";
+    // The sampled image may be a COMBINED sampler2DShadow global (tex_name is
+    // its own name; the `<tex>_sampler` partner carries the sampler_comparison
+    // type) or an OpSampledImage built AT THE CALL SITE from a separate depth
+    // texture + comparison sampler (naga/tint's only shape): then the texture
+    // is the sampled image's image operand and the sampler is its sampler
+    // operand (see resolveSamplerArg).
+    var tex_name: []const u8 = names.get(inst.words[3]) orelse "tex";
+    if (getDef(module, inst.words[3])) |sii| {
+        if (sii.op == .SampledImage and sii.words.len > 3) {
+            tex_name = names.get(sii.words[2]) orelse tex_name;
+        }
+    }
+    const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
     const coord = names.get(inst.words[4]) orelse "uv";
     const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
     const shape = depthCompareShape(module, inst.words[3]);
     const coord_swz: []const u8 = if (shape.comps == 3) ".xyz" else ".xy";
-    // ConstOffset (image-operand bit 0x8). Dref=words[5], mask=words[6], values
-    // from words[7]; ConstOffset follows Bias/Lod/Grad in ascending bit order.
-    // WGSL textureSampleCompare(Level)'s const-offset arg exists ONLY for
-    // texture_depth_2d (NOT 2d_array/cube/cube_array) -> honest-error otherwise
-    // rather than emit a builtin naga rejects. (#170)
+    // Image-operand gate (Dref=words[5], mask=words[6], values from words[7];
+    // operands follow ascending bit order Bias 0x1, Lod 0x2, Grad 0x4,
+    // ConstOffset 0x8). WGSL's depth-compare builtins carry ONLY a const-offset
+    // argument: textureSampleCompare takes no bias, and textureSampleCompareLevel
+    // has NO explicit level (naga lowers it to OpImageSampleDrefExplicitLod with
+    // Lod = literal 0). Silently DROPPING a non-zero Lod or any Bias therefore
+    // samples the wrong mip; naga still validates the output, so it is the
+    // silent-wrong this backend forbids. Lower only the faithful forms:
+    //   - implicit: at most a ConstOffset (a Bias is refused);
+    //   - explicit: a Lod that is the constant 0 plus at most a ConstOffset.
+    const is_explicit = inst.op == .ImageSampleDrefExplicitLod;
     var off_suffix: []const u8 = "";
     const dmask: u32 = if (inst.words.len > 6) inst.words[6] else 0;
-    if (dmask & 0x8 != 0) {
-        if (shape.arrayed or shape.comps == 3) return error.UnsupportedImageOperands;
-        var ow: usize = 7;
-        if (dmask & 0x1 != 0) ow += 1; // Bias
-        if (dmask & 0x2 != 0) ow += 1; // Lod
-        if (dmask & 0x4 != 0) ow += 2; // Grad
-        if (ow >= inst.words.len) return error.UnsupportedImageOperands;
-        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[ow]) orelse "vec2<i32>(0)"});
+    {
+        const allowed: u32 = 0x8 | (if (is_explicit) @as(u32, 0x2) else 0);
+        if (dmask & ~allowed != 0) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL depth-compare builtins have no bias/grad operand and no explicit level (textureSampleCompareLevel samples level 0)", .{}) catch null;
+            return error.UnsupportedImageOperands;
+        }
+        if (is_explicit and dmask & 0x2 != 0) {
+            // The Lod operand sits first (bit 0x2 precedes ConstOffset 0x8).
+            const lod_id = inst.words[7];
+            const lod_const = getDef(module, lod_id);
+            const lod_is_zero = if (lod_const) |lc| (lc.op == .Constant and lc.words.len > 3 and lc.words[3] == 0) else false;
+            if (!lod_is_zero) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL textureSampleCompareLevel samples level 0 and takes no level argument; an OpImageSampleDrefExplicitLod with a non-zero Lod has no faithful WGSL form", .{}) catch null;
+                return error.UnsupportedImageOperands;
+            }
+        }
+        if (dmask & 0x8 != 0) {
+            // WGSL textureSampleCompare(Level)'s const-offset arg exists for the
+            // 2D family INCLUDING texture_depth_2d_array, but NOT for
+            // cube/cube_array -> honest-error on cube rather than emit a builtin
+            // naga rejects. (#170; the 2d_array refusal was over-broad and
+            // refused valid offset forms.)
+            if (shape.comps == 3) return error.UnsupportedImageOperands;
+            var ow: usize = 7;
+            if (dmask & 0x2 != 0) ow += 1; // Lod
+            if (ow >= inst.words.len) return error.UnsupportedImageOperands;
+            off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[ow]) orelse "vec2<i32>(0)"});
+        }
     }
     try writeIndentStatic(w, indent);
     if (shape.arrayed) {
         const layer_comp: []const u8 = if (shape.comps == 3) ".w" else ".z";
-        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, coord, layer_comp, dref, off_suffix });
+        try w.print("let {s}: {s} = {s}({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, builtin, tex_name, sampler_arg, coord, coord_swz, coord, layer_comp, dref, off_suffix });
     } else {
-        try w.print("let {s}: {s} = {s}({s}, {s}_sampler, {s}{s}, {s}{s});\n", .{ result_name, rt, builtin, tex_name, tex_name, coord, coord_swz, dref, off_suffix });
+        try w.print("let {s}: {s} = {s}({s}, {s}, {s}{s}, {s}{s});\n", .{ result_name, rt, builtin, tex_name, sampler_arg, coord, coord_swz, dref, off_suffix });
     }
 }
 
@@ -2748,6 +2786,101 @@ fn resolveSamplerArg(module: *const ParsedModule, names: *std.AutoHashMap(u32, [
     return std.fmt.allocPrint(arena, "{s}_sampler", .{tex_name}) catch tex_name;
 }
 
+/// Resolve a texture/sampler VALUE id (the operands of a call-site
+/// OpSampledImage) back to the module-level OpVariable it was loaded from.
+/// Returns null unless the chain is OpLoad(Variable) or a bare Variable AND the
+/// variable lives in UniformConstant (the resource-declaration class); a
+/// function-parameter sampler or anything else has no module declaration to
+/// type, so the caller keeps refusing it.
+fn resolveUniformConstantVar(module: *const ParsedModule, value_id: u32) ?u32 {
+    var vid = value_id;
+    if (getDef(module, vid)) |d| {
+        if (d.op == .Load and d.words.len > 3) vid = d.words[3];
+    }
+    const v = getDef(module, vid) orelse return null;
+    if (v.op != .Variable or v.words.len < 4) return null;
+    const sc: spirv.StorageClass = @enumFromInt(v.words[3]);
+    if (sc != .UniformConstant) return null;
+    return vid;
+}
+
+/// Classify each module-level sampler VARIABLE by the image ops its call-site
+/// OpSampledImage results feed: `dref_vars` collected a depth-COMPARE op
+/// (OpImageSampleDref*/OpImageProjDref*/OpImageDrefGather), `plain_vars` a
+/// non-compare image op. SPIR-V samplers are opaque (comparison-ness lives in
+/// WHICH op samples with them, not the type), while WGSL types the BINDING:
+/// `sampler_comparison` vs `sampler`. A sampler feeding only dref ops must be
+/// declared sampler_comparison; one feeding only plain ops stays `sampler`;
+/// one feeding BOTH cannot be typed by a single WGSL binding (the caller
+/// refuses that). An OpSampledImage with no consuming image op is dead and
+/// contributes nothing.
+const SamplerUses = struct {
+    dref_vars: std.AutoHashMap(u32, void),
+    plain_vars: std.AutoHashMap(u32, void),
+};
+
+fn isDrefSampleOp(op: spirv.Op) bool {
+    return switch (op) {
+        .ImageSampleDrefImplicitLod,
+        .ImageSampleDrefExplicitLod,
+        .ImageSampleProjDrefImplicitLod,
+        .ImageSampleProjDrefExplicitLod,
+        .ImageDrefGather,
+        => true,
+        else => false,
+    };
+}
+
+fn collectSamplerUses(module: *const ParsedModule, alloc: std.mem.Allocator) SamplerUses {
+    var uses = SamplerUses{
+        .dref_vars = std.AutoHashMap(u32, void).init(alloc),
+        .plain_vars = std.AutoHashMap(u32, void).init(alloc),
+    };
+    // Pass 1: classify each OpSampledImage result id by its consumers.
+    // Bit 1 = plain image op, bit 2 = dref op, 3 = sampled both ways.
+    var si_class = std.AutoHashMap(u32, u2).init(alloc);
+    defer si_class.deinit();
+    {
+        var sampled_image_results = std.AutoHashMap(u32, void).init(alloc);
+        defer sampled_image_results.deinit();
+        for (module.instructions) |si| {
+            if (si.op == .SampledImage and si.words.len > 2) {
+                sampled_image_results.put(si.words[2], {}) catch {};
+            }
+        }
+        for (module.instructions) |inst| {
+            const consumes_sampled_image = switch (inst.op) {
+                .ImageSampleImplicitLod,
+                .ImageSampleExplicitLod,
+                .ImageSampleDrefImplicitLod,
+                .ImageSampleDrefExplicitLod,
+                .ImageSampleProjImplicitLod,
+                .ImageSampleProjExplicitLod,
+                .ImageSampleProjDrefImplicitLod,
+                .ImageSampleProjDrefExplicitLod,
+                .ImageGather,
+                .ImageDrefGather,
+                => inst.words.len > 3 and sampled_image_results.contains(inst.words[3]),
+                else => false,
+            };
+            if (!consumes_sampled_image) continue;
+            const cls: u2 = if (isDrefSampleOp(inst.op)) 2 else 1;
+            const gop = si_class.getOrPut(inst.words[3]) catch continue;
+            gop.value_ptr.* = (if (gop.found_existing) gop.value_ptr.* else 0) | cls;
+        }
+    }
+    // Pass 2: attribute each classified OpSampledImage to its sampler variable.
+    var it = si_class.iterator();
+    while (it.next()) |e| {
+        const si = getDef(module, e.key_ptr.*) orelse continue;
+        if (si.op != .SampledImage or si.words.len < 5) continue;
+        const sv = resolveUniformConstantVar(module, si.words[4]) orelse continue;
+        if (e.value_ptr.* & 2 != 0) uses.dref_vars.put(sv, {}) catch {};
+        if (e.value_ptr.* & 1 != 0) uses.plain_vars.put(sv, {}) catch {};
+    }
+    return uses;
+}
+
 fn resolvePointee(module: *const ParsedModule, id: u32) ?u32 {
     // First try direct TypePointer
     if (common.resolvePointeeType(module, id)) |pt| return pt;
@@ -2791,12 +2924,15 @@ fn collectAtomicFields(module: *const ParsedModule, out: *AtomicFieldMap) !void 
             .AtomicFAddEXT,
             .AtomicExchange,
             .AtomicCompareExchange,
+            .AtomicStore,
             => true,
             else => false,
         };
         if (!is_atomic) continue;
         if (inst.words.len < 4) continue;
-        const ptr_id = inst.words[3];
+        // OpAtomicStore has no result type/id: its pointer is words[1]; every
+        // result-producing atomic op carries it at words[3].
+        const ptr_id = if (inst.op == .AtomicStore) inst.words[1] else inst.words[3];
         const ptr_inst = common.getDef(module, ptr_id) orelse continue;
         if (ptr_inst.op != .AccessChain) continue;
         if (ptr_inst.words.len < 5) continue;
@@ -2856,12 +2992,16 @@ fn collectAtomicVars(module: *const ParsedModule, out: *std.AutoHashMap(u32, voi
             .AtomicFAddEXT,
             .AtomicExchange,
             .AtomicCompareExchange,
+            .AtomicStore,
             => true,
             else => false,
         };
         if (!is_atomic) continue;
         if (inst.words.len < 4) continue;
-        const ptr_inst = common.getDef(module, inst.words[3]) orelse continue;
+        // OpAtomicStore's pointer is words[1] (no result type/id; see
+        // collectAtomicFields).
+        const atomic_ptr_id = if (inst.op == .AtomicStore) inst.words[1] else inst.words[3];
+        const ptr_inst = common.getDef(module, atomic_ptr_id) orelse continue;
         if (ptr_inst.op != .Variable or ptr_inst.words.len < 4) continue;
         const sc: spirv.StorageClass = @enumFromInt(ptr_inst.words[3]);
         // Workgroup only: the decl-wrapping below rewrites `var<workgroup>` to
@@ -2871,7 +3011,7 @@ fn collectAtomicVars(module: *const ParsedModule, out: *std.AutoHashMap(u32, voi
         // so restricting here keeps the load/store rewrites consistent with the
         // decl. (Review follow-up.)
         if (sc == .Workgroup) {
-            try out.put(inst.words[3], {});
+            try out.put(atomic_ptr_id, {});
         }
     }
 }
@@ -3208,32 +3348,68 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // OpImageDrefGather) whose sampled image is an OpSampledImage built AT THE
     // CALL SITE from a distinct texture + samplerShadow (Vulkan
     // `sampler2DShadow(tex, samp)`). WGSL pins depth-ness to the TEXTURE type
-    // (texture_depth_2d + sampler_comparison), but such a texture is routinely
-    // ALSO sampled non-compare (`sampler2D(tex, s)` returning vec4) — and a
-    // texture binding cannot be both texture_depth_2d and texture_2d<f32>. The
-    // backend does not route separate comparison samplers, so fail loud rather
-    // than emit an undeclared `<tex>_sampler` (naga reject) or wrong types. A
-    // COMBINED sampler2DShadow global (no call-site OpSampledImage) is unaffected
-    // — it is handled by the texture's sampler_comparison partner.
-    for (module.instructions) |inst| {
-        const is_dref = switch (inst.op) {
-            .ImageSampleDrefImplicitLod,
-            .ImageSampleDrefExplicitLod,
-            .ImageSampleProjDrefImplicitLod,
-            .ImageSampleProjDrefExplicitLod,
-            .ImageDrefGather,
-            => true,
-            else => false,
-        };
-        if (!is_dref or inst.words.len < 4) continue;
-        const si = getDef(&module, inst.words[3]) orelse continue;
-        if (si.op == .SampledImage) {
-            last_error_detail = std.fmt.bufPrint(
-                &last_error_detail_buf,
-                "WGSL cannot represent a separate comparison sampler (sampler2DShadow built from a distinct texture + samplerShadow)",
-                .{},
-            ) catch null;
-            return error.UnsupportedOp;
+    // (texture_depth_2d + sampler_comparison) and comparison-ness to the SAMPLER
+    // binding, so this shape lowers cleanly ONLY when the whole module agrees:
+    //   1. the sampler variable feeds ONLY dref ops (a binding typed
+    //      sampler_comparison cannot also serve a plain textureSample), and
+    //   2. the dref op's texture is a DEPTH image (Depth=1), so texture_depth_*
+    //      matches the SPIR-V image type verbatim, and
+    //   3. the sampler resolves to a module-level UniformConstant variable
+    //      (a function-parameter sampler has no declaration to type).
+    // Anything else keeps failing loud rather than emit a mistyped binding.
+    // A COMBINED sampler2DShadow global (no call-site OpSampledImage) is
+    // unaffected: it is handled by the texture's sampler_comparison partner.
+    {
+        var guard_aa = std.heap.ArenaAllocator.init(alloc);
+        defer guard_aa.deinit();
+        const sampler_uses = collectSamplerUses(&module, guard_aa.allocator());
+        // (1) mixed-use sampler: refuse before emission; the declaration site
+        // below types a dref-only sampler as sampler_comparison, so a sampler
+        // that also feeds a plain sample would silently change that call's
+        // meaning (naga: "Comparison sampling mismatch").
+        var mixed_it = sampler_uses.dref_vars.iterator();
+        while (mixed_it.next()) |e| {
+            if (sampler_uses.plain_vars.contains(e.key_ptr.*)) {
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "WGSL types one sampler binding either sampler or sampler_comparison, never both; this sampler feeds both a depth-compare op (textureSampleCompare/textureGatherCompare) and a non-compare sample",
+                    .{},
+                ) catch null;
+                return error.UnsupportedOp;
+            }
+        }
+        // (2)+(3) every call-site dref op needs a depth texture and a
+        // module-level sampler variable.
+        for (module.instructions) |inst| {
+            if (!isDrefSampleOp(inst.op) or inst.words.len < 4) continue;
+            const si = getDef(&module, inst.words[3]) orelse continue;
+            if (si.op != .SampledImage or si.words.len < 5) continue;
+            // OpSampledImage layout: [1]=result type [2]=result [3]=image [4]=sampler.
+            if (resolveUniformConstantVar(&module, si.words[4]) == null) {
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "WGSL comparison sampling through a sampler that is not a module-level variable has no binding to type sampler_comparison",
+                    .{},
+                ) catch null;
+                return error.UnsupportedOp;
+            }
+            const tex_var = resolveUniformConstantVar(&module, si.words[3]) orelse {
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "WGSL comparison sampling through a texture that is not a module-level variable has no binding to type texture_depth_*",
+                    .{},
+                ) catch null;
+                return error.UnsupportedOp;
+            };
+            const tex_ptr_type = common.resolvePointeeType(&module, getTypeOf(&module, tex_var) orelse continue) orelse continue;
+            if (!imageTypeIsDepth(&module, tex_ptr_type)) {
+                last_error_detail = std.fmt.bufPrint(
+                    &last_error_detail_buf,
+                    "WGSL textureSampleCompare/textureGatherCompare require a texture_depth_* texture; the SPIR-V image sampled with a Dref is not a depth image (Depth=0), and retyping the binding would change what it may bind",
+                    .{},
+                ) catch null;
+                return error.UnsupportedOp;
+            }
         }
     }
 
@@ -3772,7 +3948,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // `sampler2D(tex, samp)` call site). These have no implicit texture partner,
     // so unlike a combined sampler2D they were dropped here and never declared
     // (`var uS: sampler;`), leaving call args referencing an undeclared name.
-    var samplers = std.ArrayList(struct { name: []const u8, set: u32, binding: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var samplers = std.ArrayList(struct { name: []const u8, set: u32, binding: u32, is_comparison: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    // Sampler variables whose OpSampledImage results feed ONLY depth-compare
+    // ops: WGSL types their binding sampler_comparison (SPIR-V samplers are
+    // opaque; comparison-ness is which op samples with them). Mixed-use
+    // samplers were already refused by the early guard, so dref_vars here are
+    // dref-only.
+    const sampler_uses_for_decl = collectSamplerUses(&module, arena);
 
     for (module.instructions) |inst| {
         if (inst.op != .Variable or inst.words.len < 4) continue;
@@ -3851,7 +4033,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                         try textures.append(arena, .{ .name = name, .set = set, .binding = binding, .image_type_id = pointee_type, .is_storage = is_storage, .access = access });
                     },
                     .TypeSampler => {
-                        try samplers.append(arena, .{ .name = name, .set = set, .binding = binding });
+                        try samplers.append(arena, .{
+                            .name = name,
+                            .set = set,
+                            .binding = binding,
+                            .is_comparison = sampler_uses_for_decl.dref_vars.contains(result_id),
+                        });
                     },
                     else => continue,
                 }
@@ -4476,7 +4663,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     for (samplers.items) |samp| {
         const group = samp.set;
         const binding = common.applyBindingShift(samp.binding, options.binding_shift);
-        try w.print("@group({d}) @binding({d})\nvar {s}: sampler;\n\n", .{ group, binding, samp.name });
+        // A sampler whose only sampled-image uses are depth-compare ops is the
+        // binding WGSL must type sampler_comparison (the SPIR-V form of a
+        // comparison sampler: a sampler2DShadow call site). A plain `sampler`
+        // here makes every textureSampleCompare/textureGatherCompare call on it
+        // a naga reject ("Comparison sampling mismatch"): the silent-wrong
+        // class this typing prevents.
+        const kind: []const u8 = if (samp.is_comparison) "sampler_comparison" else "sampler";
+        try w.print("@group({d}) @binding({d})\nvar {s}: {s};\n\n", .{ group, binding, samp.name, kind });
     }
 
     // Emit specialization constants as `@id(N) override NAME: TYPE = DEFAULT;`.
@@ -9672,6 +9866,29 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
+                // The sampler argument: a call-site OpSampledImage carries the
+                // real separate comparison sampler (resolveSamplerArg); a
+                // combined sampler2DShadow falls back to the `<tex>_sampler`
+                // partner (declared sampler_comparison for depth textures).
+                const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
+                const shape = depthCompareShape(module, inst.words[3]);
+                // ConstOffset (image-operand bit 0x8; Dref=words[5], mask=words[6],
+                // operand words[7]). WGSL textureGatherCompare's const-offset arg
+                // exists for texture_depth_2d AND texture_depth_2d_array (both
+                // arrayed and non-arrayed forms), but NOT for cube/cube_array ->
+                // honest-error on cube. Dropping the offset gathers the WRONG
+                // texels (naga accepts the shorter call: silent-wrong). A gather
+                // admits no other operand (Bias/Lod/Grad are invalid on
+                // OpImageDrefGather anyway); anything else in the mask is
+                // honest-errored rather than mis-skipped.
+                var off_suffix: []const u8 = "";
+                const gmask: u32 = if (inst.words.len > 6) inst.words[6] else 0;
+                if (gmask & ~@as(u32, 0x8) != 0) return error.UnsupportedImageOperands;
+                if (gmask & 0x8 != 0) {
+                    if (shape.comps == 3) return error.UnsupportedImageOperands;
+                    if (inst.words.len < 8) return error.UnsupportedImageOperands;
+                    off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[7]) orelse "vec2<i32>(0)"});
+                }
                 // On an ARRAYED depth texture WGSL takes the layer as a SEPARATE
                 // rounded i32 array_index argument between the coordinate and the
                 // depth-ref: textureGatherCompare(t, s, coord.<spatial>,
@@ -9679,15 +9896,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // coordinate (uv,layer for 2d_array; xyz,layer for cube_array), so it
                 // must be sliced out — matching the compare-SAMPLE path in
                 // emitDepthCompare. (Was previously an honest error, #170.)
-                const shape = depthCompareShape(module, inst.words[3]);
                 if (shape.arrayed) {
                     const cs = arrayedCoordSwizzle(shape.comps);
                     const ls = arrayedLayerSwizzle(shape.comps);
                     try writeInd(w, indent);
-                    try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}{s}, i32(round({s}{s})), {s});\n", .{ result_name, rt, tex_name, tex_name, coord, cs, coord, ls, dref });
+                    try w.print("let {s}: {s} = textureGatherCompare({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, dref, off_suffix });
                 } else {
                     try writeInd(w, indent);
-                    try w.print("let {s}: {s} = textureGatherCompare({s}, {s}_sampler, {s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, dref });
+                    try w.print("let {s}: {s} = textureGatherCompare({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, dref, off_suffix });
                 }
             },
 
@@ -9800,7 +10016,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 };
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
-                const tex_name = names.get(inst.words[3]) orelse "tex";
+                var tex_name: []const u8 = names.get(inst.words[3]) orelse "tex";
+                if (getDef(module, inst.words[3])) |sii| {
+                    if (sii.op == .SampledImage and sii.words.len > 3) {
+                        tex_name = names.get(sii.words[2]) orelse tex_name;
+                    }
+                }
+                const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
                 const coord = names.get(inst.words[4]) orelse "uv";
                 const dref = if (inst.words.len > 5) names.get(inst.words[5]) orelse "0" else "0";
                 // Leading spatial components = the sampler dim (.x/.xy/.xyz). The
@@ -9821,21 +10043,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // WGSL has no projective-compare-with-LOD builtin, and the implicit
                 // form already samples the base level for depth textures.
                 // ConstOffset (0x8): the projective depth-2d form keeps WGSL's
-                // textureSampleCompare offset arg. Dref=words[5], mask=words[6]. (#170)
+                // textureSampleCompare offset arg. Dref=words[5], mask=words[6].
+                // A Bias (0x1) or Lod (0x2) has no faithful projective-compare
+                // form (WGSL depth-compare builtins carry neither), so anything
+                // beyond ConstOffset in the mask honest-errors instead of being
+                // silently skipped. (#170)
                 var off_suffix: []const u8 = "";
                 {
                     const pmask: u32 = if (inst.words.len > 6) inst.words[6] else 0;
+                    if (pmask & ~@as(u32, 0x8) != 0) return error.UnsupportedImageOperands;
                     if (pmask & 0x8 != 0) {
-                        var ow: usize = 7;
-                        if (pmask & 0x1 != 0) ow += 1; // Bias
-                        if (pmask & 0x2 != 0) ow += 1; // Lod
-                        if (pmask & 0x4 != 0) ow += 2; // Grad
-                        if (ow >= inst.words.len) return error.UnsupportedImageOperands;
-                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[ow]) orelse "vec2<i32>(0)"});
+                        if (inst.words.len < 8) return error.UnsupportedImageOperands;
+                        off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[7]) orelse "vec2<i32>(0)"});
                     }
                 }
                 try writeInd(w, indent);
-                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}_sampler, {s}{s} / {s}{s}, {s} / {s}{s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, dref, coord, last_comp, off_suffix });
+                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}, {s}{s} / {s}{s}, {s} / {s}{s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lead, coord, last_comp, dref, coord, last_comp, off_suffix });
             },
 
             // ReadClockKHR — shader clock
@@ -10004,6 +10227,32 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .AtomicUMin, .AtomicSMin => try emitAtomicBinOp(module, names, inst, "Min", w, arena, indent),
             .AtomicUMax, .AtomicSMax => try emitAtomicBinOp(module, names, inst, "Max", w, arena, indent),
             .AtomicFAddEXT => try emitAtomicBinOp(module, names, inst, "Add", w, arena, indent),
+            // OpAtomicStore: WGSL atomicStore(&p, v). Unlike the RMW atomics this
+            // op has NO result type/id, so its operand layout is shifted one word
+            // earlier: [1]=pointer [2]=scope [3]=semantics [4]=value. WGSL atomics
+            // are RELAXED: Acquire/Release/AcquireRelease/SequentiallyConsistent
+            // semantics bits have NO faithful WGSL form, so honest-error rather
+            // than emit a weaker store than the source ordered.
+            .AtomicStore => {
+                if (inst.words.len < 5) return error.UnsupportedOp;
+                if (atomicPtrIsImage(module, names, inst.words[1])) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no image atomic operations (atomicStore on a storage image)", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
+                // The semantics operand is an ID of a u32 OpConstant, not a literal.
+                const semantics: u32 = if (getDef(module, inst.words[3])) |sc_i| blk: {
+                    if (sc_i.op != .Constant or sc_i.words.len < 4) break :blk std.math.maxInt(u32);
+                    break :blk sc_i.words[3];
+                } else std.math.maxInt(u32);
+                if (semantics & (0x2 | 0x4 | 0x8 | 0x10) != 0) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL atomicStore is relaxed; OpAtomicStore with acquire/release/sequentially-consistent semantics has no faithful WGSL form", .{}) catch null;
+                    return error.UnsupportedOp;
+                }
+                const ptr = names.get(inst.words[1]) orelse "ptr";
+                const val = names.get(inst.words[4]) orelse "0";
+                try writeInd(w, indent);
+                try w.print("atomicStore(&{s}, {s});\n", .{ ptr, val });
+            },
             .AtomicExchange => {
                 if (atomicPtrIsImage(module, names, inst.words[3])) {
                     last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no image atomic operations (atomicExchange on a storage image)", .{}) catch null;
@@ -10785,6 +11034,44 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             if (ptr_name != null and std.mem.eql(u8, ptr_name.?, "gl_FragDepth")) return;
             try writeIndentStatic(w, indent);
             try w.print("{s} = {s};\n", .{ ptr, val });
+        },
+        // OpSampledImage in a switch/conditional case body: alias the result to
+        // the image operand's name exactly like the main emit path, so the sample
+        // op that consumes it resolves the real texture. Previously this op fell
+        // to the replay fallback and honest-errored ("unsupported op
+        // 'SampledImage' in switch/loop replay path"), refusing shaders whose
+        // only sin was a textureSample inside a switch default arm.
+        .SampledImage => {
+            if (inst.words.len > 4) {
+                const image_name = names.get(inst.words[3]) orelse "tex";
+                if (try names.fetchPut(inst.words[2], try alloc.dupe(u8, image_name))) |old| alloc.free(old.value);
+            }
+        },
+        // OpImageSampleImplicitLod in a case body: the MINIMAL faithful form,
+        // a plain float texture, no image operands, non-arrayed, lowered exactly
+        // like the main emit path (textureSample with the call-site sampler when
+        // the OpSampledImage carries one). Anything richer (bias/lod/grad/offset
+        // operands, arrayed or multisample shapes, integer textures) keeps the
+        // honest error rather than a guessed lowering.
+        .ImageSampleImplicitLod => {
+            if (isIntegerSampledImage(module, inst.words[3])) return error.UnsupportedIntegerTextureSample;
+            const mask: u32 = if (inst.words.len > 5) inst.words[5] else 0;
+            if (mask != 0) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL switch/loop replay path lowers only a plain textureSample (image operands are unsupported here)", .{}) catch null;
+                return error.UnsupportedImageOperands;
+            }
+            const shape = arrayedSampleShape(module, inst.words[3]);
+            if (shape.arrayed or shape.depth) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL switch/loop replay path lowers only a plain non-arrayed textureSample", .{}) catch null;
+                return error.UnsupportedImageOperands;
+            }
+            const rt = try wgslType(module, inst.words[1], names, arena);
+            const result_name = names.get(inst.words[2]) orelse "v";
+            const tex_name = names.get(inst.words[3]) orelse "tex";
+            const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
+            const coord = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
+            try writeIndentStatic(w, indent);
+            try w.print("let {s}: {s} = textureSample({s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord });
         },
         .AccessChain => {
             // Rename result to composite.field expression
