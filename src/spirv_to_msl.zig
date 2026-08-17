@@ -2212,6 +2212,23 @@ fn moduleNeedsUnsafeArray(m: *const ParsedModule) bool {
                 const rt = getDef(m, inst.words[1]) orelse continue;
                 if (rt.op == .TypeArray) return true;
             },
+            // A MUTATED no-initializer Private array global is threaded as a
+            // spvUnsafeArray local (collectThreadedPrivGlobals), so the template
+            // must be in the preamble. Read-only const arrays keep their plain
+            // `constant T[N]` module-scope path and must NOT pull the template in
+            // (it would confuse consumers scanning for the const declaration).
+            .Variable => {
+                if (inst.words.len < 4 or inst.words.len >= 5) continue;
+                if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) != .Private) continue;
+                const ptr = getDef(m, inst.words[1]) orelse continue;
+                if (ptr.op != .TypePointer or ptr.words.len <= 3) continue;
+                const pt = getDef(m, ptr.words[3]) orelse continue;
+                if (pt.op != .TypeArray) continue;
+                const vid = inst.words[2];
+                for (m.instructions) |su| {
+                    if (su.op == .Store and su.words.len >= 3 and pointerRootsAt(m, su.words[1], vid)) return true;
+                }
+            },
             else => {},
         }
     }
@@ -2959,7 +2976,17 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
             if (referenced) break;
         }
-        if (referenced) return error.UndeclaredPrivateArrayGlobal;
+        // Admitted by the threading path only when MUTATED and WITHOUT an
+        // initializer operand; anything else (read-only referenced, or
+        // initialized) still has no lowering -- keep the honest error.
+        var mutated_arr = false;
+        for (module.instructions) |su| {
+            if (su.op == .Store and su.words.len >= 3 and pointerRootsAt(&module, su.words[1], var_id)) {
+                mutated_arr = true;
+                break;
+            }
+        }
+        if (referenced and !(mutated_arr and inst.words.len < 5)) return error.UndeclaredPrivateArrayGlobal;
     }
 
     var member_offsets = std.AutoHashMap(MemberKey, u32).init(aa);
@@ -6440,10 +6467,15 @@ fn collectThreadedPrivGlobals(m: *const ParsedModule, names: *std.AutoHashMap(u3
         switch (gpti.op) {
             .TypeFloat, .TypeInt, .TypeBool, .TypeVector, .TypeMatrix => {},
             // Structs are admitted now that the module-scope struct scan covers Private
-            // storage. Arrays stay out and keep the #173 honest error: an array needs
-            // spvUnsafeArray wrapping to be passed by reference, which is a separate
-            // change, and an honest refusal beats output that does not compile.
+            // storage. Arrays (#173): admitted as spvUnsafeArray<T, N> locals when they
+            // have NO initializer operand (the mutated glslang/zioshade shape) — the
+            // wrapper is reference-passable, assignable and indexable, so the same
+            // threading machinery works. Initialized or unmutated arrays keep the
+            // honest error (see the prepass refusal).
             .TypeStruct => {},
+            .TypeArray => {
+                if (ginst.words.len >= 5) continue; // initializer: not this path
+            },
             else => continue,
         }
         const gvar = ginst.words[2];
@@ -6456,7 +6488,10 @@ fn collectThreadedPrivGlobals(m: *const ParsedModule, names: *std.AutoHashMap(u3
         }
         if (!mutated) continue;
         const gname = names.get(gvar) orelse continue;
-        const gtn = mslType(m, gpt, names, alloc) catch continue;
+        const gtn = if (gpti.op == .TypeArray)
+            (mslValueType(m, gpt, names, alloc) catch continue)
+        else
+            (mslType(m, gpt, names, alloc) catch continue);
         out.append(alloc, .{
             .var_id = gvar,
             .name = gname,

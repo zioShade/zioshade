@@ -5711,6 +5711,31 @@ test "cgv: MSL -- two structs sharing one OpName get distinct mangled decls (no 
     try assertContains(msl, "float _m2;");
 }
 
+test "msl: a MUTATED Private array global is threaded as a spvUnsafeArray local (#173)" {
+    // #173 (the #private-array class): a Private `int data[4]` global that the
+    // shader STORES into (the glslang/zioshade shape; graphicsfuzz_000/017/061's
+    // data[] arrays) was flat-out refused (UndeclaredPrivateArrayGlobal) because
+    // Metal forbids file-scope mutable arrays and a C array cannot be passed by
+    // reference. Now it is declared as a spvUnsafeArray<T,N> LOCAL in the entry
+    // and threaded to helpers as `thread spvUnsafeArray<T,N>&` through the same
+    // 3-part machinery as scalar/struct Privates. Fixture: real glslang source
+    // (a helper reads data[i] -- exercising the threading). Render-verified
+    // MATCH vs naga; the three CTS shaders render MATCH too.
+    const spv_bytes = @embedFile("fixtures/private_array_global.spv");
+    const words = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(words);
+    @memcpy(std.mem.sliceAsBytes(words), spv_bytes);
+
+    const msl = try zioshade.spirvToMSL(alloc, words, .{});
+    defer alloc.free(msl);
+    // The template preamble must be present (the local needs it).
+    try assertContains(msl, "struct spvUnsafeArray");
+    // Declared as a LOCAL of the wrapper type in the entry impl.
+    try assertContains(msl, "spvUnsafeArray<int, 4> data;");
+    // The helper takes it by thread reference (the threading machinery).
+    try assertContains(msl, "thread spvUnsafeArray<int, 4>& data");
+}
+
 test "cuj: MSL -- a function-local shadowing a global's name gets mangled (no redefinition)" {
     // msl_value_shadow.spv: a Private global OpName "a_b" + Function local OpName
     // "a-b" -> both "a_b". MSL namespaces Input/Output into stage structs
