@@ -16,7 +16,15 @@
 #
 # i.e. the CTS's own WGSL, converted to SPIR-V by naga (the same oracle the
 # WGSL gates use), cross-compiled back to WGSL by zioshade, and validated by
-# naga again. Per case this classifies:
+# naga again. When a tint CLI is available (env TINT, else `tint` on PATH; the
+# upstream converter at ~/.local/bin/tint is dawn 5e9e5136 built with
+# TINT_BUILD_WGSL_READER+SPV_WRITER), naga-refused cases get a SECOND chance
+# through `tint --format spirv`: the subgroups-enabled WGSL that dominates the
+# naga-refused class converts fine with tint. upstream-convert-failed then
+# means BOTH converters refused. A tint-converted case flows through the SAME
+# zioshade + naga-validate legs (no greenwashing: tint widens the measurable
+# denominator, it never blesses output). Without tint the sweep is naga-only,
+# exactly the pre-tint behavior. Per case this classifies:
 #   roundtrip-valid          every leg succeeded: zioshade ingested + lowered
 #                            the CTS shader to WGSL that naga accepts.
 #   upstream-convert-failed  naga refused WGSL -> SPIR-V (feature-gated WGSL
@@ -62,6 +70,18 @@ CLI=${CLI:-zig-out/bin/zioshade}
 CORPUS=${1:-tests/webgpu_cts}
 PER_CASE=${PER_CASE:-}
 
+# ---- optional second upstream converter (tint) ----
+# Explicit TINT that is not executable is a hard error (a configured-but-broken
+# fallback must never silently degrade to naga-only numbers). Unset + not on
+# PATH simply means naga-only, the original behavior.
+TINT_BIN=${TINT:-}
+if [ -z "$TINT_BIN" ] && command -v tint >/dev/null 2>&1; then
+  TINT_BIN=$(command -v tint)
+fi
+if [ -n "${TINT:-}" ] && [ ! -x "$TINT_BIN" ]; then
+  echo "error: TINT=$TINT is not executable"; exit 2
+fi
+
 # ---- fail-closed setup checks ----
 [ -x "$CLI" ] || { echo "error: build the CLI first (zig build cli)"; exit 2; }
 command -v naga >/dev/null || { echo "error: naga not on PATH (needed for BOTH the WGSL -> SPIR-V upstream leg and output validation)"; exit 2; }
@@ -94,8 +114,12 @@ while IFS=$'\t' read -r id wgsl entry stage spec test params; do
     echo "HARNESS BREAKAGE: manifest row $id -> missing file $src" >&2
     exit 2
   fi
-  # ---- leg 1: CTS WGSL -> SPIR-V (naga, the upstream converter) ----
+  # ---- leg 1: CTS WGSL -> SPIR-V (naga, the upstream converter; tint second) ----
   if naga --input-kind wgsl "$src" "$TMP/case.spv" >"$TMP/e1" 2>&1; then
+    :
+  elif [ -n "$TINT_BIN" ] && "$TINT_BIN" --format spirv "$src" -o "$TMP/case.spv" >"$TMP/e1" 2>&1 && [ -s "$TMP/case.spv" ]; then
+    # naga refused (e.g. subgroups-enabled WGSL) but tint converted: the case
+    # still measures the SAME zioshade + naga-validate legs below.
     :
   else
     v_upstream=$((v_upstream+1))
@@ -155,7 +179,7 @@ fi
 echo
 echo "WebGPU CTS (webgpu:shader) WGSL round-trip sweep: $total cases ($CORPUS)"
 echo "  roundtrip-valid:          $v_ok"
-echo "  upstream-convert-failed:  $v_upstream   (naga WGSL->SPIR-V refused; not zioshade's)"
+echo "  upstream-convert-failed:  $v_upstream   (naga${TINT_BIN:+ AND tint} WGSL->SPIR-V refused; not zioshade's)"
 echo "  zioshade-refused:         $v_refused   (honest error: nonzero exit + diagnostic)"
 echo "  zioshade-invalid:         $v_invalid   (exit 0, naga rejects the output: silent-wrong class)"
 echo "  CRASH:                    $v_crash   (mandate violation)"

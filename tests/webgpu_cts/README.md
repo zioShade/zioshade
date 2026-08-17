@@ -18,12 +18,16 @@ webgpu:shader ingestion credibility harness (r2d.1).
   text instead of compiling it. `tools/webgpu_cts_extract.py` then carves this
   slice. The dumped shaders are EXACTLY what the CTS would have submitted to a
   real WebGPU implementation.
-- **Contents:** `cases/*.wgsl` (382 unique shaders, ~85 KB of WGSL) +
+- **Contents:** `cases/*.wgsl` (1613 unique shaders, ~320 KB of WGSL) +
   `manifest.tsv` (per case: id, entry point, stage, originating spec file,
   test name, params). Slice rule: unique-by-text shaders with
-  `expected=true` and at least one entry point, capped at 5 per originating
+  `expected=true` and at least one entry point, capped at 100 per originating
   spec file, picked in sha1 order (deterministic; a refresh changes only what
-  the CTS changed). 91 distinct spec files are represented.
+  the CTS changed). 91 distinct spec files are represented; the full
+  extraction pool at this pin is 2,047 per-file-bucketed uniques (2,046
+  distinct texts; one shader is witnessed by two spec files and deduped at
+  emission), so the slice covers 79% of the pool while keeping the vendored
+  bytes bounded.
 
 ## What the harness measures, and what it does NOT
 
@@ -49,16 +53,20 @@ The numbers do NOT mean, and must never be cited as:
 - **Coverage of zioshade's other backends.** This leg exercises the WGSL
   backend only (see `tools/cts_ingestion_sweep.sh` for the broad corpus legs).
 
-`upstream-convert-failed` cases are WGSL the CTS expects to compile but the
-LOCAL naga front end cannot yet convert to SPIR-V (at this pin: 50 `subgroups`
-enables, `atomic_vec2u_min_max`, `@diagnostic`, const-expr `determinant`).
-They are the upstream ceiling, not zioshade failures, and are reported
-separately for exactly that reason.
+`upstream-convert-failed` cases are WGSL the CTS expects to compile but NO
+local upstream converter can turn into SPIR-V: the sweep tries naga first and
+tint (env `TINT`, else `tint` on PATH; dawn 5e9e5136 works) second. With both
+present the class shrinks to pipeline-overridable constants without values,
+which neither converter can materialize headlessly. Without tint the class is
+the full set of naga's front-end gaps (at this pin: the `subgroups` enables,
+`@diagnostic`, const-expr `determinant`, `atomic_vec2u_min_max`, ...). They
+are the upstream ceiling, not zioshade failures, and are reported separately
+for exactly that reason.
 
 ## Refresh
 
 ```bash
-tools/webgpu_cts_fetch.sh            # regenerate cases/ + manifest.tsv
+tools/webgpu_cts_fetch.sh            # regenerate cases/ + manifest.tsv (PER_FILE=N overrides the cap)
 PER_CASE=tests/webgpu_cts/per_case.tsv tools/webgpu_cts_sweep.sh
 # then update baseline.txt counts + the pinned commit above
 ```

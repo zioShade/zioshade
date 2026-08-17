@@ -18,8 +18,13 @@ Keep filters, all counted into the stats block so the slice stays auditable:
   - at least one @vertex/@fragment/@compute entry point. Module-scope-only
     tests (const/override/type decls) have no entry point, so no compiler can
     lower them to SPIR-V; they are out of the harness's measurable path.
-  - non-empty source; exact-text dedup across the whole dump (a shader dumped
-    by 40 cases is ONE corpus case; the manifest records the first witness).
+  - non-empty source; dedup by exact text. Dedup is bucketed per spec file (the
+    cap is per spec file), so a shader witnessed by two spec files can be
+    picked from both; the case id is the content sha1, so the SECOND pick is
+    dropped at emission (the lexicographically first spec file records the
+    witness) and counted as duplicate_id_skipped. Without this, manifest rows
+    and case files disagree, which the sweep's fail-closed consistency check
+    treats as harness breakage.
 
 Usage: webgpu_cts_extract.py <dump.json> <dst> [--per-file N] (default 4)
 """
@@ -52,6 +57,7 @@ def main() -> int:
         'slice_cases': 0,
         'slice_bytes': 0,
         'spec_files_in_slice': 0,
+        'duplicate_id_skipped': 0,
     }
 
     # Pass 1: filter + global exact-text dedup, bucketed by originating spec file.
@@ -96,8 +102,16 @@ def main() -> int:
     cases_dir = os.path.join(args.dst, 'cases')
     os.makedirs(cases_dir, exist_ok=True)
     manifest = ['id\twgsl\tentry\tstage\tspec\ttest\tparams']
+    emitted_ids: set[str] = set()
     for f, c in cases:
         cid = 'cts_' + c['sha'][:12]
+        if cid in emitted_ids:
+            # Same shader text picked from another spec file: the case file is
+            # content-addressed and already written; a second manifest row
+            # would desynchronize rows vs files (sweep fail-closed check).
+            stats['duplicate_id_skipped'] += 1
+            continue
+        emitted_ids.add(cid)
         path = f'cases/{cid}.wgsl'
         with open(os.path.join(args.dst, path), 'w') as w:
             w.write(c['code'] if c['code'].endswith('\n') else c['code'] + '\n')

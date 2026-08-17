@@ -8193,3 +8193,224 @@ test "WGSL drops the lod operand of a storage-texture size query (#wgsl-cts)" {
     try assertNotContains(wgsl, "textureDimensions(stex, ");
     try nagaValidateOrSkip(wgsl, "query-storage");
 }
+
+// A module-scope var<private> whose OpVariable initializer is OpConstantNull /
+// OpConstantTrue / OpConstantFalse (naga emits these for every plain
+// `var<private> x: T;` and `var<private> b: bool = true;`) had no
+// resolveConstantExpr fold, so the Private emitter SKIPPED the declaration
+// (its policy for an unmaterialisable initializer) while every use site still
+// referenced the name: undeclared identifier at exit 0. Null now folds to the
+// zero literal of its own type (value-faithful: a WGSL var<private> without
+// initializer holds exactly that), true/false fold to bool literals.
+test "WGSL folds OpConstantNull/True/False private-global initializers (#wgsl-cts)" {
+    const spv = try assembleSpirv("priv_null_bool_init",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint GLCompute %main "main"
+        \\               OpExecutionMode %main LocalSize 1 1 1
+        \\               OpName %b "flag"
+        \\               OpName %x "counter"
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %bool = OpTypeBool
+        \\        %int = OpTypeInt 32 1
+        \\%_ptr_Private_bool = OpTypePointer Private %bool
+        \\ %_ptr_Private_int = OpTypePointer Private %int
+        \\       %true = OpConstantTrue %bool
+        \\       %null = OpConstantNull %int
+        \\      %int_7 = OpConstant %int 7
+        \\          %b = OpVariable %_ptr_Private_bool Private %true
+        \\          %x = OpVariable %_ptr_Private_int Private %null
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %lb = OpLoad %bool %b
+        \\               OpSelectionMerge %9 None
+        \\               OpBranchConditional %lb %7 %9
+        \\          %7 = OpLabel
+        \\               OpStore %x %int_7
+        \\               OpBranch %9
+        \\          %9 = OpLabel
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // read-only globals fold as const; written ones stay var<private>
+    try assertContains(wgsl, "const flag: bool = true;");
+    try assertContains(wgsl, "var<private> counter: i32 = 0;");
+    try nagaValidateOrSkip(wgsl, "priv-null-bool-init");
+}
+
+// A private global referenced ONLY by OpStore (write-only) failed the
+// Private emitter's has_load usage gate (OpLoad/OpAccessChain only), so its
+// declaration was skipped and the store's target leaked as an undeclared
+// identifier at exit 0. naga emits this exact shape for `var<private> x: i32;`
+// plus `x = 42;` (initializer OpConstantNull, single OpStore, no read).
+test "WGSL declares a write-only private global (store-only usage) (#wgsl-cts)" {
+    const spv = try assembleSpirv("priv_write_only",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint GLCompute %main "main"
+        \\               OpExecutionMode %main LocalSize 1 1 1
+        \\               OpName %x "wronly"
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\        %int = OpTypeInt 32 1
+        \\ %_ptr_Private_int = OpTypePointer Private %int
+        \\      %int_3 = OpConstant %int 3
+        \\      %int_9 = OpConstant %int 9
+        \\          %x = OpVariable %_ptr_Private_int Private %int_3
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\               OpStore %x %int_9
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // written globals stay mutable var<private> with their real initializer
+    try assertContains(wgsl, "var<private> wronly: i32 = 3;");
+    try nagaValidateOrSkip(wgsl, "priv-write-only");
+}
+
+// A fragment with @location outputs AND @builtin(frag_depth) built its
+// FragmentOutput by fabricating `@location(0) color: vec4f`: the real outputs
+// (here scalar f32 at locations 11 and 10, the naga lowering of a WGSL io
+// struct return) were dropped from the struct while their OpStores still
+// emitted against undeclared names at exit 0, and the fabricated field
+// invented a location and type the shader never had. The struct now carries
+// the real fields plus the depth field, and the return takes one argument per
+// field. The frag_depth var is tracked only in depth_output_var_id and never
+// enters the @location field list.
+test "WGSL builds the depth+locations FragmentOutput from the real outputs (#wgsl-cts)" {
+    const spv = try assembleSpirv("depth_plus_locs",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o11 %od %o10
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o11 Location 11
+        \\               OpDecorate %o10 Location 10
+        \\               OpDecorate %od BuiltIn FragDepth
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\%_ptr_Output_float = OpTypePointer Output %float
+        \\     %float_0 = OpConstant %float 0
+        \\     %float_h = OpConstant %float 0.5
+        \\        %o11 = OpVariable %_ptr_Output_float Output
+        \\        %o10 = OpVariable %_ptr_Output_float Output
+        \\         %od = OpVariable %_ptr_Output_float Output
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\               OpStore %o11 %float_h
+        \\               OpStore %o10 %float_0
+        \\               OpStore %od %float_h
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "@location(11)");
+    try assertContains(wgsl, "@location(10)");
+    try assertContains(wgsl, "@builtin(frag_depth)");
+    // no fabricated color field, no invented location 0
+    try assertNotContains(wgsl, "color:");
+    try assertNotContains(wgsl, "@location(0)");
+    try assertContains(wgsl, "return FragmentOutput(");
+    try nagaValidateOrSkip(wgsl, "depth-plus-locs");
+}
+
+// The selection-phi prologue decided "initializer defined before the if" by a
+// text scan comparing words[2] against the incoming value id for EVERY
+// instruction. words[2] is a result id only for value-producing ops: an OpName
+// string word is DATA, and a name whose first word numerically equals the value
+// id (tint names a transfer-function constant "B", string word 66) aliased an
+// arm-local value id. The then-arm value then passed as an in-scope `var phi =
+// <arm value>;` initializer while the name is declared only inside the branch:
+// undeclared identifier at exit 0. The check is now index-backed (id_defs).
+// spirv-as resolves %names symbolically and renumbers ids, so the numeric
+// alias cannot be spelled in assembly text: the test patches the assembled
+// binary, rewriting an unrelated OpName's first string word to the arm value's
+// numeric id (exactly the tint module's accident).
+test "WGSL selection-phi initializer scope check ignores OpName string words (#wgsl-cts)" {
+    const spv = try assembleSpirv("phi_name_alias",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %out
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %out Location 0
+        \\               OpName %c "B"
+        \\               OpName %66 "armval"
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\       %float = OpTypeFloat 32
+        \\     %v3float = OpTypeVector %float 3
+        \\     %v4float = OpTypeVector %float 4
+        \\       %bool = OpTypeBool
+        \\ %_ptr_Output_v4float = OpTypePointer Output %v4float
+        \\          %c = OpConstant %float 0.5
+        \\    %float_0 = OpConstant %float 0
+        \\    %float_1 = OpConstant %float 1
+        \\        %out = OpVariable %_ptr_Output_v4float Output
+        \\        %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %x = OpCompositeConstruct %v3float %float_0 %float_1 %float_0
+        \\         %b = OpFOrdGreaterThan %bool %c %float_1
+        \\               OpSelectionMerge %62 None
+        \\               OpBranchConditional %b %63 %64
+        \\         %63 = OpLabel
+        \\         %66 = OpVectorShuffle %v3float %x %x 0 1 2
+        \\               OpBranch %62
+        \\         %64 = OpLabel
+        \\         %67 = OpVectorShuffle %v3float %x %x 2 1 0
+        \\               OpBranch %62
+        \\         %62 = OpLabel
+        \\         %65 = OpPhi %v3float %66 %63 %67 %64
+        \\        %res = OpVectorShuffle %v4float %65 %65 0 1 2 0
+        \\               OpStore %out %res
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    // Walk instructions (header is 5 words; words[0] packs count+opcode),
+    // find the phi's arm value id, then the first OpName NOT naming it and
+    // rewrite that name's first string word to the arm value id.
+    var arm_id: u32 = 0;
+    {
+        var wi: usize = 5;
+        while (wi < spv.len) {
+            const wc = spv[wi] >> 16;
+            if ((spv[wi] & 0xFFFF) == 245 and wc >= 4) { // OpPhi
+                arm_id = spv[wi + 3]; // first incoming value id
+                break;
+            }
+            wi += wc;
+        }
+    }
+    var patch_at: ?usize = null;
+    {
+        var wi: usize = 5;
+        while (wi < spv.len) {
+            const wc = spv[wi] >> 16;
+            const op = spv[wi] & 0xFFFF;
+            if (op == 5 and wc >= 3 and spv[wi + 1] != arm_id) { // OpName not naming the arm value
+                patch_at = wi + 2; // its first string word
+                break;
+            }
+            wi += wc;
+        }
+    }
+    try std.testing.expect(arm_id != 0);
+    try std.testing.expect(patch_at != null);
+    spv[patch_at.?] = arm_id;
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // the arm value is only in scope inside the branch: the prologue must NOT
+    // use it as the var initializer ("vec3f = armval;" is the old bad form)
+    try assertNotContains(wgsl, "vec3f = armval;");
+    try assertContains(wgsl, "armval");
+    try nagaValidateOrSkip(wgsl, "phi-name-alias");
+}
