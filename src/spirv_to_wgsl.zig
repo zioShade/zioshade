@@ -2660,6 +2660,20 @@ fn buildAccessExprPlain(module: *const ParsedModule, names: *std.AutoHashMap(u32
 fn resolveConstantExpr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), id: u32, arena: std.mem.Allocator) ?[]const u8 {
     const inst = common.getDef(module, id) orelse return null;
     switch (inst.op) {
+        // OpConstantNull/True/False are naga's initializers for every plain
+        // `var<private> x: T;` / `var<private> b: bool = true;` global. The
+        // Private-var emitter SKIPS a declaration whose initializer does not
+        // resolve (rather than zero-initialise silently-wrong values), so an
+        // unfoldable one left every use site referencing an undeclared
+        // identifier at exit 0. Null folds to the zero literal of its own type
+        // (exactly what a WGSL var<private> without initializer holds, so the
+        // fold is value-faithful, not a fallback). (#wgsl-cts)
+        .ConstantNull => {
+            if (inst.words.len < 3) return null;
+            return zeroLiteralOfType(module, inst.words[1], names, arena);
+        },
+        .ConstantTrue => return "true",
+        .ConstantFalse => return "false",
         .ConstantComposite => {
             // Build a WGSL composite constructor: `vec4f(e0,…)` for a vector,
             // `array<T, N>(e0, e1, …)` for a (possibly nested) array, recursing
@@ -3467,33 +3481,42 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     }
                 }
                 if (location != null or is_fragment or is_vertex) {
-                    try output_vars.append(arena, inst.words[2]);
                     if (is_fragment) {
-                        // Detect depth output
+                        // Detect depth output. The frag_depth var is tracked
+                        // ONLY in depth_output_var_id, never appended to
+                        // output_vars: output_vars is the list of @location
+                        // outputs the FragmentOutput struct is built from, and a
+                        // depth entry in it would fabricate a @location field
+                        // for a builtin. (#wgsl-cts)
+                        var is_depth = false;
                         if (builtin != null) {
                             const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
                             if (bi == .frag_depth) {
                                 depth_output_var_id = inst.words[2];
-                            } else if (output_var_id == null) {
-                                output_var_id = inst.words[2];
+                                is_depth = true;
                             }
-                        } else if (output_var_id == null) {
-                            output_var_id = inst.words[2];
                         }
-                    } else if (is_vertex) {
-                        // For vertex shaders, prefer BuiltIn.position (gl_Position) as the return value
-                        if (builtin != null) {
-                            const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
-                            if (bi == .position) {
-                                output_var_id = inst.words[2]; // position always takes priority
-                            } else if (output_var_id == null) {
-                                output_var_id = inst.words[2];
-                            }
-                        } else if (output_var_id == null) {
-                            output_var_id = inst.words[2];
+                        if (!is_depth) {
+                            try output_vars.append(arena, inst.words[2]);
+                            if (output_var_id == null) output_var_id = inst.words[2];
                         }
                     } else {
-                        if (output_var_id == null) output_var_id = inst.words[2];
+                        try output_vars.append(arena, inst.words[2]);
+                        if (is_vertex) {
+                            // For vertex shaders, prefer BuiltIn.position (gl_Position) as the return value
+                            if (builtin != null) {
+                                const bi: spirv.BuiltIn = @enumFromInt(builtin.?);
+                                if (bi == .position) {
+                                    output_var_id = inst.words[2]; // position always takes priority
+                                } else if (output_var_id == null) {
+                                    output_var_id = inst.words[2];
+                                }
+                            } else if (output_var_id == null) {
+                                output_var_id = inst.words[2];
+                            }
+                        } else {
+                            if (output_var_id == null) output_var_id = inst.words[2];
+                        }
                     }
                 }
             }
@@ -3854,6 +3877,10 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         // `arr[i]` referencing an undeclared name (naga reject). Safe to declare
         // now that the initializer path below emits the real array values via
         // resolveConstantExpr (not a zero-initialised var<private>).
+        // A WRITE-ONLY var (OpStore, direct or through an access chain) is used
+        // too: skipping its declaration left the store's target as an undeclared
+        // identifier at exit 0 (naga emits this for every `var<private> x: T;`
+        // that main only assigns). (#wgsl-cts)
         var has_load = false;
         for (module.instructions) |check| {
             if (check.op == .Load and check.words.len > 3 and check.words[3] == result_id) {
@@ -3863,6 +3890,18 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (check.op == .AccessChain and check.words.len > 3 and check.words[3] == result_id) {
                 has_load = true;
                 break;
+            }
+            if (check.op == .Store and check.words.len >= 2) {
+                if (check.words[1] == result_id) {
+                    has_load = true;
+                    break;
+                }
+                if (getDef(&module, check.words[1])) |tgt| {
+                    if (tgt.op == .AccessChain and tgt.words.len > 3 and tgt.words[3] == result_id) {
+                        has_load = true;
+                        break;
+                    }
+                }
             }
         }
         if (!has_load) continue;
@@ -4836,20 +4875,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // Detect depth output for fragment shaders
     var use_frag_depth_struct = false;
     var use_frag_mrt_struct = false;
-    if (is_fragment and depth_output_var_id != null) {
-        // A depth-only fragment (no @location output at all; naga emits this for
-        // `fn main() -> @builtin(frag_depth) f32`) must NOT get a fabricated
-        // `@location(0) color: vec4f` field: that invents an output the shader
-        // never had, and no captured value can fill it. Emit the depth field
-        // alone; the return then takes exactly one argument. (#wgsl-cts)
-        try w.writeAll("struct FragmentOutput {\n");
-        if (output_var_id != null) {
-            try w.writeAll("    @location(0) color: vec4f,\n");
-        }
-        try w.writeAll("    @builtin(frag_depth) depth: f32,\n");
-        try w.writeAll("}\n\n");
-        use_frag_depth_struct = true;
-    } else if (is_fragment and output_vars.items.len > 1) {
+    // The @location field text shared by the MRT struct and the depth struct
+    // (the depth var itself is excluded from output_vars at collection, so
+    // these fields are exactly the shader's color outputs).
+    var frag_loc_fields = std.ArrayList(u8).initCapacity(arena, 128) catch return error.OutOfMemory;
+    if (is_fragment and (depth_output_var_id != null or output_vars.items.len > 1)) {
         // Two outputs sharing a @location is GLSL dual-source blending
         // (`layout(location=0, index=0/1)`), which WGSL expresses with
         // `@blend_src(0/1)`. zioshade's SPIR-V currently drops the `Index`
@@ -4866,13 +4896,11 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 }
             }
         }
-        // Multiple render targets: emit FragmentOutput struct. The field type is
-        // the output variable's REAL pointee type: a hardcoded `vec4f` matched
-        // the common GLSL MRT shape, but a scalar/other-typed output (a
-        // WGSL-authored `@location(n) out: f32`) then got a `vec4f` field that
-        // the synthesized `FragmentOutput(<captured scalar>)` return could never
-        // satisfy (naga: automatic-conversion reject). (#wgsl-cts)
-        try w.writeAll("struct FragmentOutput {\n");
+        // The field type is the output variable's REAL pointee type: a hardcoded
+        // `vec4f` matched the common GLSL MRT shape, but a scalar/other-typed
+        // output (a WGSL-authored `@location(n) out: f32`) then got a `vec4f`
+        // field that the synthesized `FragmentOutput(<captured scalar>)` return
+        // could never satisfy (naga: automatic-conversion reject). (#wgsl-cts)
         for (output_vars.items, 0..) |ovid, i| {
             const loc = getDecVal(&decorations, ovid, .location) orelse i;
             const var_name = names.get(ovid) orelse continue;
@@ -4886,8 +4914,35 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                     field_type = try wgslType(&module, pt, &names, arena);
                 }
             }
-            try w.print("    @location({d}) {s}: {s},\n", .{ loc, var_name, field_type });
+            frag_loc_fields.print(arena, "    @location({d}) {s}: {s},\n", .{ loc, var_name, field_type }) catch return error.OutOfMemory;
         }
+    }
+    if (is_fragment and depth_output_var_id != null) {
+        // A depth-only fragment (no @location output at all; naga emits this for
+        // `fn main() -> @builtin(frag_depth) f32`) must NOT get a fabricated
+        // `@location(0) color: vec4f` field: that invents an output the shader
+        // never had, and no captured value can fill it. Emit the depth field
+        // alone; the return then takes exactly one argument. (#wgsl-cts)
+        //
+        // WITH @location outputs the fields are the REAL outputs (their own
+        // locations and types): the old shape fabricated `@location(0) color:
+        // vec4f` whenever any location output existed, so scalar / non-zero-
+        // location outputs (a WGSL io-struct return lowered by naga to one
+        // Output var per member) were dropped from the struct while their
+        // OpStores still emitted against undeclared names at exit 0, and the
+        // fabricated field invented a location and type the shader never had.
+        // The location outputs then also ride the MRT capture machinery so
+        // their stored values reach the return. (#wgsl-cts)
+        try w.writeAll("struct FragmentOutput {\n");
+        try w.writeAll(frag_loc_fields.items);
+        try w.writeAll("    @builtin(frag_depth) depth: f32,\n");
+        try w.writeAll("}\n\n");
+        use_frag_depth_struct = true;
+        if (output_vars.items.len >= 1) use_frag_mrt_struct = true;
+    } else if (is_fragment and output_vars.items.len > 1) {
+        // Multiple render targets: emit FragmentOutput struct.
+        try w.writeAll("struct FragmentOutput {\n");
+        try w.writeAll(frag_loc_fields.items);
         try w.writeAll("}\n\n");
         use_frag_mrt_struct = true;
     }
@@ -5699,6 +5754,40 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Return output var
+    // Per-@location-field return values, shared by the depth struct and the MRT
+    // struct (field order == output_vars order == the emitted struct fields):
+    // the local's name in the read/partial-write case, else the last whole-var
+    // stored value, else the zero literal of the output's REAL type (a
+    // hardcoded `vec4f()` mismatches a scalar field: naga type reject).
+    // (#wgsl-cts)
+    var frag_field_values = std.ArrayList(struct { val: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    if (use_frag_depth_struct or use_frag_mrt_struct) {
+        for (output_vars.items) |ovid| {
+            const vn = names.get(ovid) orelse continue;
+            var val: ?[]const u8 = null;
+            if (mrt_is_read) {
+                val = vn;
+            } else {
+                for (mrt_return_values.items) |rv| {
+                    if (std.mem.eql(u8, rv.var_name, vn)) val = rv.value;
+                }
+            }
+            if (val == null) {
+                var zero_fallback: []const u8 = "vec4f()";
+                if (getDef(&module, ovid)) |ovi| {
+                    if (ovi.words.len > 1) {
+                        var pt = ovi.words[1];
+                        if (getDef(&module, pt)) |pi| {
+                            if (pi.op == .TypePointer and pi.words.len > 3) pt = pi.words[3];
+                        }
+                        if (zeroLiteralOfType(&module, pt, &names, arena)) |z| zero_fallback = z;
+                    }
+                }
+                val = zero_fallback;
+            }
+            try frag_field_values.append(arena, .{ .val = val.? });
+        }
+    }
     if (use_frag_depth_struct) {
         const depth_val = depth_return_value orelse "0.0";
         // Depth-only fragment: the struct has just the @builtin(frag_depth)
@@ -5706,8 +5795,17 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         if (output_var_id == null) {
             try w.print("    return FragmentOutput({s});\n", .{depth_val});
         } else {
-            const color_val = direct_return_value orelse (if (output_var_id != null) names.get(output_var_id.?) orelse "vec4f()" else "vec4f()");
-            try w.print("    return FragmentOutput({s}, {s});\n", .{ color_val, depth_val });
+            // One argument per real @location field (in struct-field order),
+            // then the depth. The old two-argument shape assumed a single
+            // fabricated `color: vec4f` field. (#wgsl-cts)
+            var d_parts = std.ArrayList(u8).initCapacity(arena, 128) catch return error.OutOfMemory;
+            for (frag_field_values.items) |fv| {
+                if (d_parts.items.len > 0) try d_parts.appendSlice(arena, ", ");
+                try d_parts.appendSlice(arena, fv.val);
+            }
+            if (d_parts.items.len > 0) try d_parts.appendSlice(arena, ", ");
+            try d_parts.appendSlice(arena, depth_val);
+            try w.print("    return FragmentOutput({s});\n", .{d_parts.items});
         }
     } else if (use_frag_mrt_struct) {
         // Build FragmentOutput. Complex case (any output read/partially written):
@@ -5715,19 +5813,9 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         // them BY NAME (preserves `vo0.x += …` increments). Simple case: use the
         // captured whole-var store values.
         var mrt_parts = std.ArrayList(u8).initCapacity(arena, 256) catch return error.OutOfMemory;
-        for (output_vars.items) |ovid| {
-            const vn = names.get(ovid) orelse continue;
+        for (frag_field_values.items) |fv| {
             if (mrt_parts.items.len > 0) try mrt_parts.appendSlice(arena, ", ");
-            if (mrt_is_read) {
-                try mrt_parts.appendSlice(arena, vn);
-            } else {
-                // Find the last stored value for this output var
-                var stored_val: ?[]const u8 = null;
-                for (mrt_return_values.items) |rv| {
-                    if (std.mem.eql(u8, rv.var_name, vn)) stored_val = rv.value;
-                }
-                try mrt_parts.appendSlice(arena, stored_val orelse "vec4f()");
-            }
+            try mrt_parts.appendSlice(arena, fv.val);
         }
         try w.print("    return FragmentOutput({s});\n", .{mrt_parts.items});
     } else if (use_vertex_struct) {
@@ -6901,16 +6989,22 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                 // Loads from variables declared before the if-else are safe
                                                 use_init = true;
                                             } else {
-                                                // Check if the value's definition index is before this SelectionMerge
-                                                var found_before = false;
-                                                for (module.instructions[0..i], 0..) |minst, mi| {
-                                                    if (minst.words.len > 2 and minst.words[2] == sp.value_id) {
-                                                        found_before = true;
-                                                        _ = mi;
-                                                        break;
+                                                // Check if the value's definition index is before this SelectionMerge.
+                                                // Use the index-backed id_defs map: the old text scan compared
+                                                // words[2] against the value id for EVERY instruction, but words[2]
+                                                // is a result id only for value-producing ops; a non-result
+                                                // instruction whose words[2] is data (an OpName string word) can
+                                                // numerically alias the value id. tint names a transfer-function
+                                                // constant "B" (string word 66), which aliased an arm-local
+                                                // VectorShuffle's id: the then-arm value passed as an in-scope
+                                                // initializer and the emitted `var phi = <arm value>;` referenced
+                                                // a name declared only inside the branch (naga: undeclared
+                                                // identifier at exit 0). (#wgsl-cts)
+                                                if (sp.value_id < module.id_defs.len) {
+                                                    if (module.id_defs[sp.value_id]) |vidx| {
+                                                        if (vidx < i) use_init = true;
                                                     }
                                                 }
-                                                if (found_before) use_init = true;
                                             }
                                         }
                                     }
