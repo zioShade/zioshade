@@ -1183,7 +1183,13 @@ test "wgsl: samplerCubeArrayShadow emits texture_depth_cube_array + separate arr
 // the array layer must STILL be split out as a separate i32 array_index (and the
 // SPIR-V Lod operand dropped — WGSL's compare-level builtin always samples mip 0).
 // Requires GL_EXT_texture_shadow_lod for textureLod() on a shadow sampler.
-test "wgsl: textureLod(sampler2DArrayShadow) emits textureSampleCompareLevel + array_index" {
+test "wgsl: textureLod(sampler2DArrayShadow) with lod 0 emits textureSampleCompareLevel + array_index" {
+    // The lod must be the CONSTANT 0: WGSL textureSampleCompareLevel samples
+    // level 0 and takes no level argument (naga lowers it to
+    // OpImageSampleDrefExplicitLod Lod=0), so a NON-zero or varying lod has no
+    // faithful WGSL form and is honest-errored (see the "explicit Dref Lod must
+    // be constant zero" test). This previously lowered by silently DROPPING a
+    // varying lod -- naga validated the output while it sampled the wrong mip.
     try runShadowValidTest(.{
         .name = "shadow_2d_array_lod",
         .source =
@@ -1191,9 +1197,8 @@ test "wgsl: textureLod(sampler2DArrayShadow) emits textureSampleCompareLevel + a
         \\#extension GL_EXT_texture_shadow_lod : require
         \\layout(binding=0) uniform sampler2DArrayShadow shadowArr;
         \\layout(location=0) in vec4 vC;
-        \\layout(location=1) in float vLod;
         \\layout(location=0) out vec4 fragColor;
-        \\void main(){ fragColor = vec4(textureLod(shadowArr, vC, vLod)); }
+        \\void main(){ fragColor = vec4(textureLod(shadowArr, vC, 0.0)); }
         ,
         .tex_decl = "var shadowArr: texture_depth_2d_array;",
         .builtin = "textureSampleCompareLevel",
@@ -8413,4 +8418,450 @@ test "WGSL selection-phi initializer scope check ignores OpName string words (#w
     try assertNotContains(wgsl, "vec3f = armval;");
     try assertContains(wgsl, "armval");
     try nagaValidateOrSkip(wgsl, "phi-name-alias");
+}
+
+// ---------------------------------------------------------------------------
+// WebGPU CTS refusal removal: separate comparison samplers, OpAtomicStore,
+// replay-path sampling. (#wgsl-cts-refusals)
+// ---------------------------------------------------------------------------
+
+// A depth-COMPARE op whose OpSampledImage is built AT THE CALL SITE from a
+// distinct depth texture + sampler variable (naga/tint's only shape for
+// textureSampleCompare/textureGatherCompare) was blanket-refused. It lowers
+// soundly when the sampler feeds ONLY dref ops (its binding is typed
+// sampler_comparison) and the texture is a depth image: WGSL pins depth-ness
+// to texture_depth_* and comparison-ness to sampler_comparison, which is
+// exactly the SPIR-V shape here.
+test "wgsl cts: separate comparison sampler, arrayed gather-compare" {
+    const spv = try assembleSpirv("sep_cmp_gather",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpName %s "s"
+        \\OpName %t "t"
+        \\OpDecorate %s DescriptorSet 0
+        \\OpDecorate %s Binding 0
+        \\OpDecorate %t DescriptorSet 0
+        \\OpDecorate %t Binding 1
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v3float = OpTypeVector %float 3
+        \\%v4float = OpTypeVector %float 4
+        \\%img = OpTypeImage %float 2D 1 1 0 1 Unknown
+        \\%tsi = OpTypeSampledImage %img
+        \\%ts = OpTypeSampler
+        \\%puimg = OpTypePointer UniformConstant %img
+        \\%pus = OpTypePointer UniformConstant %ts
+        \\%po = OpTypePointer Output %v4float
+        \\%s = OpVariable %pus UniformConstant
+        \\%t = OpVariable %puimg UniformConstant
+        \\%o = OpVariable %po Output
+        \\%float_0 = OpConstant %float 0
+        \\%c3 = OpConstantComposite %v3float %float_0 %float_0 %float_0
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%sl = OpLoad %ts %s
+        \\%tl = OpLoad %img %t
+        \\%si = OpSampledImage %tsi %tl %sl
+        \\%g = OpImageDrefGather %v4float %si %c3 %float_0
+        \\OpStore %o %g
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // The sampler binding itself is typed sampler_comparison (SPIR-V samplers
+    // are opaque; the dref USE is what marks it a comparison sampler).
+    try assertContains(wgsl, "var s: sampler_comparison;");
+    try assertContains(wgsl, "textureGatherCompare(t, s, ");
+    // The array layer is a SEPARATE rounded i32 argument, sliced from coord.z.
+    try assertContains(wgsl, "i32(round(");
+    try nagaValidateOrSkip(wgsl, "sep_cmp_gather");
+}
+
+// textureSampleCompare on texture_depth_2d_array WITH a ConstOffset: WGSL's
+// arrayed form has a const-offset parameter (naga validates it), so the old
+// arrayed+offset honest error was over-broad. Cube forms still refuse.
+test "wgsl cts: arrayed textureSampleCompare keeps its ConstOffset" {
+    const spv = try assembleSpirv("sep_cmp_offset",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpName %s "s"
+        \\OpName %t "t"
+        \\OpDecorate %s DescriptorSet 0
+        \\OpDecorate %s Binding 0
+        \\OpDecorate %t DescriptorSet 0
+        \\OpDecorate %t Binding 1
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v2float = OpTypeVector %float 2
+        \\%v3float = OpTypeVector %float 3
+        \\%v4float = OpTypeVector %float 4
+        \\%int = OpTypeInt 32 1
+        \\%v2int = OpTypeVector %int 2
+        \\%img = OpTypeImage %float 2D 1 1 0 1 Unknown
+        \\%tsi = OpTypeSampledImage %img
+        \\%ts = OpTypeSampler
+        \\%puimg = OpTypePointer UniformConstant %img
+        \\%pus = OpTypePointer UniformConstant %ts
+        \\%po = OpTypePointer Output %v4float
+        \\%s = OpVariable %pus UniformConstant
+        \\%t = OpVariable %puimg UniformConstant
+        \\%o = OpVariable %po Output
+        \\%float_0 = OpConstant %float 0
+        \\%int_1 = OpConstant %int 1
+        \\%off = OpConstantComposite %v2int %int_1 %int_1
+        \\%c3 = OpConstantComposite %v3float %float_0 %float_0 %float_0
+        \\%z4 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%sl = OpLoad %ts %s
+        \\%tl = OpLoad %img %t
+        \\%si = OpSampledImage %tsi %tl %sl
+        \\%r = OpImageSampleDrefImplicitLod %float %si %c3 %float_0 ConstOffset %off
+        \\%rv = OpCompositeConstruct %v4float %r %float_0 %float_0 %float_0
+        \\OpStore %o %rv
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var s: sampler_comparison;");
+    try assertContains(wgsl, "textureSampleCompare(t, s, ");
+    // The offset rides as the LAST argument -- dropping it samples the wrong
+    // texels and naga would still accept the call (silent-wrong).
+    try assertContains(wgsl, ", vec2<i32>(1));");
+    try nagaValidateOrSkip(wgsl, "sep_cmp_offset");
+}
+
+// A sampler binding feeding BOTH a depth-compare op and a plain sample cannot
+// be typed by one WGSL binding (sampler_comparison makes every plain call a
+// naga reject; plain sampler makes every compare call one). Honest error.
+test "wgsl cts: mixed-use comparison sampler is refused loudly" {
+    const spv = try assembleSpirv("sep_cmp_mixed",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpName %s "s"
+        \\OpName %t "t"
+        \\OpDecorate %s DescriptorSet 0
+        \\OpDecorate %s Binding 0
+        \\OpDecorate %t DescriptorSet 0
+        \\OpDecorate %t Binding 1
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v2float = OpTypeVector %float 2
+        \\%v4float = OpTypeVector %float 4
+        \\%img = OpTypeImage %float 2D 1 0 0 1 Unknown
+        \\%tsi = OpTypeSampledImage %img
+        \\%ts = OpTypeSampler
+        \\%puimg = OpTypePointer UniformConstant %img
+        \\%pus = OpTypePointer UniformConstant %ts
+        \\%po = OpTypePointer Output %v4float
+        \\%s = OpVariable %pus UniformConstant
+        \\%t = OpVariable %puimg UniformConstant
+        \\%o = OpVariable %po Output
+        \\%float_0 = OpConstant %float 0
+        \\%c2 = OpConstantComposite %v2float %float_0 %float_0
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%sl = OpLoad %ts %s
+        \\%tl = OpLoad %img %t
+        \\%si = OpSampledImage %tsi %tl %sl
+        \\%a = OpImageSampleDrefImplicitLod %float %si %c2 %float_0
+        \\%b = OpImageSampleImplicitLod %v4float %si %c2
+        \\%m = OpCompositeExtract %float %b 0
+        \\%r = OpFAdd %float %a %m
+        \\%rv = OpCompositeConstruct %v4float %r %float_0 %float_0 %float_0
+        \\OpStore %o %rv
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse "";
+    try assertContains(detail, "sampler_comparison");
+}
+
+// A Dref op over a NON-depth image (Depth=0): WGSL's compare builtins require
+// texture_depth_*, and retyping the binding would change what it may bind.
+// Honest error.
+test "wgsl cts: Dref sample on a non-depth image is refused" {
+    const spv = try assembleSpirv("sep_cmp_nondepth",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpName %s "s"
+        \\OpName %t "t"
+        \\OpDecorate %s DescriptorSet 0
+        \\OpDecorate %s Binding 0
+        \\OpDecorate %t DescriptorSet 0
+        \\OpDecorate %t Binding 1
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v2float = OpTypeVector %float 2
+        \\%v4float = OpTypeVector %float 4
+        \\%img = OpTypeImage %float 2D 0 0 0 1 Unknown
+        \\%tsi = OpTypeSampledImage %img
+        \\%ts = OpTypeSampler
+        \\%puimg = OpTypePointer UniformConstant %img
+        \\%pus = OpTypePointer UniformConstant %ts
+        \\%po = OpTypePointer Output %v4float
+        \\%s = OpVariable %pus UniformConstant
+        \\%t = OpVariable %puimg UniformConstant
+        \\%o = OpVariable %po Output
+        \\%float_0 = OpConstant %float 0
+        \\%c2 = OpConstantComposite %v2float %float_0 %float_0
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%sl = OpLoad %ts %s
+        \\%tl = OpLoad %img %t
+        \\%si = OpSampledImage %tsi %tl %sl
+        \\%a = OpImageSampleDrefImplicitLod %float %si %c2 %float_0
+        \\%rv = OpCompositeConstruct %v4float %a %float_0 %float_0 %float_0
+        \\OpStore %o %rv
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+}
+
+// WGSL textureSampleCompareLevel samples level 0 and takes NO level argument
+// (naga lowers it to OpImageSampleDrefExplicitLod with Lod = literal 0), so an
+// explicit Dref Lod that is not constant zero has no faithful WGSL form.
+// Lod = 0 lowers; anything else honest-errors instead of silently sampling
+// mip 0 (GL_EXT_texture_shadow_lod's textureLod on a shadow sampler).
+test "wgsl cts: explicit Dref Lod must be constant zero" {
+    const base =
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpName %t "t"
+        \\OpName %s "s"
+        \\OpDecorate %t DescriptorSet 0
+        \\OpDecorate %t Binding 0
+        \\OpDecorate %s DescriptorSet 0
+        \\OpDecorate %s Binding 1
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v2float = OpTypeVector %float 2
+        \\%v4float = OpTypeVector %float 4
+        \\%img = OpTypeImage %float 2D 1 0 0 1 Unknown
+        \\%ts = OpTypeSampler
+        \\%tsi = OpTypeSampledImage %img
+        \\%puimg = OpTypePointer UniformConstant %img
+        \\%pus = OpTypePointer UniformConstant %ts
+        \\%po = OpTypePointer Output %v4float
+        \\%t = OpVariable %puimg UniformConstant
+        \\%s = OpVariable %pus UniformConstant
+        \\%o = OpVariable %po Output
+        \\%float_0 = OpConstant %float 0
+        \\%float_1 = OpConstant %float 1
+        \\%c2 = OpConstantComposite %v2float %float_0 %float_0
+    ;
+    const tail =
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%sl = OpLoad %ts %s
+        \\%tl = OpLoad %img %t
+        \\%si = OpSampledImage %tsi %tl %sl
+    ;
+    var buf: [4096]u8 = undefined;
+    const lod0 = try std.fmt.bufPrintZ(&buf, "{s}\n{s}\n%a = OpImageSampleDrefExplicitLod %float %si %c2 %float_0 Lod %float_0\n%rv = OpCompositeConstruct %v4float %a %float_0 %float_0 %float_0\nOpStore %o %rv\nOpReturn\nOpFunctionEnd", .{ base, tail });
+    const spv0 = try assembleSpirv("sep_cmp_lod0", lod0);
+    defer alloc.free(spv0);
+    {
+        const wgsl = try zioshade.spirvToWGSL(alloc, spv0, .{});
+        defer alloc.free(wgsl);
+        try assertContains(wgsl, "textureSampleCompareLevel(");
+        try nagaValidateOrSkip(wgsl, "sep_cmp_lod0");
+    }
+    var buf2: [4096]u8 = undefined;
+    const lodn = try std.fmt.bufPrintZ(&buf2, "{s}\n{s}\n%a = OpImageSampleDrefExplicitLod %float %si %c2 %float_0 Lod %float_1\n%rv = OpCompositeConstruct %v4float %a %float_0 %float_0 %float_0\nOpStore %o %rv\nOpReturn\nOpFunctionEnd", .{ base, tail });
+    const spvn = try assembleSpirv("sep_cmp_lodn", lodn);
+    defer alloc.free(spvn);
+    try std.testing.expectError(error.UnsupportedImageOperands, zioshade.spirvToWGSL(alloc, spvn, .{}));
+}
+
+// OpAtomicStore (opcode 228) was missing from the Op enum entirely, so every
+// atomicStore lowered to "unsupported op 'unknown' (opcode 228)". It has NO
+// result type/id: pointer at words[1], value at words[4]. WGSL atomicStore is
+// relaxed, so acquire/release/seq_cst semantics bits honest-error.
+test "wgsl cts: OpAtomicStore lowers to atomicStore" {
+    const spv = try assembleSpirv("atomic_store",
+        \\OpCapability Shader
+        \\OpExtension "SPV_KHR_storage_buffer_storage_class"
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main"
+        \\OpExecutionMode %main LocalSize 1 1 1
+        \\OpDecorate %B DescriptorSet 0
+        \\OpDecorate %B Binding 0
+        \\OpDecorate %BT Block
+        \\OpMemberDecorate %BT 0 Offset 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%int = OpTypeInt 32 1
+        \\%uint = OpTypeInt 32 0
+        \\%BT = OpTypeStruct %int
+        \\%ptr_sb = OpTypePointer StorageBuffer %BT
+        \\%ptr_int = OpTypePointer StorageBuffer %int
+        \\%B = OpVariable %ptr_sb StorageBuffer
+        \\%uint_0 = OpConstant %uint 0
+        \\%int_1 = OpConstant %int 1
+        \\%int_4 = OpConstant %int 4
+        \\%uint_0c = OpConstant %uint 0
+        \\%uint_rel = OpConstant %uint 4
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%p = OpAccessChain %ptr_int %B %uint_0
+        \\OpAtomicStore %p %int_1 %uint_0c %int_1
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // The SSBO member the store targets must be atomic<T> (the collector walks
+    // words[1], OpAtomicStore's pointer, not the RMW ops' words[3]).
+    try assertContains(wgsl, "atomic<i32>");
+    try assertContains(wgsl, "atomicStore(&");
+    try nagaValidateOrSkip(wgsl, "atomic_store");
+}
+
+test "wgsl cts: OpAtomicStore with release semantics is refused" {
+    const spv = try assembleSpirv("atomic_store_release",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main"
+        \\OpExecutionMode %main LocalSize 1 1 1
+        \\OpDecorate %g DescriptorSet 0
+        \\OpDecorate %g Binding 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%int = OpTypeInt 32 1
+        \\%uint = OpTypeInt 32 0
+        \\%ptr_wg = OpTypePointer Workgroup %int
+        \\%g = OpVariable %ptr_wg Workgroup
+        \\%int_1 = OpConstant %int 1
+        \\%uint_rel = OpConstant %uint 4
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\OpAtomicStore %g %int_1 %uint_rel %int_1
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse "";
+    try assertContains(detail, "relaxed");
+}
+
+// A textureSample inside a switch DEFAULT body went through the switch/loop
+// replay emitter, which had no OpSampledImage/OpImageSampleImplicitLod arms
+// and honest-errored ("unsupported op 'SampledImage' in switch/loop replay
+// path"). The replay now aliases the sampled image like the main path and
+// lowers the plain sample call.
+test "wgsl cts: textureSample inside a switch default replays" {
+    const spv = try assembleSpirv("replay_switch_sample",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main"
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpName %t "t"
+        \\OpName %s "s"
+        \\OpDecorate %t DescriptorSet 0
+        \\OpDecorate %t Binding 0
+        \\OpDecorate %s DescriptorSet 0
+        \\OpDecorate %s Binding 1
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v2float = OpTypeVector %float 2
+        \\%v4float = OpTypeVector %float 4
+        \\%uint = OpTypeInt 32 0
+        \\%nullu = OpConstantNull %uint
+        \\%img = OpTypeImage %float 2D 0 0 0 1 Unknown
+        \\%tsi = OpTypeSampledImage %img
+        \\%ts = OpTypeSampler
+        \\%puimg = OpTypePointer UniformConstant %img
+        \\%pus = OpTypePointer UniformConstant %ts
+        \\%ppu = OpTypePointer Private %uint
+        \\%t = OpVariable %puimg UniformConstant
+        \\%s = OpVariable %pus UniformConstant
+        \\%sel = OpVariable %ppu Private %nullu
+        \\%float_0 = OpConstant %float 0
+        \\%c2 = OpConstantComposite %v2float %float_0 %float_0
+        \\%main = OpFunction %void None %voidfn
+        \\%l0 = OpLabel
+        \\%v = OpLoad %uint %sel
+        \\OpSelectionMerge %m None
+        \\OpSwitch %v %def 1 %one
+        \\%one = OpLabel
+        \\OpBranch %m
+        \\%def = OpLabel
+        \\%sl = OpLoad %ts %s
+        \\%tl = OpLoad %img %t
+        \\%si = OpSampledImage %tsi %tl %sl
+        \\%r = OpImageSampleImplicitLod %v4float %si %c2 None
+        \\OpBranch %m
+        \\%m = OpLabel
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(t, s, ");
+    try nagaValidateOrSkip(wgsl, "replay_switch_sample");
+}
+
+// Naming OpAtomicLoad (227) in the Op enum upgrades the refusal from
+// "unsupported op 'unknown' (opcode 227)" to the named opcode. It stays
+// unlowered in the WGSL backend, so the compile must still fail loudly with
+// the op's NAME in the diagnostic (the support-burden fix).
+test "wgsl cts: OpAtomicLoad refusal names the opcode" {
+    const spv = try assembleSpirv("atomic_load_refusal",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main"
+        \\OpExecutionMode %main LocalSize 1 1 1
+        \\OpDecorate %g DescriptorSet 0
+        \\OpDecorate %g Binding 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%int = OpTypeInt 32 1
+        \\%uint = OpTypeInt 32 0
+        \\%ptr_wg = OpTypePointer Workgroup %int
+        \\%g = OpVariable %ptr_wg Workgroup
+        \\%int_1 = OpConstant %int 1
+        \\%uint_0 = OpConstant %uint 0
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%v = OpAtomicLoad %int %g %int_1 %uint_0
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse "";
+    try assertContains(detail, "AtomicLoad");
 }
