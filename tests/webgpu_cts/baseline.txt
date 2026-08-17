@@ -3,23 +3,30 @@
 # See tests/webgpu_cts/README.md (what these numbers mean and do NOT mean) and
 # tools/webgpu_cts_sweep.sh (classification + direction rationale).
 #
-# Corpus slice: 382 unique CTS-authored WGSL shaders (cases/ + manifest.tsv),
+# Corpus slice: 1613 unique CTS-authored WGSL shaders (cases/ + manifest.tsv),
 # extracted from the webgpu:shader,validation suite of gpuweb/cts @ 2959e1c
 # (BSD-3-Clause) by the headless framework driver (tools/webgpu_cts_dump.mjs):
-# 47,515 enumerated cases -> 22,034 ran clean -> 22,293 expectCompile{Result,Warning}
-# captures -> unique expected=true entry-point shaders: 2,047 -> bounded slice
-# (sha1 order, 5 per spec file, 91 spec files). From the full dump: 17,317
+# 47,515 enumerated cases -> 22,293 expectCompile{Result,Warning} captures ->
+# unique expected=true entry-point shaders: 2,047 bucketed per spec file (2,046
+# distinct texts; one shader is witnessed by two spec files and deduped at
+# emission, duplicate_id_skipped=1) -> bounded slice (sha1 order, 100 per spec
+# file, 91 spec files, ~320 KB of WGSL). From the full dump: 17,317
 # expected=false (invalid-by-design WGSL; can never enter the round trip) and
 # 2,862 no-entry-point module-scope cases are excluded and counted here, not
 # silently dropped. 24,318 subcase-iterating cases were skipped by the dumper
 # and 1,163 cases errored against the fake device (dump stats land next to the
 # dump when regenerating); both are dumper scope, not corpus curation.
 #
-# Environment of this measurement: zioshade 0.6.0 (fix/wgsl-cts-undeclared-ids,
-# on top of 467f8062), naga 30.0.0, macOS. naga is BOTH the WGSL -> SPIR-V
-# upstream converter and the output validator.
+# Environment of this measurement: zioshade 0.6.0 (expand/webgpu-cts-slice, on
+# top of e33cc373), naga 30.0.0, macOS. naga is the WGSL -> SPIR-V upstream
+# converter and the output validator; tint (dawn 5e9e5136956e, built with
+# TINT_BUILD_WGSL_READER+SPV_WRITER, at ~/.local/bin/tint) is the SECOND
+# upstream converter for cases naga refuses. Without a tint binary on PATH the
+# sweep degrades to naga-only and the upstream/refused split changes (see the
+# 2026-08-17 naga-only row below); roundtrip-valid and zioshade-invalid are
+# unaffected by tint's presence.
 #
-# 2026-08-16 first measurement:
+# 2026-08-16 first measurement (382-case slice):
 #   roundtrip-valid          259  (67.8% of 382; 83.8% of the 309 cases that
 #                                  survived the upstream naga leg)
 #   upstream-convert-failed   67  (naga front end refuses: 50x subgroups
@@ -31,30 +38,77 @@
 #   zioshade-invalid          39  (exit 0, naga rejects the output)
 #   CRASH                      0
 #
-# 2026-08-16 after fix/wgsl-cts-undeclared-ids:
-#   roundtrip-valid          302  (79.1% of 382; 97.7% of the 309 cases that
-#                                  survived the upstream naga leg)
-#   upstream-convert-failed   67  (unchanged)
-#   zioshade-refused          13  (4 former refusals were raised from DEAD
-#                                  helpers that entry-point pruning removes)
-#   zioshade-invalid           0  (all 39 fixed; see the delta note below)
+# 2026-08-16 after fix/wgsl-cts-undeclared-ids (#637, 382-case slice):
+#   roundtrip-valid          302 / upstream-convert-failed 67 (unchanged) /
+#   zioshade-refused 13 / zioshade-invalid 0 (all 39 fixed) / CRASH 0.
+#   Fixed classes: OpConstantNull use-site folding, depth-texture scalar
+#   forms, image-query signedness, depth-only fragments, MRT field types,
+#   unreachable-function pruning.
+#
+# 2026-08-17 slice expanded 382 -> 1613 cases (per-spec-file cap 5 -> 100, same
+# pin 2959e1c; fetch verified byte-reproducible end to end). First measurement
+# on the expanded slice at e33cc373 (naga-only upstream):
+#   roundtrip-valid          981
+#   upstream-convert-failed  582   (subgroups specs dominate: ~460 cases)
+#   zioshade-refused          33
+#   zioshade-invalid          17  (exit 0, naga rejects the output)
+#   CRASH                      0
+# All 17 fixed the same day (src/spirv_to_wgsl.zig), none needed a refusal:
+#   1. 16 cases: a module-scope var<private> whose OpVariable initializer is
+#      OpConstantNull (4) or OpConstantTrue/False (12) had no
+#      resolveConstantExpr fold, so the Private emitter skipped the
+#      declaration while use sites still referenced the name. Null now folds
+#      to the zero literal of its own type, true/false to bool literals.
+#   2. 3 of those (write-only privates: OpStore, never OpLoad/AccessChain)
+#      ALSO failed the has_load usage gate; stores now count as usage.
+#   3. 1 case: a fragment with @location outputs AND @builtin(frag_depth)
+#      fabricated `@location(0) color: vec4f`, dropping the real (scalar,
+#      non-zero-location) outputs while their OpStores still emitted. The
+#      frag_depth var no longer enters the location list; the struct carries
+#      the real fields + depth; the return takes one argument per field.
+# After the fixes (naga-only): 998 / 582 / 33 / 0 / 0.
+#
+# 2026-08-17 tint added as the second upstream converter (naga first, tint
+# second; upstream-convert-failed now means BOTH refused). First tint run
+# found 2 MORE zioshade-invalids (tint SPIR-V shapes naga never emits):
+#   4. 2 cases: the selection-phi prologue's "initializer defined before the
+#      if" check compared words[2] against the value id for EVERY instruction,
+#      but words[2] is a result id only for value-producing ops; an OpName
+#      string word that numerically equals an arm-local value id (tint names a
+#      transfer-function constant "B", string word 66) let the then-arm value
+#      pass as an in-scope var initializer. The check is now index-backed
+#      (id_defs).
+#
+# 2026-08-17 final (with tint):
+#   roundtrip-valid          1024
+#   upstream-convert-failed    2  (both converters refuse: pipeline-
+#                                  overridable constants without values,
+#                                  `override block_width: i32;` and
+#                                  `override o: u32;`; the CTS binds them at
+#                                  pipeline creation, which no WGSL -> SPIR-V
+#                                  converter can materialize headlessly)
+#   zioshade-refused         587  (honest errors, measured: 546 subgroup-op
+#                                  UnsupportedOp on tint-converted SPIR-V
+#                                  [399 generic + 100 QuadSwap + 47
+#                                  QuadBroadcast], 25 separate comparison
+#                                  sampler, 4 SampledImage in switch/loop
+#                                  replay, 4 @group/@binding collisions, 4
+#                                  int64, 2 opcode-228 atomics, 2 gl_PointSize)
+#   zioshade-invalid           0
 #   CRASH                      0
 #
-# The zioshade-invalid class is the silent-wrong signal. Confirmed example:
-# cts_2673680e1f3b (a 3-statement dead-store fragment shader) emits
-# `var v8: vec3f = v5;` where v5 (the unnamed constant feeding an OpVariable
-# initializer) is never declared: undeclared identifier at exit 0. Spread:
-# texture_type, f16 vec4h, function_variables, stage/placement parsing; see
-# per_case.tsv. These are report-only findings (breadth on an unfamiliar
+# The zioshade-invalid class is the silent-wrong signal; it is 0 at this
+# measurement. These are report-only findings (breadth on an unfamiliar
 # corpus), follow-up beads, NOT gate failures.
 #
 # ratchet: this file is a point-in-time credibility record. Refresh it (and the
 # date) when the corpus or the backend changes; the sweep itself is non-gating
 # and always exits 0 unless the HARNESS breaks (missing naga/CLI, empty or
-# inconsistent corpus, classifier losing cases).
-roundtrip-valid 302
-upstream-convert-failed 67
-zioshade-refused 13
+# inconsistent corpus, classifier losing cases, or a configured-but-broken
+# TINT).
+roundtrip-valid 1024
+upstream-convert-failed 2
+zioshade-refused 587
 zioshade-invalid 0
 crash 0
-total 382
+total 1613

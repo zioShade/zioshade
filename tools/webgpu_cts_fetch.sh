@@ -10,7 +10,8 @@
 # header): sparse-clone gpuweb/cts at a PINNED commit -> tsc-emit the TS tree
 # to plain JS -> drive the CTS's own case enumeration headlessly, capturing
 # every per-case WGSL the framework would have compiled (no GPU) -> carve a
-# deterministic bounded slice (sha1 order, 5 unique shaders per spec file).
+# deterministic bounded slice (sha1 order, 100 unique shaders per spec file:
+# 1614 cases / ~319 KB of WGSL from the 91 validation spec files at 2959e1c).
 #
 # Usage: tools/webgpu_cts_fetch.sh [cts-commit]   (default: the pinned one)
 set -euo pipefail
@@ -35,7 +36,7 @@ echo "== dump per-case WGSL (headless) =="
 node tools/webgpu_cts_dump.mjs "$WORK/js" "$WORK/dump.json"
 
 echo "== carve the bounded slice into $SLICE =="
-python3 tools/webgpu_cts_extract.py "$WORK/dump.json" "$SLICE" --per-file 5
+python3 tools/webgpu_cts_extract.py "$WORK/dump.json" "$SLICE" --per-file "${PER_FILE:-100}"
 
 echo
 echo "Done. If the corpus changed: re-run tools/webgpu_cts_sweep.sh and refresh"
