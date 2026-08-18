@@ -10,7 +10,7 @@
 #
 # Prereqs on this Windows box:
 #   - Windows SDK (d3d12.lib, dxgi.lib, d3d10warp.dll ships with Windows)
-#   - dxc.exe (Windows SDK bin — the DXIL-capable one, NOT the Vulkan SDK dxc)
+#   - dxc.exe (Windows SDK bin - the DXIL-capable one, NOT the Vulkan SDK dxc)
 #   - warp_render.exe built:  see tools/warp/README.md
 #
 # Usage:  .\run.ps1 -Dir <pairs_dir> [-Dxc dxc.exe] [-Warp .\warp_render.exe]
@@ -37,12 +37,12 @@ if ($LASTEXITCODE -ne 0) { Write-Error "VS compile failed"; exit 2 }
 
 # A fragment that reads a varying (`in vec2 uv` -> `float2 uv : TEXCOORD0`) cannot
 # link against the plain fullscreen VS (which writes only SV_Position): PSO creation
-# fails with E_INVALIDARG and the shader skips — on a 72-shader slice that was 27
+# fails with E_INVALIDARG and the shader skips - on a 72-shader slice that was 27
 # skips, including every uniform-matrix probe. Mirroring the macOS ShaderCompare
 # trick (a per-fragment synthesized VS), extract the entry's inputs from zioshade's
 # HLSL and compile a per-shader VS that writes them. CRITICAL D3D12 linkage detail
 # (established empirically on WARP): a PS input links to the VS output at the SAME
-# SLOT with the SAME semantic and type — a VS whose SV_Position sits in slot 0
+# SLOT with the SAME semantic and type - a VS whose SV_Position sits in slot 0
 # cannot feed a PS whose slot 0 is TEXCOORD0, regardless of semantics. So the
 # generated VS mirrors the PS parameter list IN ORDER, and appends SV_Position at
 # the END only when the PS does not declare it (extra trailing VS outputs are

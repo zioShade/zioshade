@@ -86,12 +86,12 @@ as a gate.
 varyings (`in vec2 uv` -> `float2 uv : TEXCOORD0`), mirroring the macOS ShaderCompare
 trick of a synthesized per-fragment VS. The reason is a D3D12 linkage rule established
 empirically on WARP: **a PS input links to the VS output at the SAME SLOT, with the
-same semantic and type** — a VS whose SV_Position sits in slot 0 cannot feed a PS whose
+same semantic and type** - a VS whose SV_Position sits in slot 0 cannot feed a PS whose
 slot 0 is TEXCOORD0 (PSO creation fails with E_INVALIDARG), and leading extra VS
 outputs shift every PS input off its slot. So the generated VS mirrors the PS
 parameter list in order (NDC-derived values, spatially varying) and appends
 SV_Position only when the PS does not declare it (trailing extra VS outputs are
-legal). Without this, 27 of a 72-shader slice skipped — including every
+legal). Without this, 27 of a 72-shader slice skipped - including every
 uniform-matrix probe. Remaining skip classes: shaders whose bindings exceed the one
 b0 CBV the harness binds (declares b1+), and hostile inputs DXC rejects from either
 compiler (e.g. types.flatten: three UBOs all at binding 0).
@@ -115,7 +115,7 @@ plus `pack_unpack`, see the validity note at the end).
 That run found and closed two things:
 
 1. **A real HLSL miscompile (fixed):** a fragment with NO color outputs got a
-   synthesized `float4 main(...) : SV_Target` returning `(0,0,0,0)` — writing
+   synthesized `float4 main(...) : SV_Target` returning `(0,0,0,0)` - writing
    black-transparent to target 0 on every pixel where GLSL/SPIR-V semantics write
    NOTHING (the attachment keeps its prior contents). WARP verdict: RENDER-DIFFER
    maxdiff 255 on all 65536 px (alpha flip) for `depth-less-than.desktop` and
@@ -129,9 +129,9 @@ That run found and closed two things:
    (`fragment void main0(...)`) and render-verified on Metal (RENDER-MATCH).
 
 The 2 remaining skips are scope, not defects: `types.flatten` (GLSL declares three
-UBOs at binding 0; DXC rejects both compilers' output — hostile input) and
+UBOs at binding 0; DXC rejects both compilers' output - hostile input) and
 `ubo-load-row-major-workaround` (declares b0..b3; the harness root signature binds
-one CBV at b0 — see "Varying-input shaders" above for the skip census).
+one CBV at b0 - see "Varying-input shaders" above for the skip census).
 
 Also noted (not fixed, not render-visible with depth disabled): zioshade maps
 `gl_FragDepth` to plain `SV_Depth` and ignores the DepthLess/DepthGreater execution

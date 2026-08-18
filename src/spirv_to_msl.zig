@@ -3378,7 +3378,7 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             // A fragment with NO Output variables at all is a VOID fragment: emit no
             // main0_out (the entry is `fragment void main0(...)`). The legacy fallback
             // synthesized `float _fragColor [[color(0)]]`, writing zeros to the color
-            // attachment where SPIR-V semantics (and spirv-cross --msl) write nothing —
+            // attachment where SPIR-V semantics (and spirv-cross --msl) write nothing -
             // the same miscompile class the WARP gate found in the HLSL backend (a
             // full-image alpha flip vs the untouched clear, maxdiff 255 on 65536 px).
             // An empty main0_out struct was tried before and regressed Metal validity;
@@ -4847,7 +4847,7 @@ fn fragOutputMslType(m: *const ParsedModule, o: FragOutput, names: *std.AutoHash
 fn isSingleColorFragOutput(outputs: []const FragOutput) bool {
     // 0 outputs: no color attachment. This stays on the legacy single path so the
     // decision sites upstream can distinguish it: with NO Output variables at all
-    // the entry is a `fragment void` function (no main0_out, nothing written — an
+    // the entry is a `fragment void` function (no main0_out, nothing written - an
     // earlier empty-main0_out attempt regressed demote-to-helper / image-query /
     // partial-write-preserve validity); with an unrepresentable Output (struct-
     // typed / unknown builtin) the old default `float4 _fragColor [[color(0)]]`

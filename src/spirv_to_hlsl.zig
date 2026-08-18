@@ -4285,7 +4285,7 @@ fn emitFunction(
             // entry. Synthesizing `float4 main(...) : SV_Target` returning
             // (0,0,0,0) here wrote black-transparent to target 0 on every pixel,
             // where the SPIR-V semantics (and spirv-cross) write NOTHING and the
-            // attachment keeps its prior contents — a full-image alpha flip
+            // attachment keeps its prior contents - a full-image alpha flip
             // (0 vs clear) confirmed as a WARP RENDER-DIFFER by depth-less-than.
             // desktop + partial-write-preserve on the real DXC->DXIL->D3D12 path.
             try w.writeAll("void main(");
@@ -4755,7 +4755,7 @@ fn emitFunction(
         }
     } else if (is_fragment) {
         // No color outputs: void entry (see the `void main(` site above). Emit no
-        // return statement — writing a synthesized float4 here was the miscompile.
+        // return statement - writing a synthesized float4 here was the miscompile.
     } else if (is_vertex) {
         // Vertex entry: return the populated output struct. Same endsWith guard
         // as the fragment path above: the entry's own OpReturn already emits
@@ -8417,7 +8417,7 @@ fn emitInstruction(
                 try w.print("    return {s};\n", .{e});
             } else if (!(is_fragment or is_vertex) or (is_fragment and output_var_id == null)) {
                 // The second arm: a VOID fragment entry (no color outputs) must
-                // keep its early returns — dropping them let later writes run past
+                // keep its early returns - dropping them let later writes run past
                 // an early-out, silently clobbering state. `return;` is the only
                 // legal form there (the entry returns nothing).
                 try w.writeAll("    return;\n");
