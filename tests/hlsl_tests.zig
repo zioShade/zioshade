@@ -903,7 +903,11 @@ test "T1.1: minimal fragment shader produces HLSL with main()" {
     const hlsl = try compileToHlsl("#version 430\nvoid main() {}");
     defer alloc.free(hlsl);
     try assertContains(hlsl, "main");
-    try assertContains(hlsl, "SV_Target");
+    // A fragment with no color outputs must be a VOID entry: the old synthesized
+    // `float4 main(...) : SV_Target` returning (0,0,0,0) wrote black-transparent to
+    // target 0 where GLSL semantics write nothing (WARP RENDER-DIFFER, #warp-gate).
+    try assertContains(hlsl, "void main(");
+    try assertNotContains(hlsl, "SV_Target");
 }
 
 test "T1.2: minimal vertex shader" {
@@ -944,10 +948,13 @@ test "T2.2: vec4 produces float4" {
     const source =
         \\#version 430
         \\layout(binding = 0, std140) uniform U { vec4 color; } u;
-        \\void main() { vec4 c = u.color; }
+        \\void main() { if (u.color.x > 0.0) discard; }
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
+    // A dead `vec4 c = u.color;` is now fully DCE'd in a void entry (no synthesized
+    // output keeps it alive), so keep the uniform live via discard to still see the
+    // vec4 -> float4 mapping in the cbuffer declaration.
     try assertContains(hlsl, "float4");
 }
 
@@ -1481,11 +1488,14 @@ test "T13.2: if/else branching" {
 // T14: Entry point semantics
 // ---------------------------------------------------------------------------
 
-test "T14.1: fragment entry point has SV_Target" {
+test "T14.1: empty fragment emits void entry, not a synthesized SV_Target" {
     const source = "#version 430\nvoid main() {}";
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "SV_Target");
+    // Writing a fabricated float4(0,0,0,0) to SV_Target for a shader with no color
+    // outputs diverged from reference rendering on WARP (alpha flipped everywhere).
+    try assertContains(hlsl, "void main(");
+    try assertNotContains(hlsl, "SV_Target");
 }
 
 test "T14.2: gl_FragCoord maps to SV_Position" {
@@ -2074,8 +2084,8 @@ test "T22.1: empty main produces valid HLSL" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    try assertContains(hlsl, "float4 main(");
-    try assertContains(hlsl, "SV_Target");
+    try assertContains(hlsl, "void main(");
+    try assertContains(hlsl, "return;");
 }
 
 test "T22.2: multiple uniforms in single block" {
@@ -2500,9 +2510,10 @@ test "T25.5: mat4 transpose" {
     ;
     const hlsl = try compileToHlsl(source);
     defer alloc.free(hlsl);
-    // Just verify it compiles to valid HLSL with transpose
+    // Just verify it compiles to valid HLSL with transpose. No color output here,
+    // so the entry is void (the synthesized SV_Target return was a miscompile).
     try assertContains(hlsl, "transpose");
-    try assertContains(hlsl, "float4 main");
+    try assertContains(hlsl, "void main(");
 }
 
 // ---------------------------------------------------------------------------

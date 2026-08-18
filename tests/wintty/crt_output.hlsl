@@ -217,5 +217,4 @@ float4 main(float4 gl_FragCoord : SV_Position) : SV_Target
     float2 v26 = float2(gl_FragCoord.x, gl_FragCoord.y);
     mainImage(_fragColor, v26);
     return _fragColor;
-    return _fragColor;
 }

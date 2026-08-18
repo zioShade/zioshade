@@ -220,4 +220,5 @@ void main()
 {
     vec2 v26 = vec2(gl_FragCoord.x, gl_FragCoord.y);
     mainImage(_fragColor, v26);
+    return;
 }
