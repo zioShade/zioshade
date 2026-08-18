@@ -6,6 +6,51 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 - Nothing yet.
 
+## [0.7.0] - 2026-08-17
+
+### Changed
+
+- **The CTS GraphicsFuzz corpus is now clean on ALL FOUR backends**: GLSL/MSL/HLSL/WGSL all
+  at 0 invalid-output (the 0.5.0 baseline was GLSL 54 / MSL 47 / HLSL 46 / WGSL 5), driven by
+  #630-#637 across the loop-lowering, switch-context, and builtin-output subsystems.
+- **A new verification channel: the WebGPU CTS round-trip harness (#633, expanded in #640).**
+  Extracts the CTS's own per-case WGSL by driving its framework with a faked GPU device,
+  converts via naga (tint fallback), cross-compiles SPIR-V to WGSL, and naga-validates: 1613
+  vendored cases (79% of the pinned extraction pool, byte-reproducible end to end). Its entire
+  bug yield was fixed in the same releases: 43 invalid cases across 11 clusters (null folding,
+  depth-texture forms, image queries, depth-only outputs, MRT types, unreachable functions,
+  store-only privates, phi-scope ids), plus 58 over-refusals lifted into valid compiles
+  (comparison samplers, OpAtomicStore -- previously not even in the opcode enum -- and
+  SampledImage replay paths, #641). Post-#641: 1055 of 1613 roundtrip valid, 0 invalid,
+  0 crashes; the 556 refusals that remain are deliberate (546 subgroup ops the local naga
+  cannot parse, int64, binding collisions, point-size builtins) with named diagnostics.
+- **Three latent silent-wrong classes fixed that no earlier gate had seen**: the MSL
+  switch-merge shadow phi (graphicsfuzz_022 rendered solid blue, #630); break-to-loop-merge
+  emitted as `continue` in HLSL (6 spirv-cross shaders, #635); WGSL dropping wrap-backedge
+  phi updates (a latent infinite-loop class, #631) and returning hardcoded depth 0.0 in
+  depth-only fragments (#637).
+- **Separate-variable builtin vertex outputs (#632)**: GLSL emitted the entry as a counter
+  temp (`void v11()`, no main) and HLSL leaked undeclared-identifier stores for
+  PointSize/ViewportIndex/Layer; Viewport/Layer now route to SV_ semantics, written
+  unsupported builtins honest-error, skip-declared/drop-written elsewhere.
+- **Loop-merge-phi materialization ported to GLSL+HLSL (#635)** and **the post-loop
+  header-value hoist ported to WGSL (#631)**: multi-exit loops and post-loop header reads
+  now lower in all three text backends instead of refusing.
+- do-whiles with nested bodies lower structurally in GLSL/MSL/HLSL (#634); short-circuit loop
+  conditions lower structurally in GLSL/HLSL (#625, MSL in #622) instead of refusing.
+- MSL mutates Private ARRAY globals as spvUnsafeArray locals instead of the #173 honest
+  error (#639, where merged).
+
+### Added
+
+- Nightly gates for the integer-corpus UB contract and the metamorphic oracle (#615);
+  `--version` with a build.zig.zon drift gate (#616); a `--help` that prints the usage
+  (#623); dependencies vendored (ziotime/ziojson) so cold CI runs never hit archive-503s
+  (#626); a file-level crash baseline (#627).
+
+
+- Nothing yet.
+
 ## [0.6.0] - 2026-08-15
 
 ### Changed
