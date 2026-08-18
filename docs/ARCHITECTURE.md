@@ -65,7 +65,7 @@ prove correctness on the *unoptimized* IR -- some miscompiles only surface on on
 (the `#loop-continue-deadincr` class was invisible on optimized SPIR-V; `prove_naga`
 exercised it on the unoptimized path).
 
-The `Op` enum in `spirv.zig` is the set of SPIR-V opcodes zioshade models (252 today; see
+The `Op` enum in `spirv.zig` is the set of SPIR-V opcodes zioshade models (257 today; see
 [COVERAGE_MATRIX.md](COVERAGE_MATRIX.md)). Frontend constructs zioshade cannot translate
 faithfully are **honest-errors** (`error.CodegenFailed` / `error.SemanticFailed`), never
 silent-wrong output.

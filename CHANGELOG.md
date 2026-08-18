@@ -4,7 +4,57 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ## [Unreleased]
 
-- Nothing yet.
+### Changed
+
+- **The WGSL backend lowers the GroupNonUniform family under `enable subgroups;` (#643).**
+  The #641 state refused every subgroup op because the local naga cannot parse
+  `enable subgroups;` and lowering would have converted refusals into invalid output. The
+  design is dialect-first: decide what WGSL itself can spell, then lower exactly that and
+  refuse the rest by name. tint (dawn 5e9e5136, the sweep's fallback upstream converter)
+  parses and validates the full subgroups dialect, so it is the adjudicating oracle, with
+  MSL's simd_* lowering as the semantic reference. Lowered: vote (Elect/All/Any, plus the
+  SubgroupAllKHR/AnyKHR aliases), ballot, broadcast and broadcast-first, the shuffles
+  (Shuffle/Xor/Up/Down), Reduce of the Add/Mul/Min/Max/Bitwise families plus
+  Inclusive/Exclusive scans of Add/Mul, quadSwapX/Y/Diagonal and quadBroadcast, and the
+  subgroup_size/subgroup_invocation_id builtins as entry params. `enable subgroups;` is
+  emitted by a module pre-scan; every op checks the execution scope is Subgroup and the
+  stage is compute/fragment (tint rejects subgroup builtins in vertex). Measured on the
+  WebGPU CTS harness: subgroup refusals 546 -> 4, roundtrip-valid 1055 -> 1597 of 1613,
+  invalid 0, crash 0 (tests/webgpu_cts/baseline.txt).
+- **Families with no faithful WGSL spelling refuse sharply (#643).** AllEqual,
+  LogicalAnd/Or/Xor, InverseBallot, the ballot-bit ops (BitExtract/BitCount/FindLSB/
+  FindMSB), Rotate, the min/max/bitwise scans, and ClusteredReduce get named refusals: an
+  arithmetic emulation would not match the hardware op. The 4 subgroup refusals left in the
+  CTS corpus are the cross-function shape of tint's shuffle-mask idiom (mask stored in a
+  caller, shuffle in a helper); no WGSL construct keeps a value uniform across a call graph
+  except a written module-scope private, which is exactly what the uniformity analysis
+  rejects, so the honest action is the named refusal.
+- **The WebGPU CTS harness's validation leg is naga first, tint second (#643).** naga
+  cannot even parse `enable subgroups;`, so subgroup-lowered output was naga-unparsable by
+  construction while being valid WGSL Chrome's own frontend accepts. A naga-refused output
+  gets one second chance through tint; a case is valid if either accepts, and invalid means
+  both refused, so the silent-wrong class stays strict. Verified on the pre-lowering build
+  to return identical verdicts (1055 valid / 2 upstream / 556 refused / 0 invalid / 0
+  crash), as expected since no output used subgroups yet.
+
+### Fixed
+
+- **Three defects the subgroup work surfaced (#643).** A NonWritable storage buffer now
+  emits read-mode `var<storage>`: the old unconditional read_write was the less faithful
+  spelling and tainted buffer reads as non-uniform for tint's analysis. A private variable
+  stored exactly once in its owning function's entry block, with all accesses in that
+  function, now forwards every load to the stored value: tint's SPIR-V writer routes every
+  subgroup shuffle delta through a runtime-written module-scope private
+  (`tint_subgroup_size_mask`) that its uniformity analysis conservatively rejects
+  ("requires argument 1 to be uniform"); corpus impact of the forwarding is exactly one
+  file (graphicsfuzz_056 folds a once-stored private to its constant; naga+tint valid).
+  And the quad/ballot-bit subgroup ops are named in the shared result-id counter
+  (spirv_cross_common.zig): without a counter name every result fell to the emitters' bare
+  "v" fallback and collided into a redeclaration. Verification per the merged PR: 11 new
+  subgroup regression tests plus 1 rewritten (tint-validated where subgroups are required),
+  `zig build test` 3310/3313 with 3 environment skips, whole-corpus WGSL byte diff vs
+  origin/main over tests/spirv-cross/*.frag + tests/cts/graphicsfuzz/*.spv touching
+  exactly the one file above, structural-drop and unreachable scans at 0.
 
 ## [0.7.0] - 2026-08-17
 
