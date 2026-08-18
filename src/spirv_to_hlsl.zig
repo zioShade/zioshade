@@ -4281,7 +4281,14 @@ fn emitFunction(
                 "float4";
             try w.print("{s} main(", .{ov_type});
         } else {
-            try w.writeAll("float4 main(");
+            // No color outputs at all (depth-only / no-output fragment): a VOID
+            // entry. Synthesizing `float4 main(...) : SV_Target` returning
+            // (0,0,0,0) here wrote black-transparent to target 0 on every pixel,
+            // where the SPIR-V semantics (and spirv-cross) write NOTHING and the
+            // attachment keeps its prior contents — a full-image alpha flip
+            // (0 vs clear) confirmed as a WARP RENDER-DIFFER by depth-less-than.
+            // desktop + partial-write-preserve on the real DXC->DXIL->D3D12 path.
+            try w.writeAll("void main(");
         }
     } else if (is_vertex) {
         try w.writeAll("VS_OUTPUT main(VS_INPUT input");
@@ -4648,7 +4655,7 @@ fn emitFunction(
     // For MRT: emit struct return type with SV_Target semantics
     if (has_mrt) {
         try w.writeAll(")\n{\n");
-    } else if (is_fragment) {
+    } else if (is_fragment and output_vars.items.len > 0) {
         try w.writeAll(") : SV_Target\n{\n");
     } else {
         try w.writeAll(")\n{\n");
@@ -4747,8 +4754,8 @@ fn emitFunction(
             if (!std.mem.endsWith(u8, body_buf.items, epilogue)) try w.writeAll(epilogue);
         }
     } else if (is_fragment) {
-        // Empty fragment shader — return default value
-        try w.writeAll("    return float4(0.0, 0.0, 0.0, 0.0);\n");
+        // No color outputs: void entry (see the `void main(` site above). Emit no
+        // return statement — writing a synthesized float4 here was the miscompile.
     } else if (is_vertex) {
         // Vertex entry: return the populated output struct. Same endsWith guard
         // as the fragment path above: the entry's own OpReturn already emits
@@ -8408,7 +8415,11 @@ fn emitInstruction(
             // expr) keep the old skip / `return;`.
             if (g_early_return_expr) |e| {
                 try w.print("    return {s};\n", .{e});
-            } else if (!(is_fragment or is_vertex)) {
+            } else if (!(is_fragment or is_vertex) or (is_fragment and output_var_id == null)) {
+                // The second arm: a VOID fragment entry (no color outputs) must
+                // keep its early returns — dropping them let later writes run past
+                // an early-out, silently clobbering state. `return;` is the only
+                // legal form there (the entry returns nothing).
                 try w.writeAll("    return;\n");
             }
         },
