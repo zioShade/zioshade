@@ -12065,7 +12065,7 @@ fn emitSubgroupOp(
             n_args = 1;
         },
     }
-    var args = std.ArrayList(u8){};
+    var args: std.ArrayList(u8) = .empty;
     for (arg_ids[0..n_args], 0..) |aid, ai| {
         if (ai > 0) try args.appendSlice(arena, ", ");
         try args.appendSlice(arena, names.get(aid) orelse "0");
