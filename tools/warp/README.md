@@ -21,9 +21,10 @@ miscompile to fix. The harness also binds one root CBV at `b0` holding a known
 asymmetric mat4, so a `cbuffer A : register(b0) { float4x4 m; }` shader that
 multiplies a uniform matrix is render-verified too (#498) — its transpose is
 distinct, so a wrong-major multiply renders differently. Self-contained shaders
-don't reference `b0` and are unaffected. A shader that needs a texture or vertex
-attributes still **skips** (the harness feeds only `SV_Position`/`gl_FragCoord`
-plus that one cbuffer).
+don't reference `b0` and are unaffected. Varying-input (`in vec2 uv`) shaders render
+too via the per-shader VS (see "Run"). A shader that needs a texture, or more
+buffers than the one b0 CBV, still **skips** (the harness binds no textures and one
+cbuffer).
 
 ## One-time setup on the Windows box
 
@@ -55,11 +56,12 @@ plus that one cbuffer).
 
 ## Run
 
-On the dev (macOS) machine, stage the shader pairs and copy them over:
+On the dev (macOS) machine, stage the shader pairs and copy them over (`just warp-render`
+automates this when `WARP_HOST` is set):
 ```
 zig build cli
 tools/warp/stage_pairs.sh /tmp/warp_pairs                 # all fragment shaders
-# or only the macOS RENDER-MATCH subset:
+# or only a named subset (e.g. the macOS RENDER-MATCH list):
 # tools/hlsl_render_check.sh --sweep > sweep.txt
 # grep RENDER-MATCH sweep.txt | awk '{print $2}' > names.txt   # (adjust to sweep format)
 # tools/warp/stage_pairs.sh /tmp/warp_pairs tests/spirv-cross names.txt
@@ -69,11 +71,30 @@ scp tools/warp/*        <win>:C:/warp/
 On Windows:
 ```
 cd C:\warp
-cl /std:c++17 /EHsc /O2 warp_render.cpp /link d3d12.lib dxgi.lib
-powershell -ExecutionPolicy Bypass -File run.ps1 -Dir C:\warp_pairs
+cl /std:c++17 /EHsc /O2 warp_render.cpp /link d3d12.lib dxgi.lib    # or the clang-cl recipe above
+powershell -ExecutionPolicy Bypass -File run.ps1 -Dir C:\warp_pairs -Dxc <SDK-dxc> -Warp .\warp_render.exe
 ```
-Output is a `RENDER-MATCH / RENDER-DIFFER / skip` tally, with every diverging shader
-named. Exit code 1 if any shader diverged, so it doubles as a gate.
+`-Dxc` must point at the Windows SDK dxc (DXIL-capable); on PATH the Vulkan SDK dxc
+would be picked, which cannot emit DXIL. Output is a `RENDER-MATCH / RENDER-DIFFER /
+skip` tally with a per-skip reason line (`skip dxc-zs|dxc-sc|gen-vs|warp-2 <name>`),
+and names every diverging shader. Exit code 1 if any shader diverged, so it doubles
+as a gate.
+
+### Varying-input shaders (per-shader VS)
+
+`run.ps1` compiles a PER-SHADER fullscreen vertex shader for fragments that read
+varyings (`in vec2 uv` -> `float2 uv : TEXCOORD0`), mirroring the macOS ShaderCompare
+trick of a synthesized per-fragment VS. The reason is a D3D12 linkage rule established
+empirically on WARP: **a PS input links to the VS output at the SAME SLOT, with the
+same semantic and type** — a VS whose SV_Position sits in slot 0 cannot feed a PS whose
+slot 0 is TEXCOORD0 (PSO creation fails with E_INVALIDARG), and leading extra VS
+outputs shift every PS input off its slot. So the generated VS mirrors the PS
+parameter list in order (NDC-derived values, spatially varying) and appends
+SV_Position only when the PS does not declare it (trailing extra VS outputs are
+legal). Without this, 27 of a 72-shader slice skipped — including every
+uniform-matrix probe. Remaining skip classes: shaders whose bindings exceed the one
+b0 CBV the harness binds (declares b1+), and hostile inputs DXC rejects from either
+compiler (e.g. types.flatten: three UBOs all at binding 0).
 
 ## Files
 
@@ -84,15 +105,38 @@ named. Exit code 1 if any shader diverged, so it doubles as a gate.
 
 ## Status
 
-**Run and green on `ryzen7pro` (Windows 11, D3D12 WARP).** Over an 8-shader set:
-`RENDER-MATCH = 5` (controls: mat_branch/mat2, outer_product, mandelbrot_smooth,
-swizzle_access, struct_tern), `RENDER-DIFFER = 3` — `mat3_branch`,
-`mat_cond_swizzle`, `outer_product_test` — the exact three the macOS Metal proxy
-predicted. So the harness works end-to-end and **confirms a real zioshade HLSL
-matrix bug on the shipping DXC->DXIL->D3D12 runtime**: HLSL's `floatCxR(a,b,c)`
-constructor fills ROWS (MSL's `matCxR` fills columns), so zioshade building a matrix
-from GLSL columns stores the transpose, and `mul(M, v)` then computes M^T*v. SPIRV-
-Cross stores the same transpose but compensates with `mul(v, M)`. Fix is a matrix-
-convention correction in `spirv_to_hlsl.zig` (mul operand order + construction/
-indexing/inverse consistency), verifiable via `tools/hlsl_render_check.sh` (fast,
-macOS) and re-confirmable here.
+**First end-to-end run on the real runtime: 2026-08-18, `ryzen7pro` (Windows 11,
+D3D12 WARP, SDK 10.0.26100.0 dxc).** Over a 72-shader strided slice of
+tests/spirv-cross (63 pure-gl_FragCoord/varying + 9 b0-cbuffer probes):
+`RENDER-MATCH = 70, RENDER-DIFFER = 0, skip = 2`.
+
+That run found and closed two things:
+
+1. **A real HLSL miscompile (fixed):** a fragment with NO color outputs got a
+   synthesized `float4 main(...) : SV_Target` returning `(0,0,0,0)` — writing
+   black-transparent to target 0 on every pixel where GLSL/SPIR-V semantics write
+   NOTHING (the attachment keeps its prior contents). WARP verdict: RENDER-DIFFER
+   maxdiff 255 on all 65536 px (alpha flip) for `depth-less-than.desktop` and
+   `partial-write-preserve`; the macOS Metal proxy independently flagged the same
+   class (`RENDER-DIFFER px=65536,maxdiff=255`). Fix: emit a `void main(...)` entry
+   with no SV_Target (spirv-cross's shape), keep early OpReturns as `return;`.
+   After the fix both shaders RENDER-MATCH on WARP; `partial-write-preserve` also
+   RENDER-MATCHes on Metal.
+2. **The same bug existed in the MSL backend** (synthesized `float4 _fragColor
+   [[color(0)]]` written as zeros for no-output fragments); fixed the same way
+   (`fragment void main0(...)`) and render-verified on Metal (RENDER-MATCH).
+
+The 2 remaining skips are scope, not defects: `types.flatten` (GLSL declares three
+UBOs at binding 0; DXC rejects both compilers' output — hostile input) and
+`ubo-load-row-major-workaround` (declares b0..b3; the harness root signature binds
+one CBV at b0 — see "Varying-input shaders" above for the skip census).
+
+Also noted (not fixed, not render-visible with depth disabled): zioshade maps
+`gl_FragDepth` to plain `SV_Depth` and ignores the DepthLess/DepthGreater execution
+modes; spirv-cross maps them to `SV_DepthLessEqual`/`SV_DepthGreaterEqual`. The
+current emission is conservative (unconstrained depth write), not a miscompile, but
+the fidelity gap is real.
+
+Earlier README text claimed a July run with a matrix-convention DIFFER set; that
+came from an unmerged branch's history, not the shipping harness, and is superseded
+by the verified run above.

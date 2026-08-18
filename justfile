@@ -184,6 +184,45 @@ glsl-render:
 wgsl-render:
     @bash tools/wgsl_render_check.sh
 
+# WARP render-diff on the real DXC->DXIL->D3D12 path (tools/warp/, run on a Windows
+# box — WARP is the CPU rasterizer so no GPU needed). Renders zioshade's HLSL vs
+# SPIRV-Cross's HLSL on the same runtime and pixel-diffs: the final HLSL gate macOS
+# cannot run. Stages the pairs locally, then (if WARP_HOST is set) copies them over
+# ssh and runs the gate remotely; otherwise prints the exact commands to run by hand.
+# Host must have the Windows SDK + a DXIL-capable dxc (SDK bin, NOT the Vulkan SDK
+# one) + a C++ compiler — see tools/warp/README.md for the one-time setup and the
+# clang-cl recipe used on ryzen7pro.
+#   WARP_HOST=alessandro@ryzen7pro just warp-render            # full auto (slice = whole corpus)
+#   just warp-render SLICE=/tmp/warp_names.txt                 # stage a named subset
+#   just warp-render N=100                                     # first-N staged pairs
+warp-render SLICE="$(WARP_SLICE)" N="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{zig}} build cli
+    out=$${WARP_STAGE:-/tmp/warp_pairs}
+    if [ -n "{{SLICE}}" ] && [ -s "{{SLICE}}" ]; then
+        tools/warp/stage_pairs.sh "$out" tests/spirv-cross "{{SLICE}}"
+    elif [ -n "{{N}}" ]; then
+        ls tests/spirv-cross/*.frag | grep -v '.asm.' | sed 's|.*/||; s|\.frag$||' | head -"{{N}}" > /tmp/warp_firstn.txt
+        tools/warp/stage_pairs.sh "$out" tests/spirv-cross /tmp/warp_firstn.txt
+    else
+        tools/warp/stage_pairs.sh "$out"
+    fi
+    win_dir=$${WARP_REMOTE_DIR:-C:/zioshade_warp}
+    if [ -n "$${WARP_HOST:-}" ]; then
+        host=$${WARP_HOST}
+        ssh "$host" "mkdir $win_dir/pairs 2>nul"
+        scp -r "$out"/*.hlsl "$host:$win_dir/pairs/"
+        scp tools/warp/run.ps1 tools/warp/warp_render.cpp tools/warp/fullscreen_vs.hlsl "$host:$win_dir/"
+        echo "first run on the box: build warp_render.exe there (tools/warp/README.md clang-cl recipe)"
+        ssh "$host" "cd /d $win_dir && powershell -ExecutionPolicy Bypass -File run.ps1 -Dir $win_dir/pairs -Dxc \"%ProgramFiles(x86)%/Windows Kits/10/bin/10.0.26100.0/x64/dxc.exe\" -Warp $win_dir/warp_render.exe"
+    else
+        echo "pairs staged in $out — now on the Windows box:"
+        echo "  scp -r $out <win>:C:/warp_pairs && scp tools/warp/* <win>:C:/warp/"
+        echo "  build warp_render.exe once (README), then:"
+        echo "  powershell -File run.ps1 -Dir C:/warp_pairs -Dxc <SDK-dxc> -Warp ./warp_render.exe"
+    fi
+
 # Integer/quantized-output CORRECTNESS corpus: hand-written shaders whose output is
 # FP-ordering-independent (integer arithmetic, comparisons, bit ops, quantized writes) —
 # so ANY DIFFER is a guaranteed real bug (chaos cannot contaminate; the Csmith move). The

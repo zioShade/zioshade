@@ -259,7 +259,14 @@ int main(int argc, char** argv) {
         long d = labs((long)a[i] - (long)b[i]);
         if (d > maxD) maxD = d;
         total += d;
-        if (d > 0 && (i % 4) == 0) diffPx++;
+        // Count a pixel once when ANY of its channels differs. The old form keyed
+        // on (i % 4) == 0, so a green, blue, or alpha-only divergence reported
+        // "Different: 0" next to a DIFFER verdict, which misleads during triage.
+        if (d > 0 && (i % 4) == 3) {
+            bool any = false;
+            for (int c = 0; c < 4; c++) any |= a[i - 3 + c] != b[i - 3 + c];
+            if (any) diffPx++;
+        }
     }
     printf("Resolution: %ux%u  Pixels: %u  Different: %ld\n", W, H, W * H, diffPx);
     printf("Max channel diff: %ld\n", maxD);
