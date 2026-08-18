@@ -268,6 +268,37 @@ fn nagaValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
     return error.NagaValidationFailed;
 }
 
+// Validate WGSL with tint -- Chrome's own WGSL frontend (dawn). It is the only
+// local oracle that can parse `enable subgroups;`: naga refuses the whole
+// subgroups dialect, so subgroup-lowered output is naga-unparsable by
+// construction while being valid WGSL. Skips when no tint is on PATH (the
+// probe has no --version flag; a trivial compute shader is the probe), keeping
+// `zig build test` hermetic.
+fn tintValidateOrSkip(wgsl: []const u8, label: []const u8) !void {
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const probe_path = try zioshade.compat.tempFilePathFmt(alloc, "zs_tint_probe_{x}.wgsl", .{zioshade.compat.randomInt(u64)});
+    defer alloc.free(probe_path);
+    defer zioshade.compat.deleteFileAbsolute(alloc, probe_path) catch {};
+    try zioshade.compat.writeFileAbsolute(alloc, probe_path, "@compute @workgroup_size(1) fn main() {}");
+    const probe = zioshade.compat.processRun(main_io.io(), alloc, &.{ "tint", probe_path }) catch return error.SkipZigTest;
+    alloc.free(probe.stdout);
+    alloc.free(probe.stderr);
+    if (!((probe.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+
+    const tmp_path = try zioshade.compat.tempFilePathFmt(alloc, "zs_tint_{x}.wgsl", .{zioshade.compat.randomInt(u64)});
+    defer alloc.free(tmp_path);
+    defer zioshade.compat.deleteFileAbsolute(alloc, tmp_path) catch {};
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_path, wgsl);
+
+    const result = try zioshade.compat.processRun(main_io.io(), alloc, &.{ "tint", tmp_path });
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if ((result.term.exitedCode() orelse 1) == 0) return;
+    std.debug.print("tint REJECTED WGSL for [{s}]:\n{s}\n{s}\n--- WGSL ---\n{s}\n", .{ label, result.stdout, result.stderr, wgsl });
+    return error.TintValidationFailed;
+}
+
 // Validate SPIR-V with spirv-val, skipping when the binary is not on PATH
 // (mirrors nagaValidateOrSkip). zioshade.validateSPIRV returns false when
 // spirv-val is missing, so asserting on it directly fails spuriously on
@@ -3572,12 +3603,15 @@ test "wgsl: all-constant mix is naga-valid (abstract-literal typing)" {
 }
 
 // ---------------------------------------------------------------------------
-// Pass 2 (#170 G5) AUDIT FIX: subgroup ops were emitted directly (e.g.
-// subgroupElect()) with NO `enable subgroups;`. naga 29.0.3 rejects subgroups
-// entirely, so this was silent-wrong. They must now honest-error.
+// Subgroup lowering (feat/wgsl-subgroups). Pass 2 (#170 G5) made every
+// subgroup op an honest error because naga cannot even parse
+// `enable subgroups;`; with tint (Chrome's own WGSL frontend) as the
+// validation oracle, the GroupNonUniform family now lowers. This test was the
+// #170 refusal lock: the same glslang fragment now lowers and must carry the
+// enable (naga refuses it, so tint is the validator).
 // ---------------------------------------------------------------------------
 
-test "wgsl: subgroupElect errors honestly (WGSL/naga has no subgroups)" {
+test "wgsl: subgroupElect lowers under enable subgroups (glslang fragment)" {
     const source: [:0]const u8 =
         \\#version 450
         \\#extension GL_KHR_shader_subgroup_basic : require
@@ -3586,9 +3620,11 @@ test "wgsl: subgroupElect errors honestly (WGSL/naga has no subgroups)" {
     ;
     const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(spirv);
-    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spirv, .{}));
-    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
-    try std.testing.expect(std.mem.indexOf(u8, detail, "subgroup") != null);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "enable subgroups;");
+    try assertContains(wgsl, "subgroupElect()");
+    try tintValidateOrSkip(wgsl, "subgroup-elect-fragment");
 }
 
 // ---------------------------------------------------------------------------
@@ -8864,4 +8900,482 @@ test "wgsl cts: OpAtomicLoad refusal names the opcode" {
     try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
     const detail = zioshade.wgslLastErrorDetail() orelse "";
     try assertContains(detail, "AtomicLoad");
+}
+
+// ---------------------------------------------------------------------------
+// Subgroup lowering regression tests (feat/wgsl-subgroups): every lowered
+// GroupNonUniform family, authored as inline spirv-as (the shapes naga/tint
+// emit), asserted on form and validated with tint -- the only local oracle
+// that parses `enable subgroups;` (naga refuses the dialect wholesale).
+// Semantic reference: MSL's simd_* lowering in src/spirv_to_msl.zig.
+// ---------------------------------------------------------------------------
+
+const SUBGROUP_PREAMBLE =
+    \\OpCapability Shader
+    \\OpCapability GroupNonUniform
+    \\OpCapability GroupNonUniformArithmetic
+    \\OpCapability GroupNonUniformVote
+    \\OpCapability GroupNonUniformBallot
+    \\OpCapability GroupNonUniformShuffle
+    \\OpCapability GroupNonUniformShuffleRelative
+    \\OpCapability GroupNonUniformQuad
+    \\OpMemoryModel Logical GLSL450
+    \\OpEntryPoint GLCompute %main "main"
+    \\OpExecutionMode %main LocalSize 8 1 1
+    \\%void = OpTypeVoid
+    \\%voidfn = OpTypeFunction %void
+    \\%bool = OpTypeBool
+    \\%uint = OpTypeInt 32 0
+    \\%v4uint = OpTypeVector %uint 4
+    \\%float = OpTypeFloat 32
+    \\%true = OpConstantTrue %bool
+    \\%u3 = OpConstant %uint 3
+    \\%u2 = OpConstant %uint 2
+    \\%u1 = OpConstant %uint 1
+    \\%u0 = OpConstant %uint 0
+    \\%f1 = OpConstant %float 1
+++
+    "\n";
+
+test "wgsl subgroups: vote + ballot + broadcast lower (Elect/All/Any/Ballot/Broadcast/BroadcastFirst)" {
+    const spv = try assembleSpirv("subgroup_vote", SUBGROUP_PREAMBLE ++
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%e = OpGroupNonUniformElect %bool %u3
+        \\%a = OpGroupNonUniformAll %bool %u3 %true
+        \\%y = OpGroupNonUniformAny %bool %u3 %true
+        \\%b = OpGroupNonUniformBallot %v4uint %u3 %true
+        \\%bc = OpGroupNonUniformBroadcast %uint %u3 %u1 %u2
+        \\%bf = OpGroupNonUniformBroadcastFirst %uint %u3 %u1
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "enable subgroups;");
+    try assertContains(wgsl, "subgroupElect()");
+    try assertContains(wgsl, "subgroupAll(true)");
+    try assertContains(wgsl, "subgroupAny(true)");
+    try assertContains(wgsl, "subgroupBallot(true)");
+    try assertContains(wgsl, "subgroupBroadcast(1u, 2u)");
+    try assertContains(wgsl, "subgroupBroadcastFirst(1u)");
+    try tintValidateOrSkip(wgsl, "subgroup-vote");
+}
+
+test "wgsl subgroups: shuffles lower (Shuffle/Xor/Up/Down)" {
+    const spv = try assembleSpirv("subgroup_shuffle", SUBGROUP_PREAMBLE ++
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%s0 = OpGroupNonUniformShuffle %uint %u3 %u1 %u2
+        \\%s1 = OpGroupNonUniformShuffleXor %uint %u3 %u1 %u1
+        \\%s2 = OpGroupNonUniformShuffleUp %uint %u3 %u1 %u2
+        \\%s3 = OpGroupNonUniformShuffleDown %uint %u3 %u1 %u2
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "subgroupShuffle(1u, 2u)");
+    try assertContains(wgsl, "subgroupShuffleXor(1u, 1u)");
+    try assertContains(wgsl, "subgroupShuffleUp(1u, 2u)");
+    try assertContains(wgsl, "subgroupShuffleDown(1u, 2u)");
+    try tintValidateOrSkip(wgsl, "subgroup-shuffle");
+}
+
+test "wgsl subgroups: arithmetic Reduce lowers (Add/Mul/Min/Max/And/Or/Xor, int and float)" {
+    const spv = try assembleSpirv("subgroup_reduce", SUBGROUP_PREAMBLE ++
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%r0 = OpGroupNonUniformIAdd %uint %u3 Reduce %u1
+        \\%r1 = OpGroupNonUniformFAdd %float %u3 Reduce %f1
+        \\%r2 = OpGroupNonUniformIMul %uint %u3 Reduce %u1
+        \\%r3 = OpGroupNonUniformFMul %float %u3 Reduce %f1
+        \\%r4 = OpGroupNonUniformUMin %uint %u3 Reduce %u1
+        \\%r5 = OpGroupNonUniformFMin %float %u3 Reduce %f1
+        \\%r6 = OpGroupNonUniformUMax %uint %u3 Reduce %u1
+        \\%r7 = OpGroupNonUniformFMax %float %u3 Reduce %f1
+        \\%r8 = OpGroupNonUniformBitwiseAnd %uint %u3 Reduce %u1
+        \\%r9 = OpGroupNonUniformBitwiseOr %uint %u3 Reduce %u1
+        \\%r10 = OpGroupNonUniformBitwiseXor %uint %u3 Reduce %u1
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // The dialect is type-polymorphic: one builtin per reduction kind.
+    try assertContains(wgsl, "subgroupAdd(1u)");
+    try assertContains(wgsl, "subgroupAdd(1.0f)");
+    try assertContains(wgsl, "subgroupMul(1u)");
+    try assertContains(wgsl, "subgroupMul(1.0f)");
+    try assertContains(wgsl, "subgroupMin(1u)");
+    try assertContains(wgsl, "subgroupMin(1.0f)");
+    try assertContains(wgsl, "subgroupMax(1u)");
+    try assertContains(wgsl, "subgroupMax(1.0f)");
+    try assertContains(wgsl, "subgroupAnd(1u)");
+    try assertContains(wgsl, "subgroupOr(1u)");
+    try assertContains(wgsl, "subgroupXor(1u)");
+    try tintValidateOrSkip(wgsl, "subgroup-reduce");
+}
+
+test "wgsl subgroups: scans lower (Inclusive/Exclusive Add and Mul) and min-scan refuses" {
+    {
+        const spv = try assembleSpirv("subgroup_scan", SUBGROUP_PREAMBLE ++
+            \\%main = OpFunction %void None %voidfn
+            \\%lbl = OpLabel
+            \\%i0 = OpGroupNonUniformIAdd %uint %u3 InclusiveScan %u1
+            \\%i1 = OpGroupNonUniformIAdd %uint %u3 ExclusiveScan %u1
+            \\%i2 = OpGroupNonUniformIMul %uint %u3 InclusiveScan %u1
+            \\%i3 = OpGroupNonUniformIMul %uint %u3 ExclusiveScan %u1
+            \\%i4 = OpGroupNonUniformFAdd %float %u3 InclusiveScan %f1
+            \\OpReturn
+            \\OpFunctionEnd
+        );
+        defer alloc.free(spv);
+        const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+        defer alloc.free(wgsl);
+        try assertContains(wgsl, "subgroupInclusiveAdd(1u)");
+        try assertContains(wgsl, "subgroupExclusiveAdd(1u)");
+        try assertContains(wgsl, "subgroupInclusiveMul(1u)");
+        try assertContains(wgsl, "subgroupExclusiveMul(1u)");
+        try assertContains(wgsl, "subgroupInclusiveAdd(1.0f)");
+        try tintValidateOrSkip(wgsl, "subgroup-scan");
+    }
+    // A min/max/bitwise scan has NO form in the dialect: honest error, named.
+    const spv2 = try assembleSpirv("subgroup_minscan", SUBGROUP_PREAMBLE ++
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%m = OpGroupNonUniformUMin %uint %u3 InclusiveScan %u1
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv2);
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv2, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try assertContains(detail, "inclusive-scan subgroup form for GroupNonUniformUMin");
+}
+
+test "wgsl subgroups: quad ops lower (QuadSwap X/Y/Diagonal + QuadBroadcast)" {
+    const spv = try assembleSpirv("subgroup_quad", SUBGROUP_PREAMBLE ++
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%q0 = OpGroupNonUniformQuadSwap %uint %u3 %u1 %u0
+        \\%q1 = OpGroupNonUniformQuadSwap %uint %u3 %u1 %u1
+        \\%q2 = OpGroupNonUniformQuadSwap %uint %u3 %u1 %u2
+        \\%q3 = OpGroupNonUniformQuadBroadcast %uint %u3 %u1 %u2
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // The direction CONSTANT selects the function: 0=X, 1=Y, 2=Diagonal.
+    try assertContains(wgsl, "quadSwapX(1u)");
+    try assertContains(wgsl, "quadSwapY(1u)");
+    try assertContains(wgsl, "quadSwapDiagonal(1u)");
+    try assertContains(wgsl, "quadBroadcast(1u, 2u)");
+    try tintValidateOrSkip(wgsl, "subgroup-quad");
+}
+
+test "wgsl subgroups: builtins map (@builtin(subgroup_invocation_id)/subgroup_size)" {
+    const spv = try assembleSpirv("subgroup_builtins",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformArithmetic
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %inv %sz
+        \\OpExecutionMode %main LocalSize 8 1 1
+        \\OpDecorate %inv BuiltIn SubgroupLocalInvocationId
+        \\OpDecorate %sz BuiltIn SubgroupSize
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%uint = OpTypeInt 32 0
+        \\%u3 = OpConstant %uint 3
+        \\%ptr_in = OpTypePointer Input %uint
+        \\%inv = OpVariable %ptr_in Input
+        \\%sz = OpVariable %ptr_in Input
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%iv = OpLoad %uint %inv
+        \\%sv = OpLoad %uint %sz
+        \\%r = OpGroupNonUniformIAdd %uint %u3 Reduce %iv
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "enable subgroups;");
+    try assertContains(wgsl, "@builtin(subgroup_invocation_id)");
+    try assertContains(wgsl, "@builtin(subgroup_size)");
+    try tintValidateOrSkip(wgsl, "subgroup-builtins");
+}
+
+test "wgsl subgroups: ballot-bit / AllEqual / Logical / Rotate families refuse with named ops" {
+    // AllEqual
+    {
+        const spv = try assembleSpirv("subgroup_allequal", SUBGROUP_PREAMBLE ++
+            \\%main = OpFunction %void None %voidfn
+            \\%lbl = OpLabel
+            \\%e = OpGroupNonUniformAllEqual %bool %u3 %u1
+            \\OpReturn
+            \\OpFunctionEnd
+        );
+        defer alloc.free(spv);
+        try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try assertContains(detail, "GroupNonUniformAllEqual");
+    }
+    // LogicalAnd
+    {
+        const spv = try assembleSpirv("subgroup_logicaland", SUBGROUP_PREAMBLE ++
+            \\%main = OpFunction %void None %voidfn
+            \\%lbl = OpLabel
+            \\%l = OpGroupNonUniformLogicalAnd %bool %u3 Reduce %true
+            \\OpReturn
+            \\OpFunctionEnd
+        );
+        defer alloc.free(spv);
+        try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try assertContains(detail, "GroupNonUniformLogicalAnd");
+    }
+    // ClusteredReduce (gop 3 + cluster size operand): no WGSL form.
+    {
+        const spv = try assembleSpirv("subgroup_clustered", SUBGROUP_PREAMBLE ++
+            \\%main = OpFunction %void None %voidfn
+            \\%lbl = OpLabel
+            \\%c = OpGroupNonUniformIAdd %uint %u3 ClusteredReduce %u1 %u2
+            \\OpReturn
+            \\OpFunctionEnd
+        );
+        defer alloc.free(spv);
+        try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try assertContains(detail, "ClusteredReduce");
+    }
+    // InverseBallot / ballot bit ops: need the invocation id, no builtin.
+    {
+        const spv = try assembleSpirv("subgroup_invballot", SUBGROUP_PREAMBLE ++
+            \\%main = OpFunction %void None %voidfn
+            \\%lbl = OpLabel
+            \\%bl = OpGroupNonUniformBallot %v4uint %u3 %true
+            \\%ib = OpGroupNonUniformInverseBallot %bool %u3 %bl
+            \\OpReturn
+            \\OpFunctionEnd
+        );
+        defer alloc.free(spv);
+        try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try assertContains(detail, "GroupNonUniformInverseBallot");
+    }
+}
+
+test "wgsl subgroups: non-Subgroup execution scope and vertex stage refuse" {
+    // Scope constant 2 (Workgroup): WGSL subgroup builtins are subgroup-scoped.
+    {
+        const spv = try assembleSpirv("subgroup_scope",
+            \\OpCapability Shader
+            \\OpCapability GroupNonUniform
+            \\OpCapability GroupNonUniformArithmetic
+            \\OpMemoryModel Logical GLSL450
+            \\OpEntryPoint GLCompute %main "main"
+            \\OpExecutionMode %main LocalSize 8 1 1
+            \\%void = OpTypeVoid
+            \\%voidfn = OpTypeFunction %void
+            \\%uint = OpTypeInt 32 0
+            \\%u2 = OpConstant %uint 2
+            \\%u1 = OpConstant %uint 1
+            \\%main = OpFunction %void None %voidfn
+            \\%lbl = OpLabel
+            \\%r = OpGroupNonUniformIAdd %uint %u2 Reduce %u1
+            \\OpReturn
+            \\OpFunctionEnd
+        );
+        defer alloc.free(spv);
+        try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try assertContains(detail, "subgroup-scoped");
+    }
+    // Vertex stage: tint rejects subgroup builtins there ("built-in cannot be
+    // used by vertex pipeline stage"), so lowering would be oracle-invalid.
+    {
+        const spv = try assembleSpirv("subgroup_vertex",
+            \\OpCapability Shader
+            \\OpCapability GroupNonUniform
+            \\OpCapability GroupNonUniformArithmetic
+            \\OpMemoryModel Logical GLSL450
+            \\OpEntryPoint Vertex %main "main" %pos
+            \\OpDecorate %pos BuiltIn Position
+            \\%void = OpTypeVoid
+            \\%voidfn = OpTypeFunction %void
+            \\%uint = OpTypeInt 32 0
+            \\%float = OpTypeFloat 32
+            \\%v4float = OpTypeVector %float 4
+            \\%u3 = OpConstant %uint 3
+            \\%u1 = OpConstant %uint 1
+            \\%f0 = OpConstant %float 0
+            \\%ptr_out = OpTypePointer Output %v4float
+            \\%pos = OpVariable %ptr_out Output
+            \\%main = OpFunction %void None %voidfn
+            \\%lbl = OpLabel
+            \\%r = OpGroupNonUniformIAdd %uint %u3 Reduce %u1
+            \\%v = OpCompositeConstruct %v4float %f0 %f0 %f0 %f0
+            \\OpStore %pos %v
+            \\OpReturn
+            \\OpFunctionEnd
+        );
+        defer alloc.free(spv);
+        try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try assertContains(detail, "compute/fragment only");
+    }
+}
+
+test "wgsl subgroups: tint mask idiom round trip (single-store private forwarded, delta stays uniform)" {
+    // The exact shape tint's SPIR-V writer emits for subgroupShuffleXor(e, d):
+    // a module-scope private holding (subgroup_size - 1), stored once at
+    // function entry, the delta masked with it. The forwarding must eliminate
+    // the written private (tint's uniformity analysis rejects it) and keep the
+    // delta a plain expression of the entry parameter.
+    const spv = try assembleSpirv("subgroup_mask_idiom",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformShuffle
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %sz
+        \\OpExecutionMode %main LocalSize 8 1 1
+        \\OpName %tint_subgroup_size_mask "tint_subgroup_size_mask"
+        \\OpDecorate %sz BuiltIn SubgroupSize
+        \\%void = OpTypeVoid
+        \\%uint = OpTypeInt 32 0
+        \\%voidfn = OpTypeFunction %void
+        \\%uintfn = OpTypeFunction %void %uint
+        \\%u3 = OpConstant %uint 3
+        \\%u1 = OpConstant %uint 1
+        \\%u0 = OpConstant %uint 0
+        \\%ptr_in = OpTypePointer Input %uint
+        \\%ptr_priv = OpTypePointer Private %uint
+        \\%sz = OpVariable %ptr_in Input
+        \\%tint_subgroup_size_mask = OpVariable %ptr_priv Private %u0
+        \\%main = OpFunction %void None %voidfn
+        \\%mlbl = OpLabel
+        \\%s = OpLoad %uint %sz
+        \\%call = OpFunctionCall %void %inner %s
+        \\OpReturn
+        \\OpFunctionEnd
+        \\%inner = OpFunction %void None %uintfn
+        \\%param = OpFunctionParameter %uint
+        \\%ilbl = OpLabel
+        \\%m1 = OpISub %uint %param %u1
+        \\OpStore %tint_subgroup_size_mask %m1
+        \\%ml = OpLoad %uint %tint_subgroup_size_mask
+        \\%d = OpBitwiseAnd %uint %u0 %ml
+        \\%r = OpGroupNonUniformShuffleXor %uint %u3 %u0 %d
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "subgroupShuffleXor(");
+    // The written private is GONE (forwarded), or tint flags the delta.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var<private> tint_subgroup_size_mask") == null);
+    try tintValidateOrSkip(wgsl, "subgroup-mask-idiom");
+}
+
+test "wgsl subgroups: shuffle delta reading a cross-function private refuses" {
+    // tint's mask idiom when the SHUFFLE sits in a helper: the private is
+    // stored in the caller and loaded in the callee. No WGSL spelling keeps
+    // that value uniform across the call graph, so this must honest-error.
+    const spv = try assembleSpirv("subgroup_crossfn",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformShuffle
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %sz
+        \\OpExecutionMode %main LocalSize 8 1 1
+        \\OpName %tint_subgroup_size_mask "tint_subgroup_size_mask"
+        \\OpDecorate %sz BuiltIn SubgroupSize
+        \\%void = OpTypeVoid
+        \\%uint = OpTypeInt 32 0
+        \\%voidfn = OpTypeFunction %void
+        \\%u3 = OpConstant %uint 3
+        \\%u1 = OpConstant %uint 1
+        \\%u0 = OpConstant %uint 0
+        \\%ptr_in = OpTypePointer Input %uint
+        \\%ptr_priv = OpTypePointer Private %uint
+        \\%sz = OpVariable %ptr_in Input
+        \\%tint_subgroup_size_mask = OpVariable %ptr_priv Private %u0
+        \\%main = OpFunction %void None %voidfn
+        \\%mlbl = OpLabel
+        \\%s = OpLoad %uint %sz
+        \\%m1 = OpISub %uint %s %u1
+        \\OpStore %tint_subgroup_size_mask %m1
+        \\%call = OpFunctionCall %void %helper
+        \\OpReturn
+        \\OpFunctionEnd
+        \\%helper = OpFunction %void None %voidfn
+        \\%hlbl = OpLabel
+        \\%ml = OpLoad %uint %tint_subgroup_size_mask
+        \\%d = OpBitwiseAnd %uint %u0 %ml
+        \\%r = OpGroupNonUniformShuffleXor %uint %u3 %u0 %d
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToWGSL(alloc, spv, .{}));
+    const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+    try assertContains(detail, "uniform");
+    try assertContains(detail, "module-scope private");
+}
+
+test "wgsl: NonWritable storage buffer emits read mode (uniformity semantics)" {
+    // A NonWritable StorageBuffer var (tint: WGSL `var<storage>`; glslang:
+    // `readonly buffer`) must lower to plain `var<storage>` (read mode), not
+    // `var<storage, read_write>`: WGSL's uniformity analysis treats read-only
+    // storage reads as uniform and read_write ones as non-uniform, so the
+    // access mode is load-bearing for subgroup uniform-value arguments (and
+    // is the faithful spelling regardless).
+    const spv = try assembleSpirv("ssbo_readonly",
+        \\OpCapability Shader
+        \\OpCapability GroupNonUniform
+        \\OpCapability GroupNonUniformShuffle
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint GLCompute %main "main" %sz
+        \\OpExecutionMode %main LocalSize 8 1 1
+        \\OpDecorate %buf Block
+        \\OpMemberDecorate %buf 0 Offset 0
+        \\OpDecorate %v NonWritable
+        \\OpDecorate %buf DescriptorSet 0
+        \\OpDecorate %buf Binding 0
+        \\OpDecorate %sz BuiltIn SubgroupSize
+        \\%void = OpTypeVoid
+        \\%uint = OpTypeInt 32 0
+        \\%voidfn = OpTypeFunction %void
+        \\%buf = OpTypeStruct %uint
+        \\%u3 = OpConstant %uint 3
+        \\%u0 = OpConstant %uint 0
+        \\%ptr_sb = OpTypePointer StorageBuffer %buf
+        \\%ptr_in = OpTypePointer Input %uint
+        \\%v = OpVariable %ptr_sb StorageBuffer
+        \\%sz = OpVariable %ptr_in Input
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%s = OpLoad %uint %sz
+        \\%m = OpISub %uint %s %u0
+        \\%p = OpAccessChain %uint %v %u0
+        \\%d = OpLoad %uint %p
+        \\%r = OpGroupNonUniformShuffle %uint %u3 %d %m
+        \\OpReturn
+        \\OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var<storage> ");
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "read_write") == null);
+    try tintValidateOrSkip(wgsl, "ssbo-readonly");
 }

@@ -29,6 +29,14 @@ threadlocal var needs_inverse_2: bool = false;
 threadlocal var needs_inverse_3: bool = false;
 threadlocal var needs_inverse_4: bool = false;
 
+/// Single-entry-block-store private-var forwarding (see
+/// buildSingleStorePrivateForwarding): var id -> stored value id. Threadlocal
+/// file state like the flags above because BOTH instruction emitters need the
+/// same decision for one compile: the main emitBody and emitSimpleInstruction
+/// (the switch/loop replay emitter, 9 call sites). Rebuilt at every
+/// `spirvToWGSL` entry.
+threadlocal var forward_private_stores: std.AutoHashMapUnmanaged(u32, u32) = .empty;
+
 /// Square dimension (2/3/4) of the matrix operand of a MatrixInverse ExtInst, or
 /// null if the operand is not a square float matrix of a supported size. Used by
 /// both the pre-emit helper-detection scan and the ExtInst arms so the chosen
@@ -3268,6 +3276,158 @@ fn resolveTypeOf(module: *const ParsedModule, id: u32) ?u32 {
 // Public API
 // ---------------------------------------------------------------------------
 
+/// Detect module-scope Private variables that are functionally LOCALS and map
+/// them to the value their one store writes: exactly ONE direct OpStore, that
+/// store and its value both defined in the owning function's ENTRY block (or
+/// the value is a FunctionParameter of it), every access (the store plus all
+/// direct OpLoads) inside that ONE function and after the store, and NO other
+/// reference of any kind (no AccessChain, atomic, or copy access). For a var
+/// in this map the emitters alias every OpLoad to the stored value's name,
+/// suppress the store, and skip the module-scope `var<private>` declaration.
+///
+/// WHY (the subgroup uniformity fix): WGSL requires uniform-value arguments
+/// (the subgroup shuffle deltas, broadcast/quad ids) to be provably uniform,
+/// and tint's uniformity analysis conservatively treats ANY module-scope
+/// `var<private>` written at runtime as non-uniform ("reading from
+/// module-scope private variable may result in a non-uniform value"). tint's
+/// own SPIR-V writer lowers `subgroupShuffleXor(e, delta)` to
+/// `delta & (subgroup_size - 1)` THROUGH exactly such a var
+/// (`tint_subgroup_size_mask`, stored once at function entry), so without this
+/// forwarding every round-tripped shuffle lowers to a call tint itself
+/// rejects. Forwarding to the entry-block value restores the analysis's view
+/// of the value's uniformity (it derives from a function parameter, itself
+/// passed the subgroup_size builtin).
+///
+/// Semantically the forwarding is exact: a single store that dominates every
+/// load (entry block, all accesses in one function, store first in linear
+/// order) means each load reads the stored value; a function-local var would
+/// be identical minus the declaration. Anything that could break that
+/// domination (a second store, a store under control flow, accesses from a
+/// second function, any non-load/store reference) disqualifies the var, which
+/// then keeps its ordinary `var<private>` lowering.
+fn buildSingleStorePrivateForwarding(module: *const ParsedModule, arena: std.mem.Allocator) void {
+    forward_private_stores = .empty;
+    // id -> instruction index, for the entry-block checks.
+    var def_idx = std.AutoHashMap(u32, usize).init(arena);
+    defer def_idx.deinit();
+    for (module.instructions, 0..) |inst, ii| {
+        if (inst.words.len >= 3) def_idx.put(inst.words[2], ii) catch return;
+    }
+    for (module.instructions) |vinst| {
+        if (vinst.op != .Variable or vinst.words.len < 4) continue;
+        if (@as(spirv.StorageClass, @enumFromInt(vinst.words[3])) != .Private) continue;
+        const vid = vinst.words[2];
+        var store: ?usize = null; // instruction index of the single OpStore
+        var store_value: u32 = 0;
+        var store_func: ?usize = null; // instruction index of the owning OpFunction
+        var load_func: ?usize = null;
+        var n_loads: usize = 0;
+        var qualified = true;
+        var cur_func: ?usize = null;
+        for (module.instructions, 0..) |inst, ii| {
+            switch (inst.op) {
+                .Function => {
+                    cur_func = ii;
+                    continue;
+                },
+                .FunctionEnd => {
+                    cur_func = null;
+                    continue;
+                },
+                // Metadata referencing the id is not an access, nor is the
+                // variable's own declaration (its initializer, if any, DOES
+                // count and is caught by the word sweep below).
+                .Name, .MemberName, .Decorate, .MemberDecorate => continue,
+                .Variable => if (inst.words.len >= 3 and inst.words[2] == vid) continue,
+                else => {},
+            }
+            if (inst.op == .Store and inst.words.len >= 3 and inst.words[1] == vid) {
+                if (store != null) {
+                    qualified = false; // more than one store
+                    break;
+                }
+                store = ii;
+                store_value = inst.words[2];
+                store_func = cur_func;
+                continue;
+            }
+            if (inst.op == .Load and inst.words.len > 3 and inst.words[3] == vid) {
+                n_loads += 1;
+                if (store == null or ii < store.?) {
+                    qualified = false; // load before the (single) store
+                    break;
+                }
+                if (load_func == null) load_func = cur_func;
+                if (load_func != cur_func or cur_func == null) {
+                    qualified = false; // loads span functions / no function
+                    break;
+                }
+                continue;
+            }
+            // Any other POINTER-OPERAND mention of vid disqualifies the var
+            // (it must keep a real declaration): an AccessChain rooted at it,
+            // an atomic, a copy, an array-length, an image-texel pointer. The
+            // check is keyed on the ops that can take a variable pointer --
+            // NOT a raw word scan, whose literal operands (constant values,
+            // type widths, execution modes) numerically collide with ids.
+            const ptr_word: ?u32 = switch (inst.op) {
+                .AccessChain, .ArrayLength, .ImageTexelPointer => if (inst.words.len > 3) inst.words[3] else null,
+                .AtomicLoad, .AtomicExchange, .AtomicIAdd, .AtomicISub, .AtomicSMin, .AtomicUMin, .AtomicSMax, .AtomicUMax, .AtomicAnd, .AtomicOr, .AtomicXor, .AtomicFAddEXT, .AtomicCompareExchange, .AtomicCompareExchangeWeak, .AtomicIIncrement, .AtomicIDecrement => if (inst.words.len > 3) inst.words[3] else null,
+                .AtomicStore => if (inst.words.len > 1) inst.words[1] else null,
+                .CopyMemory => blk: {
+                    if (inst.words.len > 3) {
+                        if (inst.words[1] == vid or inst.words[2] == vid) break :blk vid;
+                    }
+                    break :blk null;
+                },
+                else => null,
+            };
+            if (ptr_word != null and ptr_word.? == vid) {
+                qualified = false;
+                break;
+            }
+        }
+        if (!qualified or store == null or n_loads == 0) continue;
+        if (store_func == null or load_func == null or store_func.? != load_func.?) continue;
+        // The store must sit in the owning function's ENTRY block: from the
+        // first Label after the OpFunction to the first block terminator.
+        const fn_start = store_func.?;
+        var entry_start: ?usize = null;
+        var entry_end: usize = module.instructions.len;
+        var j = fn_start + 1;
+        while (j < module.instructions.len) : (j += 1) {
+            const t = module.instructions[j];
+            if (entry_start == null) {
+                if (t.op == .Label) {
+                    entry_start = j;
+                } else if (t.op != .FunctionParameter) {
+                    break; // malformed function; do not forward
+                }
+                continue;
+            }
+            switch (t.op) {
+                .Branch, .BranchConditional, .Switch, .Kill, .Return, .ReturnValue, .Unreachable => {
+                    entry_end = j;
+                    break;
+                },
+                else => {},
+            }
+        }
+        if (entry_start == null or store.? < entry_start.? or store.? >= entry_end) continue;
+        // The stored VALUE must be a function parameter (its instructions sit
+        // between the OpFunction and the first Label, and its name is in scope
+        // for the whole function) or be defined in that same entry block --
+        // only then is its name in scope at every load, including loads inside
+        // later conditional/loop blocks.
+        const vd = getDef(module, store_value) orelse continue;
+        if (vd.op != .FunctionParameter) {
+            const vi = def_idx.get(store_value) orelse continue;
+            if (vi < entry_start.? or vi >= entry_end) continue;
+        }
+        forward_private_stores.put(arena, vid, store_value) catch {};
+    }
+}
+
 pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, options: WgslCompileOptions) ![]const u8 {
     // G2: recover OpSelectionMerge for unstructured-but-reducible SPIR-V (no-op on
     // structured input; fall back to the original on failure — see spirvToGLSL).
@@ -3275,6 +3435,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     defer if (_norm) |n| alloc.free(n);
     const spirv_words = _norm orelse spirv_words_in;
     last_error_detail = null; // clear any detail from a prior compile on this thread
+    forward_private_stores = .empty; // same for the private-store forwarding map
     needs_inverse_2 = false;
     needs_inverse_3 = false;
     needs_inverse_4 = false;
@@ -3538,6 +3699,24 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
     collectNames(alloc, &module, &names);
 
+    // Apply single-store private forwarding at the NAME level as well: rename
+    // every forwarded load's RESULT to the stored value's name right after
+    // collectNames, so pre-emission scans (inline-expression building, loop
+    // hoisting) and the resolvers all see the forwarded value, never the
+    // suppressed variable. The Load arm still skips the declaration (without
+    // it the general path would emit `let <value>: T = <var>;`).
+    {
+        var fit = forward_private_stores.iterator();
+        while (fit.next()) |entry| {
+            const value_name = names.get(entry.value_ptr.*) orelse continue;
+            for (module.instructions) |inst| {
+                if (inst.op != .Load or inst.words.len <= 3 or inst.words[3] != entry.key_ptr.*) continue;
+                const a = alloc.dupe(u8, value_name) catch continue;
+                if (names.fetchPut(inst.words[2], a) catch null) |old| alloc.free(old.value);
+            }
+        }
+    }
+
     // Post-process GLSL-style names to WGSL-style
     {
         var it = names.iterator();
@@ -3602,6 +3781,40 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     const w = compat.listWriter(&out, alloc);
 
     try w.writeAll("// Generated by zioshade SPIR-V -> WGSL cross-compiler\n\n");
+
+    // Single-entry-block-store private-var forwarding (see the builder's doc
+    // comment): must run before the Private module-scope emitter and before
+    // any function body, since both consult the map it fills.
+    buildSingleStorePrivateForwarding(&module, arena);
+
+    // `enable subgroups;` -- required by every subgroup builtin the backend
+    // lowers (subgroupAdd/subgroupBallot/quadSwap/... and the
+    // subgroup_invocation_id/subgroup_size @builtins). WGSL demands the enable
+    // precede every declaration, so it is written right after the header and
+    // before the matrix-inverse helpers. The pre-scan covers ops in ANY
+    // function (helpers included), not just the entry body. Emitting it when a
+    // pruned dead function held the op is harmless (an unused enable is valid
+    // WGSL); NOT emitting it for a live one would be invalid output.
+    {
+        var subgroups_used = false;
+        for (module.instructions) |inst| {
+            if (opIsLoweredSubgroup(inst.op)) {
+                subgroups_used = true;
+                break;
+            }
+            if (inst.op == .Variable and inst.words.len >= 4) {
+                const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
+                if (sc != .Input) continue;
+                if (getDecVal(&decorations, inst.words[2], .built_in)) |bv| {
+                    if (builtInNeedsSubgroupsEnable(@enumFromInt(bv))) {
+                        subgroups_used = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (subgroups_used) try w.writeAll("enable subgroups;\n\n");
+    }
 
     // Emit-once generated matrix-inverse helper(s) flagged by the pre-emit scan
     // (WGSL has no inverse builtin). Written before any struct/function so they
@@ -3938,7 +4151,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     }
 
     // Collect cbuffers and textures
-    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, set: u32, binding: u32, is_ssbo: bool, is_push_constant: bool, result_id: u32 }).initCapacity(arena, 4) catch return error.OutOfMemory;
+    var cbuffers = std.ArrayList(struct { name: []const u8, type_id: u32, set: u32, binding: u32, is_ssbo: bool, is_push_constant: bool, result_id: u32, is_read_only: bool }).initCapacity(arena, 4) catch return error.OutOfMemory;
     // `access` is the WGSL storage-texture access mode (read / write /
     // read_write) resolved from the variable's NonWritable/NonReadable
     // decorations; it is only consulted when `is_storage` is true.
@@ -3979,13 +4192,25 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // a read-only uniform and emitted `var<uniform>`, making a store
                 // `bufs[i].x = …` a naga reject = silent-wrong. (#170)
                 const is_ssbo = hasDec(&decorations, arrayElementType(&module, pointee_type), .buffer_block);
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = set, .binding = binding, .is_ssbo = is_ssbo, .is_push_constant = false, .result_id = result_id });
+                // NonWritable (from GLSL `readonly` / WGSL `var<storage>`) marks a
+                // read-only SSBO; see the .StorageBuffer arm.
+                const is_read_only = is_ssbo and hasDec(&decorations, result_id, .non_writable);
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = set, .binding = binding, .is_ssbo = is_ssbo, .is_push_constant = false, .result_id = result_id, .is_read_only = is_read_only });
             },
             .StorageBuffer => {
                 const binding = getDecVal(&decorations, result_id, .binding) orelse 0;
                 const set = getDecVal(&decorations, result_id, .descriptor_set) orelse 0;
                 const name = names.get(result_id) orelse "buffer";
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = set, .binding = binding, .is_ssbo = true, .is_push_constant = false, .result_id = result_id });
+                // SPIR-V marks a read-only storage buffer with NonWritable on the
+                // VARIABLE (tint emits exactly that for WGSL `var<storage>`; glslang
+                // for GLSL `readonly buffer`). WGSL's read mode `var<storage>` is the
+                // faithful spelling -- and it is SEMANTICALLY load-bearing, not just
+                // documentation: WGSL's uniformity analysis treats a read-only storage
+                // read as uniform and a read_write one as non-uniform, so defaulting
+                // everything to read_write wrongly taints subgroup-shuffle deltas and
+                // broadcast ids built from buffer reads.
+                const is_read_only = hasDec(&decorations, result_id, .non_writable);
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = set, .binding = binding, .is_ssbo = true, .is_push_constant = false, .result_id = result_id, .is_read_only = is_read_only });
             },
             .PushConstant => {
                 // WGSL has NO push_constant address space (naga rejects both
@@ -4000,7 +4225,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // machinery (struct forward-decls, name-collision rename, `push.value0`
                 // access chains).
                 const name = names.get(result_id) orelse "push";
-                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = 0, .binding = 0, .is_ssbo = false, .is_push_constant = true, .result_id = result_id });
+                try cbuffers.append(arena, .{ .name = name, .type_id = pointee_type, .set = 0, .binding = 0, .is_ssbo = false, .is_push_constant = true, .result_id = result_id, .is_read_only = false });
             },
             .UniformConstant => {
                 const pointee_inst = getDef(&module, pointee_type) orelse continue;
@@ -4055,6 +4280,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         const sc: spirv.StorageClass = @enumFromInt(inst.words[3]);
         if (sc != .Private) continue;
         const result_id = inst.words[2];
+        // Single-store private forwarding: the var has no module-scope life
+        // left; its loads are aliased to the stored value and its store (and
+        // declaration) are suppressed. Declaring it anyway would leave an
+        // unused var<private> AND, worse, reintroduce the written-at-runtime
+        // module-scope private that defeats tint's uniformity analysis.
+        if (forward_private_stores.contains(result_id)) continue;
         const name = names.get(result_id) orelse continue;
         const rt = try wgslType(&module, inst.words[1], &names, arena);
         // Check if this Private var is actually used. A direct OpLoad reads a
@@ -4554,7 +4785,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 }
             }
         } else if (cb.is_ssbo) {
-            try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: {s};\n\n", .{ group, binding, var_name, type_name });
+            // Read mode for a NonWritable buffer (see the .StorageBuffer arm);
+            // read_write otherwise. Plain `var<storage>` IS the read mode in
+            // WGSL (the default access for storage when omitted).
+            if (cb.is_read_only) {
+                try w.print("@group({d}) @binding({d})\nvar<storage> {s}: {s};\n\n", .{ group, binding, var_name, type_name });
+            } else {
+                try w.print("@group({d}) @binding({d})\nvar<storage, read_write> {s}: {s};\n\n", .{ group, binding, var_name, type_name });
+            }
         } else {
             try w.print("@group({d}) @binding({d})\nvar<uniform> {s}: {s};\n\n", .{ group, binding, var_name, type_name });
         }
@@ -5479,6 +5717,13 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         const type_name = try wgslType(&module, actual_type, &names, arena);
         const var_name = names.get(iv.id) orelse "input";
         if (iv.builtin) |bi| {
+            // Subgroup @builtins are compute/fragment only in WGSL (tint:
+            // "built-in cannot be used by vertex pipeline stage"). Mapping one
+            // for another stage would emit oracle-rejected output, so fail loud.
+            if (builtInNeedsSubgroupsEnable(bi) and !(is_compute or is_fragment)) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL subgroup builtins are compute/fragment only ({s})", .{std.enums.tagName(spirv.BuiltIn, bi) orelse "subgroup"}) catch null;
+                return error.UnsupportedOp;
+            }
             // Map the SPIR-V input built-in to its WGSL @builtin name. An unmapped
             // built-in (e.g. gl_PointCoord — no WGSL equivalent) must fail loud:
             // the old `else => "position"` fallback fabricated a bogus
@@ -5501,6 +5746,15 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
                 // "unknown builtin: primitive_id"). It falls to the honest-error else
                 // arm rather than emitting an invalid `@builtin(primitive_id)`. (#170)
                 .sample_id => "sample_index",
+                // SPIR-V SubgroupSize/SubgroupLocalInvocationId (SPV subgroup
+                // builtins, core since 1.3). WGSL spells them subgroup_size /
+                // subgroup_invocation_id under `enable subgroups;` (emitted by
+                // the pre-scan when any subgroup feature is used). Both are u32
+                // in WGSL and uint in SPIR-V, so no sign bridge is needed. The
+                // remaining subgroup builtins (masks, NumSubgroups, SubgroupID)
+                // have NO WGSL spelling and refuse in the else arm above.
+                .subgroup_size => "subgroup_size",
+                .subgroup_local_invocation_id => "subgroup_invocation_id",
                 else => {
                     last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no @builtin for input '{s}'", .{std.enums.tagName(spirv.BuiltIn, bi) orelse "unknown"}) catch null;
                     return error.UnsupportedOp;
@@ -8271,6 +8525,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 const ptr = names.get(inst.words[3]) orelse "var";
+                // Single-store private forwarding: this load reads the value
+                // the one dominating entry-block store wrote; alias the result
+                // to that value's name and emit no declaration at all. See
+                // buildSingleStorePrivateForwarding for the subgroup-uniformity
+                // rationale and the qualification rules.
+                if (forward_private_stores.get(inst.words[3])) |fwd_value| {
+                    if (names.get(fwd_value)) |vn| {
+                        const a = try alloc.dupe(u8, vn);
+                        if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
+                        continue;
+                    }
+                }
                 // #170 (F): a plain load of a `shared` atomic scalar lowers to
                 // atomicLoad. Materialize as a `let` (one atomic read) so a
                 // multi-use value isn't re-read per use. The result id is already
@@ -8386,6 +8652,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (skip_store_target != null and inst.words[1] == skip_store_target.?) continue;
                 // Skip stores to MRT output variables
                 if (skip_store_targets != null and skip_store_targets.?.contains(inst.words[1])) continue;
+                // Dead store under single-store private forwarding: every load
+                // of this var is aliased to the stored value, so the store has
+                // no reader (and the var has no declaration to assign to).
+                if (forward_private_stores.contains(inst.words[1])) continue;
                 // #170 (H): a whole-matrix store to a flattened matrix output var
                 // becomes per-column writes into the vecN @location members
                 // (`vertex_out.{base}_{c} = ({val})[{c}]`). The matrix value is
@@ -9438,13 +9708,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // via spirvToWGSL. (#170)
             .QuantizeToF16 => try emitCall(module, names, inst, "quantizeToF16", w, arena, indent),
 
-            // Subgroup operations (AUDIT FIX, #170 G5 Pass 2). These previously
-            // emitted WGSL subgroup builtins (subgroupElect/Ballot/Broadcast/
-            // BroadcastFirst/All/Any/Shuffle*/Inclusive*/Exclusive* and the scan/
-            // reduction forms) directly, with NO `enable subgroups;`. naga 29.0.3
-            // rejects subgroups entirely (even `enable subgroups;` is unsupported),
-            // so that output was SILENT-WRONG (zioshade exited 0 but naga rejected).
-            // Fail loud with a named error instead.
+            // Subgroup operations -> WGSL subgroup builtins under
+            // `enable subgroups;` (emitted by the module pre-scan). This replaces
+            // the #641-era consolidated refusal: the local naga cannot parse
+            // `enable subgroups;`, which made EVERY subgroup op refuse (546 CTS
+            // cases), but tint (dawn 5e9e5136) parses and validates the full
+            // subgroups dialect, so the forms below are now measurable. MSL's
+            // simd_* lowering (spirv_to_msl.zig) is the semantic reference:
+            // same execution-scope reading, same operand positions, same
+            // GroupOperation literal semantics (Reduce/Inclusive/Exclusive).
             .SubgroupAllKHR,
             .GroupNonUniformAll,
             .SubgroupAnyKHR,
@@ -9468,12 +9740,38 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .GroupNonUniformUMax,
             .GroupNonUniformFMax,
             .GroupNonUniformBitwiseAnd,
-            .GroupNonUniformLogicalAnd,
             .GroupNonUniformBitwiseOr,
-            .GroupNonUniformLogicalOr,
             .GroupNonUniformBitwiseXor,
+            .GroupNonUniformQuadBroadcast,
+            .GroupNonUniformQuadSwap,
+            => try emitSubgroupOp(module, names, inst, w, arena, indent),
+
+            // Subgroup families with NO faithful WGSL spelling stay refused
+            // (sharply named). These are NOT gaps in the emitter below: the
+            // subgroups dialect has no builtin for any of them, and emulating
+            // them would require synthesizing a subgroup_invocation_id entry
+            // param plus per-lane arithmetic whose result no longer matches
+            // the hardware op -- a miscompile, not a lowering.
+            //   AllEqual: no subgroupAllEqual in the dialect.
+            //   LogicalAnd/Or/Xor: bool reductions are subgroupAll/subgroupAny;
+            //     the Logical* integer forms have no overload, and their scans
+            //     have nothing at all.
+            //   InverseBallot/BallotBitExtract/BallotBitCount/BallotFindLSB/
+            //     BallotFindMSB: ballot-bit ops; every spelling needs the
+            //     invocation id, which the op itself does not carry.
+            //   Rotate: no form; the delta is per-invocation.
+            .GroupNonUniformAllEqual,
+            .GroupNonUniformLogicalAnd,
+            .GroupNonUniformLogicalOr,
+            .GroupNonUniformLogicalXor,
+            .GroupNonUniformInverseBallot,
+            .GroupNonUniformBallotBitExtract,
+            .GroupNonUniformBallotBitCount,
+            .GroupNonUniformBallotFindLSB,
+            .GroupNonUniformBallotFindMSB,
+            .GroupNonUniformRotate,
             => {
-                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL/naga does not support subgroup operations ({s})", .{@tagName(inst.op)}) catch null;
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL subgroups dialect has no builtin for {s} (emulating it would miscompile)", .{@tagName(inst.op)}) catch null;
                 return error.UnsupportedOp;
             },
 
@@ -10736,6 +11034,15 @@ fn resolveSourceName(module: *const ParsedModule, names: *const std.AutoHashMap(
     switch (def.op) {
         .Load, .CopyObject => {
             if (def.words.len < 4) return names.get(id);
+            // Single-store private forwarding: a forwarded load reads the one
+            // dominating store's value and the variable has no declaration
+            // left, so the pointer's name must NOT win here (it would emit an
+            // undeclared identifier).
+            if (def.op == .Load) {
+                if (forward_private_stores.get(def.words[3])) |fwd| {
+                    if (names.get(fwd)) |vn| return vn;
+                }
+            }
             // Try to resolve further through the chain
             const deeper = resolveSourceName(module, names, def.words[3], depth + 1);
             // Only use the deeper name if it's different from the current name
@@ -10818,6 +11125,13 @@ fn inlineConditionExpr(module: *const ParsedModule, names: *const std.AutoHashMa
         // Load / CopyObject — trace through to the underlying value
         .Load, .CopyObject => {
             if (cond_def.words.len < 4) return null;
+            // Single-store private forwarding (see resolveSourceName's twin):
+            // the load resolves to the stored value, not the var's name.
+            if (cond_def.op == .Load) {
+                if (forward_private_stores.get(cond_def.words[3])) |fwd| {
+                    if (names.get(fwd)) |vn| return vn;
+                }
+            }
             return inlineConditionExpr(module, names, cond_def.words[3], arena, depth + 1);
         },
         else => return null,
@@ -11008,6 +11322,14 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         .Load => {
             const result_name = names.get(inst.words[2]) orelse "v";
             const ptr = names.get(inst.words[3]) orelse "var";
+            // Single-store private forwarding, replay-path twin of the main
+            // emitBody arm: alias the load to the stored value's name.
+            if (forward_private_stores.get(inst.words[3])) |fwd_value| {
+                if (names.get(fwd_value)) |vn| {
+                    if (try names.fetchPut(inst.words[2], try alloc.dupe(u8, vn))) |old| alloc.free(old.value);
+                    return;
+                }
+            }
             // Skip inlined loads (result name == pointer name means load was inlined)
             if (!std.mem.eql(u8, result_name, ptr)) {
                 const rt = try wgslType(module, inst.words[1], names, arena);
@@ -11016,6 +11338,9 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             }
         },
         .Store => {
+            // Dead store under single-store private forwarding (replay-path
+            // twin of the main emitBody arm): no declaration to assign to.
+            if (forward_private_stores.contains(inst.words[1])) return;
             // #170 (H): a whole-matrix store to a flattened matrix output that
             // lands here (a switch/conditional replay body) cannot be split
             // correctly — the sibling `default` case body is dropped by a
@@ -11426,9 +11751,328 @@ fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     try w.print("var {s}: {s} = {s}({s});\n", .{ result_name, rt, func, args.items });
 }
 
-// (emitSubgroupArith removed in #170 G5 Pass 2: subgroup ops are now an honest
-// error — naga 29.0.3 has no subgroup support — so no subgroup builtin is ever
-// emitted. See the consolidated subgroup arm in emitBody.)
+// (emitSubgroupArith removed in #170 G5 Pass 2, then the whole family restored
+// as emitSubgroupOp once tint became the validation oracle for subgroups: the
+// local naga cannot parse `enable subgroups;`, so the #641-era state was a
+// blanket refusal of 546 CTS cases. See the subgroup arms in emitBody.)
+
+/// True for the OpGroupNonUniform*/OpSubgroup*KHR ops the WGSL backend
+/// LOWERS (the dialect's subgroup builtins under `enable subgroups;`). The
+/// families with no faithful spelling (AllEqual, Logical*, ballot-bit ops,
+/// Rotate) are deliberately absent: they refuse in their own emitBody arm.
+fn opIsLoweredSubgroup(op: spirv.Op) bool {
+    return switch (op) {
+        .GroupNonUniformElect,
+        .GroupNonUniformAll,
+        .GroupNonUniformAny,
+        .GroupNonUniformBroadcast,
+        .GroupNonUniformBroadcastFirst,
+        .GroupNonUniformBallot,
+        .GroupNonUniformShuffle,
+        .GroupNonUniformShuffleXor,
+        .GroupNonUniformShuffleUp,
+        .GroupNonUniformShuffleDown,
+        .GroupNonUniformIAdd,
+        .GroupNonUniformFAdd,
+        .GroupNonUniformIMul,
+        .GroupNonUniformFMul,
+        .GroupNonUniformSMin,
+        .GroupNonUniformUMin,
+        .GroupNonUniformFMin,
+        .GroupNonUniformSMax,
+        .GroupNonUniformUMax,
+        .GroupNonUniformFMax,
+        .GroupNonUniformBitwiseAnd,
+        .GroupNonUniformBitwiseOr,
+        .GroupNonUniformBitwiseXor,
+        .GroupNonUniformQuadBroadcast,
+        .GroupNonUniformQuadSwap,
+        .SubgroupAllKHR,
+        .SubgroupAnyKHR,
+        => true,
+        else => false,
+    };
+}
+
+/// True for the subgroup BuiltIns that have a WGSL @builtin spelling and so
+/// require `enable subgroups;` in the output.
+fn builtInNeedsSubgroupsEnable(bi: spirv.BuiltIn) bool {
+    return bi == .subgroup_local_invocation_id or bi == .subgroup_size;
+}
+
+/// WGSL subgroup-builtin name for an OpGroupNonUniform arithmetic op, keyed by
+/// the GroupOperation literal (words[4]). MSL's mslEmitSubgroupArith is the
+/// semantic reference: Reduce/InclusiveScan/ExclusiveScan map to the same
+/// three WGSL shapes, and only Add/Mul have scan forms in the dialect -- a
+/// min/max/bitwise scan or a ClusteredReduce refuses (no builtin, and an
+/// arithmetic emulation would not match the hardware op).
+fn subgroupArithName(inst: Instruction) error{ UnsupportedOp, OutOfMemory }![]const u8 {
+    const gop = if (inst.words.len > 4) inst.words[4] else 0;
+    switch (gop) {
+        0 => return switch (inst.op) { // Reduce
+            .GroupNonUniformIAdd, .GroupNonUniformFAdd => "subgroupAdd",
+            .GroupNonUniformIMul, .GroupNonUniformFMul => "subgroupMul",
+            .GroupNonUniformSMin, .GroupNonUniformUMin, .GroupNonUniformFMin => "subgroupMin",
+            .GroupNonUniformSMax, .GroupNonUniformUMax, .GroupNonUniformFMax => "subgroupMax",
+            .GroupNonUniformBitwiseAnd => "subgroupAnd",
+            .GroupNonUniformBitwiseOr => "subgroupOr",
+            .GroupNonUniformBitwiseXor => "subgroupXor",
+            else => return error.UnsupportedOp,
+        },
+        1 => return switch (inst.op) { // InclusiveScan: only Add/Mul exist
+            .GroupNonUniformIAdd, .GroupNonUniformFAdd => "subgroupInclusiveAdd",
+            .GroupNonUniformIMul, .GroupNonUniformFMul => "subgroupInclusiveMul",
+            else => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no inclusive-scan subgroup form for {s} (only Add/Mul)", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
+            },
+        },
+        2 => return switch (inst.op) { // ExclusiveScan: only Add/Mul exist
+            .GroupNonUniformIAdd, .GroupNonUniformFAdd => "subgroupExclusiveAdd",
+            .GroupNonUniformIMul, .GroupNonUniformFMul => "subgroupExclusiveMul",
+            else => {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no exclusive-scan subgroup form for {s} (only Add/Mul)", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
+            },
+        },
+        else => { // 3 = ClusteredReduce (cluster size in words[6]): no WGSL form
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL has no clustered subgroup form ({s} ClusteredReduce)", .{@tagName(inst.op)}) catch null;
+            return error.UnsupportedOp;
+        },
+    }
+}
+
+/// True if the variable has any OpStore targeting it (directly or through an
+/// AccessChain rooted at it) anywhere in the module.
+fn varHasRuntimeStore(module: *const ParsedModule, var_id: u32) bool {
+    for (module.instructions) |inst| {
+        if (inst.op != .Store or inst.words.len < 2) continue;
+        if (inst.words[1] == var_id) return true;
+        if (getDef(module, inst.words[1])) |t| {
+            if (t.op == .AccessChain and t.words.len > 3 and t.words[3] == var_id) return true;
+        }
+    }
+    return false;
+}
+
+/// True if the value id's defining expression (bounded depth, pure value ops
+/// only) reads a module-scope Private variable that is written at runtime and
+/// is NOT covered by single-store forwarding. WGSL's uniformity analysis
+/// (tint) conservatively treats such a read as non-uniform, and the subgroup
+/// builtins with a uniform-value argument (shuffle delta/mask, broadcast and
+/// quad ids) REJECT it. zioshade has no call-graph-wide uniform spelling for
+/// such a value (a written module-scope private is the only WGSL construct
+/// that crosses functions), so the caller refuses rather than emit output the
+/// oracle rejects.
+fn valueReadsRuntimePrivate(module: *const ParsedModule, id: u32, depth: u32) bool {
+    if (depth == 0) return false;
+    const d = getDef(module, id) orelse return false;
+    switch (d.op) {
+        .Load => {
+            if (d.words.len < 4) return false;
+            const ptr = d.words[3];
+            if (getDef(module, ptr)) |pv| {
+                if (pv.op == .Variable and pv.words.len >= 4) {
+                    const sc: spirv.StorageClass = @enumFromInt(pv.words[3]);
+                    if (sc == .Private and !forward_private_stores.contains(ptr) and varHasRuntimeStore(module, ptr)) return true;
+                }
+                if (pv.op == .AccessChain and pv.words.len > 3) {
+                    return valueReadsRuntimePrivate(module, pv.words[3], depth - 1);
+                }
+            }
+            return false;
+        },
+        // Pure arithmetic/bitwise/shift/divrem binaries: recurse both operands.
+        .IAdd, .ISub, .IMul, .UDiv, .SDiv, .UMod, .SRem, .SMod, .BitwiseAnd, .BitwiseOr, .BitwiseXor, .ShiftLeftLogical, .ShiftRightLogical, .ShiftRightArithmetic, .LogicalAnd, .LogicalOr, .LogicalEqual, .LogicalNotEqual => {
+            if (d.words.len > 4 and valueReadsRuntimePrivate(module, d.words[4], depth - 1)) return true;
+            if (d.words.len > 3 and valueReadsRuntimePrivate(module, d.words[3], depth - 1)) return true;
+            return false;
+        },
+        else => return false,
+    }
+}
+
+/// Lower one OpGroupNonUniform* / OpSubgroupAllKHR/AnyKHR to its WGSL subgroup
+/// builtin. Instruction layouts (scope word must be Subgroup == 3; the KHR vote
+/// forms carry no scope word):
+///   OpGroupNonUniformElect                       bool r scope
+///   OpGroupNonUniform{All,Any,Ballot,
+///                     BroadcastFirst}            T    r scope v
+///   OpGroupNonUniform{Broadcast,Shuffle,ShuffleXor,
+///                     ShuffleUp,ShuffleDown,
+///                     QuadBroadcast}             T    r scope v id
+///   OpGroupNonUniformQuadSwap                    T    r scope v direction-const
+///   OpGroupNonUniform{IAdd..BitwiseXor}          T    r scope groupop v
+///   OpSubgroup{All,Any}KHR                       bool r predicate
+fn emitSubgroupOp(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    inst: Instruction,
+    w: anytype,
+    arena: std.mem.Allocator,
+    indent: u32,
+) !void {
+    // WGSL subgroup builtins are compute/fragment only (tint: "built-in cannot
+    // be used by vertex pipeline stage"). Emitting one for another stage would
+    // produce oracle-rejected output, so refuse before writing anything.
+    switch (module.execution_model) {
+        .GLCompute, .Fragment => {},
+        else => {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL subgroup operations are compute/fragment only ({s} in {s})", .{ @tagName(inst.op), @tagName(module.execution_model) }) catch null;
+            return error.UnsupportedOp;
+        },
+    }
+    const has_scope = inst.op != .SubgroupAllKHR and inst.op != .SubgroupAnyKHR;
+    // Length guard FIRST: truncated/corrupt modules must not index out of
+    // bounds. 4 = opcode+type+id+one word; 5/6 = the operand shapes above.
+    const min_words: usize = if (!has_scope) 4 else if (inst.op == .GroupNonUniformElect) 4 else if (inst.op == .GroupNonUniformAll or inst.op == .GroupNonUniformAny or inst.op == .GroupNonUniformBallot or inst.op == .GroupNonUniformBroadcastFirst) 5 else 6;
+    if (inst.words.len < min_words) return error.UnsupportedOp;
+    if (has_scope) {
+        // The execution scope is an operand ID referencing a scope CONSTANT
+        // (glslang/tint emit OpConstant 3), not a literal. Resolve it: WGSL's
+        // subgroup builtins are SUBGROUP-scoped, and a wider execution scope
+        // (Workgroup/Device) has no spelling; silently narrowing it to subgroup
+        // scope would change the op's semantics -- a miscompile. Fail loud.
+        var scope: i64 = -1;
+        if (getDef(module, inst.words[3])) |d| {
+            if (d.op == .Constant and d.words.len > 3) scope = @as(i32, @bitCast(d.words[3]));
+        }
+        if (scope != 3) {
+            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL subgroup builtins are subgroup-scoped; {s} carries execution scope {d} != 3", .{ @tagName(inst.op), scope }) catch null;
+            return error.UnsupportedOp;
+        }
+    }
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const rn = names.get(inst.words[2]) orelse "v";
+
+    // Uniform-value argument guard: the shuffle delta/mask and the broadcast/
+    // quad id must be uniform across the subgroup. If the argument expression
+    // reads a runtime-written module-scope private that forwarding could not
+    // eliminate (its store and its loads span functions -- tint's own
+    // `tint_subgroup_size_mask` idiom when a helper holds the shuffle), no WGSL
+    // spelling keeps the value uniform: refuse rather than emit output the
+    // oracle rejects as non-uniform.
+    switch (inst.op) {
+        .GroupNonUniformBroadcast, .GroupNonUniformShuffle, .GroupNonUniformShuffleXor, .GroupNonUniformShuffleUp, .GroupNonUniformShuffleDown, .GroupNonUniformQuadBroadcast => {
+            if (valueReadsRuntimePrivate(module, inst.words[5], 8)) {
+                last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL requires a uniform {s} id/delta, but the argument reads a runtime-written module-scope private across functions (tint's uniformity analysis rejects it and no cross-function uniform spelling exists)", .{@tagName(inst.op)}) catch null;
+                return error.UnsupportedOp;
+            }
+        },
+        else => {},
+    }
+
+    var fname: []const u8 = undefined;
+    var arg_ids: [2]u32 = .{ 0, 0 };
+    var n_args: usize = 0;
+    switch (inst.op) {
+        .GroupNonUniformElect => fname = "subgroupElect",
+        .GroupNonUniformAll => {
+            fname = "subgroupAll";
+            arg_ids[0] = inst.words[4];
+            n_args = 1;
+        },
+        .GroupNonUniformAny => {
+            fname = "subgroupAny";
+            arg_ids[0] = inst.words[4];
+            n_args = 1;
+        },
+        .SubgroupAllKHR => {
+            fname = "subgroupAll";
+            arg_ids[0] = inst.words[3]; // KHR vote forms have no scope word
+            n_args = 1;
+        },
+        .SubgroupAnyKHR => {
+            fname = "subgroupAny";
+            arg_ids[0] = inst.words[3];
+            n_args = 1;
+        },
+        .GroupNonUniformBroadcastFirst => {
+            fname = "subgroupBroadcastFirst";
+            arg_ids[0] = inst.words[4];
+            n_args = 1;
+        },
+        .GroupNonUniformBallot => {
+            fname = "subgroupBallot";
+            arg_ids[0] = inst.words[4];
+            n_args = 1;
+        },
+        .GroupNonUniformBroadcast => {
+            fname = "subgroupBroadcast";
+            arg_ids[0] = inst.words[4];
+            arg_ids[1] = inst.words[5];
+            n_args = 2;
+        },
+        .GroupNonUniformShuffle => {
+            fname = "subgroupShuffle";
+            arg_ids[0] = inst.words[4];
+            arg_ids[1] = inst.words[5];
+            n_args = 2;
+        },
+        .GroupNonUniformShuffleXor => {
+            fname = "subgroupShuffleXor";
+            arg_ids[0] = inst.words[4];
+            arg_ids[1] = inst.words[5];
+            n_args = 2;
+        },
+        .GroupNonUniformShuffleUp => {
+            fname = "subgroupShuffleUp";
+            arg_ids[0] = inst.words[4];
+            arg_ids[1] = inst.words[5];
+            n_args = 2;
+        },
+        .GroupNonUniformShuffleDown => {
+            fname = "subgroupShuffleDown";
+            arg_ids[0] = inst.words[4];
+            arg_ids[1] = inst.words[5];
+            n_args = 2;
+        },
+        .GroupNonUniformQuadBroadcast => {
+            fname = "quadBroadcast";
+            arg_ids[0] = inst.words[4];
+            arg_ids[1] = inst.words[5];
+            n_args = 2;
+        },
+        .GroupNonUniformQuadSwap => {
+            // The direction selects the FUNCTION, not an argument. Per the
+            // SPIR-V spec it must be a Constant instruction: Horizontal(0) ->
+            // quadSwapX, Vertical(1) -> quadSwapY, Diagonal(2) ->
+            // quadSwapDiagonal. A non-constant or out-of-range direction has
+            // no WGSL spelling (the WGSL quad swaps are three distinct
+            // builtins), so fail loud rather than guess.
+            const dir_id = inst.words[5];
+            var dir: i64 = -1;
+            if (getDef(module, dir_id)) |d| {
+                if (d.op == .Constant and d.words.len > 3) dir = @as(i32, @bitCast(d.words[3]));
+            }
+            fname = switch (dir) {
+                0 => "quadSwapX",
+                1 => "quadSwapY",
+                2 => "quadSwapDiagonal",
+                else => {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL quad swaps are three distinct builtins; OpGroupNonUniformQuadSwap direction {d} is not 0/1/2 or not a constant", .{dir}) catch null;
+                    return error.UnsupportedOp;
+                },
+            };
+            arg_ids[0] = inst.words[4];
+            n_args = 1;
+        },
+        else => {
+            // Arithmetic family: words[4] is the GroupOperation literal (NOT an
+            // operand), the value is words[5]. MSL reads the same positions.
+            fname = try subgroupArithName(inst);
+            arg_ids[0] = inst.words[5];
+            n_args = 1;
+        },
+    }
+    var args = std.ArrayList(u8){};
+    for (arg_ids[0..n_args], 0..) |aid, ai| {
+        if (ai > 0) try args.appendSlice(arena, ", ");
+        try args.appendSlice(arena, names.get(aid) orelse "0");
+    }
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = {s}({s});\n", .{ rn, rt, fname, args.items });
+}
 
 /// True iff an OpAtomic* pointer operand resolves to an IMAGE texel (the pointer
 /// is produced by OpImageTexelPointer, which the WGSL backend names as a

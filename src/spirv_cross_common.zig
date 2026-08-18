@@ -1306,6 +1306,19 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
         .GroupNonUniformShuffleDown,
         .SubgroupAllKHR,
         .SubgroupAnyKHR,
+        // The quad and ballot-bit subgroup ops also define result ids; leaving
+        // them out of the name counter made every result fall to the emitters'
+        // bare "v" fallback, and several unnamed results in one body then
+        // collided into a redeclaration (tint: "redeclaration of 'v'").
+        .GroupNonUniformQuadBroadcast,
+        .GroupNonUniformQuadSwap,
+        .GroupNonUniformInverseBallot,
+        .GroupNonUniformBallotBitExtract,
+        .GroupNonUniformBallotBitCount,
+        .GroupNonUniformBallotFindLSB,
+        .GroupNonUniformBallotFindMSB,
+        .GroupNonUniformLogicalXor,
+        .GroupNonUniformRotate,
         => if (words.len > 2) words[2] else null,
 
         else => blk: {
