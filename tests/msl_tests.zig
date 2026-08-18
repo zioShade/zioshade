@@ -622,10 +622,14 @@ test "T1.2: fragment entry point" {
     try assertContains(msl, "fragment");
 }
 
-test "T1.3: has color(0) output" {
+test "T1.3: no-output fragment is void, no synthesized color(0)" {
     const msl = try compileToMsl("#version 430\nvoid main() {}");
     defer alloc.free(msl);
-    try assertContains(msl, "[[color(0)]]");
+    // Writing a synthesized zeroed color(0) where SPIR-V writes nothing flipped
+    // alpha vs the clear on every pixel (Metal render-diff); spirv-cross emits a
+    // void fragment, which is the correct shape.
+    try assertContains(msl, "fragment void main0(");
+    try assertNotContains(msl, "[[color(0)]]");
 }
 
 // ---------------------------------------------------------------------------
@@ -1102,8 +1106,11 @@ test "T7.2: thread float4& for out params" {
     ;
     const msl = try compileToMsl(source);
     defer alloc.free(msl);
-    // Verify output struct exists
-    try assertContains(msl, "main0_out");
+    // No color output here (uniform read + discard only), so the entry is a void
+    // fragment with no main0_out; the uniform threads through as a buffer param.
+    try assertContains(msl, "fragment void main0(");
+    try assertContains(msl, "constant u&");
+    try assertNotContains(msl, "main0_out");
 }
 
 // ---------------------------------------------------------------------------

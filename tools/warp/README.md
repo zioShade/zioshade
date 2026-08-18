@@ -108,7 +108,9 @@ compiler (e.g. types.flatten: three UBOs all at binding 0).
 **First end-to-end run on the real runtime: 2026-08-18, `ryzen7pro` (Windows 11,
 D3D12 WARP, SDK 10.0.26100.0 dxc).** Over a 72-shader strided slice of
 tests/spirv-cross (63 pure-gl_FragCoord/varying + 9 b0-cbuffer probes):
-`RENDER-MATCH = 70, RENDER-DIFFER = 0, skip = 2`.
+`RENDER-MATCH = 70, RENDER-DIFFER = 0, skip = 2`; re-confirmed over a 300-shader
+strided slice: `RENDER-MATCH = 297, RENDER-DIFFER = 0, skip = 3` (the two below
+plus `pack_unpack`, see the validity note at the end).
 
 That run found and closed two things:
 
@@ -135,7 +137,12 @@ Also noted (not fixed, not render-visible with depth disabled): zioshade maps
 `gl_FragDepth` to plain `SV_Depth` and ignores the DepthLess/DepthGreater execution
 modes; spirv-cross maps them to `SV_DepthLessEqual`/`SV_DepthGreaterEqual`. The
 current emission is conservative (unconstrained depth write), not a miscompile, but
-the fidelity gap is real.
+the fidelity gap is real. And `pack_unpack` exposed an HLSL validity gap: the whole
+std450 pack/unpack family (#56 PackSnorm2x16, #57 PackUnorm2x16, #60 UnpackUnorm2x16,
+#61 UnpackHalf2x16) emits `// unhandled std450` comments but still references the
+result IDs, so DXC rejects the output (undeclared identifier) while the MSL backend
+lowers them inline and WGSL maps them. Honest rejection, but the emission should
+lower them (f32tof16/f16tof32 + explicit snorm/unorm bit math) like MSL does.
 
 Earlier README text claimed a July run with a matrix-convention DIFFER set; that
 came from an unmerged branch's history, not the shipping harness, and is superseded
