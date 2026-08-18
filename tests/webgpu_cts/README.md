@@ -32,13 +32,19 @@ webgpu:shader ingestion credibility harness (r2d.1).
 ## What the harness measures, and what it does NOT
 
 The sweep runs each case through the only round trip available to a SPIR-V ->
-WGSL cross-compiler: `CTS WGSL --naga--> SPIR-V --zioshade--> WGSL --naga-->`.
-Read `tools/webgpu_cts_sweep.sh`'s header for the direction rationale.
+WGSL cross-compiler: `CTS WGSL --naga-then-tint--> SPIR-V --zioshade--> WGSL
+--naga-then-tint-->`. Both converter legs try naga first and fall back to tint
+(dawn `5e9e5136`) once: naga cannot even parse `enable subgroups;`, so both the
+subgroups-enabled inputs and the subgroup-lowered outputs are naga-unparsable
+by construction while being valid WGSL Chrome's own frontend accepts. A case is
+valid if EITHER validator accepts; invalid means BOTH refused. Read
+`tools/webgpu_cts_sweep.sh`'s header for the direction rationale.
 
 The numbers mean: of this CTS-derived corpus, how much zioshade ingests and
-lowers to WGSL that naga accepts (`roundtrip-valid`), how much it refuses
-loudly (`zioshade-refused`), and how much it emits broken output for at exit 0
-(`zioshade-invalid`, the silent-wrong class).
+lowers to WGSL that naga (or tint, where subgroups force it) accepts
+(`roundtrip-valid`), how much it refuses loudly (`zioshade-refused`), and how
+much it emits broken output for at exit 0 (`zioshade-invalid`, the silent-wrong
+class).
 
 The numbers do NOT mean, and must never be cited as:
 
