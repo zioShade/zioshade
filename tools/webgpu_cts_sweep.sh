@@ -24,7 +24,15 @@
 # means BOTH converters refused. A tint-converted case flows through the SAME
 # zioshade + naga-validate legs (no greenwashing: tint widens the measurable
 # denominator, it never blesses output). Without tint the sweep is naga-only,
-# exactly the pre-tint behavior. Per case this classifies:
+# exactly the pre-tint behavior. The VALIDATION leg uses the same naga-first
+# tint-second pattern: naga remains the primary validator (continuity of the
+# roundtrip-valid number), and a naga-refused output gets ONE second chance
+# through tint before being called invalid. That second chance exists because
+# the local naga cannot even PARSE `enable subgroups;`, so subgroup-lowered
+# WGSL is naga-unparsable by construction while being valid WGSL that Chrome's
+# own frontend accepts; only tint can adjudicate it. A case is valid if EITHER
+# validator accepts; invalid means BOTH refused (the silent-wrong class).
+# Per case this classifies:
 #   roundtrip-valid          every leg succeeded: zioshade ingested + lowered
 #                            the CTS shader to WGSL that naga accepts.
 #   upstream-convert-failed  naga refused WGSL -> SPIR-V (feature-gated WGSL
@@ -134,11 +142,19 @@ while IFS=$'\t' read -r id wgsl entry stage spec test params; do
   ep_args=()
   if [ "$entry" != "main" ]; then ep_args=(--entry-point "$entry"); fi
   if "$CLI" wgsl "$TMP/case.spv" ${ep_args[@]+"${ep_args[@]}"} -o "$TMP/out.wgsl" >"$TMP/e2" 2>&1; then
-    # ---- leg 3: validate zioshade's WGSL (naga again) ----
+    # ---- leg 3: validate zioshade's WGSL (naga first, tint second) ----
+    # naga is the primary validator; a naga refusal falls back to tint ONCE
+    # (same fallback pattern as the upstream leg): subgroup-lowered WGSL carries
+    # `enable subgroups;`, which the local naga cannot parse at all, so tint is
+    # the only validator that can adjudicate it. Valid if EITHER accepts.
     if naga "$TMP/out.wgsl" >/dev/null 2>&1; then
       v_ok=$((v_ok+1))
       printf '%s\troundtrip-valid\t%s\t%s\n' "$id" "$spec" "$test" >> "$VERDICTS"
       [ -n "${VERBOSE:-}" ] && echo "$id: roundtrip-valid"
+    elif [ -n "$TINT_BIN" ] && "$TINT_BIN" "$TMP/out.wgsl" >/dev/null 2>&1; then
+      v_ok=$((v_ok+1))
+      printf '%s\troundtrip-valid\t%s\t%s\n' "$id" "$spec" "$test" >> "$VERDICTS"
+      [ -n "${VERBOSE:-}" ] && echo "$id: roundtrip-valid (tint-validated)"
     else
       v_invalid=$((v_invalid+1))
       printf '%s\tzioshade-invalid\t%s\t%s\n' "$id" "$spec" "$test" >> "$VERDICTS"
@@ -181,7 +197,7 @@ echo "WebGPU CTS (webgpu:shader) WGSL round-trip sweep: $total cases ($CORPUS)"
 echo "  roundtrip-valid:          $v_ok"
 echo "  upstream-convert-failed:  $v_upstream   (naga${TINT_BIN:+ AND tint} WGSL->SPIR-V refused; not zioshade's)"
 echo "  zioshade-refused:         $v_refused   (honest error: nonzero exit + diagnostic)"
-echo "  zioshade-invalid:         $v_invalid   (exit 0, naga rejects the output: silent-wrong class)"
+echo "  zioshade-invalid:         $v_invalid   (exit 0, naga${TINT_BIN:+ AND tint} reject the output: silent-wrong class)"
 echo "  CRASH:                    $v_crash   (mandate violation)"
 [ -n "$crash_files" ] && echo "  crash cases:$crash_files"
 echo "Report-only (non-gating). Compare against $CORPUS/baseline.txt."

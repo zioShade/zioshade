@@ -122,9 +122,46 @@
 # and always exits 0 unless the HARNESS breaks (missing naga/CLI, empty or
 # inconsistent corpus, classifier losing cases, or a configured-but-broken
 # TINT).
-roundtrip-valid 1055
+#
+# 2026-08-18 after feat/wgsl-subgroups (on top of #641):
+#   roundtrip-valid         1597  (98.8% of the 1611 cases that survived the
+#                                  upstream naga+tint leg; 542 of the 546
+#                                  subgroup-refused cases now lower)
+#   upstream-convert-failed    2  (unchanged)
+#   zioshade-refused         14  (10 pre-existing non-subgroup + 4 subgroup
+#                                  cross-function refusals, see below)
+#   zioshade-invalid           0
+#   CRASH                      0
+# The validation leg now falls back to tint when naga refuses the output
+# (naga cannot even parse `enable subgroups;`; valid if EITHER accepts,
+# invalid means BOTH refused). The GroupNonUniform family lowers under
+# `enable subgroups;` (MSL's simd_* lowering as the semantic reference):
+# vote/ballot/broadcast/shuffle/quad + Reduce and Inclusive/Exclusive scans
+# of Add/Mul + subgroup_invocation_id/subgroup_size builtins. Refused
+# sharply (no faithful spelling in the dialect): AllEqual, Logical*, the
+# ballot-bit ops, Rotate, min/max/bitwise scans, ClusteredReduce, non-
+# Subgroup execution scopes, and vertex-stage subgroup use.
+# Two supporting fixes fell out:
+#   1. single-entry-block-store private-var forwarding: tint's own SPIR-V
+#      writer routes every subgroup shuffle delta through a module-scope
+#      `tint_subgroup_size_mask` private written at runtime, which tint's
+#      uniformity analysis conservatively treats as non-uniform ("requires
+#      argument 1 to be uniform"). A private stored exactly once in the
+#      owning function's entry block with all accesses in that one function
+#      is now forwarded to the stored value (declaration + store suppressed;
+#      corpus impact: exactly one file, graphicsfuzz_056, folds
+#      `var<private> MATRIX_N` to its stored constant 4; naga+tint valid).
+#   2. a NonWritable storage buffer now emits read-mode `var<storage>`:
+#      read_write wrongly taints reads as non-uniform (and is the less
+#      faithful spelling of a readonly buffer).
+# The 4 remaining subgroup refusals are the cross-function shape of the same
+# tint idiom (mask stored in the caller, shuffle in a helper): no WGSL
+# construct keeps a value uniform across a call graph except a written
+# module-scope private, which is exactly what the analysis rejects; the
+# honest action is a named refusal.
+roundtrip-valid 1597
 upstream-convert-failed 2
-zioshade-refused 556
+zioshade-refused 14
 zioshade-invalid 0
 crash 0
 total 1613

@@ -375,6 +375,21 @@ pub const BuiltIn = enum(u32) {
     base_instance = 4425,
     draw_index = 4426,
     device_index = 4438,
+    // Subgroup builtins (SPV_KHR_subgroup_ballot / core since 1.3). Only
+    // SubgroupSize (36) and SubgroupLocalInvocationId (41) have a WGSL
+    // @builtin spelling (subgroup_size / subgroup_invocation_id, under
+    // `enable subgroups;`). The masks and IDs below have NO WGSL builtin:
+    // they stay refused in the WGSL backend, but named members give the
+    // refusal diagnostics the real SPIR-V name instead of "unknown".
+    subgroup_size = 36,
+    num_subgroups = 38,
+    subgroup_id = 40,
+    subgroup_local_invocation_id = 41,
+    subgroup_eq_mask = 4416,
+    subgroup_ge_mask = 4417,
+    subgroup_gt_mask = 4418,
+    subgroup_le_mask = 4419,
+    subgroup_lt_mask = 4420,
     mesh_per_vertex_ext = 5285,
     bary_coord_khr = 5286,
     bary_coord_no_persp_khr = 5287,
