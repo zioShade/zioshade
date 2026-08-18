@@ -3375,8 +3375,26 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             }
             try w.writeAll("};\n\n");
         } else {
-            const oty = fragmentOutputMslType(&module, &names, &decs, aa);
-            try w.print("struct main0_out\n{{\n    {s} _fragColor [[color(0)]];\n}};\n\n", .{oty});
+            // A fragment with NO Output variables at all is a VOID fragment: emit no
+            // main0_out (the entry is `fragment void main0(...)`). The legacy fallback
+            // synthesized `float _fragColor [[color(0)]]`, writing zeros to the color
+            // attachment where SPIR-V semantics (and spirv-cross --msl) write nothing —
+            // the same miscompile class the WARP gate found in the HLSL backend (a
+            // full-image alpha flip vs the untouched clear, maxdiff 255 on 65536 px).
+            // An empty main0_out struct was tried before and regressed Metal validity;
+            // void is the correct shape (Metal allows void fragment functions).
+            var frag_has_any_output = false;
+            for (module.instructions) |inst| {
+                if (inst.op != .Variable or inst.words.len < 4) continue;
+                if (@as(spirv.StorageClass, @enumFromInt(inst.words[3])) == .Output) {
+                    frag_has_any_output = true;
+                    break;
+                }
+            }
+            if (frag_has_any_output) {
+                const oty = fragmentOutputMslType(&module, &names, &decs, aa);
+                try w.print("struct main0_out\n{{\n    {s} _fragColor [[color(0)]];\n}};\n\n", .{oty});
+            }
         }
     }
 
@@ -4827,11 +4845,13 @@ fn fragOutputMslType(m: *const ParsedModule, o: FragOutput, names: *std.AutoHash
 /// unchanged. Anything else (MRT, FragDepth, SampleMask, stencil, dual-source) goes through
 /// the new multi-field main0_out path.
 fn isSingleColorFragOutput(outputs: []const FragOutput) bool {
-    // 0 outputs: no color attachment. The legacy path emits a default
-    // `float _fragColor [[color(0)]]` (fragmentOutputMslType defaults float4),
-    // which kept no-output fragments Metal-valid; preserve that rather than
-    // emit an empty main0_out (which regressed demote-to-helper / image-query /
-    // partial-write-preserve).
+    // 0 outputs: no color attachment. This stays on the legacy single path so the
+    // decision sites upstream can distinguish it: with NO Output variables at all
+    // the entry is a `fragment void` function (no main0_out, nothing written — an
+    // earlier empty-main0_out attempt regressed demote-to-helper / image-query /
+    // partial-write-preserve validity); with an unrepresentable Output (struct-
+    // typed / unknown builtin) the old default `float4 _fragColor [[color(0)]]`
+    // fallback keeps the emission Metal-valid.
     if (outputs.len == 0) return true;
     if (outputs.len != 1) return false;
     const o = outputs[0];
@@ -5740,8 +5760,13 @@ fn emitFunction(
         try emitBody(m, names, decs, func_idx, w, alloc, is_frag, output_var_id, cbuffers, textures, storage_buffers, arraylen_buf_index);
         try w.writeAll("}\n\n");
 
-        // Now emit the entry wrapper
-        try w.writeAll("fragment main0_out ");
+        // Now emit the entry wrapper. No Output variables at all => `fragment void`
+        // (must match the main0_out emission decision upstream: no struct emitted).
+        if (output_var_id != null) {
+            try w.writeAll("fragment main0_out ");
+        } else {
+            try w.writeAll("fragment void ");
+        }
         try w.writeAll(func_name);
         try w.writeAll("(");
 
@@ -5855,7 +5880,11 @@ fn emitFunction(
         if (!first_param) try w.writeAll(", ");
         try w.writeAll("float4 gl_FragCoord [[position]])");
 
-        try w.writeAll("\n{\n    main0_out out = {};\n    ");
+        if (output_var_id != null) {
+            try w.writeAll("\n{\n    main0_out out = {};\n    ");
+        } else {
+            try w.writeAll("\n{\n    ");
+        }
         // #497: Alias declarations for colliding buffer bindings (resource aliasing).
         for (aliased_cbs.items) |ac| {
             try w.print("constant {s}& {s}_1 = *(constant {s}*)&{s};\n    ", .{ ac.name, ac.name, ac.name, ac.from });
@@ -5915,7 +5944,11 @@ fn emitFunction(
         for (frag_in_builtins.items) |ib| {
             if (ib.cast_to_int) try w.print(", int({s})", .{ib.name}) else try w.print(", {s}", .{ib.name});
         }
-        try w.writeAll(");\n    return out;\n}\n");
+        if (output_var_id != null) {
+            try w.writeAll(");\n    return out;\n}\n");
+        } else {
+            try w.writeAll(");\n}\n");
+        }
         return;
     }
 
