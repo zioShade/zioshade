@@ -666,6 +666,12 @@ const Instruction = struct {
 
 const MeshTopology = enum { triangles, lines, points };
 
+/// SPIR-V fragment depth execution modes (GLSL layout(depth_*)). `less` promises
+/// the written depth is <= the fragment's interpolated depth, `greater` promises
+/// >=; HLSL spells those contracts SV_DepthLessEqual / SV_DepthGreaterEqual.
+/// `unchanged` has no HLSL semantic; keep plain SV_Depth (conservative, honest).
+const DepthMode = enum { exact, less, greater, unchanged };
+
 const ParsedModule = struct {
     instructions: []const Instruction,
     id_defs: []const ?usize,
@@ -673,6 +679,7 @@ const ParsedModule = struct {
     execution_model: spirv.ExecutionModel = .Fragment,
     local_size: [3]u32 = [3]u32{ 1, 1, 1 },
     early_fragment_tests: bool = false,
+    depth_mode: DepthMode = .exact,
     mesh_topology: ?MeshTopology = null,
     mesh_max_vertices: ?u32 = null,
     mesh_max_primitives: ?u32 = null,
@@ -883,6 +890,15 @@ fn parseModule(alloc: std.mem.Allocator, words: []const u32) !ParsedModule {
             }
             if (mode == .EarlyFragmentTests) {
                 module.early_fragment_tests = true;
+            }
+            // DepthLess/DepthGreater/DepthUnchanged select the HLSL depth output
+            // semantic (SV_DepthLessEqual / SV_DepthGreaterEqual); see DepthMode.
+            if (mode == .DepthLess) {
+                module.depth_mode = .less;
+            } else if (mode == .DepthGreater) {
+                module.depth_mode = .greater;
+            } else if (mode == .DepthUnchanged) {
+                module.depth_mode = .unchanged;
             }
             // Mesh shader execution modes (M5.2)
             if (mode == .OutputTrianglesEXT) {
@@ -2544,7 +2560,7 @@ pub fn spirvToHLSL(
     }
     if (mrt_count > 1) {
         // Collect and sort output vars by location
-        const MRTVar = struct { id: u32, location: u32 };
+        const MRTVar = struct { id: u32, location: u32, index: u32 };
         var mrt_vars = std.ArrayList(MRTVar).initCapacity(aa, mrt_count) catch return error.OutOfMemory;
         defer mrt_vars.deinit(aa);
         for (module.instructions) |inst| {
@@ -2556,31 +2572,44 @@ pub fn spirvToHLSL(
                     const out_builtin = getDecorationValue(&decorations, vid, .built_in);
                     if (out_builtin != null) continue;
                     var loc: u32 = 0;
+                    var idx: u32 = 0;
                     if (decorations.get(vid)) |dec_list| {
                         for (dec_list.items) |d| {
                             if (d.decoration == .location and d.extra.len > 0) {
                                 loc = d.extra[0];
-                                break;
+                            } else if (d.decoration == .index and d.extra.len > 0) {
+                                idx = d.extra[0];
                             }
                         }
                     }
-                    mrt_vars.append(aa, .{ .id = vid, .location = loc }) catch {};
+                    mrt_vars.append(aa, .{ .id = vid, .location = loc, .index = idx }) catch {};
                 }
             }
         }
         const MRTSort = struct {
             fn lessThan(_: void, a: MRTVar, b: MRTVar) bool {
-                return a.location < b.location;
+                if (a.location != b.location) return a.location < b.location;
+                return a.index < b.index;
             }
         };
         std.sort.insertion(MRTVar, mrt_vars.items, {}, MRTSort.lessThan);
-        // Emit the struct with SV_Target semantics
+        // Emit the struct with SV_Target semantics. The semantic number is
+        // LOCATION + INDEX, DXC's own SPIR-V mapping for dual-source blending
+        // (Location=0,Index=1 is source 1, i.e. SV_Target1): emitting a second
+        // SV_Target0 for it makes DXC reject "overlapping semantic index at 0".
+        // gl_FragStencilRefARB (the frontend leaves it undecorated, so it walks
+        // in here) exports the stencil reference, not a color: map it to
+        // SV_StencilRef (uint; DXC rejects an int-typed SV_StencilRef).
         try w.writeAll("struct _MRT_OUT\n{\n");
         for (mrt_vars.items) |mv| {
             const mv_inst = getDef(&module, mv.id) orelse continue;
             const mv_type = try hlslType(&module, mv_inst.words[1], &names, aa);
             const mv_name = names.get(mv.id) orelse "out";
-            try w.print("    {s} {s} : SV_Target{d};\n", .{ mv_type, mv_name, mv.location });
+            if (isStencilRefOutputName(mv_name)) {
+                try w.print("    uint {s} : SV_StencilRef;\n", .{mv_name});
+            } else {
+                try w.print("    {s} {s} : SV_Target{d};\n", .{ mv_type, mv_name, mv.location + mv.index });
+            }
         }
         try w.writeAll("};\n\n");
     }
@@ -3189,6 +3218,24 @@ fn imageValueIsMultisampled(module: *const ParsedModule, image_value_id: u32) bo
     return tinst.words[6] == 1;
 }
 
+/// True when the image VALUE `id` resolves to a STORAGE OpTypeImage (Sampled
+/// operand, `words[7]`, is 2). zioshade maps MS storage images (GLSL image2DMS)
+/// to `RWTexture2D`/`RWTexture2DArray`, and the RWTexture GetDimensions overloads
+/// have NO NumberOfSamples out-param (only the sampled `Texture2DMS[Array]` ones
+/// do). Sample-count queries on storage images therefore take the plain spatial
+/// overload and fill the count with 0, exactly spirv-cross's `spvImageSize`
+/// (`Tex.GetDimensions(ret.x, ret.y); Param = 0u;`).
+fn imageValueIsStorageImage(module: *const ParsedModule, image_value_id: u32) bool {
+    const vdef = getDef(module, image_value_id) orelse return false;
+    if (vdef.words.len < 2) return false;
+    var tinst = getDef(module, vdef.words[1]) orelse return false;
+    if (tinst.op == .TypeSampledImage and tinst.words.len > 2) {
+        tinst = getDef(module, tinst.words[2]) orelse return false;
+    }
+    if (tinst.op != .TypeImage or tinst.words.len < 8) return false;
+    return tinst.words[7] == 2;
+}
+
 // ---------------------------------------------------------------------------
 // Type resolution
 // ---------------------------------------------------------------------------
@@ -3720,7 +3767,7 @@ fn emitFunction(
     var input_var_ids = std.ArrayList(u32).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer input_var_ids.deinit(alloc);
     // Collect ALL output variables (for MRT support)
-    const OutputVar = struct { id: u32, location: u32 };
+    const OutputVar = struct { id: u32, location: u32, index: u32 };
     var output_vars = std.ArrayList(OutputVar).initCapacity(alloc, 4) catch return error.OutOfMemory;
     defer output_vars.deinit(alloc);
     // Collect builtin output variables (e.g., gl_SampleMask)
@@ -3738,26 +3785,30 @@ fn emitFunction(
                         builtin_output_ids.append(alloc, vid) catch {};
                         continue;
                     }
-                    // Find location decoration
+                    // Find location/index decorations (index 1 = dual-source
+                    // blending source 1; DXC maps SV_Target number = location+index)
                     var loc: u32 = 0;
+                    var idx: u32 = 0;
                     if (decorations.get(vid)) |dec_list| {
                         for (dec_list.items) |d| {
                             if (d.decoration == .location and d.extra.len > 0) {
                                 loc = d.extra[0];
-                                break;
+                            } else if (d.decoration == .index and d.extra.len > 0) {
+                                idx = d.extra[0];
                             }
                         }
                     }
-                    output_vars.append(alloc, .{ .id = vid, .location = loc }) catch {};
+                    output_vars.append(alloc, .{ .id = vid, .location = loc, .index = idx }) catch {};
                 } else if (sc == .Input) {
                     input_var_ids.append(alloc, inst.words[2]) catch {};
                 }
             }
         }
-        // Sort output vars by location
+        // Sort output vars by location, then index
         const SortCtx = struct {
             fn lessThan(_: void, a: OutputVar, b: OutputVar) bool {
-                return a.location < b.location;
+                if (a.location != b.location) return a.location < b.location;
+                return a.index < b.index;
             }
         };
         std.sort.insertion(OutputVar, output_vars.items, {}, SortCtx.lessThan);
@@ -4570,9 +4621,24 @@ fn emitFunction(
                     // Hoisted to a module-scope static: the parameter takes a distinct
                     // name and is copied into the static at the top of the body, so
                     // `iv_name` keeps resolving to the static everywhere else.
-                    try w.print("{s} {s}_sv : {s}", .{ iv_type, iv_name, semantic });
+                    if (bi == .frag_coord and (module.depth_mode == .less or module.depth_mode == .greater)) {
+                        try w.print("noperspective centroid {s} {s}_sv : {s}", .{ iv_type, iv_name, semantic });
+                    } else {
+                        try w.print("{s} {s}_sv : {s}", .{ iv_type, iv_name, semantic });
+                    }
                 } else {
-                    try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
+                    // DXC validation: a PS outputting oDepthLE/oDepthGE (SV_DepthLessEqual/
+                    // SV_DepthGreaterEqual) requires its SV_Position INPUT to be declared
+                    // noperspective+centroid (position is never perspective-interpolated and
+                    // at 1x sampling centroid == pixel center, so the modifiers are
+                    // semantically free) unless it runs at sample frequency. spirv-cross
+                    // does not add them, so its conservative-depth output for a
+                    // FragCoord-reading shader is DXC-rejected.
+                    if (bi == .frag_coord and (module.depth_mode == .less or module.depth_mode == .greater)) {
+                        try w.print("noperspective centroid {s} {s} : {s}", .{ iv_type, iv_name, semantic });
+                    } else {
+                        try w.print("{s} {s} : {s}", .{ iv_type, iv_name, semantic });
+                    }
                 }
             } else {
                 const loc = getDecorationValue(decorations, ivid, .location);
@@ -4702,7 +4768,16 @@ fn emitFunction(
                     // hardcoded `int` and (via the else semantic) `TEXCOORD0`, producing invalid
                     // HLSL (wrong type + non-depth semantic) for any shader writing gl_FragDepth.
                     // spirv-cross uses SV_Depth + float. (#170, #470)
-                    try w.print("out float {s} : {s}", .{ bo_name, semantic });
+                    // DepthLess/DepthGreater execution modes carry a conservative-depth
+                    // contract (written depth <= / >= the fragment's), which DXC's own
+                    // SPIR-V reader maps to SV_DepthLessEqual / SV_DepthGreaterEqual;
+                    // spelling it lets the driver keep early-Z where the contract allows.
+                    const depth_semantic: []const u8 = switch (module.depth_mode) {
+                        .less => "SV_DepthLessEqual",
+                        .greater => "SV_DepthGreaterEqual",
+                        .exact, .unchanged => semantic,
+                    };
+                    try w.print("out float {s} : {s}", .{ bo_name, depth_semantic });
                 } else {
                     try w.print("out {s} {s} : {s}", .{ "int", bo_name, semantic });
                 }
@@ -4782,11 +4857,25 @@ fn emitFunction(
 
     const has_mrt = is_fragment and output_vars.items.len > 1;
 
-    // For MRT: emit struct return type with SV_Target semantics
+    // For MRT: emit struct return type with SV_Target semantics. A single output
+    // keeps the bare `: SV_Target` (== SV_Target0) unless its LOCATION+INDEX
+    // says otherwise (a lone dual-source src1 output), in which case the folded
+    // number is spelled out. A stencil-ref-only fragment has no color output to
+    // return; refuse rather than misroute the stencil reference to SV_Target.
     if (has_mrt) {
         try w.writeAll(")\n{\n");
     } else if (is_fragment and output_vars.items.len > 0) {
-        try w.writeAll(") : SV_Target\n{\n");
+        const sole = output_vars.items[0];
+        const sole_name = names.get(sole.id) orelse "";
+        if (isStencilRefOutputName(sole_name)) {
+            return error.UnsupportedOp;
+        }
+        const n = sole.location + sole.index;
+        if (n == 0) {
+            try w.writeAll(") : SV_Target\n{\n");
+        } else {
+            try w.print(") : SV_Target{d}\n{{\n", .{n});
+        }
     } else {
         try w.writeAll(")\n{\n");
     }
@@ -4923,6 +5012,16 @@ fn builtInToSemantic(b: u32) []const u8 {
         .frag_depth => "SV_Depth", // fragment depth output (matches spirv-cross) (#170, #470)
         else => "TEXCOORD0",
     };
+}
+
+/// True for the GL_ARB_shader_stencil_export output. The zioshade frontend emits
+/// it as a plain undecorated Output variable named gl_FragStencilRefARB (no
+/// BuiltIn decoration), so both MRT walkers must recognize it BY NAME and map it
+/// to SV_StencilRef. Letting it fall through to SV_Target{loc} collides with the
+/// real color output at the same location (DXC "overlapping semantic index") and
+/// would misroute the stencil reference into a color attachment.
+fn isStencilRefOutputName(name: []const u8) bool {
+    return std.mem.eql(u8, name, "gl_FragStencilRefARB") or std.mem.eql(u8, name, "gl_FragStencilRef");
 }
 
 // ---------------------------------------------------------------------------
@@ -6910,30 +7009,97 @@ fn emitNegatedCompare(module: *const ParsedModule, names: *std.AutoHashMap(u32, 
     });
 }
 
+/// Component count of a RESULT TYPE id: OpTypeVector yields its component count,
+/// anything else (bool/float/int scalars) is 1.
+fn typeComponentCount(module: *const ParsedModule, type_id: u32) u32 {
+    const tinst = getDef(module, type_id) orelse return 1;
+    if (tinst.op == .TypeVector and tinst.words.len > 3) return tinst.words[3];
+    return 1;
+}
+
+/// `.xyzw[i]` swizzle name for a vector component index (0..3).
+fn compSwizzle(i: u32) []const u8 {
+    return switch (i) {
+        0 => "x",
+        1 => "y",
+        2 => "z",
+        else => "w",
+    };
+}
+
+/// OpLogicalAnd/OpLogicalOr are COMPONENTWISE on bool vectors, but HLSL's `&&`/`||`
+/// are scalar-only short-circuiting operators (DXC: "operands for short-circuiting
+/// logical binary operator must be scalar"). For vector results emit the per-component
+/// expansion inside a vector constructor, the exact shape spirv-cross --hlsl uses
+/// (`bool3(a.x && b.x, ...)`); scalars keep the `&&`/`||` spelling.
+fn emitLogicalAndOr(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, op: []const u8, w: anytype, alloc: std.mem.Allocator) !void {
+    const rt = try hlslType(module, inst.words[1], names, alloc);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const a = names.get(inst.words[3]) orelse "a";
+    const b = names.get(inst.words[4]) orelse "b";
+    const n = typeComponentCount(module, inst.words[1]);
+    if (n <= 1) {
+        try w.print("    {s} {s} = {s} {s} {s};\n", .{ rt, rn, a, op, b });
+        return;
+    }
+    try w.print("    {s} {s} = {s}(", .{ rt, rn, rt });
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (i > 0) try w.writeAll(", ");
+        const c = compSwizzle(i);
+        try w.print("{s}.{s} {s} {s}.{s}", .{ a, c, op, b, c });
+    }
+    try w.writeAll(");\n");
+}
+
 /// #170 OpFUnordEqual: unordered-equal is TRUE if either operand is NaN (ordered
-/// `==` is false there = plausible-but-wrong). isnan(a)||isnan(b)||(a==b); HLSL's
-/// || is componentwise on bool vectors, so this covers scalar and vector. (spirv-
-/// cross HLSL emits bare `==`, which is NaN-wrong; zioshade diverges to be correct.)
+/// `==` is false there = plausible-but-wrong). isnan(a)||isnan(b)||(a==b); on bool
+/// VECTORS the `||` chain is expanded per component (HLSL `||` is scalar-only).
+/// (spirv-cross HLSL emits bare `==`, which is NaN-wrong; zioshade diverges to be
+/// correct.)
 fn emitUnordEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     const rt = try hlslType(module, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = isnan({s}) || isnan({s}) || ({s} == {s});\n", .{
-        rt,                                  names.get(inst.words[2]) orelse "v",
-        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
-        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
-    });
+    const rn = names.get(inst.words[2]) orelse "v";
+    const a = names.get(inst.words[3]) orelse "a";
+    const b = names.get(inst.words[4]) orelse "b";
+    const n = typeComponentCount(module, inst.words[1]);
+    if (n <= 1) {
+        try w.print("    {s} {s} = isnan({s}) || isnan({s}) || ({s} == {s});\n", .{ rt, rn, a, b, a, b });
+        return;
+    }
+    try w.print("    {s} {s} = {s}(", .{ rt, rn, rt });
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (i > 0) try w.writeAll(", ");
+        const c = compSwizzle(i);
+        try w.print("isnan({s}.{s}) || isnan({s}.{s}) || ({s}.{s} == {s}.{s})", .{ a, c, b, c, a, c, b, c });
+    }
+    try w.writeAll(");\n");
 }
 
 /// #170 OpFOrdNotEqual: ordered not-equal is FALSE on a NaN operand, but HLSL's `!=`
 /// is unordered (true on NaN), so bare `!=` is plausible-but-wrong. Lower to
-/// `!isnan(a) && !isnan(b) && (a != b)` (ordered-AND-not-equal); && is componentwise on
-/// bool vectors. The mirror of emitUnordEqual; glslang never emits FOrdNotEqual.
+/// `!isnan(a) && !isnan(b) && (a != b)` (ordered-AND-not-equal); on bool VECTORS the
+/// `&&` chain is expanded per component (HLSL `&&` is scalar-only). The mirror of
+/// emitUnordEqual; glslang never emits FOrdNotEqual.
 fn emitOrdNotEqual(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     const rt = try hlslType(module, inst.words[1], names, alloc);
-    try w.print("    {s} {s} = !isnan({s}) && !isnan({s}) && ({s} != {s});\n", .{
-        rt,                                  names.get(inst.words[2]) orelse "v",
-        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
-        names.get(inst.words[3]) orelse "a", names.get(inst.words[4]) orelse "b",
-    });
+    const rn = names.get(inst.words[2]) orelse "v";
+    const a = names.get(inst.words[3]) orelse "a";
+    const b = names.get(inst.words[4]) orelse "b";
+    const n = typeComponentCount(module, inst.words[1]);
+    if (n <= 1) {
+        try w.print("    {s} {s} = !isnan({s}) && !isnan({s}) && ({s} != {s});\n", .{ rt, rn, a, b, a, b });
+        return;
+    }
+    try w.print("    {s} {s} = {s}(", .{ rt, rn, rt });
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (i > 0) try w.writeAll(", ");
+        const c = compSwizzle(i);
+        try w.print("!isnan({s}.{s}) && !isnan({s}.{s}) && ({s}.{s} != {s}.{s})", .{ a, c, b, c, a, c, b, c });
+    }
+    try w.writeAll(");\n");
 }
 
 /// Lower a subgroup ARITHMETIC op (IAdd/FAdd/IMul/FMul/Min/Max/Bitwise/Logical)
@@ -7389,8 +7555,10 @@ fn emitInstruction(
         .FUnordLessThanEqual => try emitNegatedCompare(module, names, inst, ">", w, alloc),
         .FUnordGreaterThanEqual => try emitNegatedCompare(module, names, inst, "<", w, alloc),
 
-        .LogicalOr => try common.emitBinOp(module, names, inst, "||", w, alloc, hlslType),
-        .LogicalAnd => try common.emitBinOp(module, names, inst, "&&", w, alloc, hlslType),
+        // `&&`/`||` are scalar-only in HLSL; vector results expand per component
+        // (emitLogicalAndOr, mirroring spirv-cross --hlsl).
+        .LogicalOr => try emitLogicalAndOr(module, names, inst, "||", w, alloc),
+        .LogicalAnd => try emitLogicalAndOr(module, names, inst, "&&", w, alloc),
         .LogicalNot => {
             const rt = try hlslType(module, inst.words[1], names, alloc);
             try w.print("    {s} {s} = !{s};\n", .{ rt, names.get(inst.words[2]) orelse "v", names.get(inst.words[3]) orelse "0" });
@@ -8375,7 +8543,10 @@ fn emitInstruction(
                 // third out-param with depth or array length respectively.
                 // Texture2DMSArray's only overload additionally requires a
                 // NumberOfSamples out-param, so MS arrays query a 4th value.
-                if (imageValueIsMultisampled(module, inst.words[3])) {
+                // MS STORAGE images (RWTexture2DArray) have no samples overload.
+                const ms_and_not_storage = imageValueIsMultisampled(module, inst.words[3]) and
+                    !imageValueIsStorageImage(module, inst.words[3]);
+                if (ms_and_not_storage) {
                     try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_samples; {s}.GetDimensions({s}_w, {s}_h, {s}_d, {s}_samples);\n", .{ result_name, result_name, result_name, result_name, tex_name, result_name, result_name, result_name, result_name });
                 } else {
                     try w.print("    uint {s}_w, {s}_h, {s}_d; {s}.GetDimensions({s}_w, {s}_h, {s}_d);\n", .{ result_name, result_name, result_name, tex_name, result_name, result_name, result_name });
@@ -8384,7 +8555,10 @@ fn emitInstruction(
             } else {
                 // #475: non-arrayed Texture2DMS (rank 2) needs the sampleCount out-param
                 // (the 2-arg GetDimensions is invalid for MS textures -> DXC error).
-                if (imageValueIsMultisampled(module, inst.words[3])) {
+                // MS STORAGE images (RWTexture2D) have no samples overload.
+                const ms_and_not_storage = imageValueIsMultisampled(module, inst.words[3]) and
+                    !imageValueIsStorageImage(module, inst.words[3]);
+                if (ms_and_not_storage) {
                     try w.print("    uint {s}_w, {s}_h, {s}_samples; {s}.GetDimensions({s}_w, {s}_h, {s}_samples);\n", .{ result_name, result_name, result_name, tex_name, result_name, result_name, result_name });
                 } else {
                     try w.print("    uint {s}_w, {s}_h; {s}.GetDimensions({s}_w, {s}_h);\n", .{ result_name, result_name, tex_name, result_name, result_name });
@@ -8419,10 +8593,23 @@ fn emitInstruction(
             const rn = names.get(inst.words[2]) orelse "v";
             const rt = try hlslType(module, inst.words[1], names, alloc);
             // MS textures: Texture2DMS (spatial 2) / Texture2DMSArray (spatial 3). No mip.
-            const n = hlslImageSpatialCount(module, inst.words[3]);
-            switch (n) {
-                3 => try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_sm; {s}.GetDimensions({s}_w, {s}_h, {s}_d, {s}_sm);\n", .{ rn, rn, rn, rn, tex_name, rn, rn, rn, rn }),
-                else => try w.print("    uint {s}_w, {s}_h, {s}_sm; {s}.GetDimensions({s}_w, {s}_h, {s}_sm);\n", .{ rn, rn, rn, tex_name, rn, rn, rn }),
+            // Their GetDimensions returns the sample count in the LAST out-param.
+            // MS STORAGE images are typed RWTexture2D/RWTexture2DArray in HLSL and
+            // those overloads carry NO sample count; query the spatial dims only and
+            // fill 0, mirroring spirv-cross's spvImageSize (`Param = 0u`).
+            if (imageValueIsStorageImage(module, inst.words[3])) {
+                const n = hlslImageSpatialCount(module, inst.words[3]);
+                if (n >= 3) {
+                    try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_sm; {s}.GetDimensions({s}_w, {s}_h, {s}_d); {s}_sm = 0u;\n", .{ rn, rn, rn, rn, tex_name, rn, rn, rn, rn });
+                } else {
+                    try w.print("    uint {s}_w, {s}_h, {s}_sm; {s}.GetDimensions({s}_w, {s}_h); {s}_sm = 0u;\n", .{ rn, rn, rn, tex_name, rn, rn, rn });
+                }
+            } else {
+                const n = hlslImageSpatialCount(module, inst.words[3]);
+                switch (n) {
+                    3 => try w.print("    uint {s}_w, {s}_h, {s}_d, {s}_sm; {s}.GetDimensions({s}_w, {s}_h, {s}_d, {s}_sm);\n", .{ rn, rn, rn, rn, tex_name, rn, rn, rn, rn }),
+                    else => try w.print("    uint {s}_w, {s}_h, {s}_sm; {s}.GetDimensions({s}_w, {s}_h, {s}_sm);\n", .{ rn, rn, rn, tex_name, rn, rn, rn }),
+                }
             }
             try w.print("    {s} {s} = {s}_sm;\n", .{ rt, rn, rn });
         },
