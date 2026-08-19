@@ -247,8 +247,9 @@ test "cfg.comp: OpUndef stored to an SSBO is folded to a zero literal (not an un
 }
 
 // #170 OpFUnordEqual: unordered-equal is TRUE on a NaN operand (ordered == is false
-// there = plausible-but-wrong). HLSL lowers it to isnan(a)||isnan(b)||(a==b); || is
-// componentwise on bool vectors. glslang never emits OpFUnordEqual, so hand SPIR-V.
+// there = plausible-but-wrong). HLSL lowers it to isnan(a)||isnan(b)||(a==b); on bool
+// vectors the chain expands per component (HLSL || is scalar-only). glslang never
+// emits OpFUnordEqual, so hand SPIR-V.
 test "hlsl: OpFUnordEqual lowers to isnan(a)||isnan(b)||(a==b) NaN-correctly (#170)" {
     const spirv = assembleSpirv("funord_eq",
         \\OpCapability Shader
@@ -326,6 +327,235 @@ test "hlsl: OpFOrdNotEqual lowers to !isnan(a)&&!isnan(b)&&(a!=b) NaN-correctly 
     defer alloc.free(hlsl);
     try assertContains(hlsl, "!isnan(");
     try assertContains(hlsl, "&& (");
+}
+
+// ---------------------------------------------------------------------------
+// HLSL validity gaps from the WARP triage (tools/warp/README.md "dxc-zs" skips).
+// DXC rejects `&&`/`||` on bool vectors ("operands for short-circuiting logical
+// binary operator must be scalar"), a second SV_Target0 for a dual-source src1
+// output ("overlapping semantic index at 0"), and the samples out-param on
+// RWTexture GetDimensions ("no matching member function"). All three were honest
+// DXC rejects; each fix below must stay DXC-valid.
+// ---------------------------------------------------------------------------
+
+// OpLogicalAnd/OpLogicalOr on bool vectors: HLSL `&&`/`||` are scalar-only, so a
+// vector result expands per component inside a vector constructor, the shape
+// spirv-cross --hlsl emits (`bool3(a.x && b.x, ...)`). Hand SPIR-V: glslang's GLSL
+// frontend cannot express `&&` on vectors, and zioshade's own frontend only
+// reaches vector logicals through the ordered/unordered compare lowerings above.
+test "hlsl: vector OpLogicalAnd/Or expand per component (DXC scalar-only && and ||)" {
+    const spirv = assembleSpirv("vec_logical",
+        \\OpCapability Shader
+        \\OpMemoryModel Logical GLSL450
+        \\OpEntryPoint Fragment %main "main" %o
+        \\OpExecutionMode %main OriginUpperLeft
+        \\OpDecorate %o Location 0
+        \\%void = OpTypeVoid
+        \\%voidfn = OpTypeFunction %void
+        \\%float = OpTypeFloat 32
+        \\%v3float = OpTypeVector %float 3
+        \\%bool = OpTypeBool
+        \\%v3bool = OpTypeVector %bool 3
+        \\%v4float = OpTypeVector %float 4
+        \\%f1 = OpConstant %float 1
+        \\%v3 = OpConstantComposite %v3float %f1 %f1 %f1
+        \\%ptr_o = OpTypePointer Output %v4float
+        \\%o = OpVariable %ptr_o Output
+        \\%main = OpFunction %void None %voidfn
+        \\%lbl = OpLabel
+        \\%lt = OpFOrdLessThan %v3bool %v3 %v3
+        \\%gt = OpFOrdGreaterThan %v3bool %v3 %v3
+        \\%land = OpLogicalAnd %v3bool %lt %gt
+        \\%lor = OpLogicalOr %v3bool %lt %gt
+        \\%vx = OpCompositeExtract %bool %land 0
+        \\%vy = OpCompositeExtract %bool %lor 1
+        \\%fx = OpSelect %float %vx %f1 %f1
+        \\%fy = OpSelect %float %vy %f1 %f1
+        \\%res = OpCompositeConstruct %v4float %fx %fy %f1 %f1
+        \\OpStore %o %res
+        \\OpReturn
+        \\OpFunctionEnd
+    ) catch return error.SkipZigTest;
+    defer alloc.free(spirv);
+    const hlsl = try spirvToHlsl60(spirv);
+    defer alloc.free(hlsl);
+    // Per-component expansion in a vector constructor (spirv-cross's shape).
+    try assertContains(hlsl, ".x && ");
+    try assertContains(hlsl, ".y && ");
+    try assertContains(hlsl, ".z && ");
+    try assertContains(hlsl, ".x || ");
+    try assertContains(hlsl, ".z || ");
+}
+
+// Source-driven: the bvec-ops class. `notEqual` on float vectors lowers through
+// OpFOrdNotEqual's !isnan(a)&&!isnan(b)&&(a!=b) chain, which on a bool VECTOR
+// must likewise expand per component (the old inline `&&` chain was the exact
+// line DXC rejected in bvec-ops.frag).
+test "hlsl: notEqual on vectors expands the ordered-not-equal chain per component" {
+    const hlsl = try compileToHlsl(
+        \\#version 450
+        \\layout(location = 0) in vec2 uv;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main() {
+        \\    bvec2 ne = notEqual(uv, vec2(0.5));
+        \\    fragColor = vec4(any(ne) ? 1.0 : 0.0);
+        \\}
+    );
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "bool2(");
+    try assertContains(hlsl, "!isnan(");
+    try assertContains(hlsl, ".x) && !isnan(");
+    try assertContains(hlsl, ".y) && !isnan(");
+}
+
+// Dual-source blending: Location=0 Index=1 is src1. DXC maps the SV_Target number
+// to LOCATION+INDEX, so this must be SV_Target1; emitting a second SV_Target0 was
+// the "overlapping semantic index at 0" reject.
+test "hlsl: dual-source src1 (Location 0, Index 1) maps to SV_Target1" {
+    const hlsl = try compileToHlsl(
+        \\#version 450
+        \\layout(location = 0, index = 0) out vec4 FragColor0;
+        \\layout(location = 0, index = 1) out vec4 FragColor1;
+        \\void main() {
+        \\    FragColor0 = vec4(1.0);
+        \\    FragColor1 = vec4(2.0);
+        \\}
+    );
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "FragColor0 : SV_Target0;");
+    try assertContains(hlsl, "FragColor1 : SV_Target1;");
+}
+
+// Stencil export: the frontend emits gl_FragStencilRefARB as an undecorated
+// output, so the MRT walk used to give it SV_Target0 (colliding with the real
+// color at location 0). It is a stencil reference, not a color: map it to
+// SV_StencilRef, which DXC requires to be uint.
+test "hlsl: gl_FragStencilRefARB exports as uint SV_StencilRef" {
+    const hlsl = try compileToHlsl(
+        \\#version 450
+        \\#extension GL_ARB_shader_stencil_export : require
+        \\layout(location = 0) out vec4 MRT0;
+        \\layout(location = 1) out vec4 MRT1;
+        \\void main() {
+        \\    MRT0 = vec4(1.0);
+        \\    MRT1 = vec4(1.0, 0.0, 1.0, 1.0);
+        \\    gl_FragStencilRefARB = 100;
+        \\}
+    );
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "uint gl_FragStencilRefARB : SV_StencilRef;");
+    try assertContains(hlsl, "MRT0 : SV_Target0;");
+    try assertContains(hlsl, "MRT1 : SV_Target1;");
+}
+
+// A fragment whose ONLY output is the stencil reference has no color output to
+// return; the backend refuses rather than misroute the stencil value to
+// SV_Target (mirrors spirv-cross, which throws on this builtin).
+test "hlsl: stencil-ref-only fragment honest-errors" {
+    const spirv = try zioshade.compileToSPIRV(alloc,
+        \\#version 450
+        \\#extension GL_ARB_shader_stencil_export : require
+        \\void main() {
+        \\    gl_FragStencilRefARB = 100;
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(error.UnsupportedOp, zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }));
+}
+
+// Conservative depth: layout(depth_less)/(depth_greater) promise the written depth
+// is <= / >= the fragment's depth. DXC's own SPIR-V reader maps those contracts to
+// SV_DepthLessEqual / SV_DepthGreaterEqual (keeping early-Z eligible); plain
+// SV_Depth is still valid but silently drops the contract.
+test "hlsl: DepthLess/DepthGreater map to SV_DepthLessEqual/SV_DepthGreaterEqual" {
+    const less = try compileToHlsl(
+        \\#version 450
+        \\layout(depth_less) out float gl_FragDepth;
+        \\layout(location = 0) out vec4 c;
+        \\void main() { c = vec4(1.0); gl_FragDepth = 0.25; }
+    );
+    defer alloc.free(less);
+    try assertContains(less, "gl_FragDepth : SV_DepthLessEqual");
+    try assertNotContains(less, "SV_DepthLessEqualEqual");
+
+    // DXC validation requires an SV_Position INPUT to be noperspective+centroid
+    // when the PS outputs oDepthLE/oDepthGE (position is never perspective-
+    // interpolated; at 1x sampling centroid == pixel center, so it is free).
+    const less_pos = try compileToHlsl(
+        \\#version 450
+        \\layout(depth_less) out float gl_FragDepth;
+        \\layout(location = 0) out vec4 c;
+        \\void main() { c = vec4(1.0); gl_FragDepth = 0.25 * gl_FragCoord.y / 256.0; }
+    );
+    defer alloc.free(less_pos);
+    try assertContains(less_pos, "noperspective centroid float4 gl_FragCoord : SV_Position");
+    try assertContains(less_pos, "gl_FragDepth : SV_DepthLessEqual");
+
+    const greater = try compileToHlsl(
+        \\#version 450
+        \\layout(depth_greater) out float gl_FragDepth;
+        \\layout(location = 0) out vec4 c;
+        \\void main() { c = vec4(1.0); gl_FragDepth = 0.75; }
+    );
+    defer alloc.free(greater);
+    try assertContains(greater, "gl_FragDepth : SV_DepthGreaterEqual");
+
+    // No execution mode: plain SV_Depth stays (the exact-depth contract).
+    const exact = try compileToHlsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 c;
+        \\void main() { c = vec4(1.0); gl_FragDepth = 0.5; }
+    );
+    defer alloc.free(exact);
+    try assertContains(exact, "gl_FragDepth : SV_Depth");
+    try assertNotContains(exact, "SV_DepthLessEqual");
+    try assertNotContains(exact, "SV_DepthGreaterEqual");
+
+    // layout(depth_unchanged) has no HLSL semantic; keep conservative SV_Depth.
+    const unchanged = try compileToHlsl(
+        \\#version 450
+        \\layout(depth_unchanged) out float gl_FragDepth;
+        \\layout(location = 0) out vec4 c;
+        \\void main() { c = vec4(1.0); }
+    );
+    defer alloc.free(unchanged);
+    // The builtin is an out PARAM, so the semantic is followed by ')' not ';'.
+    try assertContains(unchanged, "gl_FragDepth : SV_Depth)");
+}
+
+// MS textures: Texture2DMS[Array].GetDimensions carries the sample count in its
+// last out-param, but the RWTexture2D[Array] types zioshade maps MS STORAGE
+// images to have no samples overload. Sample counts on storage images query the
+// spatial dims and fill 0, mirroring spirv-cross's spvImageSize (Param = 0u).
+test "hlsl: imageSamples on MS storage images uses the RW overload and fills 0" {
+    const hlsl = try compileToHlsl(
+        \\#version 450
+        \\layout(location = 0) out vec4 FragColor;
+        \\layout(binding = 0) uniform sampler2DMS uSampler;
+        \\layout(binding = 1) uniform sampler2DMSArray uSamplerArray;
+        \\layout(rgba8, binding = 2) uniform image2DMS uImage;
+        \\layout(rgba8, binding = 3) uniform image2DMSArray uImageArray;
+        \\void main() {
+        \\    FragColor = vec4(float(textureSamples(uSampler) + textureSamples(uSamplerArray)
+        \\        + imageSamples(uImage) + imageSamples(uImageArray)));
+        \\}
+    );
+    defer alloc.free(hlsl);
+    // Sampled MS textures keep the samples out-param overload.
+    try assertContains(hlsl, "uSampler.GetDimensions(");
+    try assertContains(hlsl, "uSamplerArray.GetDimensions(");
+    // Storage MS images: plain RW overload + zero-filled count, never the
+    // DXC-rejected samples overload. Check the full statement around each call.
+    try assertContains(hlsl, "_sm = 0u;");
+    for ([_][]const u8{ "uImage.GetDimensions(", "uImageArray.GetDimensions(" }) |call| {
+        const at = std.mem.indexOf(u8, hlsl, call) orelse return error.TestExpectedFind;
+        const stmt_end = std.mem.indexOfPos(u8, hlsl, at, ";\n") orelse return error.TestExpectedFind;
+        const stmt = hlsl[at .. stmt_end + 1];
+        // The RW overload's argument list closes BEFORE the sample-count zero-fill.
+        const close = std.mem.indexOf(u8, stmt, ");") orelse return error.TestExpectedFind;
+        if (std.mem.indexOf(u8, stmt[0..close], "_sm") != null) return error.TestUnexpectedFind;
+        if (std.mem.indexOf(u8, stmt[close..], "_sm = 0u;") == null) return error.TestExpectedFind;
+    }
 }
 
 // ---------------------------------------------------------------------------

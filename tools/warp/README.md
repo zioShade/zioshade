@@ -103,6 +103,31 @@ compiler (e.g. types.flatten: three UBOs all at binding 0).
 - `run.ps1`            — compile pairs to DXIL + render + diff + tally.
 - `stage_pairs.sh`     — (run on the dev machine) emit the zioshade/SPIRV-Cross HLSL pairs.
 
+## Depth mode (conservative-depth verification)
+
+`warp_render.exe <vs.cso> <psA.cso> <psB.cso> <probeVs.cso> <probePs.cso> [depthClear] [dumpPrefix]`
+(6+ args with two more `.cso` files select it; the legacy `[out_prefix]` form still
+renders depth-less). It binds a D32 depth attachment, clears it to `depthClear`, and
+draws the shader under test with the depth test ON (LESS_EQUAL, write on), so only
+pixels whose WRITTEN depth passes against the clear survive. A second probe draw
+(`probeVs.cso` + `probePs.cso`, LESS func, no depth write, probe VS carries a
+spatially varying z) then composites green wherever the stored depth exceeds the
+per-column probe z. The final image is a 2D fingerprint of the exported depth
+values: a dropped, clamped, or ignored depth write moves it. Optional `dumpPrefix`
+writes `<prefix>A.ppm`/`<prefix>B.ppm` renders for inspection.
+
+First run (2026-08-19, ryzen7pro) verified zioshade's DepthLess/DepthGreater
+lowering to `SV_DepthLessEqual`/`SV_DepthGreaterEqual` (with the DXC-required
+`noperspective centroid` on the SV_Position input): both a depth-less pair
+(z=1 VS, clear 0.3, written depth 0..0.5) and a depth-greater pair (z=0 VS, clear
+0.7, written 0.5..0.9) RENDER-MATCH at 0 differing pixels against BOTH references:
+a hand-written native-HLSL plain-`SV_Depth` shader with the same math, and
+spirv-cross's `--shader-model 60` output (patched only with the same
+noperspective-centroid modifier, which spirv-cross omits and DXC demands). A
+negative control (identical color ramp, HALF the written depth) DIFFERs at max
+channel 255, proving the path detects wrong depth values. Artifacts: `C:\warp\vgaps`
+on the Windows box (scratch; shaders + this renderer build).
+
 ## Status
 
 **First end-to-end run on the real runtime: 2026-08-18, `ryzen7pro` (Windows 11,
@@ -185,16 +210,18 @@ of the Metal fast-math EDGE class in tools/hlsl_render_check.sh.
 
 The 38 skips, by reason:
 
-- `dxc-zs` (7) - DXC rejects zioshade's HLSL; validity-scope gaps, honest rejects:
-  `types.flatten` and `pack_unpack` (known, see the notes below), plus four newly
-  cataloged here: `bvec-ops`/`vector-relational` (componentwise OpLogicalAnd on
-  bool vectors emitted as `&&`, which HLSL requires to be scalar; spirv-cross
-  emits the intrinsic form), `dual-source-blending.desktop`/`stencil-export.desktop`
-  (Location=0,Index=1 dual-source output emitted as a second `SV_Target0` instead
-  of `SV_Target1`, so DXC sees "overlapping semantic index at 0"), and
-  `sampler-ms-query.desktop` (`GetDimensions` overload on multisampled textures
-  that DXC rejects; spirv-cross routes the sample count through a separate out
-  param).
+- `dxc-zs` (2) - DXC rejects zioshade's HLSL; validity-scope gaps, honest rejects:
+  `types.flatten` and `pack_unpack` (known, see the notes below).
+  FIXED since that run (now DXC-valid; re-run the sweep to re-tally): the five
+  WARP-triage validity gaps: `bvec-ops`/`vector-relational` (componentwise
+  OpLogicalAnd on bool vectors emitted as scalar-only `&&`; now expanded per
+  component, spirv-cross's shape), `dual-source-blending.desktop`/
+  `stencil-export.desktop` (Location=0,Index=1 dual-source output was a second
+  `SV_Target0`; now folds location+index to `SV_Target1`, and the stencil
+  export maps to `uint ... : SV_StencilRef`), and `sampler-ms-query.desktop`
+  (MS STORAGE images kept asking RWTexture2D for the samples out-param DXC has
+  no overload for; now the RW overload + zero-filled count, spirv-cross's
+  `Param = 0u` shape).
 - `dxc-sc` (3) - DXC rejects SPIRV-Cross's HLSL: `image-ms.desktop`,
   `multi_uniforms`, `uniforms_global`. Reference-side limitations.
 - `warp-2` (28) - harness scope: shaders needing textures/SRVs, rasterizer
