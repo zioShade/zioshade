@@ -4279,11 +4279,16 @@ fn doWhileBodyHasContinueGLSL(
                 // An arm targeting a TRIVIAL cont block (Label + OpBranch %cont)
                 // that is NOT this branch's own SelectionMerge target is also a
                 // real continue: its path must skip the merge/remaining body,
-                // which linear fall-through cannot express. When the trivial
-                // block IS the selection merge (the else-less fall-through shape,
-                // graphicsfuzz_033/078), the walker reaches it linearly after
-                // the if and falls into the latch -- safe, and the ladder's
-                // trivial continue fast paths are degraded for pattern C.
+                // which linear fall-through cannot express. The own-merge
+                // exemption is FALSE-ARM ONLY (review finding: polarity-blind,
+                // it admitted the inverted `if (c) {} else break;` whose TRUE
+                // arm is the merge -- the ladder's `if (c) continue;` fast paths
+                // then skipped the latch/copies/bottom test AND emitted an
+                // undeclared latch temp). Only the false arm's own-merge is the
+                // path the walker reaches linearly after the if (the _033/_078
+                // fall-through shape); a TRUE-arm own-merge must invert the
+                // guard, which the fast paths do not do. Switch cases have no
+                // false arm and are never exempt.
                 const arm = inst.words[wi];
                 if (label_map.get(arm)) |ai| {
                     if (ai + 2 < m.instructions.len and
@@ -4292,7 +4297,8 @@ fn doWhileBodyHasContinueGLSL(
                         m.instructions[ai + 1].words.len > 1 and
                         m.instructions[ai + 1].words[1] == cont_lbl)
                     {
-                        const is_own_merge = i > 0 and m.instructions[i - 1].op == .SelectionMerge and
+                        const is_false_arm = inst.op == .BranchConditional and wi == 3;
+                        const is_own_merge = is_false_arm and i > 0 and m.instructions[i - 1].op == .SelectionMerge and
                             m.instructions[i - 1].words.len > 1 and m.instructions[i - 1].words[1] == arm;
                         if (!is_own_merge) return true;
                     }
@@ -5109,7 +5115,7 @@ fn emitWhileLoop(
                         }
                         break :blk false;
                     };
-                    if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe) and !merge_has_phis) {
+                    if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe) and !merge_has_phis and cont_emit_ok) {
                         // if (cond) continue;  (+ the true arm's latch-phi copies)
                         const arm_lbl = if (ntl == cont_lbl) blockLabelOfGLSL(m, bi) else ntl;
                         if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
@@ -5138,7 +5144,7 @@ fn emitWhileLoop(
                         } else {
                             try w.writeAll("        continue;\n");
                         }
-                    } else if (tl_is_trivial_continue and nhe and !merge_has_phis) {
+                    } else if (tl_is_trivial_continue and nhe and !merge_has_phis and cont_emit_ok) {
                         // if (cond) continue; else { ... }  (+ the true arm's latch copies)
                         const tarm_lbl = if (ntl == cont_lbl) blockLabelOfGLSL(m, bi) else ntl;
                         if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {

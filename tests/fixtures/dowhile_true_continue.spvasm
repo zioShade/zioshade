@@ -1,0 +1,70 @@
+; SPIR-V
+; Version: 1.0
+; Generator: bespoke
+; Bound: 60
+; Schema: 0
+OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %color %frag
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %color Location 0
+OpDecorate %frag BuiltIn FragCoord
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%f32 = OpTypeFloat 32
+%v4f = OpTypeVector %f32 4
+%i32 = OpTypeInt 32 1
+%bool = OpTypeBool
+%ptr_out = OpTypePointer Output %v4f
+%ptr_in_v4 = OpTypePointer Input %v4f
+%f0 = OpConstant %f32 0
+%f1 = OpConstant %f32 1
+%f16 = OpConstant %f32 16
+%zero = OpConstant %i32 0
+%one = OpConstant %i32 1
+%four = OpConstant %i32 4
+%true = OpConstantTrue %bool
+%false = OpConstantFalse %bool
+%green = OpConstantComposite %v4f %f0 %f1 %f0 %f1
+%blue = OpConstantComposite %v4f %f0 %f0 %f1 %f1
+%black = OpConstantComposite %v4f %f0 %f0 %f0 %f1
+%color = OpVariable %ptr_out Output
+%frag = OpVariable %ptr_in_v4 Input
+%main = OpFunction %void None %fn
+%e = OpLabel
+OpBranch %hdr
+%hdr = OpLabel
+%i = OpPhi %i32 %zero %e %inext %cont
+OpLoopMerge %m %cont None
+OpBranch %body
+%body = OpLabel
+%fc = OpLoad %v4f %frag
+%fx = OpCompositeExtract %f32 %fc 0
+%fxd = OpFDiv %f32 %fx %f16
+%bound = OpConvertFToS %i32 %fxd
+%c0 = OpSLessThan %bool %i %bound
+OpSelectionMerge %fall None
+OpBranchConditional %c0 %fall %brk
+%brk = OpLabel
+OpStore %color %black
+OpBranch %m
+%fall = OpLabel
+OpBranch %cont
+%cont = OpLabel
+%ec = OpPhi %bool %false %fall
+%inext = OpIAdd %i32 %i %one
+OpBranchConditional %ec %hdr %m
+%m = OpLabel
+%mp = OpPhi %bool %true %brk %false %cont
+OpSelectionMerge %end None
+OpBranchConditional %mp %wr %wb
+%wr = OpLabel
+OpStore %color %green
+OpBranch %end
+%wb = OpLabel
+OpStore %color %blue
+OpBranch %end
+%end = OpLabel
+OpReturn
+OpFunctionEnd

@@ -2054,3 +2054,17 @@ test "GLSL materializes a do-while merge-phi as a carrier written on both exit p
     // Post-loop: the merge block's branch reads the carrier by name.
     try std.testing.expect(std.mem.indexOf(u8, glsl, "if (v47_lm)") != null);
 }
+
+// #loop-merge-phi-do-while, review finding 1: the own-merge exemption in the
+// continue-safety check was POLARITY-BLIND -- it admitted the inverted
+// `if (c) {} else { break; }` shape whose TRUE arm is the branch's own
+// SelectionMerge target (a trivial cont block). The ladder's true-arm
+// `if (c) continue;` fast path then fired inside a pattern-C do-while: the
+// continue skipped the latch/copies/bottom test (frozen counter, infinite
+// loop) AND the emitted latch temp was undeclared (invalid GLSL). The
+// exemption is now false-arm-only; the true-arm shape keeps the honest error.
+const DOWHILE_TRUE_CONTINUE_SPV = @embedFile("fixtures/dowhile_true_continue.spv");
+
+test "GLSL refuses a pattern-C do-while whose TRUE arm is the own-merge cont fall-through (#loop-merge-phi-do-while)" {
+    try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossGlsl(DOWHILE_TRUE_CONTINUE_SPV));
+}
