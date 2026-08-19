@@ -2797,6 +2797,13 @@ pub fn tryInlineDoWhileCond(
         return std.fmt.allocPrint(alloc, "!({s})", .{inner}) catch null;
     }
     if (def.op == .Load and def.words.len > 3) return names.get(def.words[3]);
+    // A CONSTANT back-edge condition (`do { ... } while (false);` — a once-block,
+    // the degenerate form of a dead inner loop): the inline expression is the
+    // constant itself. Without this the native path refused (UnstructuredControlFlow)
+    // whenever the body scan flagged control flow — e.g. the body==cont form,
+    // whose scan starts inside the latch and sees the back-edge BC itself.
+    if (def.op == .ConstantTrue) return "true";
+    if (def.op == .ConstantFalse) return "false";
     return null;
 }
 
@@ -2932,6 +2939,7 @@ pub fn dowhileNestedBodyPhiSafe(
     cont_lbl: u32,
     label_map: *const std.AutoHashMap(u32, usize),
     check_header: bool,
+    check_merge: bool,
 ) bool {
     // Loop-header phis: between the header Label and the LoopMerge at loop_idx.
     // SKIPPED by callers that implement the do-while header-carry hoist
@@ -2947,25 +2955,30 @@ pub fn dowhileNestedBodyPhiSafe(
             if (module.instructions[pi].op == .Phi) return false;
         }
     }
-    // Divergent leading phis at the merge block.
-    if (label_map.get(merge_lbl)) |mi| {
-        var pj: usize = mi + 1;
-        while (pj < module.instructions.len) : (pj += 1) {
-            const minst = module.instructions[pj];
-            if (minst.op != .Phi) break;
-            if (minst.words.len < 7) continue; // <2 incoming pairs cannot diverge
-            var first_val: u32 = 0;
-            var diverges = false;
-            var wi: usize = 3;
-            while (wi + 1 < minst.words.len) : (wi += 2) {
-                if (wi == 3) {
-                    first_val = minst.words[wi];
-                } else if (minst.words[wi] != first_val) {
-                    diverges = true;
-                    break;
+    // Divergent leading phis at the merge block. SKIPPED by callers that
+    // materialize the merge phis as carriers on pattern C
+    // (#loop-merge-phi-do-while: declare `v<id>_lm` above the loop, write each
+    // exit path's incoming before its break / the bottom test).
+    if (check_merge) {
+        if (label_map.get(merge_lbl)) |mi| {
+            var pj: usize = mi + 1;
+            while (pj < module.instructions.len) : (pj += 1) {
+                const minst = module.instructions[pj];
+                if (minst.op != .Phi) break;
+                if (minst.words.len < 7) continue; // <2 incoming pairs cannot diverge
+                var first_val: u32 = 0;
+                var diverges = false;
+                var wi: usize = 3;
+                while (wi + 1 < minst.words.len) : (wi += 2) {
+                    if (wi == 3) {
+                        first_val = minst.words[wi];
+                    } else if (minst.words[wi] != first_val) {
+                        diverges = true;
+                        break;
+                    }
                 }
+                if (diverges) return false;
             }
-            if (diverges) return false;
         }
     }
     // Leading phis at the continue/latch block.

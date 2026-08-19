@@ -2026,3 +2026,31 @@ test "GLSL lowers a phi-counter do-while with a merge-phi condition (#dowhile-he
     // froze -> infinite loop).
     try expectOrdered(glsl, "v11 = v19;", "if (!(");
 }
+
+// #loop-merge-phi-do-while: class (2) of the _033/_078 program -- a pattern-C
+// do-while whose MERGE block carries a DIVERGENT phi (true from a side-effecting
+// body break block, false from the cont's failed back-edge test). Previously
+// refused by the phi gate's merge check (UnsupportedDoWhileNestedBody); now the
+// loop-merge-phi carrier machinery extends to pattern C: the carrier
+// (bool %47 -> v47_lm) is declared above the loop, the BOTTOM test writes the
+// cont-pred incoming (false) before its break, the body break path writes its
+// own incoming (true) via emitBlock's break-to-loop-merge handler, and the
+// post-loop read uses the carrier. Fixture: hand-assembled (dead nested loop
+// routes the pre-scan, mirroring the graphicsfuzz_033/078 shapes).
+const DOWHILE_MERGE_PHI_SPV = @embedFile("fixtures/dowhile_merge_phi.spv");
+
+test "GLSL materializes a do-while merge-phi as a carrier written on both exit paths (#loop-merge-phi-do-while)" {
+    const glsl = try crossGlsl(DOWHILE_MERGE_PHI_SPV);
+    defer alloc.free(glsl);
+    // Carrier declared above the while(true).
+    try expectOrdered(glsl, "bool v47_lm;", "while (true)");
+    // Break path: the side-effecting break block's incoming (true) copied by
+    // emitBlock's handler BEFORE its break.
+    try expectOrdered(glsl, "v47_lm = true;", "break;");
+    // Bottom test: the cont-pred incoming (false) copied before the test; the
+    // counter carry copy (#dowhile-header-carry) also sits inside the loop.
+    try expectOrdered(glsl, "v47_lm = false;", "if (!(");
+    try expectOrdered(glsl, "while (true)", "v47_lm = false;");
+    // Post-loop: the merge block's branch reads the carrier by name.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "if (v47_lm)") != null);
+}
