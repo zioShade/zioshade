@@ -1002,7 +1002,13 @@ threadlocal var g_int_mix_needed: bool = false;
 // the same break site assigns each carrier its incoming for THAT predecessor
 // before the `break;` (a break without the copy leaves the carrier holding the
 // normal-exit fallback value, silently dropping the break path's distinct value).
-const LoopMergeCtx = struct { merge_label: u32, continue_label: u32, merge_phis: []const Instruction = &.{} };
+// #loop-merge-phi-do-while: pattern_c marks a pattern-C do-while (while(true)
+// with the latch/copies/bottom test at the END of the body). A GLSL `continue`
+// there jumps to the top and skips them, so cont-branch sites must fall through
+// linearly instead; every body OpBranch-to-cont in an ADMITTED pattern-C loop is
+// the adjacent final fall-through (mid-body continues are refused at admission
+// by doWhileBodyHasContinueGLSL).
+const LoopMergeCtx = struct { merge_label: u32, continue_label: u32, merge_phis: []const Instruction = &.{}, pattern_c: bool = false };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
 // #switch-arm-break: the innermost enclosing SWITCH's merge + its merge phis, so
@@ -4702,7 +4708,7 @@ fn emitWhileLoop(
     // break-to-loop-merge handler writes the break path's incoming, exactly as
     // for top-test loops. The native do-while reaches here only with an empty
     // list (the gate refuses merge phis on that path).
-    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .continue_label = cont_lbl, .merge_phis = loop_mphis.items };
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .continue_label = cont_lbl, .merge_phis = loop_mphis.items, .pattern_c = is_do_while and !dw_native };
 
     // Loop-carried body phis: an OpPhi materialized inside the loop body (a
     // selection merge, e.g. `j = cond ? 40u : 30u`) whose result the CONTINUE
@@ -5466,10 +5472,17 @@ fn emitBlock(
                 const sw_br_target = if (inst.words.len > 1) inst.words[1] else 0;
                 // A switch case that branches to the enclosing LOOP's continue is a
                 // structured continue, not a switch break (#switch-case-continue).
+                // #loop-merge-phi-do-while: for a pattern-C do-while, `continue;`
+                // would skip the latch/copies/bottom test -- fall out of the case
+                // instead (admission guarantees this cont-branch is the adjacent
+                // final fall-through; Switch arms targeting the continue directly
+                // are refused at admission).
                 if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == sw_br_target) {
                     // #latch-phi: this block's continue carries its latch-phi copies.
                     try emitLatchPhiCopiesGLSL(m, names, lm, ctx.continue_label, blockLabelOfGLSL(m, i), w, alloc);
-                    try w.print("{s}    continue;\n", .{indent});
+                    if (!ctx.pattern_c) {
+                        try w.print("{s}    continue;\n", .{indent});
+                    }
                     break;
                 };
                 // The #69 loop-header follow, which the switch path never had: a case body
@@ -5502,13 +5515,20 @@ fn emitBlock(
             // continues the outer loop would otherwise end the block here and fall through
             // to the switch handler's unconditional `break;`, so the post-switch code runs
             // on the continue path -> silent-wrong (loop-dominator-and-switch-default).
+            // #loop-merge-phi-do-while: for a pattern-C do-while, `continue;` would
+            // skip the latch/copies/bottom test at the END of the while(true) body --
+            // fall out of the block instead (admission guarantees an arm-walked
+            // OpBranch-to-cont is the adjacent final fall-through; mid-body
+            // continues are refused by doWhileBodyHasContinueGLSL).
             if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == br_target) {
                 // #latch-phi: this block's continue carries its latch-phi copies
                 // (the most common shape: `if (c) { <compute>; continue; }` walked
                 // here by emitBlock — leaving them out kept the loop-header carry
                 // unwritten on the continue path, review of the first cut).
                 try emitLatchPhiCopiesGLSL(m, names, lm, ctx.continue_label, blockLabelOfGLSL(m, i), w, alloc);
-                try w.print("{s}    continue;\n", .{indent});
+                if (!ctx.pattern_c) {
+                    try w.print("{s}    continue;\n", .{indent});
+                }
                 break;
             };
             // #switch-arm-break: an OpBranch to the enclosing SWITCH's merge is a
