@@ -2021,10 +2021,10 @@ test "GLSL lowers a phi-counter do-while with a merge-phi condition (#dowhile-he
     const glsl = try crossGlsl(DOWHILE_PHI_COUNTER_SPV);
     defer alloc.free(glsl);
     try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
-    // The back-edge copy must exist: the persistent counter is re-assigned from
-    // the latch's update def before the bottom break (without it the counter
-    // froze -> infinite loop).
-    try expectOrdered(glsl, "v11 = v19;", "if (!(");
+    // The back-edge copy must exist AFTER the bottom test (the back edge is
+    // the loop-closing path only; copying before the test made a break carry
+    // the UPDATED value -- the phi's post-loop value is the last header entry).
+    try expectOrdered(glsl, "if (!(", "v11 = v19;");
 }
 
 // #loop-merge-phi-do-while: class (2) of the _033/_078 program -- a pattern-C
@@ -2067,4 +2067,26 @@ const DOWHILE_TRUE_CONTINUE_SPV = @embedFile("fixtures/dowhile_true_continue.spv
 
 test "GLSL refuses a pattern-C do-while whose TRUE arm is the own-merge cont fall-through (#loop-merge-phi-do-while)" {
     try std.testing.expectError(error.UnsupportedDoWhileCompoundCond, crossGlsl(DOWHILE_TRUE_CONTINUE_SPV));
+}
+
+// #dowhile-noninline-cond (class 3 of the _033/_078 program): a do-while whose
+// back-edge cond is a COMPUTED value (not a phi) whose operand chain reaches
+// the loop HEADER phi (`%ec = %inext < 4` with `%inext = %i + 1` in the body
+// merge block). The operand inliner cannot cross a phi, so the native-path
+// rebuild failed -> UnstructuredControlFlow. The cond is computed IN the cont
+// block, so pattern C emits it in the latch walk and reads it by name at the
+// bottom test; the header phi rides the #dowhile-header-carry machinery.
+// Fixture mirrors graphicsfuzz_027's shape (a Switch body + the update in the
+// body-merge block + the cond in the cont).
+const DOWHILE_SWITCH_NONINLINE_SPV = @embedFile("fixtures/dowhile_switch_noninline.spv");
+
+test "GLSL still defers a do-while with a non-inlinable computed cond over a header phi (#dowhile-noninline-cond, deferred)" {
+    // Class 3 is IMPLEMENTED and render-verified (the routing + this fixture
+    // matched naga; graphicsfuzz_027 verified 2-of-3 against spirv-cross) but
+    // is HELD BACK until the else-if ladder chain-hoist lands: admitting these
+    // loops lets graphicsfuzz_080's post-loop 5-deep else-if ladder reach an
+    // emission bug (arm-scoped chain phis read outside their braces, invalid
+    // GLSL -- see the #ladder-phi-scope guards). This pins the current honest
+    // error so the next round flips it deliberately.
+    try std.testing.expectError(error.UnstructuredControlFlow, crossGlsl(DOWHILE_SWITCH_NONINLINE_SPV));
 }
