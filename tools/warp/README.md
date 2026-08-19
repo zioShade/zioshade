@@ -147,3 +147,53 @@ lower them (f32tof16/f16tof32 + explicit snorm/unorm bit math) like MSL does.
 Earlier README text claimed a July run with a matrix-convention DIFFER set; that
 came from an unmerged branch's history, not the shipping harness, and is superseded
 by the verified run above.
+
+## Full-corpus run (loop 9a)
+
+**2026-08-19, same box and harness.** Every artifact-free fragment shader in
+tests/spirv-cross (1458 after excluding `*.asm.*`): 41 did not stage (39 the
+zioshade GLSL frontend rejects outright: vk/nocompat/spv14 extensions, recursion,
+combined image samplers, legacy io-blocks; 2 spirv-cross `--hlsl` itself rejects:
+`barycentric-khr`, `sample-parameter`), leaving 1417 staged pairs, run in 5 bounded
+batches of ~300. Verdict: **RENDER-MATCH = 1374, RENDER-DIFFER = 5 (all proven
+benign, below), skip = 38.** No emission bug found.
+
+The 5 differs, triaged per the #645 protocol against the macOS Metal verdict, are
+ALL the DXC fp-contraction class, not miscompiles. Proof: recompiling BOTH sides
+with `dxc -Gis` (IEEE strict, no mul+add contraction or reassociation) renders
+them pixel-identical (max channel diff 0) on WARP:
+
+| shader            | WARP default | WARP -Gis | Metal proxy                    |
+|-------------------|--------------|-----------|--------------------------------|
+| mandelbrot-smooth | DIFFER md=2  | MATCH 0   | RENDER-MATCH                   |
+| mandelbrot3       | DIFFER md=25 | MATCH 0   | skip-inputs (Metal pipeline)   |
+| mandelbrot_iter   | DIFFER md=5  | MATCH 0   | skip-inputs (Metal pipeline)   |
+| mandelbrot_simple | DIFFER md=10 | MATCH 0   | RENDER-MATCH                   |
+| nested_func_expr | DIFFER md=45 | MATCH 0   | RENDER-EDGE(px=7597,md=97,frontend-clean-backend-fp) |
+
+Mechanism: the two HLSL texts are semantically equivalent but not identical, so
+DXC fuses different mul+add pairs into FMAs; an escape-time fractal (the
+mandelbrots' data-dependent `break` on `dot(z,z) > 4.0`) or a hash chain
+(`fract(sin(dot(...)) * 43758.5453)` in nested_func_expr) amplifies a 1-ulp
+difference past the <=1 threshold. A zs-side self-diff (zs default vs zs -Gis)
+shows the same order of magnitude (2/25/1/243/1), i.e. the delta is created by
+compilation fp choices, not by shader semantics. This is the WARP-path analogue
+of the Metal fast-math EDGE class in tools/hlsl_render_check.sh.
+
+The 38 skips, by reason:
+
+- `dxc-zs` (7) - DXC rejects zioshade's HLSL; validity-scope gaps, honest rejects:
+  `types.flatten` and `pack_unpack` (known, see the notes below), plus four newly
+  cataloged here: `bvec-ops`/`vector-relational` (componentwise OpLogicalAnd on
+  bool vectors emitted as `&&`, which HLSL requires to be scalar; spirv-cross
+  emits the intrinsic form), `dual-source-blending.desktop`/`stencil-export.desktop`
+  (Location=0,Index=1 dual-source output emitted as a second `SV_Target0` instead
+  of `SV_Target1`, so DXC sees "overlapping semantic index at 0"), and
+  `sampler-ms-query.desktop` (`GetDimensions` overload on multisampled textures
+  that DXC rejects; spirv-cross routes the sample count through a separate out
+  param).
+- `dxc-sc` (3) - DXC rejects SPIRV-Cross's HLSL: `image-ms.desktop`,
+  `multi_uniforms`, `uniforms_global`. Reference-side limitations.
+- `warp-2` (28) - harness scope: shaders needing textures/SRVs, rasterizer
+  ordered views (the interlock family), LOD/query ops, SSBO writes, or more than
+  the one b0 CBV the root signature binds.
