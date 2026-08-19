@@ -1,4 +1,5 @@
-.gitsip/** -filter -merge -diff
 plans/** filter=gitsip merge=gitsip diff=gitsip -text export-ignore
 GOAL.md filter=gitsip merge=gitsip diff=gitsip -text export-ignore
 private/** filter=gitsip merge=gitsip diff=gitsip -text export-ignore
+.gitsip/** -filter -merge -diff -text
+.gitattributes -filter -merge -diff -text
