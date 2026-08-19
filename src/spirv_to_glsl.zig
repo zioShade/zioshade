@@ -1002,7 +1002,13 @@ threadlocal var g_int_mix_needed: bool = false;
 // the same break site assigns each carrier its incoming for THAT predecessor
 // before the `break;` (a break without the copy leaves the carrier holding the
 // normal-exit fallback value, silently dropping the break path's distinct value).
-const LoopMergeCtx = struct { merge_label: u32, continue_label: u32, merge_phis: []const Instruction = &.{} };
+// #loop-merge-phi-do-while: pattern_c marks a pattern-C do-while (while(true)
+// with the latch/copies/bottom test at the END of the body). A GLSL `continue`
+// there jumps to the top and skips them, so cont-branch sites must fall through
+// linearly instead; every body OpBranch-to-cont in an ADMITTED pattern-C loop is
+// the adjacent final fall-through (mid-body continues are refused at admission
+// by doWhileBodyHasContinueGLSL).
+const LoopMergeCtx = struct { merge_label: u32, continue_label: u32, merge_phis: []const Instruction = &.{}, pattern_c: bool = false };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
 // #switch-arm-break: the innermost enclosing SWITCH's merge + its merge phis, so
@@ -4245,26 +4251,72 @@ fn doWhileBodyHasContinueGLSL(
     label_map: *const std.AutoHashMap(u32, usize),
 ) bool {
     const start = label_map.get(body_lbl) orelse return true; // unknown: assume unsafe
+    // #loop-merge-phi-do-while: an UNCONDITIONAL OpBranch %cont is safe only as
+    // the body's LAST block (the natural fall-through immediately before the
+    // latch). Track how many distinct blocks branch to cont, and whether the
+    // latest one is directly followed by the cont label (no body block after).
+    var cont_branch_blocks: usize = 0;
+    var last_cont_branch_adjacent: bool = false;
+    var reached_cont_lbl = false;
     var i: usize = start + 1;
     while (i < m.instructions.len) : (i += 1) {
         const inst = m.instructions[i];
         if (inst.op == .FunctionEnd) break;
-        if (inst.op == .Label and inst.words.len > 1 and (inst.words[1] == cont_lbl or inst.words[1] == merge_lbl)) break;
+        if (inst.op == .Label and inst.words.len > 1 and (inst.words[1] == cont_lbl or inst.words[1] == merge_lbl)) {
+            if (inst.words[1] == cont_lbl) reached_cont_lbl = true;
+            break;
+        }
+        if (inst.op == .Label) last_cont_branch_adjacent = false;
         // A CONDITIONAL branch (BranchConditional arm / Switch case) targeting the
         // continue is a real `continue;` even when it is the ONLY cont-branch:
         // the walker emits a GLSL continue there, making the copies+bottom test
         // dead code (review #2 -- the count-based check tolerated exactly one and
-        // misread a lone conditional continue as the fall-through). An
-        // UNCONDITIONAL OpBranch %cont is always safe: the walker emits nothing
-        // for it and control falls linearly into the latch walk/copies/test.
+        // misread a lone conditional continue as the fall-through).
         if ((inst.op == .BranchConditional or inst.op == .Switch) and inst.words.len > 1) {
             var wi: usize = 2;
             while (wi < inst.words.len) : (wi += 1) {
                 if (inst.words[wi] == cont_lbl) return true;
+                // An arm targeting a TRIVIAL cont block (Label + OpBranch %cont)
+                // that is NOT this branch's own SelectionMerge target is also a
+                // real continue: its path must skip the merge/remaining body,
+                // which linear fall-through cannot express. The own-merge
+                // exemption is FALSE-ARM ONLY (review finding: polarity-blind,
+                // it admitted the inverted `if (c) {} else break;` whose TRUE
+                // arm is the merge -- the ladder's `if (c) continue;` fast paths
+                // then skipped the latch/copies/bottom test AND emitted an
+                // undeclared latch temp). Only the false arm's own-merge is the
+                // path the walker reaches linearly after the if (the _033/_078
+                // fall-through shape); a TRUE-arm own-merge must invert the
+                // guard, which the fast paths do not do. Switch cases have no
+                // false arm and are never exempt.
+                const arm = inst.words[wi];
+                if (label_map.get(arm)) |ai| {
+                    if (ai + 2 < m.instructions.len and
+                        m.instructions[ai].op == .Label and
+                        m.instructions[ai + 1].op == .Branch and
+                        m.instructions[ai + 1].words.len > 1 and
+                        m.instructions[ai + 1].words[1] == cont_lbl)
+                    {
+                        const is_false_arm = inst.op == .BranchConditional and wi == 3;
+                        const is_own_merge = is_false_arm and i > 0 and m.instructions[i - 1].op == .SelectionMerge and
+                            m.instructions[i - 1].words.len > 1 and m.instructions[i - 1].words[1] == arm;
+                        if (!is_own_merge) return true;
+                    }
+                }
             }
         }
+        if (inst.op == .Branch and inst.words.len > 1 and inst.words[1] == cont_lbl) {
+            cont_branch_blocks += 1;
+            last_cont_branch_adjacent = true;
+        }
     }
-    return false;
+    // Epilogue: the fall-through is the cont-branching block that sits directly
+    // before the cont label. Anything else (a second cont-branching block, a
+    // cont-branch with body blocks after it, or the scan ending at the merge
+    // label / function end first) means a mid-body continue.
+    if (cont_branch_blocks == 0) return false; // exits only via the bottom test / breaks
+    if (cont_branch_blocks == 1 and reached_cont_lbl and last_cont_branch_adjacent) return false;
+    return true;
 }
 
 fn emitWhileLoop(
@@ -4523,7 +4575,13 @@ fn emitWhileLoop(
         var sidx = bidx + 1;
         while (!body_nested and sidx < m.instructions.len) : (sidx += 1) {
             const t = m.instructions[sidx];
-            if (t.op == .Label and t.words.len > 1 and t.words[1] == cont_lbl) break;
+            // The body region ends at the continue label OR the merge label (a
+            // flat break exits before the latch) — the emission walker below
+            // breaks on both, so the validation scan must too. Breaking on cont
+            // alone walked INTO the merge block and rejected its fall-through
+            // branch (#loop-merge-phi-do-while: a trivial body==cont do-while
+            // whose merge continues the enclosing body).
+            if (t.op == .Label and t.words.len > 1 and (t.words[1] == cont_lbl or t.words[1] == merge_lbl)) break;
             if (t.op == .FunctionEnd) break;
             // Nested loop or switch sharing the do-while condition is not yet supported.
             if (t.op == .LoopMerge or t.op == .Switch) return error.UnstructuredControlFlow;
@@ -4573,8 +4631,12 @@ fn emitWhileLoop(
     // is has_phis and !dw_native): a native do-while with header phis would
     // declare the phi above the loop and NEVER write it (silent-wrong; review
     // finding 1). So check_header = dw_native: refuse header phis exactly when
-    // the native path will be taken. The merge/latch surfaces stay gated for both.
-    if (body_nested and !common.dowhileNestedBodyPhiSafe(m, loop_idx, merge_lbl, cont_lbl, label_map, dw_native)) {
+    // the native path will be taken. #loop-merge-phi-do-while: the MERGE check
+    // is keyed the same way -- pattern C materializes the merge phis as
+    // `v<id>_lm` carriers (declared above the loop, written per exit path), the
+    // native path does not (silent-wrong risk), so it keeps the refusal. The
+    // latch surface stays gated for both.
+    if (body_nested and !common.dowhileNestedBodyPhiSafe(m, loop_idx, merge_lbl, cont_lbl, label_map, dw_native, dw_native)) {
         return error.UnsupportedDoWhileNestedBody;
     }
 
@@ -4594,13 +4656,16 @@ fn emitWhileLoop(
     // gates the SelectionMerge honest-error in the top walker below.
     if (!is_do_while) try w.print("    bool {s} = true;\n", .{first_flag});
 
-    // #loop-merge-phi: collect DIVERGENT phis at the loop's merge block (top-test
-    // loops only; a do-while keeps the existing generic-handler refusal -- MSL has
-    // the same gate. TODO(loop-merge-phi-do-while): a do-while's bottom test would
-    // need the fallback copy placed before its bottom break, a different site).
+    // #loop-merge-phi: collect DIVERGENT phis at the loop's merge block. Top-test
+    // loops AND pattern-C do-whiles (#loop-merge-phi-do-while: the carrier's
+    // normal-exit copy sits before the BOTTOM test, written from the cont-pred
+    // incoming -- the top-of-loop fallback would read latch temps before their
+    // single declaration, the _027 use-before-declaration hazard). The NATIVE
+    // do-while never reaches here with merge phis (the gate above refuses them).
     // Also resolve the normal-exit predecessor (the smallest-index pred: the
-    // header/cond block precedes every body/break block). Port of MSL's loop_mphis
-    // machinery.
+    // header/cond block precedes every body/break block) -- top-test only; a
+    // do-while's normal exit is the cont block (used directly at the bottom).
+    // Port of MSL's loop_mphis machinery.
     var loop_mphis: std.ArrayList(Instruction) = .empty;
     defer loop_mphis.deinit(alloc);
     var lm_norm_pred: u32 = 0;
@@ -4619,6 +4684,8 @@ fn emitWhileLoop(
                 }
             }
         }
+    } else {
+        collectLoopMergePhisGLSL(m, label_map, merge_lbl, &loop_mphis, alloc);
     }
     // #loop-merge-phi: declare a distinct carrier per divergent merge phi (read
     // after the loop) + rename its result id so the generic OpPhi handler does not
@@ -4642,10 +4709,12 @@ fn emitWhileLoop(
     // #loop-merge-phi: publish the carriers (filled above) to emitBlock's
     // break-to-loop-merge handler. Re-assigned here (same labels as the entry
     // assignment, which predates the collection) because the list must be
-    // complete first (a stored .items slice would go stale on append). Do-while
-    // loops publish the labels but no carriers: their merge phis keep the
-    // generic-handler refusal.
-    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .continue_label = cont_lbl, .merge_phis = if (!is_do_while) loop_mphis.items else &.{} };
+    // complete first (a stored .items slice would go stale on append). Pattern-C
+    // do-whiles publish their carriers too (#loop-merge-phi-do-while): emitBlock's
+    // break-to-loop-merge handler writes the break path's incoming, exactly as
+    // for top-test loops. The native do-while reaches here only with an empty
+    // list (the gate refuses merge phis on that path).
+    g_loop_merge_ctx = .{ .merge_label = merge_lbl, .continue_label = cont_lbl, .merge_phis = loop_mphis.items, .pattern_c = is_do_while and !dw_native };
 
     // Loop-carried body phis: an OpPhi materialized inside the loop body (a
     // selection merge, e.g. `j = cond ? 40u : 30u`) whose result the CONTINUE
@@ -4844,7 +4913,15 @@ fn emitWhileLoop(
         try w.print("        if (!({s})) break;\n", .{cond_name}); // top-test only
     }
     const body_idx = label_map.get(body_lbl) orelse m.instructions.len;
-    if (body_idx < m.instructions.len) {
+    // A body==cont do-while (the degenerate trivial form: the header branches
+    // straight to the latch, `do {} while (c);`) has an EMPTY body -- everything
+    // between the header and the back edge belongs to the latch, emitted by the
+    // cont walk below. Walking the "body" would start inside the latch and
+    // re-process the back-edge BC as a body branch: its merge arm targets the
+    // loop merge, which the trivial-break case reads as `if (c) break;` and the
+    // header arm recurses into the loop again -- forever.
+    const dw_body_empty = is_do_while and body_lbl == cont_lbl;
+    if (!dw_body_empty and body_idx < m.instructions.len) {
         var bi: usize = body_idx + 1;
         while (bi < m.instructions.len) : (bi += 1) {
             const binst = m.instructions[bi];
@@ -4868,11 +4945,17 @@ fn emitWhileLoop(
             }
             if (binst.op == .SelectionMerge) continue;
             if (binst.op == .Branch) {
-                // #loopcond-not-exit: on a no-top-test loop, a walker-level OpBranch to
-                // the loop merge is the loop exit -- emit the break (the arm-walker form
-                // is handled by emitBlock's #loop-break-on-selection-merge). The old
-                // silent skip left the loop exit-less.
-                if (no_top_test and binst.words.len > 1 and binst.words[1] == merge_lbl) {
+                // #loopcond-not-exit: on a no-top-test loop OR a pattern-C do-while
+                // (#loop-merge-phi-do-while), a walker-level OpBranch to the loop
+                // merge is the loop exit -- emit the break (the arm-walker form is
+                // handled by emitBlock's #loop-break-on-selection-merge). The old
+                // silent skip left the loop exit-less. The break ALSO writes each
+                // merge-phi carrier its incoming for THIS block, or the carrier
+                // keeps a stale/undefined value on this exit path.
+                if ((no_top_test or (is_do_while and !dw_native)) and binst.words.len > 1 and binst.words[1] == merge_lbl) {
+                    for (loop_mphis.items) |phi| {
+                        try emitLoopMergePhiCopyGLSL(m, names, phi, blockLabelOfGLSL(m, bi), "        ", w, alloc);
+                    }
                     try w.writeAll("        break;\n");
                     continue;
                 }
@@ -4900,6 +4983,15 @@ fn emitWhileLoop(
                 const ntl = binst.words[2];
                 const nfl = if (binst.words.len > 3) binst.words[3] else null;
                 const nml = bc_merge.get(bi);
+                // #loop-merge-phi-do-while: pattern C puts the latch/copies/bottom
+                // test at the END of the while(true) body -- a GLSL `continue` jumps
+                // to the TOP and skips them (the loop spins on stale carriers; the
+                // graphicsfuzz_033/078 miscompile). Ladder cases that emit
+                // `continue;` for the FALSE arm must degrade: the general case
+                // walks the false path linearly into the latch instead. TRUE-arm
+                // continue shapes cannot be expressed linearly and are refused at
+                // admission (doWhileBodyHasContinueGLSL).
+                const cont_emit_ok = !is_do_while or dw_native;
                 // #shortcircuit-exit (GLSL port of the MSL #622 rule): on a NO-TOP-TEST
                 // loop, the short-circuit chain's FINAL BranchConditional -- the one
                 // whose target IS the loop merge -- is the loop's real exit test.
@@ -5023,7 +5115,7 @@ fn emitWhileLoop(
                         }
                         break :blk false;
                     };
-                    if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe) and !merge_has_phis) {
+                    if (tl_is_trivial_continue and (fl_is_trivial_break or !nhe) and !merge_has_phis and cont_emit_ok) {
                         // if (cond) continue;  (+ the true arm's latch-phi copies)
                         const arm_lbl = if (ntl == cont_lbl) blockLabelOfGLSL(m, bi) else ntl;
                         if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
@@ -5033,7 +5125,7 @@ fn emitWhileLoop(
                         } else {
                             try w.print("        if ({s}) continue;\n", .{ncn});
                         }
-                    } else if (tl_is_trivial_break and fl_is_trivial_continue and !merge_has_phis) {
+                    } else if (tl_is_trivial_break and fl_is_trivial_continue and !merge_has_phis and cont_emit_ok) {
                         // if (cond) break; else continue;  (+ the false arm's latch copies)
                         // #loop-merge-phi: the break carries the merge-phi copies for
                         // the breaking arm's predecessor (the trivial break block
@@ -5052,7 +5144,7 @@ fn emitWhileLoop(
                         } else {
                             try w.writeAll("        continue;\n");
                         }
-                    } else if (tl_is_trivial_continue and nhe and !merge_has_phis) {
+                    } else if (tl_is_trivial_continue and nhe and !merge_has_phis and cont_emit_ok) {
                         // if (cond) continue; else { ... }  (+ the true arm's latch copies)
                         const tarm_lbl = if (ntl == cont_lbl) blockLabelOfGLSL(m, bi) else ntl;
                         if (latchPhiCountGLSL(m, label_map, cont_lbl) > 0) {
@@ -5075,7 +5167,7 @@ fn emitWhileLoop(
                         if (nhe) {
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         }
-                    } else if (fl_is_trivial_continue and !merge_has_phis) {
+                    } else if (fl_is_trivial_continue and !merge_has_phis and cont_emit_ok) {
                         // if (cond) { ... } else continue;  (+ the false arm's latch copies)
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
@@ -5292,6 +5384,15 @@ fn emitWhileLoop(
         // do-while (pattern C, straight-line body): test the back-edge condition at the
         // BOTTOM of a while(true) loop.
         if (is_do_while) {
+            // #loop-merge-phi-do-while: the bottom test's exit edge leaves from
+            // the CONT block -- write each carrier its cont-pred incoming BEFORE
+            // the test. On the fall-through path (test passes) the copy is dead:
+            // the next iteration's copy or a break path's own copy overwrites it
+            // before the post-loop read. Placed here (not at the loop top) so a
+            // latch-temp incoming is already declared by the latch walk above.
+            for (loop_mphis.items) |phi| {
+                try emitLoopMergePhiCopyGLSL(m, names, phi, cont_lbl, "        ", w, alloc);
+            }
             const dwc = names.get(bc.words[1]) orelse "true";
             if (dw_loop_when_true) {
                 try w.print("        if (!({s})) break;\n", .{dwc});
@@ -5377,10 +5478,17 @@ fn emitBlock(
                 const sw_br_target = if (inst.words.len > 1) inst.words[1] else 0;
                 // A switch case that branches to the enclosing LOOP's continue is a
                 // structured continue, not a switch break (#switch-case-continue).
+                // #loop-merge-phi-do-while: for a pattern-C do-while, `continue;`
+                // would skip the latch/copies/bottom test -- fall out of the case
+                // instead (admission guarantees this cont-branch is the adjacent
+                // final fall-through; Switch arms targeting the continue directly
+                // are refused at admission).
                 if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == sw_br_target) {
                     // #latch-phi: this block's continue carries its latch-phi copies.
                     try emitLatchPhiCopiesGLSL(m, names, lm, ctx.continue_label, blockLabelOfGLSL(m, i), w, alloc);
-                    try w.print("{s}    continue;\n", .{indent});
+                    if (!ctx.pattern_c) {
+                        try w.print("{s}    continue;\n", .{indent});
+                    }
                     break;
                 };
                 // The #69 loop-header follow, which the switch path never had: a case body
@@ -5413,13 +5521,20 @@ fn emitBlock(
             // continues the outer loop would otherwise end the block here and fall through
             // to the switch handler's unconditional `break;`, so the post-switch code runs
             // on the continue path -> silent-wrong (loop-dominator-and-switch-default).
+            // #loop-merge-phi-do-while: for a pattern-C do-while, `continue;` would
+            // skip the latch/copies/bottom test at the END of the while(true) body --
+            // fall out of the block instead (admission guarantees an arm-walked
+            // OpBranch-to-cont is the adjacent final fall-through; mid-body
+            // continues are refused by doWhileBodyHasContinueGLSL).
             if (g_loop_merge_ctx) |ctx| if (ctx.continue_label == br_target) {
                 // #latch-phi: this block's continue carries its latch-phi copies
                 // (the most common shape: `if (c) { <compute>; continue; }` walked
                 // here by emitBlock — leaving them out kept the loop-header carry
                 // unwritten on the continue path, review of the first cut).
                 try emitLatchPhiCopiesGLSL(m, names, lm, ctx.continue_label, blockLabelOfGLSL(m, i), w, alloc);
-                try w.print("{s}    continue;\n", .{indent});
+                if (!ctx.pattern_c) {
+                    try w.print("{s}    continue;\n", .{indent});
+                }
                 break;
             };
             // #switch-arm-break: an OpBranch to the enclosing SWITCH's merge is a

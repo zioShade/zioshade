@@ -5956,7 +5956,7 @@ fn emitWhileLoopHLSL(
         // do-whiles (the _lm/latch/carry machinery was never exercised here; _027
         // emits use-before-declaration merge-phi copies under pattern C). Keep the
         // honest error when any of those phi surfaces exists.
-        if (body_nested and !common.dowhileNestedBodyPhiSafe(module, loop_idx, merge_lbl, cont_lbl, label_map, true)) {
+        if (body_nested and !common.dowhileNestedBodyPhiSafe(module, loop_idx, merge_lbl, cont_lbl, label_map, true, true)) {
             return error.UnsupportedDoWhileNestedBody;
         }
         const cond_is_phi = if (getDef(module, bc.words[1])) |cdef| cdef.op == .Phi else false;
