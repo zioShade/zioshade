@@ -468,6 +468,131 @@ test "HLSL: pack/unpack_half2x16 via f32tof16/f16tof32 (no fabricated intrinsic)
     try assertNotContains(hlsl, "pack_half2x16(");
 }
 
+// GLSL.std.450 snorm/unorm pack/unpack (54-57, 60, 61, 63, 64): HLSL has no
+// intrinsic for any of them, and SM6.6's 8-bit pack intrinsics sit above this
+// backend's SM 6.0 floor. They lower to the spirv-cross-verbatim spvPack*/
+// spvUnpack* helpers (round/clamp/saturate + shift/mask math), emitted once in
+// the preamble. Before this, the whole family emitted a `// unhandled std450`
+// comment while downstream code still referenced the result id -- an undeclared
+// identifier DXC rejects (the pack_unpack WARP-triage finding). Each opcode is
+// asserted by helper name so a regression on any one of them fails this test.
+test "HLSL: snorm/unorm 2x16 pack/unpack lower to spvPack*/spvUnpack* helpers" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 c;
+        \\layout(location=0) in vec2 a;
+        \\void main(){
+        \\    uint p1 = packSnorm2x16(a); vec2 u1 = unpackSnorm2x16(p1);
+        \\    uint p2 = packUnorm2x16(a); vec2 u2 = unpackUnorm2x16(p2);
+        \\    c = vec4(u1, u2);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Helper definitions (spirv-cross-verbatim bodies), one per opcode used
+    try assertContains(hlsl, "uint spvPackSnorm2x16(float2 value)");
+    try assertContains(hlsl, "int2 Packed = int2(round(clamp(value, -1.0, 1.0) * 32767.0)) & 0xffff;");
+    try assertContains(hlsl, "uint spvPackUnorm2x16(float2 value)");
+    try assertContains(hlsl, "uint2 Packed = uint2(round(saturate(value) * 65535.0));");
+    try assertContains(hlsl, "float2 spvUnpackSnorm2x16(uint value)");
+    try assertContains(hlsl, "int2 Packed = int2(SignedValue << 16, SignedValue) >> 16;");
+    try assertContains(hlsl, "float2 spvUnpackUnorm2x16(uint value)");
+    try assertContains(hlsl, "uint2 Packed = uint2(value & 0xffff, value >> 16);");
+    // Call sites use the result ids (no dangling identifier)
+    try assertContains(hlsl, "spvPackSnorm2x16(");
+    try assertContains(hlsl, "spvUnpackSnorm2x16(");
+    try assertContains(hlsl, "spvPackUnorm2x16(");
+    try assertContains(hlsl, "spvUnpackUnorm2x16(");
+    try assertNotContains(hlsl, "unhandled std450");
+}
+
+test "HLSL: snorm/unorm 4x8 pack/unpack lower to spvPack*/spvUnpack* helpers" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location=0) out vec4 c;
+        \\layout(location=0) in vec4 a;
+        \\void main(){
+        \\    uint p1 = packSnorm4x8(a); vec4 u1 = unpackSnorm4x8(p1);
+        \\    uint p2 = packUnorm4x8(a); vec4 u2 = unpackUnorm4x8(p2);
+        \\    c = u1 + u2;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "uint spvPackSnorm4x8(float4 value)");
+    try assertContains(hlsl, "int4 Packed = int4(round(clamp(value, -1.0, 1.0) * 127.0)) & 0xff;");
+    try assertContains(hlsl, "uint spvPackUnorm4x8(float4 value)");
+    try assertContains(hlsl, "uint4 Packed = uint4(round(saturate(value) * 255.0));");
+    try assertContains(hlsl, "float4 spvUnpackSnorm4x8(uint value)");
+    try assertContains(hlsl, "int4 Packed = int4(SignedValue << 24, SignedValue << 16, SignedValue << 8, SignedValue) >> 24;");
+    try assertContains(hlsl, "float4 spvUnpackUnorm4x8(uint value)");
+    try assertContains(hlsl, "uint4 Packed = uint4(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, value >> 24);");
+    try assertContains(hlsl, "spvPackSnorm4x8(");
+    try assertContains(hlsl, "spvUnpackSnorm4x8(");
+    try assertContains(hlsl, "spvPackUnorm4x8(");
+    try assertContains(hlsl, "spvUnpackUnorm4x8(");
+    try assertNotContains(hlsl, "unhandled std450");
+}
+
+// PackDouble2x32 (59) / UnpackDouble2x32 (65): the backend's type floor is
+// float-only, so a well-formed module using either opcode (its operand or result
+// type is a 64-bit float) is already sharp-refused by the module-wide 64-bit gate
+// (#476: error.UnsupportedDoubleType) before any emission -- never the old
+// `// unhandled std450 #59` stub with a dangling result id. The .ExtInst arm also
+// refuses 59/65 directly as defense-in-depth for malformed input. GLSL has no
+// builtin for these, so the modules are hand-built around a single ExtInst.
+test "HLSL: Pack/UnpackDouble2x32 sharp-refuse (no dangling result id)" {
+    const words = [_]u32{
+        0x07230203, // magic
+        0x00010000, // version 1.0
+        0x00080001, // generator
+        11, // ID bound
+        0, // schema
+        (2 << 16) | 17, 1, // OpCapability Shader
+        (6 << 16) | 11, 7, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, // %7 = OpExtInstImport "GLSL.std.450"
+        (3 << 16) | 14, 0, 1, // OpMemoryModel Logical GLSL450
+        (5 << 16) | 15, 4, 2, 0x6e69616d, 0x00000000, // OpEntryPoint Fragment %2 "main"
+        (3 << 16) | 16, 2, 7, // OpExecutionMode %2 OriginUpperLeft
+        (2 << 16) | 19, 1, // %1 = OpTypeVoid
+        (3 << 16) | 33, 3, 1, // %3 = OpTypeFunction %1
+        (3 << 16) | 22, 4, 64, // %4 = OpTypeFloat 64
+        (4 << 16) | 21, 5, 32, 0, // %5 = OpTypeInt 32 0
+        (4 << 16) | 23, 6, 5, 2, // %6 = OpTypeVector %5 2
+        (3 << 16) | 1, 6, 8, // %8 = OpUndef %6
+        (5 << 16) | 54, 1, 2, 0, 3, // %2 = OpFunction %1 None %3
+        (2 << 16) | 248, 9, // %9 = OpLabel
+        (6 << 16) | 12, 4, 10, 7, 59, 8, // %10 = OpExtInst %4 %7 59(PackDouble2x32) %8
+        (1 << 16) | 253, // OpReturn
+        (1 << 16) | 56, // OpFunctionEnd
+    };
+    try std.testing.expectError(error.UnsupportedDoubleType, zioshade.spirvToHLSL(alloc, &words, .{ .shader_model = 60 }));
+    // Same refusal for UnpackDouble2x32 (65): operand is the double, result v2uint.
+    const words65 = [_]u32{
+        0x07230203, // magic
+        0x00010000, // version 1.0
+        0x00080001, // generator
+        11, // ID bound
+        0, // schema
+        (2 << 16) | 17, 1, // OpCapability Shader
+        (6 << 16) | 11, 7, 0x4c534c47, 0x6474732e, 0x3035342e, 0x00000000, // %7 = OpExtInstImport "GLSL.std.450"
+        (3 << 16) | 14, 0, 1, // OpMemoryModel Logical GLSL450
+        (5 << 16) | 15, 4, 2, 0x6e69616d, 0x00000000, // OpEntryPoint Fragment %2 "main"
+        (3 << 16) | 16, 2, 7, // OpExecutionMode %2 OriginUpperLeft
+        (2 << 16) | 19, 1, // %1 = OpTypeVoid
+        (3 << 16) | 33, 3, 1, // %3 = OpTypeFunction %1
+        (3 << 16) | 22, 4, 64, // %4 = OpTypeFloat 64
+        (4 << 16) | 21, 5, 32, 0, // %5 = OpTypeInt 32 0
+        (4 << 16) | 23, 6, 5, 2, // %6 = OpTypeVector %5 2
+        (3 << 16) | 1, 4, 8, // %8 = OpUndef %4 (double)
+        (5 << 16) | 54, 1, 2, 0, 3, // %2 = OpFunction %1 None %3
+        (2 << 16) | 248, 9, // %9 = OpLabel
+        (6 << 16) | 12, 6, 10, 7, 65, 8, // %10 = OpExtInst %6 %7 65(UnpackDouble2x32) %8
+        (1 << 16) | 253, // OpReturn
+        (1 << 16) | 56, // OpFunctionEnd
+    };
+    try std.testing.expectError(error.UnsupportedDoubleType, zioshade.spirvToHLSL(alloc, &words65, .{ .shader_model = 60 }));
+}
+
 // OpFma (GLSL.std.450 #50) is a fused multiply-add. HLSL's `fma` intrinsic is
 // double-only -- DXC rejects `fma(float,float,float)` at every shader model -- so
 // the only float multiply-add HLSL has is `mad` (a*b+c, no fusion guarantee). The
