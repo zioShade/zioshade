@@ -16979,3 +16979,78 @@ test "HLSL emits case breaks when the switch default target is the merge (#switc
     while (std.mem.indexOfPos(u8, hlsl, i, "break;")) |pos| : (count += 1) i = pos + 1;
     try std.testing.expect(count >= 4);
 }
+
+// #hlsl-struct-buffer-decl: glslang propagates `layout(row_major)` on a UBO's
+// STRUCT-typed member onto the struct's own matrix members (Foo_0). The struct
+// forward-decl emitter then threw UnsupportedRowMajorMatrix mid-member-list and
+// every call site swallowed it, leaving a half-open `struct Foo {` in the output
+// so the cbuffer declaration landed INSIDE the member list (glslang rejects with
+// "member type expected"; spirv-cross passes). The error must PROPAGATE: honest
+// refusal of the whole shader, never a broken declaration sequence.
+test "HLSL honest-errors a row_major struct UBO member instead of nesting the cbuffer in the struct (#hlsl-struct-buffer-decl)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct Foo
+        \\{
+        \\    mat3x4 MVP0;
+        \\    mat3x4 MVP1;
+        \\};
+        \\layout(std140, binding = 0) uniform UBO
+        \\{
+        \\    layout(row_major) Foo foo;
+        \\};
+        \\layout(location = 0) in vec4 v0;
+        \\layout(location = 0) out vec3 V0;
+        \\void main() { V0 = v0 * foo.MVP0; }
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedRowMajorMatrix,
+        zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
+    );
+}
+
+// Same swallow class via the SSBO element-struct path: an explicit row_major
+// NON-square array member (mat2x3) aborted the struct decl after earlier
+// members were printed, then the RWStructuredBuffer declaration itself was
+// printed inside the still-open member list. Must refuse honestly instead.
+test "HLSL honest-errors an SSBO row_major non-square member instead of nesting the buffer decl in the struct (#hlsl-struct-buffer-decl)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0, std430) buffer SSBO
+        \\{
+        \\    layout(column_major) mat2 m0;
+        \\    layout(row_major) mat2 m4;
+        \\    layout(row_major) mat2x3 m6[4];
+        \\    vec4 data[];
+        \\} ssbo;
+        \\void main() { ssbo.data[0] = ssbo.m6[0][0]; }
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedRowMajorMatrix,
+        zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
+    );
+}
+
+// Positive guard for the same emitter: an emittable SSBO element struct must be
+// fully CLOSED (`};` + blank line) before the RWStructuredBuffer declaration.
+// The broken shape printed the decl directly after a member, with no `};`
+// between (a member line then the decl = `;\nRWStructuredBuffer<`).
+test "HLSL closes an SSBO element struct before the RWStructuredBuffer declaration (#hlsl-struct-buffer-decl)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding = 0, std430) buffer SSBO
+        \\{
+        \\    mat4 m;
+        \\    vec4 data[];
+        \\} ssbo;
+        \\void main() { ssbo.data[0] = ssbo.m[0]; }
+    ;
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "};\n\nRWStructuredBuffer<");
+    try assertNotContains(hlsl, ";\nRWStructuredBuffer<");
+}

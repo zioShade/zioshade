@@ -217,6 +217,21 @@ jobs:
       - name: Run arbitrary-SPIR-V validity sweep
         run: bash tools/spv_input_validity_sweep.sh tests/arbitrary_spirv
 
+      # Interim tier-1 HLSL gate (the `just hlsl-glslang-all` twin; kept in step
+      # per the justfile ci rule -- a gate that runs in only one of the two is a
+      # gate nobody is watching). This job already installs exactly the two
+      # oracles the sweep needs (glslangValidator, spirv-cross). GATES on any NEW
+      # INVALID (zioshade HLSL fails glslang while the spirv-cross reference
+      # passes); honest-errors and glslang frontend limitations are not fatal.
+      # The two INVALIDs this caught on first wired run (struct-packing.comp,
+      # struct.rowmajor.flatten.vert) were the swallowed-error partial struct
+      # decls fixed by #hlsl-struct-buffer-decl.
+      - name: HLSL glslang validity sweep (fragment + vertex + compute)
+        run: |
+          bash tools/hlsl_glslang_sweep.sh tests/spirv-cross fragment frag
+          bash tools/hlsl_glslang_sweep.sh tests/spirv-cross vertex vert
+          bash tools/hlsl_glslang_sweep.sh tests/spirv-cross compute comp
+
   # CTS ingestion credibility sweep (r2d.2). Broad-corpus counterpart of the gating
   # spv-validity job: feeds the vendored GraphicsFuzz corpus (SPIRV-Tools' fuzz seeds,
   # committed at tests/cts/graphicsfuzz) through the binary-ingestion path and reports

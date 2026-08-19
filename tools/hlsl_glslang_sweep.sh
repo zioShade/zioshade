@@ -90,7 +90,11 @@ case "$STAGE" in
     # multi-dim UBO array dims + row_major drilling). out-block-qualifiers.vert now
     # honest-errors (#491: colliding output block members can't flatten without
     # duplicate VS_OUTPUT fields; full member-name-prefixing/block-reconstruction
-    # deferred).
+    # deferred). struct.rowmajor.flatten.vert WAS flagged INVALID (found during
+    # #649 verification): a row_major struct-typed UBO member made the struct-decl
+    # emitter throw mid-member-list with the error swallowed, so the cbuffer
+    # declaration landed inside the open `struct Foo {` (fixed by #hlsl-struct-
+    # buffer-decl: the error now propagates as an honest UnsupportedRowMajorMatrix).
     KNOWN_INVALID=" ";;
   compute)
     # No known HLSL compute INVALIDs. cfg.comp WAS here (OpUndef result id
@@ -98,7 +102,12 @@ case "$STAGE" in
     # the frontend folds dead loops over uninitialized locals into `data = undef`).
     # Fixed: the HLSL backend now declares OpUndef as a zero-initialized local
     # (`<type> vN = {};`), matching the MSL backend. spec-constant-op-member-array
-    # was the prior entry (fixed: see below).
+    # was the prior entry (fixed: see below). struct-packing.comp WAS flagged
+    # INVALID (found during #649 verification): an explicit row_major non-square
+    # SSBO member aborted the element-struct decl mid-list with the error
+    # swallowed, so the RWStructuredBuffer declaration itself was emitted inside
+    # the member list (fixed by #hlsl-struct-buffer-decl: honest
+    # UnsupportedRowMajorMatrix, struct decls are atomic).
     KNOWN_INVALID=" ";;
   *)
     KNOWN_INVALID=" ";;
