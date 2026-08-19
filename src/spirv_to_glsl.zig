@@ -4245,19 +4245,22 @@ fn doWhileBodyHasContinueGLSL(
     label_map: *const std.AutoHashMap(u32, usize),
 ) bool {
     const start = label_map.get(body_lbl) orelse return true; // unknown: assume unsafe
-    var count: usize = 0;
     var i: usize = start + 1;
     while (i < m.instructions.len) : (i += 1) {
         const inst = m.instructions[i];
         if (inst.op == .FunctionEnd) break;
         if (inst.op == .Label and inst.words.len > 1 and (inst.words[1] == cont_lbl or inst.words[1] == merge_lbl)) break;
-        if ((inst.op == .Branch or inst.op == .BranchConditional) and inst.words.len > 1) {
-            var wi: usize = if (inst.op == .Branch) 1 else 2;
+        // A CONDITIONAL branch (BranchConditional arm / Switch case) targeting the
+        // continue is a real `continue;` even when it is the ONLY cont-branch:
+        // the walker emits a GLSL continue there, making the copies+bottom test
+        // dead code (review #2 -- the count-based check tolerated exactly one and
+        // misread a lone conditional continue as the fall-through). An
+        // UNCONDITIONAL OpBranch %cont is always safe: the walker emits nothing
+        // for it and control falls linearly into the latch walk/copies/test.
+        if ((inst.op == .BranchConditional or inst.op == .Switch) and inst.words.len > 1) {
+            var wi: usize = 2;
             while (wi < inst.words.len) : (wi += 1) {
-                if (inst.words[wi] == cont_lbl) {
-                    count += 1;
-                    if (count > 1) return true;
-                }
+                if (inst.words[wi] == cont_lbl) return true;
             }
         }
     }
@@ -4546,11 +4549,6 @@ fn emitWhileLoop(
         // do-whiles (the _lm/latch/carry machinery was never exercised here; _027
         // emits use-before-declaration merge-phi copies under pattern C). Keep the
         // honest error when any of those phi surfaces exists.
-        // #dowhile-header-carry: header phis are handled by the hoist+copy
-        // machinery below (pattern C only); the merge/latch surfaces stay gated.
-        if (body_nested and !common.dowhileNestedBodyPhiSafe(m, loop_idx, merge_lbl, cont_lbl, label_map, false)) {
-            return error.UnsupportedDoWhileNestedBody;
-        }
         const cond_is_phi = if (getDef(m, bc.words[1])) |cdef| cdef.op == .Phi else false;
         // #dowhile-header-carry: a phi back-edge condition that cannot be inlined
         // (a multi-incoming if/else merge phi, not a single-block short-circuit
@@ -4568,6 +4566,17 @@ fn emitWhileLoop(
         }
     }
     const dw_native = dw_inlined != null;
+
+    // #dowhile-header-carry: header phis are handled by the hoist+copy machinery
+    // below -- PATTERN C ONLY. The native path (do{}while(cond)) has no phi carry
+    // (the #237 prologue is !is_do_while, has_phis is !is_do_while, carried_phis
+    // is has_phis and !dw_native): a native do-while with header phis would
+    // declare the phi above the loop and NEVER write it (silent-wrong; review
+    // finding 1). So check_header = dw_native: refuse header phis exactly when
+    // the native path will be taken. The merge/latch surfaces stay gated for both.
+    if (body_nested and !common.dowhileNestedBodyPhiSafe(m, loop_idx, merge_lbl, cont_lbl, label_map, dw_native)) {
+        return error.UnsupportedDoWhileNestedBody;
+    }
 
     // #237: run the SSA phi counter update at the TOP of the loop (guarded by a
     // first-iteration flag) so a `continue` — which skips the bottom-of-loop update
