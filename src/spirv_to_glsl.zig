@@ -4241,33 +4241,6 @@ fn loopBodyReachesMergeGLSL(
     return false;
 }
 
-/// #ladder-phi-scope: TRUE when a selection-merge phi's incoming value is
-/// itself a phi defined INSIDE one of the selection's ARMS (an else-if
-/// ladder's chain: the outer phi's incoming is the inner selection's phi).
-/// The arm's nested emission declares that inner phi ARM-SCOPED; this level's
-/// copy reads it after the arm closes = undeclared identifier
-/// (graphicsfuzz_080's 5-deep else-if ladder emitted invalid GLSL the moment
-/// a preceding do-while stopped refusing first). Honest-error here until the
-/// chain-hoist (declaring the whole chain's carriers at the outermost
-/// selection) lands.
-fn phiIncomingIsArmInternalGLSL(
-    m: *const ParsedModule,
-    label_map: *const std.AutoHashMap(u32, usize),
-    vals: [2]u32,
-    arm_a: ?u32,
-    arm_b: ?u32,
-    merge_lbl: u32,
-) bool {
-    const mi = label_map.get(merge_lbl) orelse return false;
-    if (arm_a) |al| {
-        if (armRegionHasPhiGLSL(m, label_map, vals, al, mi)) return true;
-    }
-    if (arm_b) |bl| {
-        if (armRegionHasPhiGLSL(m, label_map, vals, bl, mi)) return true;
-    }
-    return false;
-}
-
 fn armRegionHasPhiGLSL(
     m: *const ParsedModule,
     label_map: *const std.AutoHashMap(u32, usize),
@@ -5304,7 +5277,13 @@ fn emitWhileLoop(
                                 // itself a phi defined inside the TRUE arm reads outside its
                                 // scope = undeclared identifier (graphicsfuzz_080's 5-deep
                                 // else-if chain). Honest-error until the chain-hoist lands.
-                                if (armRegionHasPhiGLSL(m, label_map, .{ false_val, false_val }, ntl, nmv)) return error.UnsupportedLadderPhiScope;
+                                // nmv is a LABEL id; armRegionHasPhiGLSL wants the merge
+                                // block's instruction INDEX (review: passing the label
+                                // silently disabled this guard -- label ids never exceed
+                                // the def's index, so the scan saw only a prefix).
+                                if (label_map.get(nmv)) |nmv_idx| {
+                                    if (armRegionHasPhiGLSL(m, label_map, .{ false_val, false_val }, ntl, nmv_idx)) return error.UnsupportedLadderPhiScope;
+                                }
                                 const fvn = exprName(m, names, false_val, alloc);
                                 if (pre_declared) {
                                     try w.print("        {s} = {s};\n", .{ vn, fvn });

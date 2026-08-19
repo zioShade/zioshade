@@ -2944,7 +2944,8 @@ pub fn dowhileNestedBodyPhiSafe(
     // Loop-header phis: between the header Label and the LoopMerge at loop_idx.
     // SKIPPED by callers that implement the do-while header-carry hoist
     // (#dowhile-header-carry: declare the phi above the loop from its entry
-    // incoming, copy the back-edge update before the bottom test).
+    // incoming, copy the back-edge update AFTER the bottom test -- the back
+    // edge; copying before the test made a break carry the updated value).
     if (check_header) {
         var hi = loop_idx;
         while (hi > 0) : (hi -= 1) {
