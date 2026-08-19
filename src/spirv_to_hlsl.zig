@@ -2074,7 +2074,10 @@ pub fn spirvToHLSL(
     var emitted_names2 = std.StringHashMap(void).init(aa);
     defer emitted_names2.deinit();
     for (cbuffers.items) |cb| {
-        hlslEmitStructForwardDecls(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
+        // Propagate: a cbuffer-reachable struct that cannot be emitted correctly
+        // (e.g. explicit row_major non-square matrix member) must refuse the whole
+        // shader honestly, never leave a partial struct declaration behind.
+        try hlslEmitStructForwardDecls(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2);
     }
     // A Private global of user-struct type (`QuicksortObject obj;` in the source) is
     // emitted by emitFunction as `static QuicksortObject obj;`, but nothing declared
@@ -2096,7 +2099,7 @@ pub fn spirvToHLSL(
                 continue;
             }
             if (elem.op == .TypeStruct) {
-                hlslEmitOneStructForwardDecl(&module, &names, elem_id, w, aa, &emitted_structs, &emitted_names2) catch {};
+                try hlslEmitOneStructForwardDecl(&module, &names, elem_id, w, aa, &emitted_structs, &emitted_names2);
             }
             break;
         }
@@ -2145,7 +2148,7 @@ pub fn spirvToHLSL(
                     struct_name = std.fmt.allocPrint(aa, "{s}_type", .{struct_name}) catch struct_name;
                     names.put(cb.type_id, struct_name) catch {};
                 }
-                hlslEmitOneStructForwardDecl(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2) catch {};
+                try hlslEmitOneStructForwardDecl(&module, &names, cb.type_id, w, aa, &emitted_structs, &emitted_names2);
                 if (has_interlock) {
                     try w.print("RasterizerOrderedStructuredBuffer<{s}> {s} : register(u{d});\n\n", .{ struct_name, clean_name, uav_binding });
                 } else {
@@ -2275,7 +2278,7 @@ pub fn spirvToHLSL(
                         pt_inst = getDef(&module, pointee_id) orelse break;
                     }
                     if (pt_inst.op == .TypeStruct) {
-                        hlslEmitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs, &emitted_names2) catch {};
+                        try hlslEmitOneStructForwardDecl(&module, &names, pointee_id, w, aa, &local_structs, &emitted_names2);
                     }
                 }
             }
@@ -2286,7 +2289,7 @@ pub fn spirvToHLSL(
     // missed by the OpVariable scan above; declare them too.
     for (module.instructions) |inst| {
         if (common.structValueTypeId(&module, inst)) |sid| {
-            hlslEmitOneStructForwardDecl(&module, &names, sid, w, aa, &local_structs, &emitted_names2) catch {};
+            try hlslEmitOneStructForwardDecl(&module, &names, sid, w, aa, &local_structs, &emitted_names2);
         }
     }
     if (local_structs.count() > 0) try w.writeAll("\n");
@@ -2444,12 +2447,12 @@ pub fn spirvToHLSL(
         const type_id = inst.words[1];
         const type_inst = getDef(&module, type_id) orelse continue;
         if (type_inst.op == .TypeStruct) {
-            hlslEmitOneStructForwardDecl(&module, &names, type_id, w, aa, &local_structs, &emitted_names2) catch {};
+            try hlslEmitOneStructForwardDecl(&module, &names, type_id, w, aa, &local_structs, &emitted_names2);
         } else if (type_inst.op == .TypeArray and type_inst.words.len > 2) {
             const elem_type_id = type_inst.words[2];
             const elem_inst = getDef(&module, elem_type_id) orelse continue;
             if (elem_inst.op == .TypeStruct) {
-                hlslEmitOneStructForwardDecl(&module, &names, elem_type_id, w, aa, &local_structs, &emitted_names2) catch {};
+                try hlslEmitOneStructForwardDecl(&module, &names, elem_type_id, w, aa, &local_structs, &emitted_names2);
             }
         }
     }
@@ -3386,7 +3389,22 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
     emitted.put(type_id, {}) catch return;
     try emitted_names.put(sname, {});
 
-    try w.print("struct {s}\n{{\n", .{sname});
+    // Render THIS struct into a scratch buffer and append to `w` only after
+    // every member rendered. An error mid-member-list (UnsupportedRowMajorMatrix
+    // on an explicit non-square row_major buffer member, a spec-constant array
+    // size that can't be resolved, a type-name failure) must never leave a
+    // half-open `struct X {` behind: the next module-scope emission (a cbuffer
+    // or `RWStructuredBuffer<T>` declaration) then lands INSIDE the member list
+    // and glslang/DXC reject the whole file: a swallowed error turning into
+    // INVALID output instead of the honest error it is. Callers propagate the
+    // error out of spirvToHLSL, which discards its buffer on error, so the
+    // failed emission produces NO output at all. (#563-era placement rule:
+    // module-scope text is emitted from spirvToHLSL itself, never lazily from
+    // a point where an abort can't unwind it.)
+    var body_buf = std.ArrayList(u8).initCapacity(alloc, 128) catch return error.OutOfMemory;
+    defer body_buf.deinit(alloc);
+    const bw = compat.listWriter(&body_buf, alloc);
+    try bw.print("struct {s}\n{{\n", .{sname});
     for (inst.words[2..], 0..) |mt_id, mi| {
         // Lifted from emitStructMembers: a row_major matrix member's std140
         // bytes are the row-major layout of the logical matrix M, and zioshade
@@ -3440,16 +3458,17 @@ fn hlslEmitOneStructForwardDecl(module: *const ParsedModule, names: *std.AutoHas
                     return error.UnsupportedSpecConstantArraySize;
                 var mname_buf: [32]u8 = undefined;
                 const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-                try w.print("    {s}{s} {s}[{d}];\n", .{ row_major_qual, et, mname, lv });
+                try bw.print("    {s}{s} {s}[{d}];\n", .{ row_major_qual, et, mname, lv });
                 continue;
             }
         }
         const member_type = try hlslType(module, mt_id, names, alloc);
         var mname_buf: [32]u8 = undefined;
         const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
-        try w.print("    {s}{s} {s};\n", .{ row_major_qual, member_type, mname });
+        try bw.print("    {s}{s} {s};\n", .{ row_major_qual, member_type, mname });
     }
-    try w.writeAll("};\n\n");
+    try bw.writeAll("};\n\n");
+    try w.writeAll(body_buf.items);
 }
 
 // ---------------------------------------------------------------------------

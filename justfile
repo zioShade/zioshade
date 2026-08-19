@@ -103,12 +103,19 @@ hlsl-glslang-all:
 # is the HLSL analog of `wgsl-naga` / `msl-lint` — dxc is the real HLSL oracle.
 # Reports per-stage PASS/FAIL/SKIP. Requires dxc (override the `dxc` variable).
 #
-# Baseline at SM 6.0: ZERO unexplained divergences. The 4 known FAILs are all
-# DXC/D3D constraints on otherwise-correct zioshade HLSL, NOT zioshade bugs:
-#   * barycentric-{khr,khr-io-block,nv}: `SV_Barycentrics` requires ps_6_1
-#     (correct semantic; this gate compiles at 6.0).
-#   * complex-expression-in-access-chain: a structured-buffer element exceeds
-#     DXC's hard 2048-byte element-size limit (16384 B); a D3D limit, not zioshade.
+# Baseline at SM 6.0 (re-audited with #hlsl-struct-buffer-decl): 4 FAILs.
+#   * barycentric-{khr-io-block,nv}: honest frontend refusals
+#     (UnsupportedBarycentricArrayOverlap), no HLSL emitted. barycentric-khr
+#     now PASSES and complex-expression-in-access-chain passes (the old
+#     ps_6_1 / 2048-byte-element notes were stale).
+#   * shader-clock: honest refusal (UnsupportedInt64Type), no HLSL emitted.
+#   * ubo-load-row-major-workaround: REAL bug, known and deferred. glslang
+#     duplicates a struct type when row_major propagates into it
+#     (NestedRowMajor_1); the cbuffer member uses the decorated variant's
+#     name while the function param/local uses the undecorated one, and DXC
+#     rejects the struct copy "cannot implicitly convert". Fixing it needs
+#     row-major struct variant unification (same deferred surface as the
+#     explicit non-square RowMajor use-site swaps). NOT a DXC constraint.
 # Any NEW fail beyond these four is a real divergence to fix.
 # build the pinned DXC Docker image (linux/amd64; Rosetta on Apple Silicon).
 # Required once before `just hlsl-dxc` (the default tools/dxc wrapper uses it).
@@ -530,6 +537,9 @@ c-abi:
 #   build, cli, examples, test, test-hlsl  -> job `build-test`
 #   test-conformance, strict-gate          -> job `conformance`
 #   spv-validity                           -> job `spv-validity`
+#   hlsl-glslang-all                       -> job `spv-validity` (HLSL glslang sweep
+#                                             step; that job already installs the
+#                                             glslang + spirv-cross oracles it needs)
 #   cts-ingestion                          -> job `cts-ingestion`
 #   structural-drop, unreachable-scan-all  -> job `structural-drop` (one job: the scan
 #                                             reuses the CLI the sweep already built)
@@ -545,7 +555,7 @@ c-abi:
 # the hosted runners cannot run them.
 #
 # the workflow's job set, run locally on this OS with Zig 0.15.2
-ci: fmt-check check-min-word-count check-version-sync build cli examples test test-hlsl test-conformance strict-gate spv-validity cts-ingestion structural-drop unreachable-scan-all fuzz-smoke c-abi
+ci: fmt-check check-min-word-count check-version-sync build cli examples test test-hlsl test-conformance strict-gate spv-validity hlsl-glslang-all cts-ingestion structural-drop unreachable-scan-all fuzz-smoke c-abi
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI PASSED (this OS, Zig 0.15.2 only)"
