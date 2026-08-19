@@ -4231,6 +4231,42 @@ fn loopBodyReachesMergeGLSL(
     return false;
 }
 
+/// #dowhile-header-carry: does the do-while BODY region (body_lbl up to the
+/// continue label) contain MORE THAN ONE branch to the continue label? The
+/// natural fall-through into the latch is exactly one (the last branch before
+/// the latch block); any additional branch-to-cont is a source `continue;`,
+/// which in pattern C would skip the bottom test (#246 hazard) -- the caller
+/// then keeps its honest error.
+fn doWhileBodyHasContinueGLSL(
+    m: *const ParsedModule,
+    body_lbl: u32,
+    cont_lbl: u32,
+    merge_lbl: u32,
+    label_map: *const std.AutoHashMap(u32, usize),
+) bool {
+    const start = label_map.get(body_lbl) orelse return true; // unknown: assume unsafe
+    var i: usize = start + 1;
+    while (i < m.instructions.len) : (i += 1) {
+        const inst = m.instructions[i];
+        if (inst.op == .FunctionEnd) break;
+        if (inst.op == .Label and inst.words.len > 1 and (inst.words[1] == cont_lbl or inst.words[1] == merge_lbl)) break;
+        // A CONDITIONAL branch (BranchConditional arm / Switch case) targeting the
+        // continue is a real `continue;` even when it is the ONLY cont-branch:
+        // the walker emits a GLSL continue there, making the copies+bottom test
+        // dead code (review #2 -- the count-based check tolerated exactly one and
+        // misread a lone conditional continue as the fall-through). An
+        // UNCONDITIONAL OpBranch %cont is always safe: the walker emits nothing
+        // for it and control falls linearly into the latch walk/copies/test.
+        if ((inst.op == .BranchConditional or inst.op == .Switch) and inst.words.len > 1) {
+            var wi: usize = 2;
+            while (wi < inst.words.len) : (wi += 1) {
+                if (inst.words[wi] == cont_lbl) return true;
+            }
+        }
+    }
+    return false;
+}
+
 fn emitWhileLoop(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -4513,18 +4549,34 @@ fn emitWhileLoop(
         // do-whiles (the _lm/latch/carry machinery was never exercised here; _027
         // emits use-before-declaration merge-phi copies under pattern C). Keep the
         // honest error when any of those phi surfaces exists.
-        if (body_nested and !common.dowhileNestedBodyPhiSafe(m, loop_idx, merge_lbl, cont_lbl, label_map)) {
-            return error.UnsupportedDoWhileNestedBody;
-        }
         const cond_is_phi = if (getDef(m, bc.words[1])) |cdef| cdef.op == .Phi else false;
+        // #dowhile-header-carry: a phi back-edge condition that cannot be inlined
+        // (a multi-incoming if/else merge phi, not a single-block short-circuit
+        // router) can still lower as PATTERN C -- provided the body has NO branch
+        // to the continue label other than the natural fall-through (a mid-body
+        // `continue;` would skip the bottom test; the #246 hazard). The phi cond
+        // is materialized by the body machinery and read by name at the bottom.
+        const dw_body_continue_free = !doWhileBodyHasContinueGLSL(m, body_lbl, cont_lbl, merge_lbl, label_map);
         if (cond_is_phi) {
-            dw_inlined = common.tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc, std450ToGlsl) orelse return error.UnsupportedDoWhileCompoundCond;
+            dw_inlined = common.tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc, std450ToGlsl);
+            if (dw_inlined == null and !dw_body_continue_free) return error.UnsupportedDoWhileCompoundCond;
         } else if (body_has_cf or body_nested) {
             // Native do-while requires the condition rebuilt over persistent vars.
             dw_inlined = common.tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc, std450ToGlsl) orelse return error.UnstructuredControlFlow;
         }
     }
     const dw_native = dw_inlined != null;
+
+    // #dowhile-header-carry: header phis are handled by the hoist+copy machinery
+    // below -- PATTERN C ONLY. The native path (do{}while(cond)) has no phi carry
+    // (the #237 prologue is !is_do_while, has_phis is !is_do_while, carried_phis
+    // is has_phis and !dw_native): a native do-while with header phis would
+    // declare the phi above the loop and NEVER write it (silent-wrong; review
+    // finding 1). So check_header = dw_native: refuse header phis exactly when
+    // the native path will be taken. The merge/latch surfaces stay gated for both.
+    if (body_nested and !common.dowhileNestedBodyPhiSafe(m, loop_idx, merge_lbl, cont_lbl, label_map, dw_native)) {
+        return error.UnsupportedDoWhileNestedBody;
+    }
 
     // #237: run the SSA phi counter update at the TOP of the loop (guarded by a
     // first-iteration flag) so a `continue` — which skips the bottom-of-loop update
@@ -4650,6 +4702,50 @@ fn emitWhileLoop(
                 swbrk = std.fmt.allocPrint(alloc, "_swbrk_{d}", .{loop_idx}) catch "_swbrk";
                 try w.print("    bool {s} = false;\n", .{swbrk.?});
                 g_swbrk_flag_glsl = swbrk;
+            }
+        }
+    }
+
+    // #dowhile-header-carry: for a pattern-C do-while, declare each loop-header
+    // phi ABOVE the loop from its ENTRY incoming (the body reads the persistent
+    // var; without this every body reference is an undeclared identifier), and
+    // remember the (result, update) pairs for the back-edge copies at the bottom.
+    var dw_header_phis = std.ArrayList(struct { result_id: u32, update_id: u32 }).initCapacity(alloc, 4) catch unreachable;
+    defer dw_header_phis.deinit(alloc);
+    if (is_do_while and !dw_native) {
+        if (g_loop_phis) |lp| {
+            if (lp.get(loop_idx)) |plist| {
+                for (plist.items) |pi| {
+                    const pdef = getDef(m, pi.result_id) orelse continue;
+                    if (pdef.op != .Phi or pdef.words.len < 7) continue;
+                    // entry incoming = the pair whose pred is NOT the latch pred:
+                    // with 2 incomings, the first whose pred != the phi's other pred
+                    // chain... simplest: the incoming whose pred block index is
+                    // BELOW the loop header (pre-loop); the back-edge pred is inside.
+                    var update_val: u32 = pi.update_id;
+                    {
+                        const p0 = pdef.words[4];
+                        const p1 = pdef.words[6];
+                        const pi0 = label_map.get(p0) orelse 0;
+                        const hdr_idx = label_map.get(header_lbl) orelse 0;
+                        // The update is the incoming from the IN-LOOP pred (>= the
+                        // header); prefer the pre-computed update_id when it is one
+                        // of the phi's incomings.
+                        if (pi.update_id != pdef.words[3] and pi.update_id != pdef.words[5]) {
+                            if (pi0 >= hdr_idx) {
+                                update_val = pdef.words[3];
+                            } else {
+                                update_val = pdef.words[5];
+                            }
+                            _ = p1;
+                        }
+                    }
+                    // NOTE: the existing #413/loop-phi machinery already declares
+                    // the header phi above the loop -- emitting our own declaration
+                    // duplicates it (redefinition). Only collect the (result, update)
+                    // pairs; the back-edge copies below are the missing piece.
+                    dw_header_phis.append(alloc, .{ .result_id = pi.result_id, .update_id = update_val }) catch {};
+                }
             }
         }
     }
@@ -5169,6 +5265,17 @@ fn emitWhileLoop(
                 if (cinst.op == .LoopMerge or cinst.op == .SelectionMerge) continue;
                 try emitInstruction(m, names, decs, cinst, w, alloc, is_frag, ovid);
             }
+        }
+    }
+    // #dowhile-header-carry: pattern-C do-while back-edge copies. The latch walk
+    // just above emitted the update defs (e.g. `int vN = i_1 + 1;`); copy each into
+    // the persistent header-phi var so the next iteration reads the new value
+    // (without this the counter freezes and the loop spins).
+    if (is_do_while and !dw_native) {
+        for (dw_header_phis.items) |hp| {
+            const rn = names.get(hp.result_id) orelse continue;
+            const uv = exprName(m, names, hp.update_id, alloc);
+            try w.print("        {s} = {s};\n", .{ rn, uv });
         }
     }
     if (dw_native) {

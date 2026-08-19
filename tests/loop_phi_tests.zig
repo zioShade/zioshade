@@ -2001,3 +2001,28 @@ test "HLSL emits the break for a side-effecting break block inside a selection (
     // and break yet render 0 instead of 1 (review note).
     try expectOrdered(hlsl, "v12 = v18;", "break;");
 }
+
+// #dowhile-header-carry: a pattern-C do-while whose loop HEADER carries phis (a
+// counter) and whose back-edge condition is a multi-incoming if/else MERGE phi
+// (not a single-block short-circuit router, so tryInlineDoWhileCond cannot
+// rebuild it). Previously double-refused: UnsupportedDoWhileCompoundCond (the
+// phi cond) and the phi gate's header check (UnsupportedDoWhileNestedBody).
+// Now: the header phi is already declared above the loop by the #413 machinery;
+// this fix adds the BACK-EDGE COPY (the latch walk emits the update def, then
+// the copy re-assigns the persistent counter -- without it the counter froze
+// and the loop spun), and routes uninlinable phi conds to pattern C when the
+// body has no branch-to-continue other than the fall-through (a mid-body
+// continue would skip the bottom test). Fixture: hand-assembled (the glslang
+// memory form uses a Function var, no phi; the phi form is spirv-opt/
+// GraphicsFuzz-specific). Render-verified: round-trip A-test MATCH.
+const DOWHILE_PHI_COUNTER_SPV = @embedFile("fixtures/dowhile_phi_counter.spv");
+
+test "GLSL lowers a phi-counter do-while with a merge-phi condition (#dowhile-header-carry)" {
+    const glsl = try crossGlsl(DOWHILE_PHI_COUNTER_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    // The back-edge copy must exist: the persistent counter is re-assigned from
+    // the latch's update def before the bottom break (without it the counter
+    // froze -> infinite loop).
+    try expectOrdered(glsl, "v11 = v19;", "if (!(");
+}

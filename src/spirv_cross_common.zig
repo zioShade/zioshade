@@ -2931,15 +2931,21 @@ pub fn dowhileNestedBodyPhiSafe(
     merge_lbl: u32,
     cont_lbl: u32,
     label_map: *const std.AutoHashMap(u32, usize),
+    check_header: bool,
 ) bool {
     // Loop-header phis: between the header Label and the LoopMerge at loop_idx.
-    var hi = loop_idx;
-    while (hi > 0) : (hi -= 1) {
-        if (module.instructions[hi].op == .Label) break;
-    }
-    var pi = hi + 1;
-    while (pi < loop_idx) : (pi += 1) {
-        if (module.instructions[pi].op == .Phi) return false;
+    // SKIPPED by callers that implement the do-while header-carry hoist
+    // (#dowhile-header-carry: declare the phi above the loop from its entry
+    // incoming, copy the back-edge update before the bottom test).
+    if (check_header) {
+        var hi = loop_idx;
+        while (hi > 0) : (hi -= 1) {
+            if (module.instructions[hi].op == .Label) break;
+        }
+        var pi = hi + 1;
+        while (pi < loop_idx) : (pi += 1) {
+            if (module.instructions[pi].op == .Phi) return false;
+        }
     }
     // Divergent leading phis at the merge block.
     if (label_map.get(merge_lbl)) |mi| {
