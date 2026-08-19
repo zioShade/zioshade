@@ -3898,6 +3898,10 @@ fn emitBody(
                         // incoming from the header block (in scope before the if); initialize
                         // to it so the phi is defined when the condition is false. Mirrors MSL.
                         const false_val = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        // #ladder-phi-scope: an init emitted at the selection level that
+                        // reads a phi defined INSIDE the true arm = undeclared identifier
+                        // (graphicsfuzz_080's post-loop else-if chain).
+                        if (armRegionHasPhiGLSL(m, &label_map, .{ false_val, false_val }, tl, merge_idx)) return error.UnsupportedLadderPhiScope;
                         const fvn = exprName(m, names, false_val, alloc);
                         try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn, fvn });
                     }
@@ -4232,6 +4236,62 @@ fn loopBodyReachesMergeGLSL(
             while (wi < inst.words.len) : (wi += 1) {
                 if (inst.words[wi] == merge_lbl) return true;
             }
+        }
+    }
+    return false;
+}
+
+/// #ladder-phi-scope: TRUE when a selection-merge phi's incoming value is
+/// itself a phi defined INSIDE one of the selection's ARMS (an else-if
+/// ladder's chain: the outer phi's incoming is the inner selection's phi).
+/// The arm's nested emission declares that inner phi ARM-SCOPED; this level's
+/// copy reads it after the arm closes = undeclared identifier
+/// (graphicsfuzz_080's 5-deep else-if ladder emitted invalid GLSL the moment
+/// a preceding do-while stopped refusing first). Honest-error here until the
+/// chain-hoist (declaring the whole chain's carriers at the outermost
+/// selection) lands.
+fn phiIncomingIsArmInternalGLSL(
+    m: *const ParsedModule,
+    label_map: *const std.AutoHashMap(u32, usize),
+    vals: [2]u32,
+    arm_a: ?u32,
+    arm_b: ?u32,
+    merge_lbl: u32,
+) bool {
+    const mi = label_map.get(merge_lbl) orelse return false;
+    if (arm_a) |al| {
+        if (armRegionHasPhiGLSL(m, label_map, vals, al, mi)) return true;
+    }
+    if (arm_b) |bl| {
+        if (armRegionHasPhiGLSL(m, label_map, vals, bl, mi)) return true;
+    }
+    return false;
+}
+
+fn armRegionHasPhiGLSL(
+    m: *const ParsedModule,
+    label_map: *const std.AutoHashMap(u32, usize),
+    vals: [2]u32,
+    arm_lbl: u32,
+    mi: usize,
+) bool {
+    const ai = label_map.get(arm_lbl) orelse return false;
+    if (ai >= mi) return false;
+    for (vals) |v| {
+        // phis sit at BLOCK HEADS: check the phi run after the arm label
+        // and after every Label in the arm region.
+        var k: usize = ai + 1;
+        var at_head = true;
+        while (k < mi) : (k += 1) {
+            const t = m.instructions[k];
+            if (at_head) {
+                if (t.op == .Phi) {
+                    if (t.words.len > 2 and t.words[2] == v) return true;
+                    continue;
+                }
+                at_head = false;
+            }
+            if (t.op == .Label) at_head = true;
         }
     }
     return false;
@@ -4620,6 +4680,11 @@ fn emitWhileLoop(
             if (dw_inlined == null and !dw_body_continue_free) return error.UnsupportedDoWhileCompoundCond;
         } else if (body_has_cf or body_nested) {
             // Native do-while requires the condition rebuilt over persistent vars.
+            // #dowhile-noninline-cond (deferred): a computed cond whose operand
+            // chain reaches the loop HEADER phi (`%ec = %i + 1 < 4`, graphicsfuzz_027)
+            // cannot be rebuilt, and pattern C is blocked until the else-if ladder
+            // chain-hoist lands (graphicsfuzz_080's post-loop ladder emits an
+            // arm-scoped phi read out of scope). Keep the honest error.
             dw_inlined = common.tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc, std450ToGlsl) orelse return error.UnstructuredControlFlow;
         }
     }
@@ -5234,6 +5299,12 @@ fn emitWhileLoop(
                                 // No else arm: initialize to the fall-through (header) value so
                                 // the phi is defined when the condition is false. Mirrors MSL.
                                 const false_val = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                // #ladder-phi-scope: the init is emitted at the SELECTION's
+                                // level (outside the arm braces). A fall-through value that is
+                                // itself a phi defined inside the TRUE arm reads outside its
+                                // scope = undeclared identifier (graphicsfuzz_080's 5-deep
+                                // else-if chain). Honest-error until the chain-hoist lands.
+                                if (armRegionHasPhiGLSL(m, label_map, .{ false_val, false_val }, ntl, nmv)) return error.UnsupportedLadderPhiScope;
                                 const fvn = exprName(m, names, false_val, alloc);
                                 if (pre_declared) {
                                     try w.print("        {s} = {s};\n", .{ vn, fvn });
@@ -5359,17 +5430,6 @@ fn emitWhileLoop(
             }
         }
     }
-    // #dowhile-header-carry: pattern-C do-while back-edge copies. The latch walk
-    // just above emitted the update defs (e.g. `int vN = i_1 + 1;`); copy each into
-    // the persistent header-phi var so the next iteration reads the new value
-    // (without this the counter freezes and the loop spins).
-    if (is_do_while and !dw_native) {
-        for (dw_header_phis.items) |hp| {
-            const rn = names.get(hp.result_id) orelse continue;
-            const uv = exprName(m, names, hp.update_id, alloc);
-            try w.print("        {s} = {s};\n", .{ rn, uv });
-        }
-    }
     if (dw_native) {
         // Native do-while (#246): close with the inlined back-edge condition. A body
         // `continue` lands here (do-while continue semantics); the condition reads the
@@ -5398,6 +5458,21 @@ fn emitWhileLoop(
                 try w.print("        if (!({s})) break;\n", .{dwc});
             } else {
                 try w.print("        if ({s}) break;\n", .{dwc});
+            }
+            // #dowhile-header-carry: pattern-C do-while back-edge copies, AFTER
+            // the bottom test. The latch walk above emitted the update defs
+            // (e.g. `v12 = v11 + 1;`); the copy re-assigns the persistent
+            // header-phi var so the NEXT iteration reads the new value. It must
+            // run only on the CONTINUE path (the back edge): a phi's value after
+            // the loop is the value from the LAST HEADER ENTRY, so copying
+            // before the test made a break carry the UPDATED value instead
+            // (fixture dowhile_switch_noninline: post-loop read off by one
+            // iteration, a 1024-pixel render DIFFER found by class 3's probe).
+            // The copies before the loop-closing brace = the back edge exactly.
+            for (dw_header_phis.items) |hp| {
+                const rn = names.get(hp.result_id) orelse continue;
+                const uv = exprName(m, names, hp.update_id, alloc);
+                try w.print("        {s} = {s};\n", .{ rn, uv });
             }
         }
         try w.writeAll("    }\n");
@@ -5601,6 +5676,9 @@ fn emitBlock(
                         try w.print("{s}    {s} {s}_phi;\n", .{ indent, rtt, vn });
                     } else {
                         const false_val = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                        // #ladder-phi-scope: as in emitBody/emitWhileLoop -- a selection-
+                        // level init reading an arm-internal phi is out of scope.
+                        if (armRegionHasPhiGLSL(m, lm, .{ false_val, false_val }, tl, merge_idx2)) return error.UnsupportedLadderPhiScope;
                         const fvn = exprName(m, names, false_val, alloc);
                         try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, rtt, vn, fvn });
                     }
