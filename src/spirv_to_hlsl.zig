@@ -1494,7 +1494,125 @@ const spv_bitfield_sextract_hlsl =
     \\
 ;
 
+// GLSL.std.450 snorm/unorm pack/unpack (54-57, 60, 61, 63, 64): HLSL has no
+// intrinsic for any of them (and SM6.6's 8-bit pack intrinsics are above this
+// backend's SM 6.0 floor), so they lower to generated helpers -- verbatim the
+// `spvPack*`/`spvUnpack*` helpers `spirv-cross --hlsl` emits (DXC-proven shape).
+// Snorm unpack sign-extends with the shift trick (`(v << k) >> k` on a signed
+// int), not bitfieldExtract, so the helpers are valid at every shader model this
+// backend targets. Each helper is emitted at most once (gated by modulePackNeeds).
+// PackHalf2x16 (58) / UnpackHalf2x16 (62) need no helper: they inline to
+// f32tof16/f16tof32 in the .ExtInst arm. Pack/UnpackDouble2x32 (59/65) honest-error.
+const spv_pack_snorm4x8_hlsl =
+    \\uint spvPackSnorm4x8(float4 value)
+    \\{
+    \\    int4 Packed = int4(round(clamp(value, -1.0, 1.0) * 127.0)) & 0xff;
+    \\    return uint(Packed.x | (Packed.y << 8) | (Packed.z << 16) | (Packed.w << 24));
+    \\}
+    \\
+    \\
+;
+const spv_pack_unorm4x8_hlsl =
+    \\uint spvPackUnorm4x8(float4 value)
+    \\{
+    \\    uint4 Packed = uint4(round(saturate(value) * 255.0));
+    \\    return Packed.x | (Packed.y << 8) | (Packed.z << 16) | (Packed.w << 24);
+    \\}
+    \\
+    \\
+;
+const spv_pack_snorm2x16_hlsl =
+    \\uint spvPackSnorm2x16(float2 value)
+    \\{
+    \\    int2 Packed = int2(round(clamp(value, -1.0, 1.0) * 32767.0)) & 0xffff;
+    \\    return uint(Packed.x | (Packed.y << 16));
+    \\}
+    \\
+    \\
+;
+const spv_pack_unorm2x16_hlsl =
+    \\uint spvPackUnorm2x16(float2 value)
+    \\{
+    \\    uint2 Packed = uint2(round(saturate(value) * 65535.0));
+    \\    return Packed.x | (Packed.y << 16);
+    \\}
+    \\
+    \\
+;
+const spv_unpack_snorm2x16_hlsl =
+    \\float2 spvUnpackSnorm2x16(uint value)
+    \\{
+    \\    int SignedValue = int(value);
+    \\    int2 Packed = int2(SignedValue << 16, SignedValue) >> 16;
+    \\    return clamp(float2(Packed) / 32767.0, -1.0, 1.0);
+    \\}
+    \\
+    \\
+;
+const spv_unpack_unorm2x16_hlsl =
+    \\float2 spvUnpackUnorm2x16(uint value)
+    \\{
+    \\    uint2 Packed = uint2(value & 0xffff, value >> 16);
+    \\    return float2(Packed) / 65535.0;
+    \\}
+    \\
+    \\
+;
+const spv_unpack_snorm4x8_hlsl =
+    \\float4 spvUnpackSnorm4x8(uint value)
+    \\{
+    \\    int SignedValue = int(value);
+    \\    int4 Packed = int4(SignedValue << 24, SignedValue << 16, SignedValue << 8, SignedValue) >> 24;
+    \\    return clamp(float4(Packed) / 127.0, -1.0, 1.0);
+    \\}
+    \\
+    \\
+;
+const spv_unpack_unorm4x8_hlsl =
+    \\float4 spvUnpackUnorm4x8(uint value)
+    \\{
+    \\    uint4 Packed = uint4(value & 0xff, (value >> 8) & 0xff, (value >> 16) & 0xff, value >> 24);
+    \\    return float4(Packed) / 255.0;
+    \\}
+    \\
+    \\
+;
+
 const HlslBitfieldNeeds = struct { insert: bool = false, uextract: bool = false, sextract: bool = false };
+
+/// Which std450 snorm/unorm pack/unpack helpers a module needs (one bool per opcode).
+const HlslPackNeeds = struct {
+    pack_snorm4x8: bool = false,
+    pack_unorm4x8: bool = false,
+    pack_snorm2x16: bool = false,
+    pack_unorm2x16: bool = false,
+    unpack_snorm2x16: bool = false,
+    unpack_unorm2x16: bool = false,
+    unpack_snorm4x8: bool = false,
+    unpack_unorm4x8: bool = false,
+};
+
+/// Scan the module for GLSL.std.450 pack/unpack ExtInst opcodes (54-57, 60, 61,
+/// 63, 64) so each spvPack*/spvUnpack* helper is emitted at most once. 58/62
+/// (half2x16) inline without a helper; 59/65 (double) refuse before emission.
+fn modulePackNeeds(m: *const ParsedModule) HlslPackNeeds {
+    var r = HlslPackNeeds{};
+    for (m.instructions) |inst| {
+        if (inst.op != .ExtInst or inst.words.len < 5) continue;
+        switch (inst.words[4]) {
+            54 => r.pack_snorm4x8 = true,
+            55 => r.pack_unorm4x8 = true,
+            56 => r.pack_snorm2x16 = true,
+            57 => r.pack_unorm2x16 = true,
+            60 => r.unpack_snorm2x16 = true,
+            61 => r.unpack_unorm2x16 = true,
+            63 => r.unpack_snorm4x8 = true,
+            64 => r.unpack_unorm4x8 = true,
+            else => {},
+        }
+    }
+    return r;
+}
 
 /// Scan the module for the three OpBitField* ops so each helper family is emitted once.
 fn moduleBitfieldNeeds(m: *const ParsedModule) HlslBitfieldNeeds {
@@ -1914,6 +2032,18 @@ pub fn spirvToHLSL(
     if (bf_needs.insert) try w.writeAll(spv_bitfield_insert_hlsl);
     if (bf_needs.uextract) try w.writeAll(spv_bitfield_uextract_hlsl);
     if (bf_needs.sextract) try w.writeAll(spv_bitfield_sextract_hlsl);
+
+    // HLSL has no snorm/unorm pack/unpack intrinsics - emit the spvPack*/spvUnpack*
+    // helper(s) (spirv-cross-verbatim) once for each opcode actually used.
+    const pk_needs = modulePackNeeds(&module);
+    if (pk_needs.pack_snorm4x8) try w.writeAll(spv_pack_snorm4x8_hlsl);
+    if (pk_needs.pack_unorm4x8) try w.writeAll(spv_pack_unorm4x8_hlsl);
+    if (pk_needs.pack_snorm2x16) try w.writeAll(spv_pack_snorm2x16_hlsl);
+    if (pk_needs.pack_unorm2x16) try w.writeAll(spv_pack_unorm2x16_hlsl);
+    if (pk_needs.unpack_snorm2x16) try w.writeAll(spv_unpack_snorm2x16_hlsl);
+    if (pk_needs.unpack_unorm2x16) try w.writeAll(spv_unpack_unorm2x16_hlsl);
+    if (pk_needs.unpack_snorm4x8) try w.writeAll(spv_unpack_snorm4x8_hlsl);
+    if (pk_needs.unpack_unorm4x8) try w.writeAll(spv_unpack_unorm4x8_hlsl);
 
     // HLSL has no matrix inverse() — emit the closed-form spvInverseNxN helper(s)
     // once for each dimension actually used (#488).
@@ -7653,16 +7783,42 @@ fn emitInstruction(
                 try w.print("    {s} {s} = spvInverse{d}x{d}({s});\n", .{ rt, names.get(inst.words[2]) orelse "v", d, d, arg });
                 return;
             }
-            // PackHalf2x16 (58) / UnpackHalf2x16 (62): HLSL has no pack_half2x16
-            // function (the generic table maps these to the fabricated GLSL name,
-            // an undefined HLSL function). Inline via f32tof16 / f16tof32 — one
-            // statement, no temp/helper (mirrors spirv-cross's spvPack/UnpackHalf2x16).
-            if (instruction == 58 or instruction == 62) {
-                if (inst.words.len < 6) return;
+            // std450 pack/unpack family (54-64). None of them has an HLSL intrinsic
+            // (the generic table fabricates GLSL/Metal names - undefined HLSL functions):
+            //   58/62 (Pack/UnpackHalf2x16) inline via f32tof16 / f16tof32 - one
+            //     statement, no temp/helper (mirrors spirv-cross's spvPack/UnpackHalf2x16).
+            //   54-57, 60, 61, 63, 64 (snorm/unorm) call the generated spvPack*/spvUnpack*
+            //     helpers (spirv-cross-verbatim, emitted once in the preamble; SM6.6's
+            //     8-bit pack intrinsics are above this backend's SM 6.0 floor).
+            //   59/65 (Pack/UnpackDouble2x32) have no sound spelling: the backend's type
+            //     floor is float-only (OpTypeFloat 64 renders as float), so asdouble would
+            //     still be fed wrong types. A well-formed module using either is already
+            //     refused module-wide by the #476 64-bit gate (UnsupportedDoubleType);
+            //     refusing here too is defense-in-depth so a malformed module that slips
+            //     past that gate can never emit the old `// unhandled std450` stub whose
+            //     result id stayed referenced downstream (undeclared identifier).
+            if (instruction >= 54 and instruction <= 64) {
+                if (inst.words.len < 6) return; // one operand
+                if (instruction == 59 or instruction == 65) return error.UnsupportedOp;
                 const rt = try hlslType(module, inst.words[1], names, alloc);
                 const rname = names.get(inst.words[2]) orelse "v";
                 const arg = names.get(inst.words[5]) orelse "x";
-                if (instruction == 58) {
+                const fn_name: []const u8 = switch (instruction) {
+                    54 => "spvPackSnorm4x8",
+                    55 => "spvPackUnorm4x8",
+                    56 => "spvPackSnorm2x16",
+                    57 => "spvPackUnorm2x16",
+                    58 => "",
+                    60 => "spvUnpackSnorm2x16",
+                    61 => "spvUnpackUnorm2x16",
+                    62 => "",
+                    63 => "spvUnpackSnorm4x8",
+                    64 => "spvUnpackUnorm4x8",
+                    else => return error.UnsupportedOp, // unreachable: range-checked above
+                };
+                if (fn_name.len > 0) {
+                    try w.print("    {s} {s} = {s}({s});\n", .{ rt, rname, fn_name, arg });
+                } else if (instruction == 58) {
                     try w.print("    {s} {s} = f32tof16({s}).x | (f32tof16({s}).y << 16);\n", .{ rt, rname, arg, arg });
                 } else {
                     try w.print("    {s} {s} = f16tof32(uint2({s} & 0xffff, {s} >> 16));\n", .{ rt, rname, arg, arg });
@@ -9877,14 +10033,13 @@ fn std450ToHlsl(func: spirv.GLSLstd450) ?[]const u8 {
                 79 => "min",
                 80 => "max",
                 81 => "clamp",
-                // Pack/unpack opcodes (54-64) emit NO fabricated name here:
-                //  - 58/62 (Pack/UnpackHalf2x16) are intercepted above via
-                //    f32tof16/f16tof32, so they never reach this table.
-                //  - 54-57, 60, 61, 63, 64 (snorm/unorm pack/unpack) have no real
-                //    HLSL intrinsic -- correct lowering is a scale/round/asuint bit
-                //    helper (spirv-cross spvPack/Unpack{S,U}norm*), deferred until a
-                //    DXC oracle. Drop to the honest-error path (else => null) rather
-                //    than emit a Metal/OpenCL name that is an undeclared HLSL function.
+                // Pack/unpack opcodes (54-64) emit NO fabricated name here - the whole
+                // family is intercepted in the .ExtInst arm: 58/62 inline via
+                // f32tof16/f16tof32, 54-57/60/61/63/64 call the generated spirv-cross-
+                // verbatim spvPack*/spvUnpack* helpers, 59/65 (double) sharp-refuse.
+                // Staying null keeps this table the bypass tripwire: a refactor that
+                // reroutes one of these back here emits a visible `// unhandled std450`
+                // stub (non-compiling) instead of a fabricated Metal/OpenCL name.
                 76 => "EvaluateAttributeAtCentroid",
                 77 => "EvaluateAttributeAtSample",
                 78 => "EvaluateAttributeSnapped",

@@ -138,11 +138,14 @@ Also noted (not fixed, not render-visible with depth disabled): zioshade maps
 modes; spirv-cross maps them to `SV_DepthLessEqual`/`SV_DepthGreaterEqual`. The
 current emission is conservative (unconstrained depth write), not a miscompile, but
 the fidelity gap is real. And `pack_unpack` exposed an HLSL validity gap: the whole
-std450 pack/unpack family (#56 PackSnorm2x16, #57 PackUnorm2x16, #60 UnpackUnorm2x16,
-#61 UnpackHalf2x16) emits `// unhandled std450` comments but still references the
-result IDs, so DXC rejects the output (undeclared identifier) while the MSL backend
-lowers them inline and WGSL maps them. Honest rejection, but the emission should
-lower them (f32tof16/f16tof32 + explicit snorm/unorm bit math) like MSL does.
+std450 pack/unpack family (#56 PackSnorm2x16, #57 PackUnorm2x16, #60 UnpackSnorm2x16,
+#61 UnpackUnorm2x16) emitted `// unhandled std450` comments but still referenced the
+result IDs, so DXC rejected the output (undeclared identifier) while the MSL backend
+lowers them inline and WGSL maps them. FIXED since: the HLSL backend now lowers
+54-57/60/61/63/64 to spirv-cross-verbatim `spvPack*`/`spvUnpack*` helpers (58/62 were
+already inlined via f32tof16/f16tof32; 59/65 double-refuse per the #476 64-bit gate),
+DXC-verified at ps_6_0; `pack_unpack` compiles clean, so the next run can drop that
+skip.
 
 Earlier README text claimed a July run with a matrix-convention DIFFER set; that
 came from an unmerged branch's history, not the shipping harness, and is superseded
