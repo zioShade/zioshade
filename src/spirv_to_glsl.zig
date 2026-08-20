@@ -3951,10 +3951,9 @@ fn emitBody(
                 if (tl == mval and fl != null) {
                     const bc_blk = blockLabelOfGLSL(m, idx);
                     for (phi_decls.items) |pv| {
-                        // #ladder-phi-hoist: pre-declared at an outer arm top.
-                        if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
-                        const rtt = try glslType(m, pv.type_id, names, alloc);
-                        const vn = names.get(pv.result_id) orelse "pv";
+                        // #ladder-phi-hoist: pre-declared at an outer arm top; keep
+                        // the fall-through init as an assignment.
+                        if (pv.preds[0] != bc_blk) {} // polarity handled below
                         var tv: u32 = pv.vals[0];
                         var fv: u32 = pv.vals[1];
                         if (pv.preds[0] != bc_blk) {
@@ -3962,7 +3961,13 @@ fn emitBody(
                             fv = pv.vals[0];
                         }
                         const tvn = exprName(m, names, tv, alloc);
-                        try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn, tvn });
+                        const vn_x = names.get(pv.result_id) orelse "pv";
+                        if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) {
+                            try w.print("    {s}_phi = {s};\n", .{ vn_x, tvn });
+                            continue;
+                        }
+                        const rtt = try glslType(m, pv.type_id, names, alloc);
+                        try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn_x, tvn });
                     }
                     try w.print("    if (!({s}))\n    {{\n", .{cn});
                     idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
@@ -3987,8 +3992,19 @@ fn emitBody(
                 }
                 for (phi_decls.items) |pv| {
                     // #ladder-phi-hoist: an outer level pre-declared this phi at
-                    // its arm top; re-declaring here would shadow it.
-                    if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
+                    // its arm top; re-declaring here would shadow it. A skipped
+                    // decl that carried the no-else fall-through INIT must keep
+                    // the assignment (dropping it left the phi unassigned on the
+                    // condition-false path -- the hoist review finding).
+                    if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) {
+                        if (!he) {
+                            const fvv = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                            const fvn0 = exprName(m, names, fvv, alloc);
+                            const vn0 = names.get(pv.result_id) orelse "pv";
+                            try w.print("    {s}_phi = {s};\n", .{ vn0, fvn0 });
+                        }
+                        continue;
+                    }
                     const rtt = try glslType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
@@ -5373,8 +5389,17 @@ fn emitWhileLoop(
                             }
                         }
                         for (body_phis.items) |pv| {
-                            // #ladder-phi-hoist: pre-declared at an outer arm top.
-                            if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
+                            // #ladder-phi-hoist: pre-declared at an outer arm top; a
+                            // skipped no-else init keeps its assignment (as above).
+                            if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) {
+                                if (!nhe) {
+                                    const fvv = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                    const fvn0 = exprName(m, names, fvv, alloc);
+                                    const vn0 = names.get(pv.result_id) orelse "pv";
+                                    try w.print("        {s}_phi = {s};\n", .{ vn0, fvn0 });
+                                }
+                                continue;
+                            }
                             // A loop-carried phi was already declared at loop top (a
                             // carried_phis phi as `vN_phi`, or a #413-hoisted back-edge
                             // carrier as its base name); don't re-declare it body-local.
@@ -5798,10 +5823,6 @@ fn emitBlock(
                 if (tl == nmv and fl != null) {
                     const bc_blk = blockLabelOfGLSL(m, i);
                     for (phi_decls2.items) |pv| {
-                        // #ladder-phi-hoist: pre-declared at an outer arm top.
-                        if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
-                        const rtt = try glslType(m, pv.type_id, names, alloc);
-                        const vn = names.get(pv.result_id) orelse "pv";
                         var tv: u32 = pv.vals[0];
                         var fv: u32 = pv.vals[1];
                         if (pv.preds[0] != bc_blk) {
@@ -5809,28 +5830,38 @@ fn emitBlock(
                             fv = pv.vals[0];
                         }
                         const tvn = exprName(m, names, tv, alloc);
-                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, rtt, vn, tvn });
+                        const vn_x = names.get(pv.result_id) orelse "pv";
+                        // #ladder-phi-hoist: pre-declared at an outer arm top; keep
+                        // the fall-through init as an assignment.
+                        if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) {
+                            try w.print("{s}    {s}_phi = {s};\n", .{ indent, vn_x, tvn });
+                            continue;
+                        }
+                        const rtt = try glslType(m, pv.type_id, names, alloc);
+                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, rtt, vn_x, tvn });
                     }
                     try w.print("{s}    if (!({s}))\n{s}    {{\n", .{ indent, cn, indent });
                     {
-                        // bc_blk is the BC's OWN block; capture once -- emitBlock
-                        // below moves `i`, and a recomputed blockLabelOf would be a
-                        // DIFFERENT block, mispicking the arm-side incoming.
-                        const bc_blk4 = bc_blk;
+                        // The hoist's arm-side values: the incoming whose pred is NOT
+                        // the BC's own block (computable before the walk).
                         var fsides4 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
                         defer fsides4.deinit(alloc);
                         for (phi_decls2.items) |pv| {
                             var fv: u32 = pv.vals[1];
-                            if (pv.preds[1] != bc_blk4) fv = pv.vals[0];
+                            if (pv.preds[1] == bc_blk) fv = pv.vals[0];
                             fsides4.append(alloc, fv) catch {};
                         }
                         try hoistArmIncomingPhisGLSL(m, names, lm, w, alloc, phi_decls2.items, fsides4.items, fl.?, nmv, indent);
                     }
                     i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
+                    // The ARM-EXIT pred: emitBlock returns at the arm's terminator,
+                    // so the recomputed label IS the arm-exit block (polarity probe:
+                    // nothen_nested -- the c-false copy must take the ARM's incoming).
+                    const arm_exit4 = blockLabelOfGLSL(m, i);
                     for (phi_decls2.items) |pv| {
                         const vn = names.get(pv.result_id) orelse "pv";
                         var fv: u32 = pv.vals[1];
-                        if (pv.preds[1] != bc_blk) fv = pv.vals[0];
+                        if (pv.preds[1] != arm_exit4) fv = pv.vals[0];
                         const fvn = exprName(m, names, fv, alloc);
                         try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, fvn });
                     }
@@ -5846,8 +5877,17 @@ fn emitBlock(
                     continue;
                 }
                 for (phi_decls2.items) |pv| {
-                    // #ladder-phi-hoist: pre-declared at an outer arm top.
-                    if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
+                    // #ladder-phi-hoist: pre-declared at an outer arm top; a skipped
+                    // no-else init keeps its assignment (see emitBody's twin).
+                    if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) {
+                        if (!he) {
+                            const fvv = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                            const fvn0 = exprName(m, names, fvv, alloc);
+                            const vn0 = names.get(pv.result_id) orelse "pv";
+                            try w.print("{s}    {s}_phi = {s};\n", .{ indent, vn0, fvn0 });
+                        }
+                        continue;
+                    }
                     const rtt = try glslType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
