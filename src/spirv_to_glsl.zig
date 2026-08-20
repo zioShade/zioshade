@@ -7454,28 +7454,23 @@ fn emitInstruction(
                     // piece of work. Top-level carries lower fully.
                     {
                         var self_idx: usize = 0;
-                        var regions: [16]struct { s: usize, e: usize } = undefined;
-                        var nreg: usize = 0;
                         for (m.instructions, 0..) |mi, ix| {
                             if (@intFromEnum(mi.op) == opc and mi.words.len >= 3 and mi.words[2] == inst.words[2]) {
                                 self_idx = ix;
                                 break;
                             }
                         }
+                        // Tableless containment (review: a 16-entry region table
+                        // silently DROPPED the 17th loop and let its carries
+                        // through to the invalid escape output).
                         for (m.instructions, 0..) |mi, ix| {
-                            if (mi.op == .LoopMerge and mi.words.len >= 2 and nreg < regions.len) {
-                                var mj: usize = ix + 1;
-                                while (mj < m.instructions.len) : (mj += 1) {
-                                    if (m.instructions[mj].op == .Label and m.instructions[mj].words.len > 1 and m.instructions[mj].words[1] == mi.words[1]) break;
-                                }
-                                if (mj < m.instructions.len) {
-                                    regions[nreg] = .{ .s = ix, .e = mj };
-                                    nreg += 1;
-                                }
+                            if (mi.op != .LoopMerge or mi.words.len < 2) continue;
+                            if (self_idx <= ix) continue;
+                            var mj: usize = ix + 1;
+                            while (mj < m.instructions.len) : (mj += 1) {
+                                if (m.instructions[mj].op == .Label and m.instructions[mj].words.len > 1 and m.instructions[mj].words[1] == mi.words[1]) break;
                             }
-                        }
-                        for (regions[0..nreg]) |r| {
-                            if (self_idx > r.s and self_idx < r.e) return error.UnsupportedCarryInLoop;
+                            if (mj < m.instructions.len and self_idx < mj) return error.UnsupportedCarryInLoop;
                         }
                     }
                 }
@@ -7484,8 +7479,12 @@ fn emitInstruction(
                     const xn = exprName(m, names, inst.words[3], alloc);
                     const yn = exprName(m, names, inst.words[4], alloc);
                     const fn_name: []const u8 = if (opc == 149) "uaddCarry" else "usubBorrow";
-                    var lo_name: []const u8 = "_carr_lo";
-                    var hi_name: []const u8 = "_carr_hi";
+                    // Fallback names minted from the result id (review: fixed
+                    // strings redeclared across two carry ops in one function).
+                    const lo_fb = std.fmt.allocPrint(alloc, "v{d}cylo", .{inst.words[2]}) catch return error.OutOfMemory;
+                    const hi_fb = std.fmt.allocPrint(alloc, "v{d}cyhi", .{inst.words[2]}) catch return error.OutOfMemory;
+                    var lo_name: []const u8 = lo_fb;
+                    var hi_name: []const u8 = hi_fb;
                     var t_name: []const u8 = "uint";
                     {
                         var j: usize = 0;
@@ -7499,8 +7498,27 @@ fn emitInstruction(
                             const ni = m.instructions[j];
                             if (ni.op == .FunctionEnd) break;
                             if (ni.op == .CompositeExtract and ni.words.len >= 5 and ni.words[3] == inst.words[2]) {
+                                // Multi-index (lane) extracts on vector carries are NOT
+                                // member selects (review) -- honest error rather than a
+                                // misread.
+                                if (ni.words.len > 5) return error.UnsupportedCarryMemberAccess;
                                 const nm = names.get(ni.words[2]) orelse "v";
-                                if (ni.words[4] == 0) lo_name = nm else hi_name = nm;
+                                if (ni.words[4] == 0) {
+                                    // A SECOND extract of the same member aliases the
+                                    // member variable (review: last-wins left the other
+                                    // extract's name dangling).
+                                    if (lo_name.ptr != lo_fb.ptr) {
+                                        if (names.fetchPut(ni.words[2], lo_name) catch null) |oldn| alloc.free(oldn.value);
+                                        continue;
+                                    }
+                                    lo_name = nm;
+                                } else {
+                                    if (hi_name.ptr != hi_fb.ptr) {
+                                        if (names.fetchPut(ni.words[2], hi_name) catch null) |oldn| alloc.free(oldn.value);
+                                        continue;
+                                    }
+                                    hi_name = nm;
+                                }
                                 t_name = try glslType(m, ni.words[1], names, alloc);
                             }
                         }
@@ -7515,8 +7533,10 @@ fn emitInstruction(
                     if (inst.words.len < 5) return error.CrossCompileUnsupported;
                     const xn = exprName(m, names, inst.words[3], alloc);
                     const yn = exprName(m, names, inst.words[4], alloc);
-                    var lo_name: []const u8 = "_mul_lo";
-                    var hi_name: []const u8 = "_mul_hi";
+                    const lo_fb2 = std.fmt.allocPrint(alloc, "v{d}mulo", .{inst.words[2]}) catch return error.OutOfMemory;
+                    const hi_fb2 = std.fmt.allocPrint(alloc, "v{d}mulh", .{inst.words[2]}) catch return error.OutOfMemory;
+                    var lo_name: []const u8 = lo_fb2;
+                    var hi_name: []const u8 = hi_fb2;
                     var t_name: []const u8 = "uint";
                     {
                         var j: usize = 0;
@@ -7530,8 +7550,21 @@ fn emitInstruction(
                             const ni = m.instructions[j];
                             if (ni.op == .FunctionEnd) break;
                             if (ni.op == .CompositeExtract and ni.words.len >= 5 and ni.words[3] == inst.words[2]) {
+                                if (ni.words.len > 5) return error.UnsupportedCarryMemberAccess;
                                 const nm = names.get(ni.words[2]) orelse "v";
-                                if (ni.words[4] == 0) lo_name = nm else hi_name = nm;
+                                if (ni.words[4] == 0) {
+                                    if (lo_name.ptr != lo_fb2.ptr) {
+                                        if (names.fetchPut(ni.words[2], lo_name) catch null) |oldn| alloc.free(oldn.value);
+                                        continue;
+                                    }
+                                    lo_name = nm;
+                                } else {
+                                    if (hi_name.ptr != hi_fb2.ptr) {
+                                        if (names.fetchPut(ni.words[2], hi_name) catch null) |oldn| alloc.free(oldn.value);
+                                        continue;
+                                    }
+                                    hi_name = nm;
+                                }
                                 t_name = try glslType(m, ni.words[1], names, alloc);
                             }
                         }
