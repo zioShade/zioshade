@@ -211,10 +211,14 @@ static int renderOne(ID3D12Device* dev, ID3D12CommandQueue* queue,
     CP<ID3D12CommandAllocator> alloc;
     HRCHECK(dev->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc)), "CreateCommandAllocator");
 
-    // Constant buffer bound at b0: a KNOWN, clearly asymmetric mat4 in std140
-    // column-major layout (columns 0..3 = {1..4},{5..8},{9..12},{13..16}), padded
-    // to the 256-byte CBV alignment. A uniform-matrix shader reads M from offset 0;
-    // its transpose is distinct, so a wrong-major multiply would render differently.
+    // Constant buffer bound at b0: 64 DISTINCT floats (1..64) filling the whole
+    // 256-byte CBV. The first 16 are the known asymmetric mat4 in std140
+    // column-major layout (columns 0..3 = {1..4},{5..8},{9..12},{13..16}); its
+    // transpose is distinct, so a wrong-major multiply renders differently. The
+    // remaining floats keep every uniform member past offset 64 render-
+    // discriminating too: a shader that reads a second matrix / array / struct
+    // tail would otherwise see zeros and a miscompiled read could silently
+    // match (the loop-13 lesson, made permanent; validated on WARP there).
     CP<ID3D12Resource> cbuf;
     {
         D3D12_HEAP_PROPERTIES hp = {}; hp.Type = D3D12_HEAP_TYPE_UPLOAD;
@@ -226,10 +230,10 @@ static int renderOne(ID3D12Device* dev, ID3D12CommandQueue* queue,
         HRCHECK(dev->CreateCommittedResource(&hp, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_GENERIC_READ, nullptr, IID_PPV_ARGS(&cbuf)), "CreateCommittedResource(cbuf)");
         float m[64] = {0};
-        for (int i = 0; i < 16; i++) m[i] = (float)(i + 1); // 1..16, column-major
+        for (int i = 0; i < 64; i++) m[i] = (float)(i + 1); // 1..64, all distinct
         void* p = nullptr; D3D12_RANGE nr = {0, 0};
         HRCHECK(cbuf->Map(0, &nr, &p), "Map cbuf");
-        memcpy(p, m, sizeof(float) * 16);
+        memcpy(p, m, sizeof(m));
         cbuf->Unmap(0, nullptr);
     }
 
