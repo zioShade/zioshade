@@ -2080,13 +2080,17 @@ test "GLSL refuses a pattern-C do-while whose TRUE arm is the own-merge cont fal
 // body-merge block + the cond in the cont).
 const DOWHILE_SWITCH_NONINLINE_SPV = @embedFile("fixtures/dowhile_switch_noninline.spv");
 
-test "GLSL still defers a do-while with a non-inlinable computed cond over a header phi (#dowhile-noninline-cond, deferred)" {
-    // Class 3 is IMPLEMENTED and render-verified (the routing + this fixture
-    // matched naga; graphicsfuzz_027 verified 2-of-3 against spirv-cross) but
-    // is HELD BACK until the else-if ladder chain-hoist lands: admitting these
-    // loops lets graphicsfuzz_080's post-loop 5-deep else-if ladder reach an
-    // emission bug (arm-scoped chain phis read outside their braces, invalid
-    // GLSL -- see the #ladder-phi-scope guards). This pins the current honest
-    // error so the next round flips it deliberately.
-    try std.testing.expectError(error.UnstructuredControlFlow, crossGlsl(DOWHILE_SWITCH_NONINLINE_SPV));
+test "GLSL lowers a do-while with a non-inlinable computed cond over a header phi (#dowhile-noninline-cond)" {
+    const glsl = try crossGlsl(DOWHILE_SWITCH_NONINLINE_SPV);
+    defer alloc.free(glsl);
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "while (true)") != null);
+    // The Switch body is emitted.
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "switch") != null);
+    // The header phi is declared above the loop from its entry incoming; the
+    // cond is computed in the latch and read by name at the bottom test; the
+    // carry copy rides the back edge (AFTER the test). Names are emission-order
+    // counters: v11 = the phi, v12 = the update, v13 = the cond.
+    try expectOrdered(glsl, "int v11 = 0;", "while (true)");
+    try expectOrdered(glsl, "v12 = v11 + 1;", "if (!(v13))");
+    try expectOrdered(glsl, "if (!(v13))", "v11 = v12;");
 }

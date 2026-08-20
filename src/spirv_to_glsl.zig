@@ -1011,6 +1011,17 @@ threadlocal var g_int_mix_needed: bool = false;
 const LoopMergeCtx = struct { merge_label: u32, continue_label: u32, merge_phis: []const Instruction = &.{}, pattern_c: bool = false };
 threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 
+// #ladder-phi-hoist: merge phis whose incoming is ITSELF a phi defined inside
+// one of the selection's arms (an else-if chain). The arm's nested emission
+// declares that inner phi inside the arm's nested braces, but this level's arm
+// copy prints AFTER those braces close = out of scope (graphicsfuzz_080's
+// 9-level ladder). The outer handler pre-declares the inner phi at the ARM TOP
+// and records its result id here; the nested handler's decl loop consumes the
+// marker and skips its own (now-shadowing) declaration, keeping assignments.
+const PhiDeclGLSL = struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 };
+var g_predeclared_arm_phis: std.AutoHashMap(u32, void) = undefined;
+var g_predeclared_arm_phis_init = false;
+
 // #switch-arm-break: the innermost enclosing SWITCH's merge + its merge phis, so
 // an if-arm (or any nested block) whose OpBranch targets the SWITCH's merge can
 // emit the per-edge phi copy + `break;` (a break out of the switch from inside a
@@ -1486,6 +1497,9 @@ fn dropVaryingLocation(version: u32, model: spirv.ExecutionModel, comptime dir: 
 }
 
 pub fn spirvToGLSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: GlslCompileOptions) ![]const u8 {
+    // #ladder-phi-hoist: per-compile state (the map borrows THIS call's arena;
+    // a stale map from a previous compile segfaults on its freed memory).
+    g_predeclared_arm_phis_init = false;
     // #169 (G4): honest-error before doing any work. ESSL is out of scope; the
     // `es` field must not be silently ignored. Only the supported desktop set is
     // accepted — anything else is a hard error rather than an invalid #version.
@@ -3504,6 +3518,8 @@ fn collectSwitchMergePhis(m: *const ParsedModule, label_map: *const std.AutoHash
 }
 fn emitSwitchPhiDecls(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), phis: []const Instruction, w: anytype, alloc: std.mem.Allocator) !void {
     for (phis) |phi| {
+        // #ladder-phi-hoist: pre-declared at an outer arm top.
+        if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(phi.words[2])) continue;
         const t = try glslType(m, phi.words[1], names, alloc);
         const vn = names.get(phi.words[2]) orelse "pv";
         try w.print("    {s} {s}_phi;\n", .{ t, vn });
@@ -3565,6 +3581,41 @@ fn isSwitchCaseTargetGLSL(switch_words: []const u32, lbl: u32) bool {
         if (switch_words[k] == lbl) return true;
     }
     return false;
+}
+
+/// #ladder-phi-hoist: before walking a selection arm, declare (at the ARM TOP)
+/// each merge phi whose arm-side incoming is itself a phi defined inside the
+/// arm -- an else-if chain's next-level phi. Records the ids in
+/// g_predeclared_arm_phis so the nested selection skips its own declaration
+/// (assignments stay), making this level's arm copy read a variable declared
+/// at its own scope or shallower.
+fn hoistArmIncomingPhisGLSL(
+    m: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    label_map: *const std.AutoHashMap(u32, usize),
+    w: anytype,
+    alloc: std.mem.Allocator,
+    phis: []const PhiDeclGLSL,
+    arm_side_vals: []const u32,
+    arm_lbl: u32,
+    merge_lbl: u32,
+    indent: []const u8,
+) !void {
+    if (!g_predeclared_arm_phis_init) {
+        g_predeclared_arm_phis = std.AutoHashMap(u32, void).init(alloc);
+        g_predeclared_arm_phis_init = true;
+    }
+    const merge_idx = label_map.get(merge_lbl) orelse return;
+    for (phis, arm_side_vals) |pv, av| {
+        _ = pv;
+        if (!armRegionHasPhiGLSL(m, label_map, .{ av, av }, arm_lbl, merge_idx)) continue;
+        const pd = getDef(m, av) orelse continue;
+        if (pd.op != .Phi) continue;
+        const rtt = glslType(m, pd.words[1], names, alloc) catch continue;
+        const vn = names.get(av) orelse continue;
+        try w.print("{s}{s} {s}_phi;\n", .{ indent, rtt, vn });
+        g_predeclared_arm_phis.put(av, {}) catch {};
+    }
 }
 
 fn emitBody(
@@ -3875,7 +3926,7 @@ fn emitBody(
                 const he = fl != null and fl.? != mval;
                 // Scan merge block for Phi nodes to pre-declare
                 const merge_idx = label_map.get(mval) orelse m.instructions.len;
-                var phi_decls = std.ArrayList(struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 }).initCapacity(alloc, 4) catch unreachable;
+                var phi_decls = std.ArrayList(PhiDeclGLSL).initCapacity(alloc, 4) catch unreachable;
                 defer phi_decls.deinit(alloc);
                 if (merge_idx < m.instructions.len) {
                     var mi2: usize = merge_idx + 1;
@@ -3887,7 +3938,57 @@ fn emitBody(
                         }
                     }
                 }
+                // #no-then-selection: the BC's TRUE target is its own SelectionMerge
+                // (`if (!(c)) { ... }` -- the true path falls through to the join).
+                // Walking tl as an arm walks the MERGE BLOCK inside the if: a merge
+                // is a join, not an arm, so its content then emitted TWICE (the
+                // walker also continues at the merge), and the chain's phi copies
+                // landed at brace depths that read arm-scoped temps outside their
+                // scope (graphicsfuzz_080's 9-level else-if ladder = undeclared
+                // identifier). Mirror the no-else form, inverted: init the merge
+                // phis from the TRUE-side (fall-through) incoming -- pred = this
+                // BC's own block -- and guard the FALSE arm under `if (!(c))`.
+                if (tl == mval and fl != null) {
+                    const bc_blk = blockLabelOfGLSL(m, idx);
+                    for (phi_decls.items) |pv| {
+                        // #ladder-phi-hoist: pre-declared at an outer arm top.
+                        if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
+                        const rtt = try glslType(m, pv.type_id, names, alloc);
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        var tv: u32 = pv.vals[0];
+                        var fv: u32 = pv.vals[1];
+                        if (pv.preds[0] != bc_blk) {
+                            tv = pv.vals[1];
+                            fv = pv.vals[0];
+                        }
+                        const tvn = exprName(m, names, tv, alloc);
+                        try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn, tvn });
+                    }
+                    try w.print("    if (!({s}))\n    {{\n", .{cn});
+                    idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
+                    for (phi_decls.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const bc_blk2 = blockLabelOfGLSL(m, idx);
+                        var fv: u32 = pv.vals[1];
+                        if (pv.preds[1] != bc_blk2) fv = pv.vals[0];
+                        const fvn = exprName(m, names, fv, alloc);
+                        try w.print("        {s}_phi = {s};\n", .{ vn, fvn });
+                    }
+                    try w.writeAll("    }\n");
+                    for (phi_decls.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const phi_name = try std.fmt.allocPrint(alloc, "{s}_phi", .{vn});
+                        if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
+                    }
+                    if (label_map.get(mval)) |mi| {
+                        idx = mi;
+                    }
+                    continue;
+                }
                 for (phi_decls.items) |pv| {
+                    // #ladder-phi-hoist: an outer level pre-declared this phi at
+                    // its arm top; re-declaring here would shadow it.
+                    if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
                     const rtt = try glslType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
@@ -3907,6 +4008,17 @@ fn emitBody(
                     }
                 }
                 try w.print("    if ({s})\n    {{\n", .{cn});
+                // #ladder-phi-hoist: declare any arm-side incoming that is itself
+                // an arm-internal phi at the ARM TOP (before the nested braces).
+                {
+                    var tsides = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                    defer tsides.deinit(alloc);
+                    for (phi_decls.items) |pv| {
+                        const tv = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                        tsides.append(alloc, tv) catch {};
+                    }
+                    if (tl != mval) try hoistArmIncomingPhisGLSL(m, names, &label_map, w, alloc, phi_decls.items, tsides.items, tl, mval, "    ");
+                }
                 idx = try emitBlock(m, names, decs, tl, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                 // After true branch: assign Phi vars
                 for (phi_decls.items) |pv| {
@@ -3917,6 +4029,15 @@ fn emitBody(
                 }
                 if (he) {
                     try w.writeAll("    } else {\n");
+                    {
+                        var fsides = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                        defer fsides.deinit(alloc);
+                        for (phi_decls.items) |pv| {
+                            const fv = if (phiPred1InTrueRegion(m, &label_map, tl, mval, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                            fsides.append(alloc, fv) catch {};
+                        }
+                        try hoistArmIncomingPhisGLSL(m, names, &label_map, w, alloc, phi_decls.items, fsides.items, fl.?, mval, "    ");
+                    }
                     idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     // After false branch: assign Phi vars
                     for (phi_decls.items) |pv| {
@@ -4658,7 +4779,8 @@ fn emitWhileLoop(
             // cannot be rebuilt, and pattern C is blocked until the else-if ladder
             // chain-hoist lands (graphicsfuzz_080's post-loop ladder emits an
             // arm-scoped phi read out of scope). Keep the honest error.
-            dw_inlined = common.tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc, std450ToGlsl) orelse return error.UnstructuredControlFlow;
+            dw_inlined = common.tryInlineDoWhileCond(m, names, bc.words[1], label_map, alloc, std450ToGlsl);
+            if (dw_inlined == null and !dw_body_continue_free) return error.UnstructuredControlFlow;
         }
     }
     const dw_native = dw_inlined != null;
@@ -5229,7 +5351,7 @@ fn emitWhileLoop(
                         // the merge was dropped: its true value vanished and its result
                         // aliased to the block-scoped false value (undeclared at the use
                         // site = invalid GLSL). (phi_loop_branch)
-                        var body_phis = std.ArrayList(struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 }).initCapacity(alloc, 4) catch unreachable;
+                        var body_phis = std.ArrayList(PhiDeclGLSL).initCapacity(alloc, 4) catch unreachable;
                         defer body_phis.deinit(alloc);
                         if (label_map.get(nmv)) |midx| {
                             var pj: usize = midx + 1;
@@ -5251,6 +5373,8 @@ fn emitWhileLoop(
                             }
                         }
                         for (body_phis.items) |pv| {
+                            // #ladder-phi-hoist: pre-declared at an outer arm top.
+                            if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
                             // A loop-carried phi was already declared at loop top (a
                             // carried_phis phi as `vN_phi`, or a #413-hoisted back-edge
                             // carrier as its base name); don't re-declare it body-local.
@@ -5293,6 +5417,17 @@ fn emitWhileLoop(
                             }
                         }
                         try w.print("        if ({s})\n        {{\n", .{ncn});
+                        // #ladder-phi-hoist: declare arm-side incomings that are arm-internal
+                        // phis at the ARM TOP.
+                        if (ntl != nmv) {
+                            var tsides3 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                            defer tsides3.deinit(alloc);
+                            for (body_phis.items) |pv| {
+                                const tv = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                                tsides3.append(alloc, tv) catch {};
+                            }
+                            try hoistArmIncomingPhisGLSL(m, names, label_map, w, alloc, body_phis.items, tsides3.items, ntl, nmv, "        ");
+                        }
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         for (body_phis.items) |pv| {
                             // A carried phi is already renamed to `vN_phi`; a #413-hoisted
@@ -5310,6 +5445,15 @@ fn emitWhileLoop(
                         }
                         if (nhe) {
                             try w.writeAll("        } else {\n");
+                            {
+                                var fsides3 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                                defer fsides3.deinit(alloc);
+                                for (body_phis.items) |pv| {
+                                    const fv = if (phiPred1InTrueRegion(m, label_map, ntl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                                    fsides3.append(alloc, fv) catch {};
+                                }
+                                try hoistArmIncomingPhisGLSL(m, names, label_map, w, alloc, body_phis.items, fsides3.items, nfl.?, nmv, "        ");
+                            }
                             bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                             for (body_phis.items) |pv| {
                                 const carried = carried_phis.contains(pv.result_id) or phiIsHoistedLoopCarrierGLSL(pv.result_id);
@@ -5627,7 +5771,7 @@ fn emitBlock(
                 const he = fl != null and fl.? != nmv;
                 // Scan merge block for Phi nodes to pre-declare
                 const merge_idx2 = lm.get(nmv) orelse m.instructions.len;
-                var phi_decls2 = std.ArrayList(struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 }).initCapacity(alloc, 4) catch unreachable;
+                var phi_decls2 = std.ArrayList(PhiDeclGLSL).initCapacity(alloc, 4) catch unreachable;
                 defer phi_decls2.deinit(alloc);
                 if (merge_idx2 < m.instructions.len) {
                     var mi3: usize = merge_idx2 + 1;
@@ -5648,7 +5792,60 @@ fn emitBlock(
                         }
                     }
                 }
+                // #no-then-selection (as in emitBody): the BC's TRUE target is its own
+                // SelectionMerge. Walking tl as an arm walks the merge block inside
+                // the if, duplicating its content; emit inverted instead.
+                if (tl == nmv and fl != null) {
+                    const bc_blk = blockLabelOfGLSL(m, i);
+                    for (phi_decls2.items) |pv| {
+                        // #ladder-phi-hoist: pre-declared at an outer arm top.
+                        if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
+                        const rtt = try glslType(m, pv.type_id, names, alloc);
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        var tv: u32 = pv.vals[0];
+                        var fv: u32 = pv.vals[1];
+                        if (pv.preds[0] != bc_blk) {
+                            tv = pv.vals[1];
+                            fv = pv.vals[0];
+                        }
+                        const tvn = exprName(m, names, tv, alloc);
+                        try w.print("{s}    {s} {s}_phi = {s};\n", .{ indent, rtt, vn, tvn });
+                    }
+                    try w.print("{s}    if (!({s}))\n{s}    {{\n", .{ indent, cn, indent });
+                    {
+                        var fsides4 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                        defer fsides4.deinit(alloc);
+                        for (phi_decls2.items) |pv| {
+                            const bc_blk4 = blockLabelOfGLSL(m, i);
+                            var fv: u32 = pv.vals[1];
+                            if (pv.preds[1] != bc_blk4) fv = pv.vals[0];
+                            fsides4.append(alloc, fv) catch {};
+                        }
+                        try hoistArmIncomingPhisGLSL(m, names, lm, w, alloc, phi_decls2.items, fsides4.items, fl.?, nmv, indent);
+                    }
+                    i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
+                    for (phi_decls2.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const bc_blk5 = blockLabelOfGLSL(m, i);
+                        var fv: u32 = pv.vals[1];
+                        if (pv.preds[1] != bc_blk5) fv = pv.vals[0];
+                        const fvn = exprName(m, names, fv, alloc);
+                        try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, fvn });
+                    }
+                    try w.print("{s}    }}\n", .{indent});
+                    for (phi_decls2.items) |pv| {
+                        const vn = names.get(pv.result_id) orelse "pv";
+                        const phi_name = try std.fmt.allocPrint(alloc, "{s}_phi", .{vn});
+                        if (names.fetchPut(pv.result_id, phi_name) catch null) |old| alloc.free(old.value);
+                    }
+                    if (lm.get(nmv)) |nmi2| {
+                        i = nmi2;
+                    }
+                    continue;
+                }
                 for (phi_decls2.items) |pv| {
+                    // #ladder-phi-hoist: pre-declared at an outer arm top.
+                    if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) continue;
                     const rtt = try glslType(m, pv.type_id, names, alloc);
                     const vn = names.get(pv.result_id) orelse "pv";
                     if (he) {
@@ -5663,6 +5860,17 @@ fn emitBlock(
                     }
                 }
                 try w.print("{s}    if ({s})\n{s}    {{\n", .{ indent, cn, indent });
+                // #ladder-phi-hoist: declare arm-side incomings that are arm-internal
+                // phis at the ARM TOP (before the nested braces).
+                if (tl != nmv) {
+                    var tsides2 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                    defer tsides2.deinit(alloc);
+                    for (phi_decls2.items) |pv| {
+                        const tv = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[1] else pv.vals[0];
+                        tsides2.append(alloc, tv) catch {};
+                    }
+                    try hoistArmIncomingPhisGLSL(m, names, lm, w, alloc, phi_decls2.items, tsides2.items, tl, nmv, indent);
+                }
                 // #switch-arm-break (conditional): an arm DIRECTLY targeting the
                 // enclosing switch's merge is a conditional break out of the switch.
                 // The old path walked the arm, re-emitting the switch's MERGE block
@@ -5688,6 +5896,15 @@ fn emitBlock(
                 }
                 if (he) {
                     try w.print("{s}    }} else {{\n", .{indent});
+                    {
+                        var fsides2 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                        defer fsides2.deinit(alloc);
+                        for (phi_decls2.items) |pv| {
+                            const fv = if (phiPred1InTrueRegion(m, lm, tl, nmv, pv.preds[1], alloc)) pv.vals[0] else pv.vals[1];
+                            fsides2.append(alloc, fv) catch {};
+                        }
+                        try hoistArmIncomingPhisGLSL(m, names, lm, w, alloc, phi_decls2.items, fsides2.items, fl.?, nmv, indent);
+                    }
                     if (fl_is_swbreak) {
                         try emitSwitchMergeBreakGLSL(m, names, sctx_bc.?, blockLabelOfGLSL(m, i), indent, w, alloc);
                     } else {
