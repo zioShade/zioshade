@@ -1,0 +1,46 @@
+; SPIR-V
+; Version: 1.0
+; Generator: bespoke
+; Bound: 40
+; Schema: 0
+OpCapability Shader
+%1 = OpExtInstImport "GLSL.std.450"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %color %frag
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %color Location 0
+OpDecorate %frag BuiltIn FragCoord
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%f32 = OpTypeFloat 32
+%v4f = OpTypeVector %f32 4
+%u32 = OpTypeInt 32 0
+%bool = OpTypeBool
+%two_u = OpTypeStruct %u32 %u32
+%ptr_out = OpTypePointer Output %v4f
+%ptr_in_v4 = OpTypePointer Input %v4f
+%ptr_in_f = OpTypePointer Input %f32
+%uint_1 = OpConstant %u32 1
+%u0 = OpConstant %u32 0
+%umax = OpConstant %u32 4294967295
+%f0 = OpConstant %f32 0
+%f1 = OpConstant %f32 1
+%f4294967295 = OpConstant %f32 4294967295
+%color = OpVariable %ptr_out Output
+%frag = OpVariable %ptr_in_v4 Input
+%main = OpFunction %void None %fn
+%e = OpLabel
+%xc = OpAccessChain %ptr_in_f %frag %uint_1
+%xl = OpLoad %f32 %xc
+%xf = OpFDiv %f32 %xl %f4294967295
+%x = OpConvertFToU %u32 %xf
+%big = OpIAdd %u32 %umax %u0
+%c = OpIAddCarry %two_u %big %x
+%lo = OpCompositeExtract %u32 %c 0
+%hi = OpCompositeExtract %u32 %c 1
+%lof = OpConvertUToF %f32 %lo
+%hif = OpConvertUToF %f32 %hi
+%ov = OpCompositeConstruct %v4f %lof %hif %f0 %f1
+OpStore %color %ov
+OpReturn
+OpFunctionEnd

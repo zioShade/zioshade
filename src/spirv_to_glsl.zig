@@ -2176,6 +2176,13 @@ fn findEntryPoint(module: *const ParsedModule, name: []const u8) ?u32 {
 }
 
 fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
+    // #carry-ops: OpIAddCarry (149) / OpISubBorrow (150) / OpUMulExtended (151)
+    // define a result at words[2]; the spirv.Op enum is non-exhaustive and does
+    // not name them (same raw-opcode indexing as common's shared table, #170).
+    {
+        const opc = @intFromEnum(op);
+        if (opc == 149 or opc == 150 or opc == 151) return if (words.len > 2) words[2] else null;
+    }
     return switch (op) {
         .TypeVoid, .TypeBool, .TypeInt, .TypeFloat, .TypeVector, .TypeMatrix, .TypeImage, .TypeSampler, .TypeSampledImage, .TypeArray, .TypeRuntimeArray, .TypeStruct, .TypePointer, .TypeFunction, .TypeForwardPointer, .TypeAccelerationStructureKHR, .TypeRayQueryKHR, .TypeTensorARM => if (words.len > 1) words[1] else null,
         .ConstantTrue, .ConstantFalse, .Constant, .ConstantComposite, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse, .SpecConstantComposite, .SpecConstantOp, .Undef => if (words.len > 2) words[2] else null,
@@ -6658,6 +6665,10 @@ fn emitInstruction(
                         const ext_op = sd.words[4];
                         if (ext_op == 52 or ext_op == 36) return; // FrexpStruct/ModfStruct - already decomposed
                     }
+                    {
+                        const soc = @intFromEnum(sd.op);
+                        if (soc == 149 or soc == 150 or soc == 151) return;
+                    }
                 }
             }
             const rtt = try glslType(m, inst.words[1], names, alloc);
@@ -7425,6 +7436,112 @@ fn emitInstruction(
                 try w.print("    {s} {s} = {s}({s}.{s}.length());\n", .{ rtt, rn, rtt, inst_name, mname });
         },
         else => {
+            // #carry-ops: OpIAddCarry (149) / OpISubBorrow (150) / OpUMulExtended
+            // (151) -- struct-result ops with no GLSL struct equivalent; GLSL's
+            // uaddCarry/usubBorrow/umulExtended take the members as OUT params.
+            // Decomposed exactly like the std450 FrexpStruct/ModfStruct pair:
+            // scan the downstream CompositeExtracts, steal their result names for
+            // the members, emit the out-param + call; the extracts skip
+            // themselves. (The spirv.Op enum is non-exhaustive and does not name
+            // these -- match by raw opcode, as WGSL does.)
+            {
+                const opc = @intFromEnum(inst.op);
+                if (opc == 149 or opc == 150 or opc == 151) {
+                    // Scope gate: a carry op inside a LOOP is refused for now --
+                    // GraphicsFuzz loop bodies read body-scoped temps after the
+                    // loop (graphicsfuzz_058), and the escape hoist (declaring
+                    // surviving body values at the enclosing scope) is its own
+                    // piece of work. Top-level carries lower fully.
+                    {
+                        var self_idx: usize = 0;
+                        var regions: [16]struct { s: usize, e: usize } = undefined;
+                        var nreg: usize = 0;
+                        for (m.instructions, 0..) |mi, ix| {
+                            if (@intFromEnum(mi.op) == opc and mi.words.len >= 3 and mi.words[2] == inst.words[2]) {
+                                self_idx = ix;
+                                break;
+                            }
+                        }
+                        for (m.instructions, 0..) |mi, ix| {
+                            if (mi.op == .LoopMerge and mi.words.len >= 2 and nreg < regions.len) {
+                                var mj: usize = ix + 1;
+                                while (mj < m.instructions.len) : (mj += 1) {
+                                    if (m.instructions[mj].op == .Label and m.instructions[mj].words.len > 1 and m.instructions[mj].words[1] == mi.words[1]) break;
+                                }
+                                if (mj < m.instructions.len) {
+                                    regions[nreg] = .{ .s = ix, .e = mj };
+                                    nreg += 1;
+                                }
+                            }
+                        }
+                        for (regions[0..nreg]) |r| {
+                            if (self_idx > r.s and self_idx < r.e) return error.UnsupportedCarryInLoop;
+                        }
+                    }
+                }
+                if (opc == 149 or opc == 150) {
+                    if (inst.words.len < 5) return error.CrossCompileUnsupported;
+                    const xn = exprName(m, names, inst.words[3], alloc);
+                    const yn = exprName(m, names, inst.words[4], alloc);
+                    const fn_name: []const u8 = if (opc == 149) "uaddCarry" else "usubBorrow";
+                    var lo_name: []const u8 = "_carr_lo";
+                    var hi_name: []const u8 = "_carr_hi";
+                    var t_name: []const u8 = "uint";
+                    {
+                        var j: usize = 0;
+                        for (m.instructions, 0..) |mi, i| {
+                            if (@intFromEnum(mi.op) == opc and mi.words.len >= 3 and mi.words[2] == inst.words[2]) {
+                                j = i + 1;
+                                break;
+                            }
+                        }
+                        while (j < m.instructions.len) : (j += 1) {
+                            const ni = m.instructions[j];
+                            if (ni.op == .FunctionEnd) break;
+                            if (ni.op == .CompositeExtract and ni.words.len >= 5 and ni.words[3] == inst.words[2]) {
+                                const nm = names.get(ni.words[2]) orelse "v";
+                                if (ni.words[4] == 0) lo_name = nm else hi_name = nm;
+                                t_name = try glslType(m, ni.words[1], names, alloc);
+                            }
+                        }
+                    }
+                    try w.print("    {s} {s};\n", .{ t_name, hi_name });
+                    try w.print("    {s} {s} = {s}({s}, {s}, {s});\n", .{ t_name, lo_name, fn_name, xn, yn, hi_name });
+                    return;
+                }
+                if (opc == 151) {
+                    // OpUMulExtended returns {low, high}; GLSL's umulExtended is
+                    // void with BOTH members as out-params (call order: msb, lsb).
+                    if (inst.words.len < 5) return error.CrossCompileUnsupported;
+                    const xn = exprName(m, names, inst.words[3], alloc);
+                    const yn = exprName(m, names, inst.words[4], alloc);
+                    var lo_name: []const u8 = "_mul_lo";
+                    var hi_name: []const u8 = "_mul_hi";
+                    var t_name: []const u8 = "uint";
+                    {
+                        var j: usize = 0;
+                        for (m.instructions, 0..) |mi, i| {
+                            if (@intFromEnum(mi.op) == 151 and mi.words.len >= 3 and mi.words[2] == inst.words[2]) {
+                                j = i + 1;
+                                break;
+                            }
+                        }
+                        while (j < m.instructions.len) : (j += 1) {
+                            const ni = m.instructions[j];
+                            if (ni.op == .FunctionEnd) break;
+                            if (ni.op == .CompositeExtract and ni.words.len >= 5 and ni.words[3] == inst.words[2]) {
+                                const nm = names.get(ni.words[2]) orelse "v";
+                                if (ni.words[4] == 0) lo_name = nm else hi_name = nm;
+                                t_name = try glslType(m, ni.words[1], names, alloc);
+                            }
+                        }
+                    }
+                    try w.print("    {s} {s};\n", .{ t_name, lo_name });
+                    try w.print("    {s} {s};\n", .{ t_name, hi_name });
+                    try w.print("    umulExtended({s}, {s}, {s}, {s});\n", .{ xn, yn, hi_name, lo_name });
+                    return;
+                }
+            }
             // An unhandled opcode has no GLSL lowering. Emitting a `// unhandled op N`
             // comment and continuing leaves the result undefined at every use site =
             // invalid GLSL at exit 0 (the silent-wrong class this project exists to

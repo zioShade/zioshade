@@ -2090,6 +2090,28 @@ const DOWHILE_SWITCH_NONINLINE_SPV = @embedFile("fixtures/dowhile_switch_noninli
 // loop (routes the body past the strict scan into the rich walker).
 const WHILE_NOTHEN_BODY_SPV = @embedFile("fixtures/while_nothen_body.spv");
 
+// #carry-ops: OpIAddCarry/OpISubBorrow return a 2-member struct {value,
+// carry/borrow} with no GLSL struct equivalent. GLSL has the uaddCarry/
+// usubBorrow builtins taking the second member as an OUT param. Lowered like
+// the std450 FrexpStruct/ModfStruct decomposition: scan the downstream
+// CompositeExtracts, steal their result names for the members, emit the
+// out-param + call; the extracts skip themselves. Fixture: both members feed
+// the output (graphicsfuzz_064's shape -- its carry extract previously hit
+// the unhandled-opcode honest error).
+const CARRY_OPS_SPV = @embedFile("fixtures/carry_ops.spv");
+
+test "GLSL lowers OpIAddCarry to uaddCarry with a named carry out-param (#carry-ops)" {
+    const glsl = try crossGlsl(CARRY_OPS_SPV);
+    defer alloc.free(glsl);
+    // The out-param is declared, the call assigns the low word, and both
+    // member names appear downstream (the extracts alias, not re-declare).
+    try expectOrdered(glsl, "uint ", "= uaddCarry(");
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "uaddCarry(") != null);
+    // exactly one uaddCarry call, no struct emission
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, glsl, "uaddCarry("));
+    try std.testing.expect(std.mem.indexOf(u8, glsl, "struct") == null);
+}
+
 test "GLSL lowers a no-then selection inside a loop body (#no-then-selection)" {
     const glsl = try crossGlsl(WHILE_NOTHEN_BODY_SPV);
     defer alloc.free(glsl);
