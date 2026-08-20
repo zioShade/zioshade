@@ -56,29 +56,29 @@ render-proven," here is the honest per-backend confidence level:
 | **MSL on `spirv-opt -O`** | **render-proven** | `prove_opt` runs the SPIR-V optimizer's output through both zioshade-MSL and SPIRV-Cross-MSL and render-diffs on Metal; a focused campaign closed 39 structural miscompiles to 0, and wintty's own `crt_output`/`focus_output` shaders verify MATCH on optimized SPIR-V | `just prove-opt` |
 | **GLSL** | **render-verified (proxy)** | glslang compile (0 INVALID) + Metal-reuse render proxy (zioshade GLSL → glslang → MSL → Metal vs MSL_ref): **1141 MATCH / 3 EDGE / 22 DIFFER (flagged)** — `#loop-continue-deadincr` dropped 70 → 26, `#switch-fallthrough` dropped 26 → 25, and proxy FP-adjudication (#52) split 3 benign EDGE from 22 persistent DIFFER (chaos / control-flow / proxy-round-trip). Single-oracle proxy, same correlated-normalization caveat as HLSL | `just glsl-glslang-all`, `bash tools/glsl_render_check.sh` |
 | **WGSL** | **render-verified (proxy)** | naga compile (0 REJECT) + Metal-reuse render proxy (zioshade WGSL → naga → MSL → Metal vs MSL_ref): **1138 MATCH / 9 EDGE / 19 DIFFER (flagged)** — `#loop-continue-deadincr` (`continuing{}`) dropped 60 → 29, `#switch-fallthrough` (statement duplication — `fallthrough` was removed from WGSL) dropped 29 → 28, and proxy FP-adjudication (#52) split 9 benign EDGE from 19 persistent DIFFER (chaos / control-flow / proxy-round-trip). Same single-oracle-proxy caveat | `just wgsl-naga`, `bash tools/wgsl_render_check.sh` |
-| **HLSL** | **compile-verified** (glslang + DXC) | glslang accepts the emitted HLSL (0 INVALID); DXC canonical SM6.x compile-verify now provisioned in Docker — 51 PASS / 3 honest-error / 2 SKIP as of commit `e920e3f`, 2026-07-27 (dated snapshot; [BENCHMARKS.md](../BENCHMARKS.md#dxc-validation-snapshots) is the source of truth for DXC figures); the D3D12 *render*-diff (semantic truth) is still founder-gated. The previously WARP-flagged matrix-convention bug (`floatCxR` row-fill → transpose) is **FIXED via `emitMatrixMulSwapped`** (mirrors spirv-cross's `mul(v,M)` convention) and **WARP-CONFIRMED** — a re-run on the real DXC→DXIL→D3D12 runtime gave **3 RENDER-MATCH / 0 RENDER-DIFFER** on the exact three previously flagged (mat3_branch, mat_cond_swizzle, outer_product_test); zioshade's HLSL byte-matches spirv-cross. A **full WARP corpus sweep** on real D3D12 (ryzen7pro): **803 RENDER-MATCH / 9 RENDER-DIFFER / 599 skip** (post-fix re-sweep confirmed at scale — zero regression). The one control-flow DIFFER (`switch_fallthrough` — HLSL emitted unconditional `break;`, dropping the fallthrough accumulation) is **FIXED** (emit `break;` only for terminal cases; fallthrough cases fall through, mirroring spirv-cross) and moved DIFFER→MATCH. The remaining 9 DIFFERs are benign-FP (mandelbrot_iter/simple/3, multi_return2, nested_func_expr — chaotic shaders diverging by FP ordering) or harness artifacts (.vk.nocompat; .desktop depth-greater/less + image-query) | `just hlsl-glslang-all`, `just hlsl-dxc` |
+| **HLSL** | **render-verified (WARP)** | glslang compile (0 INVALID) + DXC SM6.x compile gate (51 PASS / 3 honest-error / 2 SKIP; dated snapshots in [BENCHMARKS.md](../BENCHMARKS.md#dxc-validation-snapshots)) + a **D3D12 render oracle at full-corpus scale**: `tools/warp/` compiles both zioshade's and the reference's HLSL with DXC to DXIL and renders them on D3D12 WARP (Microsoft's software D3D12 rasterizer, the API path a Windows app actually executes), pixel-diffing every shader with per-shader generated vertex stages and a distinct-float constant fill. Full-corpus run (#646): **1374 RENDER-MATCH / 5 RENDER-DIFFER / 0 emission bugs** over 1417 artifact-free staged fragments; all five DIFFERs are proven benign fp-contraction (recompiling both sides with `dxc -Gis` renders them pixel-identical), and every skip is reasoned per-shader. The gate's first run (#645) found and fixed a real emission class (no-output fragments synthesizing zero writes where SPIR-V semantics write nothing), so it is not a rubber stamp. History: the early matrix-convention (`floatCxR` row-fill) and `switch_fallthrough` DIFFERs are fixed and WARP-confirmed. Honest scope: WARP is a software rasterizer, so this proves D3D12 semantics, not vendor-driver behavior. | `just hlsl-glslang-all`, `just hlsl-dxc`, `tools/warp/` (Windows host via `WARP_HOST`) |
 
-**What "compile-verified only" means, honestly.** A compiler can emit output a
+**What is render-proven and what is not, honestly.** A compiler can emit output a
 downstream validator accepts yet still compute the wrong thing — precisely the
-"plausible-but-wrong" failure zioshade exists to eliminate. Only the MSL backend
-has a *render/exec* oracle (run it on the GPU, compare pixels); for GLSL/WGSL/HLSL
-we currently prove the output is *well-formed*, not that it is *semantically
-correct*. Two consequences, by design:
+"plausible-but-wrong" failure zioshade exists to eliminate. Render/exec oracles exist
+today for two of the four backends: MSL runs natively on a Metal GPU, and HLSL runs on
+D3D12 WARP at full-corpus scale (above). GLSL and WGSL are compile-checked plus
+proxy-render-verified (below), not semantically proven on their own APIs. One
+consequence, by design:
 
 - Where zioshade cannot translate a construct safely, it **declines loudly**
   (a named honest-error) rather than emit a best-effort translation that might be
   wrong. Every "honest-err" / XFAIL above is such a refusal, never a silent pass.
-- The DXC **compile**-verify tier is now provisioned (`just hlsl-dxc`, DXC in Docker —
-  51 PASS / 3 honest-error / 2 SKIP at commit `e920e3f`, 2026-07-27; see
-  [BENCHMARKS.md](../BENCHMARKS.md#dxc-validation-snapshots)), giving HLSL a canonical
-  SM6.x compile oracle on top of the glslang frontend gate. The DXC → D3D12 **render** oracle
-  (`tools/hlsl_render_check.sh` + `tools/warp/`) — which would lift HLSL from
-  compile-verified to render-proven — is the remaining founder-gated tier: it needs a
-  D3D execution rig, and DXC compile is itself not a semantic oracle. wintty ships on
-  MSL today, so the macOS render-proven path remains the one that matters for the consumer.
 
-**Bottom line:** trust the MSL path as render-verified; treat GLSL/WGSL/HLSL as
-compile-checked and honest-error-bounded — not as semantically proven.
+The remaining tiers are named, not hidden: a native-hardware D3D12 rig would upgrade
+HLSL from WARP (software rasterizer) to vendor-driver truth, and a native GL leg would
+do the same for GLSL beyond the Metal-reuse proxy. wintty ships on Windows via D3D12,
+so the WARP leg is the one its users actually execute, and the Metal leg is the
+reference GPU the rest of the suite renders on.
+
+**Bottom line:** trust MSL as render-proven on Metal and HLSL as render-verified on
+D3D12 WARP; treat GLSL and WGSL as compile-checked, proxy-render-verified, and
+honest-error-bounded.
 
 ## Second independent oracle: naga render differential
 

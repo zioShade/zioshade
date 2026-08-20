@@ -3,7 +3,7 @@
 
 # zioshade status
 
-Generated: `2026-08-15T04:18:16Z` · commit `ba3966e1`
+Generated: `2026-08-20T19:25:59Z` · commit `c92a06a6`
 
 ## Conformance (`zig build conformance` — every fixture's SPIR-V validated with spirv-val)
 
