@@ -94,7 +94,8 @@ case "$STAGE" in
     # #649 verification): a row_major struct-typed UBO member made the struct-decl
     # emitter throw mid-member-list with the error swallowed, so the cbuffer
     # declaration landed inside the open `struct Foo {` (fixed by #hlsl-struct-
-    # buffer-decl: the error now propagates as an honest UnsupportedRowMajorMatrix).
+    # buffer-decl, then fully LOWERED by #hlsl-nonsquare-rowmajor: the explicit
+    # row_major non-square member emits a flipped column_major qualifier).
     KNOWN_INVALID=" ";;
   compute)
     # No known HLSL compute INVALIDs. cfg.comp WAS here (OpUndef result id
@@ -106,8 +107,9 @@ case "$STAGE" in
     # INVALID (found during #649 verification): an explicit row_major non-square
     # SSBO member aborted the element-struct decl mid-list with the error
     # swallowed, so the RWStructuredBuffer declaration itself was emitted inside
-    # the member list (fixed by #hlsl-struct-buffer-decl: honest
-    # UnsupportedRowMajorMatrix, struct decls are atomic).
+    # the member list (fixed by #hlsl-struct-buffer-decl, then fully LOWERED by
+    # #hlsl-nonsquare-rowmajor: the flipped column_major qualifier plus
+    # all-dims array members).
     KNOWN_INVALID=" ";;
   *)
     KNOWN_INVALID=" ";;
