@@ -2857,6 +2857,145 @@ test "T18.23: non-square row_major matrix is an honest error (not silent-wrong)"
     }
 }
 
+// ---------------------------------------------------------------------------
+// T18.24+: #rm-extract -- OpCompositeExtract reaching a row_major SQUARE matrix
+// inside a LOADED composite value (the loop-14 silent-wrong class; the MSL
+// analog of the HLSL #656 fix). A whole-struct load (`RowMajor l = rm;`) holds
+// RAW row-major bytes, so extracting the matrix member yields M^T unless
+// wrapped in transpose(...). Byte provenance decides: a load (or copy/phi of
+// loads) is raw (transpose); a CompositeConstruct is logical (no transpose --
+// the inverse silent-wrong); anything else (function call, select, mixed phi)
+// is refused honestly. Render-proven against spirv-cross on Metal with the
+// distinct-float LCG buffer fill (base DIFFERs, fixed MATCHes).
+// ---------------------------------------------------------------------------
+
+test "T18.24: row_major matrix extracted from a whole-struct load is transposed" {
+    // The ubo-load-row-major-workaround corpus shape, minimized: `%v = OpLoad
+    // %RowMajor %p; OpCompositeExtract %mat4 %v 0` read the raw M^T silently.
+    const source =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor loaded = rm;
+        \\    FragColor = loaded.B * Clip;
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The extract from the loaded struct must wrap the member in transpose().
+    try assertContains(msl, "transpose(");
+    // Column_major struct loads (the control below) must NOT gain one.
+    const col_source =
+        \\#version 450
+        \\struct Plain { mat4 B; };
+        \\layout(binding=0,std140,column_major) uniform UBO2 { Plain rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    Plain loaded = rm;
+        \\    FragColor = loaded.B * Clip;
+        \\}
+    ;
+    const col_msl = try compileToMsl(col_source);
+    defer alloc.free(col_msl);
+    try assertNotContains(col_msl, "transpose(");
+}
+
+test "T18.25: row_major struct-load column extract keeps the tail logical" {
+    // `loaded.B[1]` (extract the matrix, then column 1): the transpose wraps
+    // the MATRIX; the tail indexes the LOGICAL matrix -- `transpose(x)[1]`,
+    // never a second transpose. (The HLSL loop-13 victim shape, MSL side.)
+    const source =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor loaded = rm;
+        \\    FragColor = loaded.B[1];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertContains(msl, ")[1]");
+    try assertNotContains(msl, "transpose(transpose(");
+}
+
+test "T18.26: row_major matrix extracted from a CONSTRUCTED struct is NOT transposed" {
+    // Provenance: a CompositeConstruct of the decorated struct type holds
+    // LOGICAL (column-major) bytes -- transposing it would be the inverse
+    // silent-wrong. Exactly one transpose (the raw extract) may appear.
+    const source =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor loaded = rm;
+        \\    mat4 logical = transpose(loaded.B);
+        \\    RowMajor made = RowMajor(logical);
+        \\    FragColor = made.B * Clip;
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    try assertNotContains(msl, "transpose(transpose(");
+}
+
+test "T18.27: constructed whole-struct store into a row_major-typed local compensates" {
+    // A local of the decorated struct type is READ through the type-driven
+    // transpose (findRowMajorMatrix), so every store must leave RAW bytes: a
+    // struct copied from the buffer already holds raw bytes (plain store), but
+    // a CONSTRUCTED value must be transposed member-wise after the copy, or
+    // the unconditional transposed read would flip the logical matrix.
+    const source =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor v;
+        \\    if (Clip.x > 0.5) { v = rm; } else { v = RowMajor(mat4(1.0,2.0,3.0,4.0,5.0,6.0,7.0,8.0,9.0,10.0,11.0,12.0,13.0,14.0,15.0,16.0)); }
+        \\    FragColor = v.B[1];
+        \\}
+    ;
+    const msl = try compileToMsl(source);
+    defer alloc.free(msl);
+    // The constructed store must be followed by the member-wise compensation.
+    try assertContains(msl, "= transpose(");
+}
+
+test "T18.28: unprovable row_major extract provenance is an honest error" {
+    // A struct SELECT (ternary) joining a buffer-loaded value and a constructed
+    // value hides the byte provenance of the selected branch: the loaded side
+    // needs transpose(...), the constructed side must NOT get one. Guessing
+    // either way would miscompile the other, so the backend must refuse.
+    const source =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor a = rm;
+        \\    RowMajor b = RowMajor(mat4(1.0));
+        \\    RowMajor v = Clip.x > 0.5 ? a : b;
+        \\    FragColor = v.B * Clip;
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedRowMajorExtractProvenance,
+        zioshade.spirvToMSL(alloc, spirv, .{}),
+    );
+}
+
 test "T18.24: row_major SQUARE matrix ARRAY read is transposed" {
     // The RowMajor decoration sits on the struct MEMBER even when that member is
     // an array of matrices. Reading `a.m[1][0]` must transpose the indexed

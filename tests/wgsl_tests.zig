@@ -2553,6 +2553,135 @@ test "wgsl: non-square row_major UBO matrix is an honest error (not silent-wrong
     );
 }
 
+// ---------------------------------------------------------------------------
+// #rm-extract: OpCompositeExtract reaching a row_major matrix inside a LOADED
+// composite value (the loop-14 silent-wrong class; the WGSL twin of the MSL fix
+// and the HLSL #656 fix). A whole-struct load (`RowMajor l = rm;`) reads RAW
+// row-major bytes, so extracting the matrix member yields M^T -- silent-wrong
+// unless wrapped in transpose(...). Byte provenance decides: a load (or
+// copy/phi of loads) is raw (transpose); a CompositeConstruct is logical (no
+// transpose); anything else (function call, select) is refused honestly.
+// ---------------------------------------------------------------------------
+
+test "wgsl: row_major matrix extracted from a whole-struct load is transposed" {
+    // The loop-13 HLSL victim shape in WGSL form: `RowMajor l = rm;` then use
+    // l.B. The struct load holds raw M^T bytes; the extract must transpose.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor loaded = rm;
+        \\    FragColor = loaded.B * Clip;
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "transpose(");
+    try nagaValidateOrSkip(wgsl, "row_major struct-load extract");
+}
+
+test "wgsl: row_major matrix from a whole-struct load keeps the column tail logical" {
+    // The matrix THEN a column: `loaded.B[1]` (extract member, then column 1).
+    // The transpose wraps the matrix; the tail indexes the LOGICAL matrix, so
+    // the column read must be `transpose(...)[1]`, not a second transpose.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor loaded = rm;
+        \\    FragColor = loaded.B[1];
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, ")[1]");
+    try nagaValidateOrSkip(wgsl, "row_major struct-load column extract");
+}
+
+test "wgsl: row_major matrix extracted from a CONSTRUCTED struct is NOT transposed" {
+    // Byte provenance: a CompositeConstruct of the decorated struct type holds
+    // LOGICAL (column-major) bytes -- transposing it would be the inverse
+    // silent-wrong. Extract from the constructed value must stay plain.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor loaded = rm;
+        \\    mat4 logical = transpose(loaded.B);
+        \\    RowMajor made = RowMajor(logical);
+        \\    FragColor = made.B * Clip;
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    // Exactly one transpose: the raw extract from `loaded`. The constructed
+    // `made.B` read (inlined into the mul) must NOT add another.
+    try assertNotContains(wgsl, "transpose(transpose(");
+    try nagaValidateOrSkip(wgsl, "row_major constructed-struct extract");
+}
+
+test "wgsl: unprovable row_major extract provenance is an honest error" {
+    // A struct SELECT (ternary) joining a buffer-loaded value and a constructed
+    // value hides the byte provenance of the selected branch: the loaded side
+    // needs transpose(...), the constructed side must NOT get one. Guessing
+    // either way would miscompile the other, so the backend must refuse.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\layout(binding=0,std140,row_major) uniform UBO2 { RowMajor rm; };
+        \\layout(location=0) in vec4 Clip;
+        \\layout(location=0) out vec4 FragColor;
+        \\void main() {
+        \\    RowMajor a = rm;
+        \\    RowMajor b = RowMajor(mat4(1.0));
+        \\    RowMajor v = Clip.x > 0.5 ? a : b;
+        \\    FragColor = v.B * Clip;
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedRowMajorExtractProvenance,
+        zioshade.spirvToWGSL(alloc, spirv, .{}),
+    );
+}
+
+test "wgsl: store THROUGH a row_major matrix member is an honest error (was naga-invalid)" {
+    // The store path used buildAccessExpr's READ compensation, emitting
+    // `transpose(ubo.A)[0] = vec4(...)` -- invalid WGSL (naga: "expected `;`")
+    // at zioshade exit 0. Mirrors the MSL backend's guard: fail loudly rather
+    // than emit an assignment through transpose(...).
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(binding=0,std140,row_major) uniform A { mat4 m; } a;
+        \\layout(location=0) out vec4 o;
+        \\void main() {
+        \\    a.m[0] = vec4(1.0, 2.0, 3.0, 4.0);
+        \\    o = a.m[1];
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try std.testing.expectError(
+        error.UnsupportedRowMajorMatrixStore,
+        zioshade.spirvToWGSL(alloc, spirv, .{}),
+    );
+}
+
 test "wgsl: gl_VertexIndex/gl_InstanceIndex emit u32 @builtin with i32 conversion" {
     // WGSL mandates u32 for vertex_index/instance_index, but glslang types them
     // as signed i32. Emitting i32 makes naga reject the entry point. We emit a
