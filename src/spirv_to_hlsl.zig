@@ -1892,6 +1892,9 @@ pub fn spirvToHLSL(
     // uses to silently bind the wrong bytes -- #zm0). Mangling runs on the
     // hlslSafeName form so two raw names that sanitize equal also split.
     common.commonPrewriteUniqueStructNames(module.instructions, &names, aa, hlslSafeName);
+    // THEN re-merge the specific pair the split must not keep apart: glslang's
+    // row_major type duplicates. See hlslUnifyRowMajorStructVariants.
+    hlslUnifyRowMajorStructVariants(&module, &names, aa);
     // Alias const-initialised Private globals to their promoted const (Design A).
     hlslAliasConstInitializedPrivateVars(aa, &module, &names);
     // Mangle function-scope ids (Function-class OpVariable or OpFunctionParameter)
@@ -2547,7 +2550,7 @@ pub fn spirvToHLSL(
     var emitted_globals = false;
     for (func_ids.items) |fid| {
         if (fid == entry_id) continue; // emit entry last
-        try emitFunction(&module, &names, &decorations, fid, w, aa, false, &out_param_info, options.shader_model, !emitted_globals);
+        try emitFunction(&module, &names, &decorations, fid, w, aa, false, &out_param_info, options.shader_model, !emitted_globals, &emitted_names2);
         emitted_globals = true;
     }
 
@@ -2618,7 +2621,7 @@ pub fn spirvToHLSL(
     }
 
     // Emit entry function last
-    try emitFunction(&module, &names, &decorations, entry_id, w, aa, true, &out_param_info, options.shader_model, !emitted_globals);
+    try emitFunction(&module, &names, &decorations, entry_id, w, aa, true, &out_param_info, options.shader_model, !emitted_globals, &emitted_names2);
     output_owned = false;
     return output.toOwnedSlice(alloc);
 }
@@ -2810,6 +2813,326 @@ fn collectNames(alloc: std.mem.Allocator, module: *const ParsedModule, names: *s
             if (i == 0) continue; // Keep first one as-is
             const new_name = std.fmt.allocPrint(alloc, "{s}_{d}", .{ name, id }) catch continue;
             names.put(id, new_name) catch {};
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Row-major struct variant unification (#hlsl-rowmajor-struct-variant)
+// ---------------------------------------------------------------------------
+
+/// Recursively serialize a structural key for `type_id`: two types produce the
+/// same key iff they are the same type for HLSL purposes. Layout decorations
+/// (RowMajor/ColMajor/Offset/MatrixStride) are deliberately NOT part of the
+/// key: they steer the `row_major` storage modifier on members, not the HLSL
+/// type identity. Struct member NAMES are part of the key because the single
+/// surviving declaration spells the declaring variant's member names, so a
+/// variant whose members are named differently must not merge. An array length
+/// that cannot be resolved to a value falls back to the raw length operand id
+/// so a shape that cannot be proven identical never unifies.
+fn hlslStructVariantKey(module: *const ParsedModule, type_id: u32, out: *std.ArrayList(u8), alloc: std.mem.Allocator, depth: u32) void {
+    if (depth > 16) {
+        out.print(alloc, "T{d}", .{type_id}) catch {};
+        return;
+    }
+    const inst = getDef(module, type_id) orelse {
+        out.print(alloc, "T{d}", .{type_id}) catch {};
+        return;
+    };
+    switch (inst.op) {
+        .TypeVoid => out.appendSlice(alloc, "v") catch {},
+        .TypeBool => out.appendSlice(alloc, "b") catch {},
+        .TypeInt => {
+            const signed = inst.words.len > 3 and inst.words[3] != 0;
+            out.print(alloc, "i{d}{d}", .{ inst.words[2], @intFromBool(signed) }) catch {};
+        },
+        .TypeFloat => out.print(alloc, "f{d}", .{inst.words[2]}) catch {},
+        .TypeVector => {
+            out.print(alloc, "V{d}<", .{inst.words[3]}) catch {};
+            hlslStructVariantKey(module, inst.words[2], out, alloc, depth + 1);
+            out.appendSlice(alloc, ">") catch {};
+        },
+        .TypeMatrix => {
+            const colvec = getDef(module, inst.words[2]);
+            const rows: u32 = if (colvec) |cv| cv.words[3] else inst.words[3];
+            out.print(alloc, "M{d}x{d}", .{ inst.words[3], rows }) catch {};
+        },
+        .TypeArray => {
+            // A resolvable length keys by VALUE (two different constant ids with
+            // the same value are the same array); an unresolvable one keys by
+            // the operand id, which never matches across distinct operands.
+            const len = common.arrayLengthValue(module, inst.words[3]);
+            if (len) |lv| {
+                out.print(alloc, "A{d}<", .{lv}) catch {};
+            } else {
+                out.print(alloc, "A~{d}<", .{inst.words[3]}) catch {};
+            }
+            hlslStructVariantKey(module, inst.words[2], out, alloc, depth + 1);
+            out.appendSlice(alloc, ">") catch {};
+        },
+        .TypeRuntimeArray => {
+            out.appendSlice(alloc, "R<") catch {};
+            hlslStructVariantKey(module, inst.words[2], out, alloc, depth + 1);
+            out.appendSlice(alloc, ">") catch {};
+        },
+        .TypePointer => {
+            out.print(alloc, "P{d}<", .{inst.words[2]}) catch {};
+            hlslStructVariantKey(module, inst.words[3], out, alloc, depth + 1);
+            out.appendSlice(alloc, ">") catch {};
+        },
+        .TypeStruct => {
+            out.print(alloc, "S{d}", .{inst.words.len - 2}) catch {};
+            for (inst.words[2..], 0..) |mt_id, mi| {
+                var mname_buf: [32]u8 = undefined;
+                const mname = hlslGetMemberName(module, type_id, @intCast(mi), &mname_buf);
+                out.print(alloc, "[{s}:", .{mname}) catch {};
+                hlslStructVariantKey(module, mt_id, out, alloc, depth + 1);
+                out.appendSlice(alloc, "]") catch {};
+            }
+        },
+        else => {
+            // Opaque types (images, samplers, ...): opcode plus every literal
+            // operand, so two differently-parameterized types never match.
+            out.print(alloc, "O{d}", .{@intFromEnum(inst.op)}) catch {};
+            for (inst.words[2..]) |word| out.print(alloc, ",{d}", .{word}) catch {};
+        },
+    }
+}
+
+/// Unify glslang's row-major struct type duplicates onto ONE HLSL spelling.
+///
+/// When a named struct type is used inside a row_major (or column_major)
+/// uniform block, glslang materializes a SECOND OpTypeStruct carrying the
+/// RowMajor/MatrixStride/Offset member decorations while function-scope uses
+/// keep the undecorated original. SPIR-V treats them as two types; HLSL must
+/// not. The split names reach HLSL as `NestedRowMajor_1` (the decorated
+/// variant, used for the cbuffer member) and `NestedRowMajor` (used for the
+/// function param/local), and DXC rejects the struct copy between them
+/// ("cannot implicitly convert from 'NestedRowMajor_1' to 'NestedRowMajor'").
+/// spirv-cross emits ONE struct spelling for both uses, which is the sound
+/// reading: SPIR-V carries RowMajor as a MEMBER decoration, so the struct type
+/// identity is singular and the row_major placement is a member-level storage
+/// modifier -- a function-local instance of a struct with `row_major` members
+/// keeps the same logical value (the modifier only affects cbuffer packing).
+///
+/// This pass runs AFTER commonPrewriteUniqueStructNames (which must still
+/// split genuinely different structs that share an OpName) and renames every
+/// unifiable group member to the group's shared raw name. The single
+/// declaration then comes from the first module-scope walk (cbuffer-reachable
+/// variant first), which is the layout-bearing body; the name-level dedup in
+/// hlslEmitOneStructForwardDecl suppresses the other variants.
+///
+/// UNIFIABLE, per group of TypeStructs sharing (raw name, structural key):
+///   * all variants carry the same RowMajor member set, OR
+///   * at most one variant is layout-relevant (reachable from a
+///     Uniform/PushConstant/StorageBuffer block, or carrying any explicit
+///     RowMajor member decoration).
+/// The second clause is the glslang pattern: the undecorated original is
+/// function-scope only, where layout decorations are meaningless. If two
+/// variants carry DIFFERENT RowMajor sets and both are layout-relevant (the
+/// same struct used with AND without RowMajor in different blocks, e.g.
+/// tests/spirv_bins/ubo_layout.spv -- legal SPIR-V, and the two layouts
+/// genuinely need two spellings), the group is left split: the pre-existing
+/// two-spelling output, which DXC accepts as long as no struct-typed value
+/// crosses the variants, rather than risk silently binding the wrong bytes.
+fn hlslUnifyRowMajorStructVariants(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) void {
+    // Raw (pre-mangle) sanitized OpName per struct id; the post-prewrite names
+    // map has already lost the shared spelling this pass needs to restore.
+    var raw_names = std.AutoHashMap(u32, []const u8).init(alloc);
+    defer raw_names.deinit();
+    for (module.instructions) |inst| {
+        if (inst.op != .Name or inst.words.len < 3) continue;
+        const name_str = parseLiteralString(alloc, inst.words[2..]) catch continue;
+        const sanitized = sanitizeName(alloc, name_str) catch continue;
+        raw_names.put(inst.words[1], sanitized) catch {};
+    }
+
+    // Layout-relevant usage: any struct type reachable (through struct members
+    // and arrays) from a Uniform/PushConstant/StorageBuffer block. Direct
+    // pointer pointees alone are NOT enough: a struct nested as a block member
+    // never gets its own block pointer unless the shader access-chains through
+    // it (ubo_layout.spv's undecorated %Str_0 sits inside %UBO2 with only a
+    // matrix-typed member pointer). Unifying two block-reachable variants with
+    // different RowMajor sets would read one block's bytes transposed
+    // (silent-wrong), so reachability must be transitive.
+    var block_used = std.AutoHashMap(u32, void).init(alloc);
+    defer block_used.deinit();
+    {
+        var worklist = std.ArrayList(u32).initCapacity(alloc, 8) catch return;
+        defer worklist.deinit(alloc);
+        for (module.instructions) |inst| {
+            if (inst.op != .TypePointer or inst.words.len < 4) continue;
+            const sc: spirv.StorageClass = @enumFromInt(inst.words[2]);
+            if (sc != .Uniform and sc != .PushConstant and sc != .StorageBuffer) continue;
+            // Unwrap array wrappers: a block pointer to an array-of-struct makes
+            // the element struct block-reachable too.
+            var seed = inst.words[3];
+            while (true) {
+                const s = getDef(module, seed) orelse break;
+                if (s.op == .TypeArray or s.op == .TypeRuntimeArray) {
+                    if (s.words.len < 3) break;
+                    seed = s.words[2];
+                    continue;
+                }
+                if (s.op == .TypeStruct) worklist.append(alloc, seed) catch {};
+                break;
+            }
+        }
+        while (worklist.pop()) |tid| {
+            if (block_used.contains(tid)) continue;
+            const inst = getDef(module, tid) orelse continue;
+            if (inst.op != .TypeStruct) continue;
+            block_used.put(tid, {}) catch {};
+            for (inst.words[2..]) |mt| {
+                var elem = mt;
+                while (true) {
+                    const e = getDef(module, elem) orelse break;
+                    if (e.op == .TypeArray or e.op == .TypeRuntimeArray) {
+                        if (e.words.len < 3) break;
+                        elem = e.words[2];
+                        continue;
+                    }
+                    if (e.op == .TypePointer) {
+                        if (e.words.len < 4) break;
+                        elem = e.words[3];
+                        continue;
+                    }
+                    if (e.op == .TypeStruct) worklist.append(alloc, elem) catch {};
+                    break;
+                }
+            }
+        }
+    }
+
+    // RowMajor member index sets per struct id.
+    var rowmaj = std.AutoHashMap(u32, std.ArrayList(u32)).init(alloc);
+    defer {
+        var rit = rowmaj.iterator();
+        while (rit.next()) |e| e.value_ptr.deinit(alloc);
+        rowmaj.deinit();
+    }
+    for (module.instructions) |inst| {
+        if (inst.op != .MemberDecorate or inst.words.len < 4) continue;
+        if (@as(spirv.Decoration, @enumFromInt(inst.words[3])) != .row_major) continue;
+        const gop = rowmaj.getOrPut(inst.words[1]) catch continue;
+        if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(u32).empty;
+        gop.value_ptr.append(alloc, inst.words[2]) catch {};
+    }
+    var sit = rowmaj.iterator();
+    while (sit.next()) |e| std.mem.sort(u32, e.value_ptr.items, {}, std.sort.asc(u32));
+
+    // One entry per TypeStruct, in instruction order.
+    const Variant = struct {
+        id: u32,
+        base: []const u8,
+        key: []const u8,
+        rowmaj: []const u32,
+        used: bool,
+    };
+    var variants = std.ArrayList(Variant).initCapacity(alloc, 16) catch return;
+    defer variants.deinit(alloc);
+    for (module.instructions) |inst| {
+        if (inst.op != .TypeStruct) continue;
+        const tid = inst.words[1];
+        var key_buf = std.ArrayList(u8).initCapacity(alloc, 64) catch continue;
+        hlslStructVariantKey(module, tid, &key_buf, alloc, 0);
+        const base = raw_names.get(tid) orelse "Struct";
+        const rm: []const u32 = if (rowmaj.get(tid)) |l| l.items else &[_]u32{};
+        variants.append(alloc, .{
+            .id = tid,
+            .base = base,
+            .key = key_buf.toOwnedSlice(alloc) catch continue,
+            .rowmaj = rm,
+            .used = block_used.contains(tid),
+        }) catch {};
+    }
+
+    // Group by (raw name, structural key).
+    var groups = std.StringHashMap(std.ArrayList(u32)).init(alloc);
+    defer {
+        var git = groups.iterator();
+        while (git.next()) |e| e.value_ptr.deinit(alloc);
+        groups.deinit();
+    }
+    for (variants.items) |v| {
+        const gk = std.fmt.allocPrint(alloc, "{s}\x00{s}", .{ v.base, v.key }) catch continue;
+        const gop = groups.getOrPut(gk) catch continue;
+        if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(u32).empty;
+        gop.value_ptr.append(alloc, v.id) catch {};
+    }
+
+    var it = groups.iterator();
+    while (it.next()) |entry| {
+        const member_ids = entry.value_ptr.items;
+        if (member_ids.len <= 1) continue;
+
+        // Resolve group members back to their Variant records.
+        var members = std.ArrayList(Variant).initCapacity(alloc, member_ids.len) catch continue;
+        defer members.deinit(alloc);
+        for (member_ids) |mid| {
+            for (variants.items) |v| {
+                if (v.id == mid) {
+                    members.append(alloc, v) catch {};
+                    break;
+                }
+            }
+        }
+        if (members.items.len != member_ids.len) continue; // paranoid; never hit
+
+        // Gate 1: all variants must agree on the RowMajor member set, or the
+        // group must hold at most one layout-relevant variant.
+        var distinct_layouts: usize = 0;
+        for (members.items, 0..) |m, i| {
+            var dup = false;
+            for (members.items[0..i]) |prev| {
+                if (std.mem.eql(u32, prev.rowmaj, m.rowmaj)) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) distinct_layouts += 1;
+        }
+        if (distinct_layouts > 1) {
+            var relevant: usize = 0;
+            for (members.items) |m| {
+                if (m.used or m.rowmaj.len > 0) relevant += 1;
+            }
+            if (relevant > 1) continue;
+        }
+
+        // Gate 2: the shared base name must not be owned by a TypeStruct
+        // outside the group (a structurally different same-OpName struct the
+        // prewrite pass split off); renaming into its name would make the
+        // name-level decl dedup silently drop one of the two real layouts.
+        const base = members.items[0].base;
+        var owner_ok = true;
+        var nit = names.iterator();
+        while (nit.next()) |ne| {
+            if (!std.mem.eql(u8, ne.value_ptr.*, base)) continue;
+            const def = getDef(module, ne.key_ptr.*);
+            if (def) |d| {
+                if (d.op == .TypeStruct) {
+                    var in_group = false;
+                    for (member_ids) |mid| {
+                        if (mid == ne.key_ptr.*) {
+                            in_group = true;
+                            break;
+                        }
+                    }
+                    if (!in_group) {
+                        owner_ok = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!owner_ok) continue;
+
+        // Unify: every variant adopts the shared raw name. The declaration
+        // body comes from whichever variant the module-scope walk reaches
+        // first (cbuffer-reachable, i.e. the layout-bearing one).
+        for (member_ids) |mid| {
+            names.put(mid, base) catch {};
         }
     }
 }
@@ -3771,6 +4094,12 @@ fn emitFunction(
     // declaration per function and DXC reporting "redefinition". Only the first
     // function emitted passes true.
     emit_globals: bool,
+    // The module-scope struct-decl name set (emitted_names2 in spirvToHLSL). The
+    // per-vertex input struct declarations below used to keep a PRIVATE set, so a
+    // type whose name was already declared at module scope (possible since
+    // #hlsl-rowmajor-struct-variant unification, or if the same id is also
+    // cbuffer-reachable) would be re-declared here: DXC "redefinition".
+    mod_emitted_names: *std.StringHashMap(void),
 ) !void {
     const func_inst = getDef(module, func_id) orelse return;
     if (func_inst.op != .Function or func_inst.words.len < 5) return;
@@ -4417,8 +4746,6 @@ fn emitFunction(
     if (is_fragment) {
         var local_structs = std.AutoHashMap(u32, void).init(alloc);
         defer local_structs.deinit();
-        var local_names = std.StringHashMap(void).init(alloc);
-        defer local_names.deinit();
         for (input_var_ids.items) |ivid| {
             const is_per_vertex = hasDecoration(decorations, ivid, .per_vertex_khr) or hasDecoration(decorations, ivid, .per_vertex_nv);
             if (is_per_vertex) {
@@ -4427,9 +4754,9 @@ fn emitFunction(
                     const pt_inst = getDef(module, pt);
                     if (pt_inst) |pi| {
                         if (pi.op == .TypeArray and pi.words.len > 2) {
-                            hlslEmitOneStructForwardDecl(module, names, pi.words[2], w, alloc, &local_structs, &local_names) catch {};
+                            hlslEmitOneStructForwardDecl(module, names, pi.words[2], w, alloc, &local_structs, mod_emitted_names) catch {};
                         } else if (pi.op == .TypeStruct) {
-                            hlslEmitOneStructForwardDecl(module, names, pt, w, alloc, &local_structs, &local_names) catch {};
+                            hlslEmitOneStructForwardDecl(module, names, pt, w, alloc, &local_structs, mod_emitted_names) catch {};
                         }
                     }
                 }

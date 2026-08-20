@@ -17054,3 +17054,74 @@ test "HLSL closes an SSBO element struct before the RWStructuredBuffer declarati
     try assertContains(hlsl, "};\n\nRWStructuredBuffer<");
     try assertNotContains(hlsl, ";\nRWStructuredBuffer<");
 }
+
+// #hlsl-rowmajor-struct-variant: glslang materializes a SECOND OpTypeStruct
+// when a named struct type is used inside a row_major uniform block (the block
+// copy carries RowMajor/MatrixStride/Offset member decorations, the
+// function-scope uses keep the undecorated original). The HLSL backend used to
+// declare BOTH spellings (NestedRowMajor_1 for the cbuffer member,
+// NestedRowMajor for the function param/local), and DXC rejected the struct
+// copy between them: "cannot implicitly convert from 'NestedRowMajor_1' to
+// 'NestedRowMajor'". The fix unifies the variants onto ONE spelling that
+// carries the row_major member modifier (a function-local instance of a struct
+// with row_major members keeps the same logical value; the modifier only
+// affects cbuffer packing), matching spirv-cross's single-spelling shape.
+//
+// Source: tests/spirv-cross/ubo-load-row-major-workaround.frag compiled by
+// glslang (zioshade's own frontend does not duplicate the struct types, so the
+// regression MUST pin the glslang-produced binary in tests/spirv_bins).
+fn countOccurrences(haystack: []const u8, needle: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (std.mem.indexOfPos(u8, haystack, i, needle)) |at| {
+        n += 1;
+        i = at + needle.len;
+    }
+    return n;
+}
+
+test "HLSL: glslang row_major struct duplicates unify to ONE spelling (#hlsl-rowmajor-struct-variant)" {
+    const spv_data = try zioshade.compat.readFileByPath(alloc, "tests/spirv_bins/ubo-load-row-major-workaround.spv", 1024 * 1024);
+    defer alloc.free(spv_data);
+    const spv_u32_len = spv_data.len / 4;
+    const spv = @as([*]const u32, @ptrCast(@alignCast(spv_data.ptr)))[0..spv_u32_len];
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{ .shader_model = 60 });
+    defer alloc.free(hlsl);
+
+    // ONE declaration per struct type: no _1 variant spelling anywhere.
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(hlsl, "struct RowMajor\n"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(hlsl, "struct NestedRowMajor\n"));
+    try assertNotContains(hlsl, "RowMajor_1");
+    try assertNotContains(hlsl, "NestedRowMajor_1");
+    // The surviving declaration is the DECORATED variant's body (the
+    // cbuffer-reachable spelling): the row_major member modifier must survive,
+    // else the cbuffer bytes are read transposed (silent-wrong).
+    try assertContains(hlsl, "struct RowMajor\n{\n    row_major float4x4 B;\n};");
+    try assertContains(hlsl, "struct NestedRowMajor\n{\n    RowMajor rm;\n};");
+    // The cross-variant struct copy now type-checks: the cbuffer member and the
+    // workaround function's param/local all spell the SAME type name.
+    try assertContains(hlsl, "NestedRowMajor v20 = _17_rm2;");
+    try assertContains(hlsl, "inout NestedRowMajor wrap");
+}
+
+test "HLSL: single-struct row_major UBO keeps one spelling via the zioshade frontend" {
+    // The same source through zioshade's own frontend (which does NOT
+    // duplicate the struct types) must keep the one-spelling shape: the
+    // unification pass must not split or rename anything here.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct RowMajor { mat4 B; };
+        \\struct NestedRowMajor { RowMajor rm; };
+        \\layout(std140, row_major) uniform UBO3 { NestedRowMajor rm2; } u3;
+        \\layout(std140, row_major) uniform UBO2 { RowMajor rm; } u2;
+        \\layout(location = 0) out vec4 FragColor;
+        \\NestedRowMajor loadIt(inout NestedRowMajor wrap) { NestedRowMajor l = wrap; return l; }
+        \\void main() { FragColor = loadIt(u3.rm2).rm.B[0] + u2.rm.B[1]; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(hlsl, "struct RowMajor\n"));
+    try std.testing.expectEqual(@as(usize, 1), countOccurrences(hlsl, "struct NestedRowMajor\n"));
+    try assertContains(hlsl, "row_major float4x4 B;");
+    try assertNotContains(hlsl, "RowMajor_1");
+}
