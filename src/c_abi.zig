@@ -246,6 +246,7 @@ fn statusFromErr(err: anyerror) c_int {
         error.UnsupportedRecursion,
         error.UnsupportedRowMajorMatrix,
         error.UnsupportedRowMajorMatrixStore,
+        error.UnsupportedRowMajorExtractProvenance,
         error.UnsupportedSamplePosition,
         error.UnsupportedShortCircuitLoopCond,
         error.UnsupportedSamplerArray,

@@ -1213,6 +1213,97 @@ fn findRowMajorMatrix(m: *const ParsedModule, base_id: u32, indices: []const u32
     return null;
 }
 
+/// Where a buffer's raw bytes live in a composite VALUE: `raw` means the value
+/// came straight from a load of memory typed with the RowMajor member
+/// decoration (so a row-major member inside it reads as the TRANSPOSE of the
+/// logical matrix), `logical` means the value was assembled in registers
+/// (column-major, the logical matrix itself). A row-major member decoration
+/// describes the BUFFER layout only -- a CompositeConstruct of the same struct
+/// type holds logical bytes and must NOT be transposed -- so provenance, not the
+/// type alone, decides compensation. `unknown` (function call results, selects,
+/// mixed phis) cannot be proven and must not be guessed at.
+const ValueBytes = enum { raw, logical, unknown };
+
+fn valueBytesProvenance(m: *const ParsedModule, id: u32, depth: u8) ValueBytes {
+    if (depth > 8) return .unknown;
+    const def = getDef(m, id) orelse return .unknown;
+    switch (def.op) {
+        // A load reads memory through the decorated type: raw bytes.
+        .Load => return .raw,
+        .CopyObject => {
+            if (def.words.len < 4) return .unknown;
+            return valueBytesProvenance(m, def.words[3], depth + 1);
+        },
+        // Assembled in registers: logical bytes.
+        .CompositeConstruct, .ConstantComposite, .ConstantNull => return .logical,
+        // A sub-value extract keeps its source's bytes UNLESS it crosses a
+        // row-major matrix -- a crossing extract is transposed at emission, so
+        // its RESULT value is the logical matrix (compensated), while a
+        // non-crossing sub-struct/sub-array still holds raw bytes.
+        .CompositeExtract => {
+            if (def.words.len < 5) return .unknown;
+            const src = valueBytesProvenance(m, def.words[3], depth + 1);
+            if (src == .unknown) return .unknown;
+            if (src == .raw and findRowMajorExtract(m, def.words[3], def.words[4..]) != null) return .logical;
+            return src;
+        },
+        // A phi joins values; all incomings must agree (words alternate
+        // value, parent-block, so step by 2).
+        .Phi => {
+            if (def.words.len < 4) return .unknown;
+            var saw_raw = false;
+            var saw_logical = false;
+            var i: usize = 3;
+            while (i < def.words.len) : (i += 2) {
+                switch (valueBytesProvenance(m, def.words[i], depth + 1)) {
+                    .raw => saw_raw = true,
+                    .logical => saw_logical = true,
+                    .unknown => return .unknown,
+                }
+            }
+            if (saw_raw and !saw_logical) return .raw;
+            if (saw_logical and !saw_raw) return .logical;
+            return .unknown;
+        },
+        else => return .unknown,
+    }
+}
+
+/// If the LITERAL `indices` of an OpCompositeExtract walk from the composite
+/// VALUE `value_id` into a `row_major` SQUARE matrix member (a direct member or
+/// a matrix-array element inside the loaded type), return the boundary: the
+/// extract indices up to and including `boundary` produce the RAW (transposed)
+/// matrix value, and the remaining indices index into the LOGICAL matrix.
+/// Mirrors `findRowMajorMatrix` (which walks pointer chains with index IDs)
+/// for value-side literal indices; the caller must gate on
+/// `valueBytesProvenance` before transposing.
+fn findRowMajorExtract(m: *const ParsedModule, value_id: u32, indices: []const u32) ?RowMajorAccess {
+    var cur_type: ?u32 = common.getTypeOf(m, value_id);
+    var target: ?u32 = null; // square row-major matrix we are descending toward
+    for (indices, 0..) |val, i| {
+        const tid = cur_type orelse return null;
+        const ti = getDef(m, tid) orelse return null;
+        if (ti.op == .TypeStruct) {
+            if (val + 2 >= ti.words.len) return null;
+            const member_tid = ti.words[val + 2];
+            if (memberIsRowMajor(m, tid, val)) {
+                if (arrayMatrixElement(m, member_tid)) |mtid| {
+                    if (!matrixIsNonSquare(m, mtid)) target = mtid;
+                }
+            }
+            cur_type = member_tid;
+        } else if (ti.op == .TypeVector or ti.op == .TypeArray or ti.op == .TypeMatrix) {
+            cur_type = ti.words[2];
+        } else {
+            return null;
+        }
+        if (target) |mt| {
+            if (cur_type == mt) return .{ .boundary = i, .matrix_tid = mt };
+        }
+    }
+    return null;
+}
+
 /// When a std140 UBO array element is widened to a *wider* 4-component MSL type
 /// (e.g. `float arr[N]` stored as `float4 arr[N]` so the natural stride hits
 /// 16), an `arr[i]` index yields the wide type while the GLSL element is
@@ -1273,6 +1364,114 @@ fn writeMatrixTail(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const 
         } else {
             try w.print("[{d}]", .{val});
             cur_type = null;
+        }
+    }
+}
+
+/// Append the PREFIX of a transposed row-major extract: the literal indices
+/// that produce the raw matrix value, spelled exactly like the plain
+/// CompositeExtract path (struct member `.name`, array/matrix element `[n]`).
+fn writeExtractIndices(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), value_id: u32, indices: []const u32, expr: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
+    _ = names;
+    var cur_type: ?u32 = common.getTypeOf(m, value_id);
+    for (indices) |val| {
+        const ti = if (cur_type) |t| getDef(m, t) else null;
+        if (ti) |t| {
+            if (t.op == .TypeStruct) {
+                var mname_buf: [32]u8 = undefined;
+                const mname = getMemberName(m, cur_type.?, val, &mname_buf);
+                try expr.print(alloc, ".{s}", .{mname});
+                cur_type = if (val + 2 < t.words.len) t.words[val + 2] else null;
+            } else if (t.op == .TypeVector) {
+                try expr.appendSlice(alloc, swizzleChar(val));
+                cur_type = t.words[2];
+            } else {
+                try expr.print(alloc, "[{d}]", .{val});
+                cur_type = t.words[2];
+            }
+        } else {
+            try expr.print(alloc, "[{d}]", .{val});
+            cur_type = null;
+        }
+    }
+}
+
+/// Append the indices that come AFTER a (transposed) row-major matrix in a
+/// CompositeExtract: they index the LOGICAL matrix, so a column index is `[n]`
+/// (MSL `m[n]` is a column read) and a vector element is a `.xyzw` swizzle.
+/// Literal-index sibling of `writeMatrixTail`.
+fn writeMatrixTailLiterals(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), matrix_tid: u32, indices: []const u32, expr: *std.ArrayList(u8), alloc: std.mem.Allocator) !void {
+    _ = names;
+    var cur_type: ?u32 = matrix_tid;
+    for (indices) |val| {
+        const ti = if (cur_type) |t| getDef(m, t) else null;
+        if (ti) |t| {
+            if (t.op == .TypeVector) {
+                try expr.appendSlice(alloc, swizzleChar(val));
+                cur_type = t.words[2];
+            } else {
+                try expr.print(alloc, "[{d}]", .{val});
+                cur_type = if (t.op == .TypeMatrix or t.op == .TypeArray) t.words[2] else null;
+            }
+        } else {
+            try expr.print(alloc, "[{d}]", .{val});
+            cur_type = null;
+        }
+    }
+}
+
+/// True if `type_id` (a struct) contains a row_major SQUARE matrix member at
+/// any struct-nesting depth. Locals of such a type are read through the
+/// type-driven transpose of `findRowMajorMatrix`, so every store into them must
+/// keep RAW bytes (see the Store arm's whole-struct compensation).
+fn structContainsRowMajorMatrix(m: *const ParsedModule, type_id: u32) bool {
+    const ti = getDef(m, type_id) orelse return false;
+    if (ti.op != .TypeStruct or ti.words.len < 3) return false;
+    for (ti.words[2..], 0..) |member_tid, i| {
+        if (memberIsRowMajor(m, type_id, @intCast(i))) {
+            // Direct matrix or (array of) matrix: reads transpose per element,
+            // so the member counts regardless of array nesting (findRowMajorMatrix
+            // walks array elements too).
+            if (arrayMatrixElement(m, member_tid)) |mtid| {
+                if (!matrixIsNonSquare(m, mtid)) return true;
+            }
+        }
+        const md = getDef(m, member_tid) orelse continue;
+        if (md.op == .TypeStruct) {
+            if (structContainsRowMajorMatrix(m, member_tid)) return true;
+        }
+    }
+    return false;
+}
+
+/// Emit the compensating assignments after a WHOLE-STRUCT store of a LOGICAL
+/// (register-assembled) value into a local whose reads transpose row_major
+/// members: copy the struct plainly first, then overwrite every row_major
+/// matrix member with its transpose so the local holds RAW bytes again.
+/// Returns an error if a member needs per-element work we do not emit
+/// (row_major matrix arrays, arrays of structs) -- honest refusal over a wrong
+/// partial copy.
+fn writeRowMajorStructCompensation(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), target_name: []const u8, value_name: []const u8, struct_tid: u32, path: []const u8, w: anytype) !void {
+    const ti = getDef(m, struct_tid) orelse return;
+    if (ti.op != .TypeStruct or ti.words.len < 3) return;
+    for (ti.words[2..], 0..) |member_tid, i| {
+        var mname_buf: [32]u8 = undefined;
+        const mname = getMemberName(m, struct_tid, @intCast(i), &mname_buf);
+        if (memberIsRowMajor(m, struct_tid, @intCast(i))) {
+            const mt = getDef(m, member_tid);
+            if (mt != null and mt.?.op == .TypeMatrix and !matrixIsNonSquare(m, member_tid)) {
+                try w.print("    {s}.{s}{s} = transpose({s}.{s}{s});\n", .{ target_name, path, mname, value_name, path, mname });
+                continue;
+            }
+            // A row_major matrix ARRAY (or array-of-struct tail) needs per-element
+            // transposes the plain struct copy cannot provide.
+            return error.UnsupportedRowMajorMatrixStore;
+        }
+        const md = getDef(m, member_tid) orelse continue;
+        if (md.op == .TypeStruct and structContainsRowMajorMatrix(m, member_tid)) {
+            var nested_buf: [80]u8 = undefined;
+            const nested = std.fmt.bufPrint(&nested_buf, "{s}{s}.", .{ path, mname }) catch return error.UnsupportedRowMajorMatrixStore;
+            try writeRowMajorStructCompensation(m, names, target_name, value_name, member_tid, nested, w);
         }
     }
 }
@@ -8787,6 +8986,38 @@ fn emitInstruction(
                     findRowMajorMatrix(m, ptr.words[3], ptr.words[4..]) != null)
                     return error.UnsupportedRowMajorMatrixStore;
             }
+            // #rm-store: a WHOLE-STRUCT store into a local whose type contains
+            // row_major matrix members must leave RAW bytes behind (every read
+            // transposes, `findRowMajorMatrix`). A RAW value (a struct copied
+            // from the buffer) already holds raw bytes -- plain store. A LOGICAL
+            // value (a CompositeConstruct of the decorated type) must be
+            // transposed member-wise after the copy; unprovable provenance
+            // fails loudly rather than store one branch's bytes wrongly.
+            if (getDef(m, inst.words[1])) |dst| {
+                if (dst.op == .Variable and dst.words.len >= 4 and
+                    @as(spirv.StorageClass, @enumFromInt(dst.words[3])) == .Function)
+                {
+                    const pptr = getDef(m, dst.words[1]);
+                    if (pptr != null and pptr.?.op == .TypePointer and pptr.?.words.len >= 4) {
+                        const pty = getDef(m, pptr.?.words[3]);
+                        if (pty != null and pty.?.op == .TypeStruct and
+                            structContainsRowMajorMatrix(m, pptr.?.words[3]))
+                        {
+                            const tgt = names.get(inst.words[1]) orelse "v";
+                            const val = names.get(inst.words[2]) orelse "0";
+                            switch (valueBytesProvenance(m, inst.words[2], 0)) {
+                                .raw => {}, // plain store below keeps raw bytes
+                                .logical => {
+                                    try w.print("    {s} = {s};\n", .{ tgt, val });
+                                    try writeRowMajorStructCompensation(m, names, tgt, val, pptr.?.words[3], "", w);
+                                    return;
+                                },
+                                .unknown => return error.UnsupportedRowMajorMatrixStore,
+                            }
+                        }
+                    }
+                }
+            }
             // Matrix-typed vertex output: the main0_out field is flattened to
             // per-column vectors; scatter the store (out.m22_0 = v[0]; out.m22_1
             // = v[1]; ...), the spirv-cross idiom.
@@ -9105,6 +9336,34 @@ fn emitInstruction(
             }
             const rtt = try mslType(m, inst.words[1], names, alloc);
             const comp = names.get(inst.words[3]) orelse "c";
+            // #rm-extract: an extract that reaches a row_major SQUARE matrix
+            // member inside a RAW composite value (a whole-struct or array load
+            // from the buffer: `%v = OpLoad %RowMajor %p; OpCompositeExtract
+            // %mat4 %v 0`) reads the TRANSPOSE of the logical matrix -- the same
+            // compensation `writeAccessExpr` applies when the same matrix is
+            // reached through an access chain. Provenance decides: a
+            // CompositeConstruct of the same struct type holds LOGICAL bytes
+            // and must stay untransposed; unprovable sources fail loudly
+            // rather than guess.
+            if (inst.words.len > 4) {
+                if (findRowMajorExtract(m, inst.words[3], inst.words[4..])) |hit| {
+                    switch (valueBytesProvenance(m, inst.words[3], 0)) {
+                        .raw => {
+                            var expr = std.ArrayList(u8).initCapacity(alloc, 64) catch return error.OutOfMemory;
+                            defer expr.deinit(alloc);
+                            try expr.appendSlice(alloc, "transpose(");
+                            try expr.appendSlice(alloc, comp);
+                            try writeExtractIndices(m, names, inst.words[3], inst.words[4 .. hit.boundary + 5], &expr, alloc);
+                            try expr.appendSlice(alloc, ")");
+                            try writeMatrixTailLiterals(m, names, hit.matrix_tid, inst.words[hit.boundary + 5 ..], &expr, alloc);
+                            try w.print("    {s} {s} = {s};\n", .{ rtt, names.get(inst.words[2]) orelse "v", expr.items });
+                            return;
+                        },
+                        .logical => {}, // registers hold the logical matrix: plain path
+                        .unknown => return error.UnsupportedRowMajorExtractProvenance,
+                    }
+                }
+            }
             try w.print("    {s} {s} = {s}", .{ rtt, names.get(inst.words[2]) orelse "v", comp });
             var cur_type = common.getTypeOf(m, inst.words[3]);
             for (inst.words[4..]) |index| {

@@ -870,6 +870,33 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
+    // MSL/WGSL: a NON-square row_major buffer/SSBO matrix member (mat2x4, mat3x4,
+    // mat2x3 arrays, ...) has no sound spelling in either language: MSL and WGSL
+    // matrices are column-major in memory with no layout qualifier, so the
+    // transposed declaration would need MatrixStride-dependent widening plus
+    // per-access swizzle surgery (spirv-cross's approach; naga refuses the same
+    // shape). SQUARE row_major matrices ARE supported (reads are transposed).
+    // Name the shape so the refusal is actionable instead of a bare error name.
+    if (err == error.UnsupportedRowMajorMatrix) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: a NON-square row_major matrix member (e.g. mat2x4/mat3x4/mat2x3) in a uniform/storage block has no sound MSL/WGSL lowering (both store matrices column-major with no row_major qualifier). Workaround: declare the matrix column_major (the default), use a square row_major matrix (supported, reads are transposed), or transpose it in the shader before the buffer layout is chosen.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
+    // MSL/WGSL: OpCompositeExtract reaching a row_major matrix member inside a
+    // composite value whose byte provenance cannot be proven (a struct returned
+    // by a function call, a select, or a phi joining loaded and constructed
+    // values). Raw buffer bytes need transpose(...); register-assembled bytes
+    // must NOT be transposed -- guessing either way would silently miscompile,
+    // so the backend refuses.
+    if (err == error.UnsupportedRowMajorExtractProvenance) {
+        std.debug.print(
+            "error: cross-compilation failed: {s}: a row_major matrix is extracted from a composite value whose byte provenance cannot be proven (a struct returned by a function call, a select, or a phi mixing buffer-loaded and constructed values). Workaround: extract the row_major matrix in the function that loads it and return/pass the matrix itself, or copy through a local variable before extracting.\n",
+            .{@errorName(err)},
+        );
+        std.process.exit(1);
+    }
     // WGSL honest-errors (UnsupportedOp / UnsupportedExtInst) carry a precise reason in
     // spirv_to_wgsl.last_error_detail (which construct is unrepresentable / which GLSL.std.450
     // instruction has no mapping). Surface it so the refusal is actionable instead of a bare
