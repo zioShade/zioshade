@@ -1019,8 +1019,11 @@ threadlocal var g_loop_merge_ctx: ?LoopMergeCtx = null;
 // and records its result id here; the nested handler's decl loop consumes the
 // marker and skips its own (now-shadowing) declaration, keeping assignments.
 const PhiDeclGLSL = struct { result_id: u32, type_id: u32, vals: [2]u32, preds: [2]u32 };
-var g_predeclared_arm_phis: std.AutoHashMap(u32, void) = undefined;
-var g_predeclared_arm_phis_init = false;
+// threadlocal, like every sibling global: concurrent spirvToGLSL calls each
+// own their map (a shared one races the per-compile reset across threads --
+// review finding, PR #655).
+threadlocal var g_predeclared_arm_phis: std.AutoHashMap(u32, void) = undefined;
+threadlocal var g_predeclared_arm_phis_init = false;
 
 // #switch-arm-break: the innermost enclosing SWITCH's merge + its merge phis, so
 // an if-arm (or any nested block) whose OpBranch targets the SWITCH's merge can
@@ -3950,6 +3953,13 @@ fn emitBody(
                 // BC's own block -- and guard the FALSE arm under `if (!(c))`.
                 if (tl == mval and fl != null) {
                     const bc_blk = blockLabelOfGLSL(m, idx);
+                    // #no-then: the init/copy picks below assume the BC's own block
+                    // is among each merge phi's FIRST TWO preds. A shared-merge flat
+                    // else-if chain gives phis 3+ preds and would silently pick a
+                    // wrong incoming (review finding) -- refuse loudly instead.
+                    for (phi_decls.items) |pv| {
+                        if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
+                    }
                     for (phi_decls.items) |pv| {
                         // #ladder-phi-hoist: pre-declared at an outer arm top; keep
                         // the fall-through init as an assignment.
@@ -3970,6 +3980,20 @@ fn emitBody(
                         try w.print("    {s} {s}_phi = {s};\n", .{ rtt, vn_x, tvn });
                     }
                     try w.print("    if (!({s}))\n    {{\n", .{cn});
+                    // #ladder-phi-hoist (review finding): the no-then path lacked
+                    // BOTH the hoist and the scope guard for its arm-side incoming --
+                    // a chain phi two levels inside the arm read out of scope. Hoist
+                    // the arm-side values (pred != the BC's own block) like emitBlock.
+                    {
+                        var fsides = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                        defer fsides.deinit(alloc);
+                        for (phi_decls.items) |pv| {
+                            var fv: u32 = pv.vals[1];
+                            if (pv.preds[1] == bc_blk) fv = pv.vals[0];
+                            fsides.append(alloc, fv) catch {};
+                        }
+                        try hoistArmIncomingPhisGLSL(m, names, &label_map, w, alloc, phi_decls.items, fsides.items, fl.?, mval, "    ");
+                    }
                     idx = try emitBlock(m, names, decs, fl.?, mval, &label_map, &bc_merge, w, alloc, is_frag, output_var_id, "    ", false);
                     for (phi_decls.items) |pv| {
                         const vn = names.get(pv.result_id) orelse "pv";
@@ -5822,6 +5846,10 @@ fn emitBlock(
                 // the if, duplicating its content; emit inverted instead.
                 if (tl == nmv and fl != null) {
                     const bc_blk = blockLabelOfGLSL(m, i);
+                    // #no-then: as in emitBody -- first-two-preds assumption guard.
+                    for (phi_decls2.items) |pv| {
+                        if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
+                    }
                     for (phi_decls2.items) |pv| {
                         var tv: u32 = pv.vals[0];
                         var fv: u32 = pv.vals[1];
