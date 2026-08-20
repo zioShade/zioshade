@@ -5813,10 +5813,13 @@ fn emitBlock(
                     }
                     try w.print("{s}    if (!({s}))\n{s}    {{\n", .{ indent, cn, indent });
                     {
+                        // bc_blk is the BC's OWN block; capture once -- emitBlock
+                        // below moves `i`, and a recomputed blockLabelOf would be a
+                        // DIFFERENT block, mispicking the arm-side incoming.
+                        const bc_blk4 = bc_blk;
                         var fsides4 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
                         defer fsides4.deinit(alloc);
                         for (phi_decls2.items) |pv| {
-                            const bc_blk4 = blockLabelOfGLSL(m, i);
                             var fv: u32 = pv.vals[1];
                             if (pv.preds[1] != bc_blk4) fv = pv.vals[0];
                             fsides4.append(alloc, fv) catch {};
@@ -5826,9 +5829,8 @@ fn emitBlock(
                     i = try emitBlock(m, names, decs, fl.?, nmv, lm, bm, w, alloc, is_frag, ovid, indent, false);
                     for (phi_decls2.items) |pv| {
                         const vn = names.get(pv.result_id) orelse "pv";
-                        const bc_blk5 = blockLabelOfGLSL(m, i);
                         var fv: u32 = pv.vals[1];
-                        if (pv.preds[1] != bc_blk5) fv = pv.vals[0];
+                        if (pv.preds[1] != bc_blk) fv = pv.vals[0];
                         const fvn = exprName(m, names, fv, alloc);
                         try w.print("{s}        {s}_phi = {s};\n", .{ indent, vn, fvn });
                     }
