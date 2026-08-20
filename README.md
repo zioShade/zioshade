@@ -3,7 +3,7 @@
 **A pure-Zig shading-language compiler: GLSL to SPIR-V to HLSL / MSL / GLSL / WGSL, in one module, no C++ runtime.**[^name]
 
 [![CI](https://github.com/zioshade/zioshade/actions/workflows/ci.yml/badge.svg)](https://github.com/zioshade/zioshade/actions/workflows/ci.yml)
-[![Conformance](https://img.shields.io/badge/strict--gate-PASS%202108-brightgreen)](docs/STATUS.md)
+[![Conformance](https://img.shields.io/badge/strict--gate-PASS%202109-brightgreen)](docs/STATUS.md)
 [![Fuzz](https://img.shields.io/badge/fuzz-1M%20clean-brightgreen)](#correctness-how-a-single-maintainer-compiler-earns-trust)
 [![Zig](https://img.shields.io/badge/Zig-0.15.2-f7a41d)](https://ziglang.org/download/0.15.2/)
 [![License](https://img.shields.io/badge/license-MIT%20%2F%20Apache--2.0-blue)](#license)
@@ -63,20 +63,113 @@ zig-out/bin/zioshade reflect shader.spv
 
 Using it as a Zig dependency, the C ABI (`include/zioshade.h`, built with `zig build c-lib`), the full CLI surface, and the complete API table all live in the sections below and in [`examples/`](examples/).
 
+## One shader, four backends
+
+Input: `tests/render_compare/mandelbrot.frag`, a fragment shader with a loop, a break, and mixed integer/float math:
+
+```glsl
+#version 430
+layout(location = 0) out vec4 FragColor;
+
+void main() {
+    vec2 uv = gl_FragCoord.xy / vec2(128.0);
+    vec2 c = (uv - 0.5) * 3.0;
+    vec2 z = vec2(0.0);
+    int iter = 0;
+    for (int i = 0; i < 16; i++) {
+        float x = z.x * z.x - z.y * z.y + c.x;
+        float y = 2.0 * z.x * z.y + c.y;
+        z = vec2(x, y);
+        if (dot(z, z) > 4.0) break;
+        iter++;
+    }
+    float t = float(iter) / 16.0;
+    FragColor = vec4(t, t * t, sqrt(t), 1.0);
+}
+```
+
+One command per backend. The entry point each backend emits (excerpts; full generated files in [`examples/four-backends/`](examples/four-backends/)):
+
+```metal
+// zioshade msl shader.frag   (spirv-cross-compatible conventions)
+struct main0_out { float4 _fragColor [[color(0)]]; };
+static inline __attribute__((always_inline))
+void main0_impl(thread float4& FragColor, float2 _fragCoord)
+{
+    float2 v17 = ((v14 / float2(128.0)) - float2(0.5)) * 3.0;
+    // the for-loop lowers as while (true) with an explicit first-iteration flag
+```
+
+```hlsl
+// zioshade hlsl shader.frag
+float4 main(float4 gl_FragCoord : SV_Position) : SV_Target
+{
+    float2 v17 = v16 * 3.0;
+    // same lowering, HLSL spelling: SV_ semantics on the signature
+```
+
+```wgsl
+// zioshade wgsl shader.frag
+@fragment
+fn main(@builtin(position) gl_FragCoord: vec4f) -> @location(0) vec4f {
+    loop {
+        if (!(v18 < 16)) { break; }
+        continuing { v18 = v18 + 1; }  // WGSL's native back-edge form
+```
+
+```glsl
+// zioshade glsl shader.frag   (GLSL 430 out)
+layout(location = 0) out vec4 FragColor;
+void main()
+{
+    // loop-carried values keep their names; output is 430 only
+```
+
+Regenerate everything yourself:
+
+```bash
+zig build cli
+for t in msl hlsl wgsl glsl; do zig-out/bin/zioshade $t tests/render_compare/mandelbrot.frag -o examples/four-backends/mandelbrot.$t; done
+```
+
 ## Correctness: how a single-maintainer compiler earns trust
 
 A compiler written by one person is only worth using if you can check its work without trusting the author. zioshade's answer is to validate every output with the competitors' own tools, so the claim is not "trust me" but "the reference implementations agree":
 
-- **Khronos `spirv-val` on 2000+ fixtures.** Every fixture's SPIR-V is validated by the Khronos validator. `zig build strict-gate` reports **PASS 2108, XFAIL 13 (documented rejections), 0 FP-regression**; [docs/STATUS.md](docs/STATUS.md) is the single source of truth for these counts and is regenerated from a real run by `just status`.
+```
+                        GLSL 330-460
+                             |
+                      zioshade frontend
+                             |
+   Khronos spirv-val blesses every fixture (2,100+) on every commit
+                             |
+                           SPIR-V
+      +-------------+-------------+-------------+
+      |             |             |             |
+     MSL           HLSL          GLSL          WGSL
+      |             |             |             |
+  Metal GPU    DXC -> DXIL    glslang +     naga + tint
+  render +     -> D3D12 WARP  Metal-reuse   compile +
+  pixel-diff   render +       proxy render  WebGPU CTS
+  vs spirv-    pixel-diff     pixel-diff    round-trip
+  cross AND    vs spirv-      (flagged      (1,613 CTS
+  naga, a      cross          DIFFERs       shaders)
+  second       (1,374 MATCH)  adjudicated)
+  oracle
+```
+
+- **Khronos `spirv-val` on 2000+ fixtures.** Every fixture's SPIR-V is validated by the Khronos validator. `zig build strict-gate` reports **PASS 2109, XFAIL 12 (documented rejections), 0 FP-regression**; [docs/STATUS.md](docs/STATUS.md) is the single source of truth for these counts and is regenerated from a real run by `just status`.
 - **DXC on the HLSL output.** Emitted HLSL is fed to Microsoft's `dxc` and compiled to DXIL; the most recent recorded run (`just hlsl-dxc`, SM 6.0, commit `e920e3f`, 2026-07-27) is **51 PASS / 3 honest-error / 2 SKIP** over the 56 SPIR-V fixtures. DXC needs Windows, Docker, or a Vulkan SDK install, so these are dated snapshots rather than numbers re-measured on every commit; [BENCHMARKS.md](BENCHMARKS.md#dxc-validation-snapshots) is the single source of truth for DXC results and stamps every snapshot with its commit and date.
 - **naga-gated WGSL.** WGSL output is piped through `naga` (the wgpu / Firefox implementation) as an external acceptance check; the WGSL fix history is a long list of "naga rejected this, so we fixed it or turned it into a loud error."
-- **`just prove` — a reproducible differential proof across all three shader stages.** zioshade's output and an independent glslang → SPIRV-Cross reference are *executed on a real GPU* and compared: fragment shaders by rendered pixels, vertex shaders by captured `gl_Position`, compute shaders by output buffers. One command prints an honest report (`verified / benign / divergences / skipped-with-reason`) and exits nonzero on any real divergence, so it doubles as a regression gate. The full-corpus run (`PROVE_FULL=1`, recorded 2026-07-25) is **1315 shaders verified, 0 divergences**, spanning both SPIRV-Cross's own test suite and a hand-written real-world corpus (mandelbrot, julia, plasma, phong, hash-noise, terrain). Read that figure with its scope. Per [docs/DIFFERENTIAL_PROOF.md](docs/DIFFERENTIAL_PROOF.md), that particular run (`frag_oracle_check.sh`) drives SPIRV-Cross on **both** sides, so what the 1315 proves is that zioshade's GLSL → SPIR-V **frontend** agrees with glslang's on a real Metal GPU, with SPIRV-Cross as the shared backend. zioshade's **own** MSL backend is render-proven by two separate Metal runs: `prove_opt` (1123 MATCH on `spirv-opt -O` output, 0 structural) and `prove_naga` (1127 MATCH / 7 flagged DIFFER, using naga as an independent second oracle). MSL is the only backend whose own output is rendered natively: GLSL and WGSL go through a Metal-reuse proxy that still flags 22 and 19 DIFFERs respectively, and HLSL is compile-verified (glslang + DXC) with a WARP render sweep. Treat GLSL / WGSL / HLSL as compile-checked and honest-error-bounded, not as semantically proven. This is still the strongest check available: compile-clean is not render-correct, and a differential render/execution oracle is the only thing that catches a silently-wrong output. The per-backend confidence table is in [docs/DIFFERENTIAL_PROOF.md](docs/DIFFERENTIAL_PROOF.md).
+- **`just prove` — a reproducible differential proof across all three shader stages.** zioshade's output and an independent glslang → SPIRV-Cross reference are *executed on a real GPU* and compared: fragment shaders by rendered pixels, vertex shaders by captured `gl_Position`, compute shaders by output buffers. One command prints an honest report (`verified / benign / divergences / skipped-with-reason`) and exits nonzero on any real divergence, so it doubles as a regression gate. The full-corpus run (`PROVE_FULL=1`, recorded 2026-07-25) is **1315 shaders verified, 0 divergences**, spanning both SPIRV-Cross's own test suite and a hand-written real-world corpus (mandelbrot, julia, plasma, phong, hash-noise, terrain). Read that figure with its scope. Per [docs/DIFFERENTIAL_PROOF.md](docs/DIFFERENTIAL_PROOF.md), that particular run (`frag_oracle_check.sh`) drives SPIRV-Cross on **both** sides, so what the 1315 proves is that zioshade's GLSL → SPIR-V **frontend** agrees with glslang's on a real Metal GPU, with SPIRV-Cross as the shared backend. zioshade's **own** MSL backend is render-proven by two separate Metal runs: `prove_opt` (1123 MATCH on `spirv-opt -O` output, 0 structural) and `prove_naga` (1127 MATCH / 7 flagged DIFFER, using naga as an independent second oracle). MSL is render-proven natively on Metal; HLSL is render-verified at full-corpus scale on D3D12 WARP (next bullet); GLSL and WGSL are compile-checked plus proxy-render-verified on a Metal-reuse proxy (22 and 19 flagged DIFFERs respectively, adjudicated), which is why they are described as honest-error-bounded rather than semantically proven. Compile-clean is not render-correct, and a differential render/execution oracle is the only thing that catches a silently-wrong output. The per-backend confidence table is in [docs/DIFFERENTIAL_PROOF.md](docs/DIFFERENTIAL_PROOF.md).
+- **A D3D12 render gate for the HLSL backend.** `tools/warp/` compiles both zioshade's and the reference's HLSL with DXC to DXIL and renders them on D3D12 WARP, pixel-diffing every shader. The full-corpus run (#646) is **1374 RENDER-MATCH / 5 RENDER-DIFFER / 0 emission bugs** over 1417 staged fragments; all five DIFFERs are proven benign fp-contraction (recompiling both sides with `dxc -Gis` renders them pixel-identical). WARP is Microsoft's software D3D12 rasterizer: real D3D12 semantics, not vendor hardware.
+- **A WebGPU CTS round-trip channel for the WGSL backend.** The harness extracts the CTS's own per-case WGSL by driving its framework with a faked GPU device, converts to SPIR-V, cross-compiles back to WGSL, and validates with naga (tint fallback): **1613 CTS-authored shaders, 1597 round-trip valid, 0 invalid, 0 crashes**; every remaining refusal is named.
 - **1,000,000-iteration fuzz.** The structured-GLSL fuzzer is clean over a million iterations (`just fuzz-million`; ad-hoc `zig build fuzz -- --count N`).
 - **Opcode/capability coverage matrix.** The per-backend SPIR-V opcode surface is bounded and measurable, not corpus-implicit: zioshade models 251 `Op` opcodes (each backend statically handles 217-225; the real-fixture corpus exercises 94, of which 93 are modelled). See [docs/COVERAGE_MATRIX.md](docs/COVERAGE_MATRIX.md), regenerated by `just coverage-matrix`.
 
 ### The named principle: honest error, never miscompile
 
-The contract underneath all of that is one rule: **when zioshade cannot faithfully translate a construct, it returns a loud error rather than emitting plausible-but-wrong output.** A rejected shader is a bug report; a silently miscompiled shader is a trap. Every entry in the WGSL history above exists because a "silent-wrong" was found and converted into either a correct lowering or an explicit `error.UnsupportedOp`. The 13 XFAIL fixtures are documented, curated rejections (see `KNOWN_UNSUPPORTED` in `tests/runner.zig`), not silent failures.
+The contract underneath all of that is one rule: **when zioshade cannot faithfully translate a construct, it returns a loud error rather than emitting plausible-but-wrong output.** A rejected shader is a bug report; a silently miscompiled shader is a trap. Every entry in the WGSL history above exists because a "silent-wrong" was found and converted into either a correct lowering or an explicit `error.UnsupportedOp`. The 12 XFAIL fixtures are documented, curated rejections (see `KNOWN_UNSUPPORTED` in `tests/runner.zig`), not silent failures.
 
 ## Performance
 
@@ -151,7 +244,7 @@ Add zioshade to `build.zig.zon` with `zig fetch`, then `exe.root_module.addImpor
 ## Known limitations
 
 - **GLSL output is 430 only.** Other versions are not generated.
-- **WGSL is the least-proven backend.** Its opcode coverage has grown well past the common core (a static lower bound of 236 of the 257 modelled opcodes, per [docs/COVERAGE_MATRIX.md](docs/COVERAGE_MATRIX.md)), and the GroupNonUniform family now lowers under `enable subgroups;` (#643; families with no faithful WGSL spelling still refuse by name), but it has no direct render/exec differential proof (naga/tint compile validation plus indirect round-trip checks only). On the vendored GraphicsFuzz corpus the WGSL leg measures 65 ok / 23 honest-error / 0 naga-rejected / 0 crash (`tools/cts_ingestion_sweep.sh`). Deepening remains tracked in [#170](https://github.com/zioshade/zioshade/issues/170).
+- **WGSL is the least-proven backend.** Its opcode coverage has grown well past the common core (a static lower bound of 236 of the 257 modelled opcodes, per [docs/COVERAGE_MATRIX.md](docs/COVERAGE_MATRIX.md)), and the GroupNonUniform family now lowers under `enable subgroups;` (#643; families with no faithful WGSL spelling still refuse by name), but it has no direct render/exec differential proof (naga/tint compile validation plus indirect round-trip checks only). Measured: on the vendored GraphicsFuzz corpus the WGSL leg is 65 ok / 23 honest-error / 0 naga-rejected / 0 crash (`tools/cts_ingestion_sweep.sh`), and on the larger WebGPU CTS round-trip channel it is 1597 valid / 14 refused / 0 invalid / 0 crash of 1613 CTS-authored shaders (`tests/webgpu_cts/baseline.txt`). Deepening remains tracked in [#170](https://github.com/zioshade/zioshade/issues/170).
 - **Cross-compiler control flow:** structured SPIR-V works on every backend; unstructured-but-reducible `if`/`switch` (missing `OpSelectionMerge`) is structurized transparently by a pre-pass. Unstructured loops (missing `OpLoopMerge`) and irreducible CFGs **fail loud** with `error.UnstructuredControlFlow` rather than miscompile. zioshade's own SPIR-V is always structured; this only affects externally-optimized or hand-authored input.
 - **Single contributor.** Treat as alpha if you are not the wintty project.
 
@@ -192,7 +285,7 @@ Current status: the library, CLI, C ABI, and complete test suite build and pass 
 zig build                    # library
 zig build cli                # CLI tool
 zig build test               # unit tests
-zig build strict-gate        # compile-side conformance gate (PASS 2108, see docs/STATUS.md)
+zig build strict-gate        # compile-side conformance gate (PASS 2109, see docs/STATUS.md)
 zig build conformance        # spirv-val conformance suite (needs spirv-val on PATH)
 zig build fuzz -- --count N  # fuzzer (headline: 1,000,000 clean via `just fuzz-million`)
 ```
