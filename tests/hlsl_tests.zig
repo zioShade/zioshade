@@ -13452,6 +13452,141 @@ test "T529.3: non-square buffer matrix array row_major + swapped mul" {
     try assertContains(hlsl, "mul(v, ");
 }
 
+// Regression for hlsl-nonsquare-rowmajor (#654 follow-up): the LAST deliberate HLSL
+// deferral. An explicit `layout(row_major)` NON-square matrix member used to be an
+// honest UnsupportedRowMajorMatrix; it now lowers with the FLIPPED HLSL keyword
+// (`column_major`), the SPIRV-Cross convention (verified against its --hlsl output):
+// row-major std140 bytes are R chunks of C floats, which is exactly how HLSL
+// column_major floatCxR groups them (R columns of C floats), so the HLSL value is M^T
+// -- the SAME transposed convention as a non-square ColMajor member (T529.2), and the
+// existing use-site machinery (raw `m[i]` row reads, swapped mul operands) applies
+// unchanged. All five corpus shapes that used to honest-error now lower:
+// rowmajor.flatten.vert, struct.rowmajor.flatten.vert, matrixindex.flatten.vert,
+// read-from-row-major-array.vert, struct-packing.comp.
+test "T598.1: explicit row_major non-square member: column_major decl + swapped mul" {
+    // rowmajor.flatten.vert shape: top-level cbuffer member, VectorTimesMatrix use.
+    const source =
+        \\#version 450
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec4 fc;
+        \\layout(binding = 0, std140) uniform U { layout(row_major) mat2x4 m; };
+        \\void main() { vec2 r = v * m; fc = vec4(r, 0.0, 1.0); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Flipped keyword: NOT row_major (that would regroup R-chunks-of-C bytes as
+    // C-chunks-of-R and misread every element), NOT bare column_major either --
+    // the explicit spelling mirrors spirv-cross and survives a non-default
+    // global packing pragma.
+    try assertContains(hlsl, "column_major float2x4 U_m");
+    try assertNotContains(hlsl, "row_major float2x4");
+    // v * m (OpVectorTimesMatrix) on the M^T value must swap to mul(m, v).
+    try assertContains(hlsl, "mul(v13, v);");
+}
+
+test "T598.2: explicit row_major non-square inside a struct member" {
+    // struct.rowmajor.flatten.vert shape: glslang propagates the member RowMajor
+    // onto the nested struct's matrix members; the struct decl carries the
+    // flipped keyword and a local struct copy keeps the M^T convention.
+    const source =
+        \\#version 450
+        \\struct Foo { mat3x4 MVP0; };
+        \\layout(binding = 0, std140) uniform U { layout(row_major) Foo foo; };
+        \\layout(location = 0) in vec4 v;
+        \\layout(location = 0) out vec3 fc;
+        \\void main() { Foo f = foo; vec3 a = v * f.MVP0; fc = a; }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "column_major float3x4 MVP0;");
+    try assertNotContains(hlsl, "row_major float3x4");
+    // v * f.MVP0 through the local copy stays on the swapped-operand path.
+    try assertContains(hlsl, "mul(v14, v);");
+}
+
+test "T598.3: matrix column reads: square buffer matrix transposes, non-square raw" {
+    // matrixindex.flatten.vert shape. HLSL m[i] is ROW i; SPIR-V selects COLUMN i.
+    // A SQUARE buffer matrix is stored as the logical M (bare column_major for
+    // ColMajor, row_major for RowMajor), so a load + OpCompositeExtract column
+    // read must wrap the value in transpose(). A NON-square buffer matrix is M^T
+    // (row i of the stored value IS column i of M), so its reads stay raw --
+    // for BOTH storage flavors.
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140) uniform UBO {
+        \\    layout(column_major) mat4 M1C;
+        \\    layout(row_major) mat4 M1R;
+        \\    layout(column_major) mat2x4 M2C;
+        \\    layout(row_major) mat2x4 M2R;
+        \\};
+        \\layout(location = 0) out vec4 o;
+        \\void main() {
+        \\    vec4 a = M1C[1];
+        \\    vec4 b = M1R[1];
+        \\    vec4 c = M2C[1];
+        \\    vec4 d = M2R[0];
+        \\    float e = M1C[1][2];
+        \\    float f = M2R[1][2];
+        \\    o = a + b + c + d + vec4(e, f, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    // Square storage flavors: bare float4x4 (M1C) and row_major float4x4 (M1R)
+    // both hold M and both column reads transpose.
+    try assertContains(hlsl, "float4x4 UBO_M1C : packoffset(c0);");
+    try assertContains(hlsl, "row_major float4x4 UBO_M1R");
+    try assertContains(hlsl, "float4 v13 = transpose(v12)[1];");
+    try assertContains(hlsl, "float4 v16 = transpose(v15)[1];");
+    // Non-square storage flavors: row_major (M2C) and column_major (M2R) both
+    // hold M^T and the reads stay raw rows.
+    try assertContains(hlsl, "row_major float2x4 UBO_M2C");
+    try assertContains(hlsl, "column_major float2x4 UBO_M2R");
+    try assertContains(hlsl, "float4 v19 = v18[1];");
+    try assertContains(hlsl, "float4 v22 = v21[0];");
+}
+
+test "T598.4: row_major block over an array of non-square matrices" {
+    // read-from-row-major-array.vert shape: block-level row_major on a
+    // multi-dim array member. Both array dims must survive emission and the
+    // whole-matrix load carries the M^T convention (m[0] is column 0).
+    const source =
+        \\#version 450
+        \\layout(binding = 0, std140, row_major) uniform Block { mat2x3 var[3][4]; };
+        \\layout(location = 0) out vec4 o;
+        \\void main() { mat2x3 m = var[1][2]; o = vec4(m[0], 1.0); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "column_major float2x3 Block_var[3][4]");
+    try assertContains(hlsl, "float2x3 v14 = Block_var[1][2];");
+    try assertContains(hlsl, "float3 v15 = v14[0];");
+}
+
+test "T598.5: SSBO struct row_major non-square keeps every array dim" {
+    // struct-packing.comp shape. Two independent fixes under one shader: the
+    // flipped `column_major` qualifier for the non-square row_major members,
+    // and multi-dim array members in the SSBO struct decl must emit EVERY
+    // dimension (m6[4][2], not m6[4]) -- dropping one would declare a too-small
+    // struct and shift the stride of every later member.
+    const source =
+        \\#version 450
+        \\layout(binding = 1, std430) buffer SSBO1 {
+        \\    float lead;
+        \\    layout(row_major) mat2x3 m6[4][2];
+        \\    layout(row_major) mat3x2 m7;
+        \\} sb;
+        \\layout(location = 0) out vec4 o;
+        \\void main() { o = vec4(sb.m7[0], 1.0) + vec4(sb.m6[1][1][0], 1.0, 0.0, 0.0); }
+    ;
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "column_major float2x3 m6[4][2];");
+    try assertContains(hlsl, "column_major float3x2 m7;");
+    // Column read through the M^T value: m7[0] is a raw row read (vec2 column).
+    try assertContains(hlsl, "float2 v17 = sb[0].m7[0];");
+}
+
 test "T530.1: gl_MaxUniformBindings and constants" {
     // Tests that GLSL max constants compile
     const source =
@@ -15750,22 +15885,26 @@ test "T597.2: UBO matrix-column read is transposed (HLSL row-index != GLSL colum
     try assertContains(row, "transpose(a_m)[0]");
 }
 
-test "T597.3: non-square row_major UBO matrix is an honest error (not silent-wrong)" {
-    // A row_major NON-square matrix (mat3x4) needs swapped HLSL dimensions and a
-    // layout we don't yet implement; fail loudly instead of emitting a
-    // column-major-shaped member with untransposed access (silent-wrong).
+test "T597.3: non-square row_major UBO matrix lowers with the flipped keyword" {
+    // A row_major NON-square matrix (mat3x4) used to be an honest
+    // UnsupportedRowMajorMatrix (needs swapped HLSL dims). It now lowers with
+    // the FLIPPED keyword `column_major` (spirv-cross's convention): the HLSL
+    // value is M^T, so `a_m[0]` (an HLSL row read) already yields GLSL column 0
+    // -- no transpose, never the old column-major-shaped silent-wrong.
+    // See T598.1 for the full rationale (#654 follow-up).
     const source: [:0]const u8 =
         \\#version 450
         \\layout(binding=0,std140,row_major) uniform A { mat3x4 m; } a;
         \\layout(location=0) out vec4 o;
         \\void main() { o = a.m[0]; }
     ;
-    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
-    defer alloc.free(spirv);
-    try std.testing.expectError(
-        error.UnsupportedRowMajorMatrix,
-        zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
-    );
+    const hlsl = try compileToHlsl(source);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "column_major float3x4 a_m");
+    try assertNotContains(hlsl, "row_major float3x4");
+    // Column 0 of M = row 0 of the stored M^T: a RAW read, no transpose().
+    try assertContains(hlsl, "= a_m[0];");
+    try assertNotContains(hlsl, "transpose(a_m)");
 }
 
 test "T597.4: local matrix column read is NOT transposed (regression guard)" {
@@ -16982,12 +17121,15 @@ test "HLSL emits case breaks when the switch default target is the merge (#switc
 
 // #hlsl-struct-buffer-decl: glslang propagates `layout(row_major)` on a UBO's
 // STRUCT-typed member onto the struct's own matrix members (Foo_0). The struct
-// forward-decl emitter then threw UnsupportedRowMajorMatrix mid-member-list and
-// every call site swallowed it, leaving a half-open `struct Foo {` in the output
-// so the cbuffer declaration landed INSIDE the member list (glslang rejects with
-// "member type expected"; spirv-cross passes). The error must PROPAGATE: honest
-// refusal of the whole shader, never a broken declaration sequence.
-test "HLSL honest-errors a row_major struct UBO member instead of nesting the cbuffer in the struct (#hlsl-struct-buffer-decl)" {
+// forward-decl emitter used to throw UnsupportedRowMajorMatrix mid-member-list
+// and every call site swallowed it, leaving a half-open `struct Foo {` in the
+// output so the cbuffer declaration landed INSIDE the member list (glslang
+// rejects with "member type expected"; spirv-cross passes). The deferral is
+// LIFTED (#654 follow-up): the member now lowers with the flipped
+// `column_major` qualifier, so this test guards the STRUCTURAL invariant that
+// survived the lift -- the struct is fully CLOSED before the cbuffer decl, the
+// cbuffer is never nested inside the struct.
+test "HLSL closes a row_major struct UBO member's struct before the cbuffer declaration (#hlsl-struct-buffer-decl)" {
     const source: [:0]const u8 =
         \\#version 450
         \\struct Foo
@@ -17003,19 +17145,24 @@ test "HLSL honest-errors a row_major struct UBO member instead of nesting the cb
         \\layout(location = 0) out vec3 V0;
         \\void main() { V0 = v0 * foo.MVP0; }
     ;
-    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .vertex });
-    defer alloc.free(spirv);
-    try std.testing.expectError(
-        error.UnsupportedRowMajorMatrix,
-        zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
-    );
+    const hlsl = try compileToHlslStage(source, .vertex);
+    defer alloc.free(hlsl);
+    // Flipped qualifier on the propagated row_major (non-square mat3x4).
+    try assertContains(hlsl, "column_major float3x4 MVP0;");
+    try assertNotContains(hlsl, "row_major float3x4");
+    // Struct closed before the cbuffer: no `struct ... {` left open, the
+    // cbuffer decl follows a `};`.
+    const struct_pos = std.mem.indexOf(u8, hlsl, "struct Foo").?;
+    const cbuf_pos = std.mem.indexOf(u8, hlsl, "cbuffer UBO").?;
+    try std.testing.expect(struct_pos < cbuf_pos);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl[struct_pos..cbuf_pos], "};") != null);
 }
 
-// Same swallow class via the SSBO element-struct path: an explicit row_major
-// NON-square array member (mat2x3) aborted the struct decl after earlier
-// members were printed, then the RWStructuredBuffer declaration itself was
-// printed inside the still-open member list. Must refuse honestly instead.
-test "HLSL honest-errors an SSBO row_major non-square member instead of nesting the buffer decl in the struct (#hlsl-struct-buffer-decl)" {
+// Same emitter through the SSBO element-struct path: the explicit row_major
+// NON-square array member (mat2x3) used to abort the struct decl mid-list; it
+// now lowers, and the guard keeps checking the structural invariant -- the
+// element struct is fully CLOSED before the RWStructuredBuffer declaration.
+test "HLSL closes an SSBO row_major non-square struct before the RWStructuredBuffer declaration (#hlsl-struct-buffer-decl)" {
     const source: [:0]const u8 =
         \\#version 450
         \\layout(binding = 0, std430) buffer SSBO
@@ -17027,12 +17174,16 @@ test "HLSL honest-errors an SSBO row_major non-square member instead of nesting 
         \\} ssbo;
         \\void main() { ssbo.data[0] = ssbo.m6[0][0]; }
     ;
-    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .compute });
-    defer alloc.free(spirv);
-    try std.testing.expectError(
-        error.UnsupportedRowMajorMatrix,
-        zioshade.spirvToHLSL(alloc, spirv, .{ .shader_model = 60 }),
-    );
+    const hlsl = try compileToHlslStage(source, .compute);
+    defer alloc.free(hlsl);
+    // Square row_major keeps row_major; non-square takes the flipped keyword.
+    try assertContains(hlsl, "row_major float2x2 m4;");
+    try assertContains(hlsl, "column_major float2x3 m6[4];");
+    try assertNotContains(hlsl, "row_major float2x3");
+    const struct_pos = std.mem.indexOf(u8, hlsl, "struct SSBO").?;
+    const buf_pos = std.mem.indexOf(u8, hlsl, "RWStructuredBuffer<SSBO>").?;
+    try std.testing.expect(struct_pos < buf_pos);
+    try std.testing.expect(std.mem.indexOf(u8, hlsl[struct_pos..buf_pos], "};") != null);
 }
 
 // Positive guard for the same emitter: an emittable SSBO element struct must be

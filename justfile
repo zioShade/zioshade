@@ -103,20 +103,17 @@ hlsl-glslang-all:
 # is the HLSL analog of `wgsl-naga` / `msl-lint` — dxc is the real HLSL oracle.
 # Reports per-stage PASS/FAIL/SKIP. Requires dxc (override the `dxc` variable).
 #
-# Baseline at SM 6.0 (re-audited with #hlsl-struct-buffer-decl): 4 FAILs.
+# Baseline at SM 6.0 (re-audited with #hlsl-nonsquare-rowmajor): 3 FAILs.
 #   * barycentric-{khr-io-block,nv}: honest frontend refusals
 #     (UnsupportedBarycentricArrayOverlap), no HLSL emitted. barycentric-khr
 #     now PASSES and complex-expression-in-access-chain passes (the old
 #     ps_6_1 / 2048-byte-element notes were stale).
 #   * shader-clock: honest refusal (UnsupportedInt64Type), no HLSL emitted.
-#   * ubo-load-row-major-workaround: REAL bug, known and deferred. glslang
-#     duplicates a struct type when row_major propagates into it
-#     (NestedRowMajor_1); the cbuffer member uses the decorated variant's
-#     name while the function param/local uses the undecorated one, and DXC
-#     rejects the struct copy "cannot implicitly convert". Fixing it needs
-#     row-major struct variant unification (same deferred surface as the
-#     explicit non-square RowMajor use-site swaps). NOT a DXC constraint.
-# Any NEW fail beyond these four is a real divergence to fix.
+#   ubo-load-row-major-workaround PASSES again (#654 unified the glslang
+#   row_major struct duplicate to one spelling); the old "4 FAILs" baseline
+#   entry for it was stale, and the explicit non-square RowMajor surface it
+#   was grouped with is now fully LIFTED (flipped `column_major` qualifier).
+# Any NEW fail beyond these three is a real divergence to fix.
 # build the pinned DXC Docker image (linux/amd64; Rosetta on Apple Silicon).
 # Required once before `just hlsl-dxc` (the default tools/dxc wrapper uses it).
 dxc-image:
