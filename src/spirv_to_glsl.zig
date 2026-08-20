@@ -3592,6 +3592,25 @@ fn isSwitchCaseTargetGLSL(switch_words: []const u32, lbl: u32) bool {
 /// g_predeclared_arm_phis so the nested selection skips its own declaration
 /// (assignments stay), making this level's arm copy read a variable declared
 /// at its own scope or shallower.
+/// #no-then-selection hardening: the init/copy picks index only the FIRST TWO
+/// (value, pred) pairs of each merge phi. A phi with 3+ preds (a shared-merge
+/// flat else-if chain) can carry the needed pred in slot 3 and would silently
+/// mispick -- refuse those (the collectors truncate to two pairs).
+fn noThenMergePhisAreTwoPredGLSL(
+    m: *const ParsedModule,
+    label_map: *const std.AutoHashMap(u32, usize),
+    merge_lbl: u32,
+) bool {
+    const mi = label_map.get(merge_lbl) orelse return true;
+    var k: usize = mi + 1;
+    while (k < m.instructions.len) : (k += 1) {
+        const t = m.instructions[k];
+        if (t.op != .Phi) break;
+        if (t.words.len > 7) return false;
+    }
+    return true;
+}
+
 fn hoistArmIncomingPhisGLSL(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3957,6 +3976,7 @@ fn emitBody(
                     // is among each merge phi's FIRST TWO preds. A shared-merge flat
                     // else-if chain gives phis 3+ preds and would silently pick a
                     // wrong incoming (review finding) -- refuse loudly instead.
+                    if (!noThenMergePhisAreTwoPredGLSL(m, &label_map, mval)) return error.UnsupportedLadderPhiScope;
                     for (phi_decls.items) |pv| {
                         if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
                     }
@@ -5411,6 +5431,7 @@ fn emitWhileLoop(
                         // from the BC-block incoming, guard the false arm under
                         // `if (!(c))`, and hoist the arm-side chain phis at the arm top.
                         const bc_blk = blockLabelOfGLSL(m, bi);
+                        if (!noThenMergePhisAreTwoPredGLSL(m, label_map, nmv)) return error.UnsupportedLadderPhiScope;
                         for (nt_phis.items) |pv| {
                             if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
                         }
@@ -5915,6 +5936,7 @@ fn emitBlock(
                 if (tl == nmv and fl != null) {
                     const bc_blk = blockLabelOfGLSL(m, i);
                     // #no-then: as in emitBody -- first-two-preds assumption guard.
+                    if (!noThenMergePhisAreTwoPredGLSL(m, lm, nmv)) return error.UnsupportedLadderPhiScope;
                     for (phi_decls2.items) |pv| {
                         if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
                     }
