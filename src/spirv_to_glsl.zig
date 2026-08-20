@@ -3592,6 +3592,25 @@ fn isSwitchCaseTargetGLSL(switch_words: []const u32, lbl: u32) bool {
 /// g_predeclared_arm_phis so the nested selection skips its own declaration
 /// (assignments stay), making this level's arm copy read a variable declared
 /// at its own scope or shallower.
+/// #no-then-selection hardening: the init/copy picks index only the FIRST TWO
+/// (value, pred) pairs of each merge phi. A phi with 3+ preds (a shared-merge
+/// flat else-if chain) can carry the needed pred in slot 3 and would silently
+/// mispick -- refuse those (the collectors truncate to two pairs).
+fn noThenMergePhisAreTwoPredGLSL(
+    m: *const ParsedModule,
+    label_map: *const std.AutoHashMap(u32, usize),
+    merge_lbl: u32,
+) bool {
+    const mi = label_map.get(merge_lbl) orelse return true;
+    var k: usize = mi + 1;
+    while (k < m.instructions.len) : (k += 1) {
+        const t = m.instructions[k];
+        if (t.op != .Phi) break;
+        if (t.words.len > 7) return false;
+    }
+    return true;
+}
+
 fn hoistArmIncomingPhisGLSL(
     m: *const ParsedModule,
     names: *std.AutoHashMap(u32, []const u8),
@@ -3957,6 +3976,7 @@ fn emitBody(
                     // is among each merge phi's FIRST TWO preds. A shared-merge flat
                     // else-if chain gives phis 3+ preds and would silently pick a
                     // wrong incoming (review finding) -- refuse loudly instead.
+                    if (!noThenMergePhisAreTwoPredGLSL(m, &label_map, mval)) return error.UnsupportedLadderPhiScope;
                     for (phi_decls.items) |pv| {
                         if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
                     }
@@ -5384,6 +5404,75 @@ fn emitWhileLoop(
                         try w.print("        if ({s})\n        {{\n", .{ncn});
                         bi = try emitBlock(m, names, decs, ntl, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
                         try w.writeAll("        }\n");
+                    } else if (ntl == nmv and nfl != null) {
+                        // #no-then-selection (the emitBody/emitBlock ports): the BC's
+                        // body_phis equivalent, collected here (the general case's list
+                        // is scoped inside its own block).
+                        var nt_phis = std.ArrayList(PhiDeclGLSL).initCapacity(alloc, 4) catch unreachable;
+                        defer nt_phis.deinit(alloc);
+                        if (label_map.get(nmv)) |midx5| {
+                            var pj5: usize = midx5 + 1;
+                            while (pj5 < m.instructions.len) : (pj5 += 1) {
+                                const minst = m.instructions[pj5];
+                                if (minst.op != .Phi) break;
+                                if (names.get(minst.words[2])) |ex| {
+                                    if (std.mem.endsWith(u8, ex, "_lm")) continue;
+                                }
+                                if (minst.words.len >= 7) {
+                                    nt_phis.append(alloc, .{ .result_id = minst.words[2], .type_id = minst.words[1], .vals = .{ minst.words[3], minst.words[5] }, .preds = .{ minst.words[4], minst.words[6] } }) catch {};
+                                }
+                            }
+                        }
+                        // (the rest of the no-then emission follows)
+                        // TRUE target is its own SelectionMerge. Walking tl as an arm
+                        // walks the MERGE BLOCK inside the if (its phis then hit the
+                        // generic handler unowned = UnsupportedPhiAlias, and phi-free
+                        // content double-emits). Emit inverted: init the merge phis
+                        // from the BC-block incoming, guard the false arm under
+                        // `if (!(c))`, and hoist the arm-side chain phis at the arm top.
+                        const bc_blk = blockLabelOfGLSL(m, bi);
+                        if (!noThenMergePhisAreTwoPredGLSL(m, label_map, nmv)) return error.UnsupportedLadderPhiScope;
+                        for (nt_phis.items) |pv| {
+                            if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
+                        }
+                        for (nt_phis.items) |pv| {
+                            var tv: u32 = pv.vals[0];
+                            if (pv.preds[0] != bc_blk) tv = pv.vals[1];
+                            const tvn = exprName(m, names, tv, alloc);
+                            const vn_x = names.get(pv.result_id) orelse "pv";
+                            if (g_predeclared_arm_phis_init and g_predeclared_arm_phis.contains(pv.result_id)) {
+                                try w.print("        {s}_phi = {s};\n", .{ vn_x, tvn });
+                                continue;
+                            }
+                            const rtt = try glslType(m, pv.type_id, names, alloc);
+                            try w.print("        {s} {s}_phi = {s};\n", .{ rtt, vn_x, tvn });
+                        }
+                        try w.print("        if (!({s}))\n        {{\n", .{ncn});
+                        {
+                            var fsides5 = std.ArrayList(u32).initCapacity(alloc, 4) catch unreachable;
+                            defer fsides5.deinit(alloc);
+                            for (nt_phis.items) |pv| {
+                                var fv: u32 = pv.vals[1];
+                                if (pv.preds[1] == bc_blk) fv = pv.vals[0];
+                                fsides5.append(alloc, fv) catch {};
+                            }
+                            try hoistArmIncomingPhisGLSL(m, names, label_map, w, alloc, nt_phis.items, fsides5.items, nfl.?, nmv, "        ");
+                        }
+                        bi = try emitBlock(m, names, decs, nfl.?, nmv, label_map, bc_merge, w, alloc, is_frag, ovid, "        ", false);
+                        const arm_exit5 = blockLabelOfGLSL(m, bi);
+                        for (nt_phis.items) |pv| {
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            var fv: u32 = pv.vals[1];
+                            if (pv.preds[1] != arm_exit5) fv = pv.vals[0];
+                            const fvn = exprName(m, names, fv, alloc);
+                            try w.print("            {s}_phi = {s};\n", .{ vn, fvn });
+                        }
+                        try w.writeAll("        }\n");
+                        for (nt_phis.items) |pv| {
+                            const vn = names.get(pv.result_id) orelse "pv";
+                            const phi_name = try std.fmt.allocPrint(alloc, "{s}_phi", .{vn});
+                            if (names.fetchPut(pv.result_id, phi_name) catch null) |oldn| alloc.free(oldn.value);
+                        }
                     } else {
                         // General case — materialize any phis at the merge (val = cond
                         // ? a : b), exactly like the top-level and emitBlock selection
@@ -5847,6 +5936,7 @@ fn emitBlock(
                 if (tl == nmv and fl != null) {
                     const bc_blk = blockLabelOfGLSL(m, i);
                     // #no-then: as in emitBody -- first-two-preds assumption guard.
+                    if (!noThenMergePhisAreTwoPredGLSL(m, lm, nmv)) return error.UnsupportedLadderPhiScope;
                     for (phi_decls2.items) |pv| {
                         if (pv.preds[0] != bc_blk and pv.preds[1] != bc_blk) return error.UnsupportedLadderPhiScope;
                     }

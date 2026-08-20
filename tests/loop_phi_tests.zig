@@ -2080,6 +2080,26 @@ test "GLSL refuses a pattern-C do-while whose TRUE arm is the own-merge cont fal
 // body-merge block + the cond in the cont).
 const DOWHILE_SWITCH_NONINLINE_SPV = @embedFile("fixtures/dowhile_switch_noninline.spv");
 
+// #no-then-selection inside a LOOP BODY (the emitWhileLoop ladder port -- the
+// last of the three walkers). A BC whose TRUE target is its own SelectionMerge
+// (`if (!(c)) { ... }` form) previously walked the MERGE BLOCK as the then-arm:
+// its unowned phi hit the generic handler = UnsupportedPhiAlias (phi-free
+// merges would double-emit the content). Now emitted inverted, with the merge
+// phis init'd from the BC-block incoming and the arm copy taking the arm-exit
+// incoming. Fixture: a counter loop with a no-then selection + a dead nested
+// loop (routes the body past the strict scan into the rich walker).
+const WHILE_NOTHEN_BODY_SPV = @embedFile("fixtures/while_nothen_body.spv");
+
+test "GLSL lowers a no-then selection inside a loop body (#no-then-selection)" {
+    const glsl = try crossGlsl(WHILE_NOTHEN_BODY_SPV);
+    defer alloc.free(glsl);
+    // Inverted guard, init from the BC-block (fall-through) incoming, arm copy
+    // inside the braces. Names are emission-order counters: v16 = the phi,
+    // v15 = the arm value, v14 = the cond.
+    try expectOrdered(glsl, "float v16_phi = 0.0;", "if (!(v14))");
+    try expectOrdered(glsl, "if (!(v14))", "v16_phi = v15;");
+}
+
 test "GLSL lowers a do-while with a non-inlinable computed cond over a header phi (#dowhile-noninline-cond)" {
     const glsl = try crossGlsl(DOWHILE_SWITCH_NONINLINE_SPV);
     defer alloc.free(glsl);
