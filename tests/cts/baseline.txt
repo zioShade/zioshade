@@ -54,3 +54,17 @@ crash-files:glsl
 crash-files:wgsl
 crash-files:msl
 crash-files:hlsl
+
+# ---------------------------------------------------------------------------
+# GLSL expected-refusals table (2026-08-20, at c92a06a6). The GLSL loop-lowering
+# arc (#617-#659) closed every silent-wrong class it found; the remaining tail is
+# 12 named refusals out of 87 -- all inside the honest-error contract (correct
+# output or a named refusal, never plausible-but-wrong output). Recorded here so
+# the count is stable and auditable: a NEW refusal name in this set is a
+# regression to investigate, and a file moving OFF this list is a recovery worth
+# a baseline edit in the same PR.
+#
+#   class                    files                                              what it is
+#   UnstructuredControlFlow  025 032 038 051 059 060                           the do-while body walker's documented flat-scan conservatism: non-nested bodies with multi-block control flow the scan is not nesting-aware enough to validate (fail-loud by design; the emission walker could render some of these, but unvalidated admission is how the silent-wrong classes of #617-#659 got in)
+#   UnsupportedPhiAlias      041 067                                            a control-flow merge phi whose value differs by predecessor in a shape the backend cannot yet materialize; aliasing would silently use one branch's value on every path (refused since #565/#567)
+#   UnsupportedCarryInLoop   048 058 064 076                                    carry-family ops (OpIAddCarry/OpISubBorrow/OpUMulExtended) inside loops: #659 lowers them at top level (uaddCarry/usubBorrow/umulExtended) but loop-contained carries expose the body-value-escape class (a loop-body temp read after the loop); the escape hoist is the unlock (incidence checked 2026-08-20: 0 occurrences in 873 non-CTS corpus shaders -- the shape only arises in optimized/procedural SPIR-V, so this is CTS-tail work, deliberately deprioritized behind adoption)
