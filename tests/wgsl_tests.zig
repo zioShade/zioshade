@@ -9642,3 +9642,63 @@ test "WGSL: BitFieldSExtract emits inside a switch case body (shared emitter)" {
     try assertContains(wgsl, "extractBits(");
     try nagaValidateOrSkip(wgsl, "replay-bitfield-extract");
 }
+
+// #wgsl-switch-case-exit: a case-body OpBranch whose target is NEITHER the
+// switch's merge, the enclosing loop's continue, a fallthrough case label, nor
+// a nested-if merge points at an INTERNAL same-case block (or an outer
+// construct, e.g. the enclosing loop's merge). The arm walks broke on ANY
+// OpBranch, so everything after it in the case body was silently DROPPED
+// (exit 0, naga-valid-but-wrong). This pins the honest error that replaces
+// the silent truncation; following internal blocks is the region-walker's
+// job.
+test "WGSL: case-body branch to an internal block refuses (no silent truncation)" {
+    const spv = try assembleSpirv("switch_case_internal_branch",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\         %fn = OpTypeFunction %void
+        \\         %f32 = OpTypeFloat 32
+        \\         %v4f = OpTypeVector %f32 4
+        \\         %u32 = OpTypeInt 32 0
+        \\          %pu = OpTypePointer Function %u32
+        \\         %po4 = OpTypePointer Output %v4f
+        \\           %o = OpVariable %po4 Output
+        \\          %f0 = OpConstant %f32 0.0
+        \\          %f1 = OpConstant %f32 1.0
+        \\          %u1 = OpConstant %u32 1
+        \\         %one = OpConstantComposite %v4f %f1 %f0 %f0 %f1
+        \\     %zerov = OpConstantComposite %v4f %f0 %f0 %f0 %f1
+        \\        %main = OpFunction %void None %fn
+        \\       %entry = OpLabel
+        \\        %svar = OpVariable %pu Function %u1
+        \\         %sel = OpLoad %u32 %svar
+        \\               OpSelectionMerge %swmerge None
+        \\               OpSwitch %sel %dflt 1 %c1
+        \\          %c1 = OpLabel
+        \\               OpStore %o %one
+        \\               OpBranch %c1b
+        \\         %c1b = OpLabel
+        \\               OpStore %o %zerov
+        \\               OpBranch %swmerge
+        \\        %dflt = OpLabel
+        \\               OpStore %o %one
+        \\               OpBranch %swmerge
+        \\      %swmerge = OpLabel
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        // If this fires, the truncation class is back (or was never reached).
+        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(error.UnsupportedSwitchCaseExit, e);
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try std.testing.expect(std.mem.indexOf(u8, detail, "internal") != null);
+    }
+}
