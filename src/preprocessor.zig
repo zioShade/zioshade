@@ -289,8 +289,31 @@ pub const Preprocessor = struct {
         const path_copy = try self.alloc.dupe(u8, path);
         try self.included_files.put(self.alloc, path_copy, {});
 
-        // Tokenize the included source
-        const inc_tokens = try lexer.tokenize(self.alloc, resolved_source);
+        // Tokenize the included source, then REKEY every token into the
+        // interned region (extra_strings, reached via start >= top_source_len).
+        // Lexer offsets are relative to the INCLUDED text, which is valid only
+        // while self.source is swapped to it: once the swap backs off, a token
+        // at or above top_source_len indexes extra_strings where nothing was
+        // interned (out-of-bounds panic — the ghostty `common.glsl` shape, an
+        // `#include` before `#version` with a content-heavy header), and one
+        // below it aliases the TOP source (silent-wrong text). Interning the
+        // whole file as ONE string preserves every downstream property: token
+        // text resolves forever (parserSource appends extra_strings to the
+        // buffer the parser indexes), adjacency arithmetic within the header
+        // survives (the `#define F(x)` vs `#define F (x)` discriminator), and
+        // multi-token spans stay contiguous (array-size expressions the parser
+        // re-lexes).
+        const lexed_inc = try lexer.tokenize(self.alloc, resolved_source);
+        const inc_base = try self.internText(resolved_source);
+        const inc_tokens = self.alloc.alloc(lexer.Token, lexed_inc.len) catch |e| {
+            self.alloc.free(lexed_inc);
+            return e;
+        };
+        for (lexed_inc, 0..) |t, i| {
+            inc_tokens[i] = t;
+            inc_tokens[i].start = inc_base + t.start;
+        }
+        self.alloc.free(lexed_inc);
         // Freed on EVERY exit path, not just the fallthrough one: a nested
         // include can now fail with error.UnsafeIncludePath, which propagates
         // straight out of the loop below and would otherwise leak this slice.
@@ -690,6 +713,7 @@ pub const Preprocessor = struct {
             }
 
             const body_owned = try body.toOwnedSlice(self.alloc);
+            try self.rebaseBodyTokens(body_owned);
 
             try self.defines.put(self.alloc, name, .{
                 .function = .{
@@ -717,8 +741,28 @@ pub const Preprocessor = struct {
             }
 
             const body_owned = try body.toOwnedSlice(self.alloc);
+            try self.rebaseBodyTokens(body_owned);
             try self.defines.put(self.alloc, name, .{ .object = body_owned });
         }
+    }
+
+    /// Rebase a stored macro body's tokens onto one contiguous interned copy
+    /// of the body's text. Bodies are borrowed from the token stream, so a body
+    /// parsed from the TOP-level source reads the wrong bytes when the macro is
+    /// expanded inside an include (self.source is swapped to the header) — the
+    /// mirror image of include-borne tokens aliasing the top source after the
+    /// swap-back. Interning the body's span once makes the tokens
+    /// address-space-independent AND keeps them contiguous (multi-token spans
+    /// the parser re-lexes, like array sizes, stay intact). Bodies whose tokens
+    /// already live in the interned region (defined inside an include, rekeyed
+    /// at tokenize time in handleInclude) resolve forever as-is.
+    fn rebaseBodyTokens(self: *Preprocessor, body: []lexer.Token) !void {
+        if (body.len == 0) return;
+        if (body[0].start >= self.top_source_len) return;
+        const span_start = body[0].start;
+        const span_end = body[body.len - 1].start + body[body.len - 1].len;
+        const base = try self.internText(self.source[span_start..span_end]);
+        for (body) |*t| t.start = base + (t.start - span_start);
     }
 
     fn expandMacro(self: *Preprocessor, tokens: []const lexer.Token, index: *usize, identifier_tok: lexer.Token) !void {
@@ -1771,7 +1815,7 @@ test "expand object-like macro" {
     var found_42 = false;
     for (result) |tok| {
         if (tok.tag == .int_literal) {
-            const text = source[tok.start..][0..tok.len];
+            const text = pp.getTokenText(tok);
             if (std.mem.eql(u8, text, "42")) {
                 found_42 = true;
             }
@@ -1904,7 +1948,7 @@ test "#undef removes macro" {
     var found_identifier = false;
     for (result) |tok| {
         if (tok.tag == .identifier) {
-            const text = source[tok.start..][0..tok.len];
+            const text = pp.getTokenText(tok);
             if (std.mem.eql(u8, text, "FOO")) {
                 found_identifier = true;
             }
@@ -2110,7 +2154,7 @@ test "self-recursion prevention" {
     var found_identifier = false;
     for (result) |tok| {
         if (tok.tag == .identifier) {
-            const text = source[tok.start..][0..tok.len];
+            const text = pp.getTokenText(tok);
             if (std.mem.eql(u8, text, "FOO")) {
                 found_identifier = true;
             }

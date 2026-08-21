@@ -358,3 +358,127 @@ test "include: a self-referential cycle terminates" {
     try std.testing.expect(!pp.unresolved_include);
     try std.testing.expect(pp.defines.contains("A_SEEN"));
 }
+
+// ---------------------------------------------------------------------------
+// Content correctness: token text must outlive the include window
+// ---------------------------------------------------------------------------
+// The token-text address space has two regions: the top-level source, and the
+// interned extra_strings reached via start >= top_source_len (what the parser
+// reads through parserSource()). Tokens lexed from an INCLUDED file carry
+// offsets relative to the included text, which is valid only while the include
+// is being processed: once self.source is restored, an offset below
+// top_source_len aliases the TOP source (silent-wrong text) and one at or above
+// it indexes extra_strings where nothing was interned (out-of-bounds panic).
+// The same aliasing runs the other way for macro bodies stored from the
+// top-level stream and expanded inside an include. The tests in this section
+// pin the rekeying that keeps every emitted token resolvable forever. The
+// motivating shape is ghostty's `common.glsl`: `#include` before `#version`,
+// content-heavy header, macros defined and used inside it.
+
+/// Assert every `want` string appears as the text of some output token, read
+/// the way the PARSER reads it: parserSource()[tok.start .. tok.start+len].
+fn expectTokenTextsContain(
+    pp: *preprocessor.Preprocessor,
+    original: [:0]const u8,
+    tokens: []const lexer.Token,
+    want: []const []const u8,
+) !void {
+    const src = try pp.parserSource(original, alloc);
+    defer if (src.ptr != original.ptr) alloc.free(src);
+    for (want) |w| {
+        var found = false;
+        for (tokens) |t| {
+            const text = src[t.start .. t.start + t.len];
+            if (std.mem.eql(u8, text, w)) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            std.debug.print("missing token text '{s}'\n", .{w});
+            return error.TestExpectedNotFound;
+        }
+    }
+}
+
+test "include: header tokens resolve after the include window" {
+    // The header is much LONGER than the top-level source, so a token late in
+    // the header has an offset at or above top_source_len: before rekeying,
+    // getTokenText routed it into the interned region where nothing was
+    // interned and panicked. The macro is also used at top level after the
+    // include returns, which needs the stored body to resolve post-restore.
+    var tree = try Tree.create("content");
+    const hdr_path = try Tree.pathIn(tree.root, "hdr.glsl");
+    defer alloc.free(hdr_path);
+    const main_path = try Tree.pathIn(tree.root, "main.glsl");
+    defer alloc.free(main_path);
+    defer tree.destroy(&.{hdr_path});
+
+    var hdr = std.ArrayListUnmanaged(u8).empty;
+    defer hdr.deinit(alloc);
+    try hdr.appendSlice(alloc, "#version 430 core\n#define HDR_VAL 41\n// ");
+    try hdr.appendNTimes(alloc, 'x', 512);
+    try hdr.appendSlice(alloc, "\nint hdr_use = HDR_VAL;\n");
+    try compat.writeFileAbsolute(alloc, hdr_path, hdr.items);
+
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source: [:0]const u8 = "#include \"hdr.glsl\"\nint top_use = HDR_VAL;\n";
+    const out = try run(&pp, main_path, &.{}, source);
+    defer alloc.free(out);
+
+    // hdr_use's initializer expands to 41 inside the window; top_use's
+    // initializer expands the SAME stored body after the window.
+    try expectTokenTextsContain(&pp, source, out, &.{ "hdr_use", "top_use", "41", "int" });
+}
+
+test "include: top-level macro body resolves inside the include window" {
+    // A macro defined in the top-level source and used INSIDE the header: its
+    // stored body tokens are top-source-relative, which reads the wrong bytes
+    // while self.source is swapped to the header.
+    var tree = try Tree.create("topbody");
+    const hdr_path = try Tree.writeIn(tree.root, "hdr.glsl", "#version 430 core\nint hdr_side = TOP_M;\n");
+    defer alloc.free(hdr_path);
+    const main_path = try Tree.pathIn(tree.root, "main.glsl");
+    defer alloc.free(main_path);
+    defer tree.destroy(&.{hdr_path});
+
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source: [:0]const u8 = "#define TOP_M 3\n#include \"hdr.glsl\"\nint top_after = TOP_M;\n";
+    const out = try run(&pp, main_path, &.{}, source);
+    defer alloc.free(out);
+
+    // Both expansions must read the body as "3" — one during the window, one
+    // after it.
+    try expectTokenTextsContain(&pp, source, out, &.{ "hdr_side", "3" });
+}
+
+test "include: spaced #define in a header stays an object macro" {
+    // `#define HDR_SPACED (2+3)` — the paren is separated by a space, so this
+    // is an OBJECT macro whose body is `(2+3)`. Whether a following `(` makes a
+    // macro function-like is decided by token ADJACENCY (start == name.start +
+    // name.len), so this test guards that the rekeying of header tokens keeps
+    // adjacent tokens contiguous in the interned region.
+    var tree = try Tree.create("spaced");
+    const hdr_path = try Tree.writeIn(tree.root, "hdr.glsl", "#define HDR_SPACED (2+3)\n#define HDR_FN(x) ((x)+1)\n");
+    defer alloc.free(hdr_path);
+    const main_path = try Tree.pathIn(tree.root, "main.glsl");
+    defer alloc.free(main_path);
+    defer tree.destroy(&.{hdr_path});
+
+    var pp = preprocessor.Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source: [:0]const u8 = "#include \"hdr.glsl\"\nint a = HDR_SPACED;\nint b = HDR_FN(9);\n";
+    const out = try run(&pp, main_path, &.{}, source);
+    defer alloc.free(out);
+
+    // HDR_SPACED expands to the object body ( 2 + 3 ); HDR_FN(9) substitutes
+    // 9 into the function body. A misclassification of the spaced form would
+    // leave HDR_SPACED unexpanded (bare identifier, no call), which the
+    // contains-check on ")" would then miss.
+    try expectTokenTextsContain(&pp, source, out, &.{ "(", "2", "+", "3", ")", "9" });
+}
