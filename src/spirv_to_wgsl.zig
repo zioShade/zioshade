@@ -9277,86 +9277,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // VectorShuffle
-            .VectorShuffle => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const v1 = names.get(inst.words[3]) orelse "v1";
-                const v2 = names.get(inst.words[4]) orelse "v2";
-                // Get component count of first vector to determine single-source swizzle
-                const v1_type = getDef(module, inst.words[3]);
-                var v1_count: u32 = 4; // default to vec4
-                if (v1_type) |vt| blk: {
-                    if (vt.op == .Load or vt.op == .AccessChain) {
-                        // Resolve through load/accesschain to get the actual type
-                        if (vt.words.len > 1) {
-                            const inner_type = getDef(module, vt.words[1]);
-                            if (inner_type) |it| {
-                                if (it.op == .TypeVector and it.words.len > 3) {
-                                    v1_count = it.words[3];
-                                    break :blk;
-                                }
-                            }
-                        }
-                    }
-                    // Check if v1 instruction has a type we can use
-                    if (vt.op == .TypeVector and vt.words.len > 3) {
-                        v1_count = vt.words[3];
-                    } else if (vt.words.len > 1) {
-                        const t = getDef(module, vt.words[1]);
-                        if (t) |ti| {
-                            if (ti.op == .TypeVector and ti.words.len > 3) {
-                                v1_count = ti.words[3];
-                            }
-                        }
-                    }
-                }
-                // Check if all components come from the same source vector (single-source swizzle)
-                var single_source = true;
-                for (inst.words[5..]) |idx| {
-                    if (idx >= v1_count) {
-                        single_source = false;
-                        break;
-                    }
-                }
-                if (single_source) {
-                    // All from v1 — emit as v1.xyzw swizzle
-                    var sw = std.ArrayList(u8).initCapacity(arena, 5) catch return;
-                    defer sw.deinit(arena);
-                    const chars = "xyzw";
-                    for (inst.words[5..]) |idx| {
-                        if (idx < 4) try sw.append(arena, chars[idx]);
-                    }
-                    try writeInd(w, indent);
-                    try w.print("let {s}: {s} = {s}.{s};\n", .{ result_name, rt, v1, sw.items });
-                } else {
-                    // Mixed sources — construct from components
-                    try writeInd(w, indent);
-                    try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
-                    var first = true;
-                    for (inst.words[5..]) |idx| {
-                        if (!first) try w.writeAll(", ");
-                        first = false;
-                        const src = if (idx < v1_count) v1 else v2;
-                        // OpVectorShuffle selects from the CONCATENATION of v1 (indices
-                        // 0..v1_count-1) and v2 (indices v1_count..); a component of v2 is
-                        // `idx - v1_count`, NOT `idx % v1_count`. The two agree only when
-                        // v1 and v2 have the SAME width (the common two-vecN case), so `%`
-                        // silently picked the wrong v2 component whenever v2 was wider --
-                        // e.g. shuffle(a:vec2, b:vec4, [0,4]) is (a.x, b.z) but `%` gave
-                        // (a.x, b.x). v1's own components (idx < v1_count) are unaffected.
-                        const comp = if (idx < v1_count) idx else idx - v1_count;
-                        const sw = switch (comp) {
-                            0 => ".x",
-                            1 => ".y",
-                            2 => ".z",
-                            3 => ".w",
-                            else => ".x",
-                        };
-                        try w.print("{s}{s}", .{ src, sw });
-                    }
-                    try w.writeAll(");\n");
-                }
-            },
+            .VectorShuffle => try emitVectorShuffleWgsl(module, names, inst, w, arena, indent),
 
             // Arithmetic
             .FAdd, .IAdd => try emitBinOp(module, names, &inline_exprs, inst, "+", w, arena, indent),
@@ -9947,22 +9868,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent);
                 try w.print("let {s}: {s} = ~{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
-            .BitReverse => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                try writeInd(w, indent);
-                try w.print("let {s}: {s} = reverseBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
-            },
-            .BitCount => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                // GLSL bitCount ALWAYS returns a SIGNED int (genIType), but WGSL
-                // countOneBits returns the ARGUMENT's type — so an unsigned arg yields
-                // u32/vecNu while the result type rt is i32/vecNi (naga: "expected
-                // vec3<i32>, got vec3<u32>"). Wrap in rt(...) to match; it is an
-                // identity when the argument is already signed. (Same shape as the
-                // findMSB/findLSB bit-scan wrap.) (#170)
-                try writeInd(w, indent);
-                try w.print("let {s}: {s} = {s}(countOneBits({s}));\n", .{ names.get(inst.words[2]) orelse "v", rt, rt, names.get(inst.words[3]) orelse "0" });
-            },
+            .BitReverse => try emitBitReverseWgsl(module, names, inst, w, arena, indent),
+            .BitCount => try emitBitCountWgsl(module, names, inst, w, arena, indent),
             // SPIR-V bitfield ops: WGSL has insertBits(e, newbits, offset, count)
             // and extractBits(e, offset, count). The S/U variants of extract
             // both map to extractBits — WGSL picks signed vs unsigned from
@@ -9978,16 +9885,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 try writeInd(w, indent);
                 try w.print("let {s}: {s} = insertBits({s}, {s}, u32({s}), u32({s}));\n", .{ rn, rt, base, insert, offset, count });
             },
-            .BitFieldSExtract, .BitFieldUExtract => {
-                if (inst.words.len < 6) continue;
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const rn = names.get(inst.words[2]) orelse "v";
-                const base = names.get(inst.words[3]) orelse "0";
-                const offset = names.get(inst.words[4]) orelse "0u";
-                const count = names.get(inst.words[5]) orelse "0u";
-                try writeInd(w, indent);
-                try w.print("let {s}: {s} = extractBits({s}, u32({s}), u32({s}));\n", .{ rn, rt, base, offset, count });
-            },
+            .BitFieldSExtract, .BitFieldUExtract => try emitBitFieldExtractWgsl(module, names, inst, w, arena, indent),
 
             // Derivatives. Ordered to match the SPIR-V spec numbering:
             // plain (207-209), Fine (210-212), Coarse (213-215). WGSL has a
@@ -10157,71 +10055,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // v.z = P;` — both backwards AND an illegal mutation of an immutable
             // `let`. Surfaced by textureProj(sampler2DShadow), whose coordinate
             // glslang builds with exactly this op.)
-            .CompositeInsert => {
-                const rt = try wgslType(module, inst.words[1], names, arena);
-                const result_name = names.get(inst.words[2]) orelse "v";
-                const object = names.get(inst.words[3]) orelse "o";
-                const composite = names.get(inst.words[4]) orelse "c";
-                // Build access chain from indices with type-aware member names
-                var access = std.ArrayList(u8).initCapacity(arena, 64) catch return;
-                defer access.deinit(arena);
-                // Walk the type chain to resolve struct member names
-                var current_type: ?u32 = if (inst.words.len > 1) blk: {
-                    // result type is the composite type
-                    const ti = getDef(module, inst.words[1]);
-                    break :blk if (ti) |t| t.words[1] else null;
-                } else null;
-                for (inst.words[5..]) |idx| {
-                    if (current_type) |ct| {
-                        const ct_inst = getDef(module, ct);
-                        if (ct_inst) |cti| {
-                            if (cti.op == .TypeStruct) {
-                                var mname_buf: [32]u8 = undefined;
-                                const mname = getMemberName(module, ct, idx, &mname_buf);
-                                try access.print(arena, ".{s}", .{mname});
-                                // Walk to member type
-                                if (idx + 2 < cti.words.len) current_type = cti.words[idx + 2] else current_type = null;
-                                continue;
-                            } else if (cti.op == .TypeVector) {
-                                const sw = switch (idx) {
-                                    0 => ".x",
-                                    1 => ".y",
-                                    2 => ".z",
-                                    3 => ".w",
-                                    else => ".x",
-                                };
-                                try access.appendSlice(arena, sw);
-                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
-                                continue;
-                            } else if (cti.op == .TypeMatrix) {
-                                try access.print(arena, "[{d}]", .{idx});
-                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
-                                continue;
-                            } else if (cti.op == .TypeArray) {
-                                try access.print(arena, "[{d}]", .{idx});
-                                if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
-                                continue;
-                            }
-                        }
-                    }
-                    // Fallback: use vector swizzle
-                    const sw = switch (idx) {
-                        0 => ".x",
-                        1 => ".y",
-                        2 => ".z",
-                        3 => ".w",
-                        else => "[0]",
-                    };
-                    try access.appendSlice(arena, sw);
-                }
-                // Copy the base composite into a MUTABLE local, then overwrite the
-                // indexed component with the inserted object (`var`, not `let`, so
-                // the member assignment is legal WGSL).
-                try writeInd(w, indent);
-                try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, composite });
-                try writeInd(w, indent);
-                try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
-            },
+            .CompositeInsert => try emitCompositeInsertWgsl(module, names, inst, w, arena, indent),
 
             // VectorExtractDynamic
             .VectorExtractDynamic => {
@@ -11611,6 +11445,199 @@ fn emitWrapBackedgePhiUpdates(
     }
 }
 
+/// Shared OpVectorShuffle emitter — called from BOTH the main emitBody
+/// dispatch and emitSimpleInstruction (switch case-body / loop-header replay).
+/// The anti-drift pattern (glslStd450WgslName rationale): the main arm carries
+/// past silent-wrong fixes (the v2 concatenation-index fix below) that a
+/// copy-pasted replay twin would fork. (#wgsl-replay-twin-drift)
+fn emitVectorShuffleWgsl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const v1 = names.get(inst.words[3]) orelse "v1";
+    const v2 = names.get(inst.words[4]) orelse "v2";
+    // Get component count of first vector to determine single-source swizzle
+    const v1_type = getDef(module, inst.words[3]);
+    var v1_count: u32 = 4; // default to vec4
+    if (v1_type) |vt| blk: {
+        if (vt.op == .Load or vt.op == .AccessChain) {
+            // Resolve through load/accesschain to get the actual type
+            if (vt.words.len > 1) {
+                const inner_type = getDef(module, vt.words[1]);
+                if (inner_type) |it| {
+                    if (it.op == .TypeVector and it.words.len > 3) {
+                        v1_count = it.words[3];
+                        break :blk;
+                    }
+                }
+            }
+        }
+        // Check if v1 instruction has a type we can use
+        if (vt.op == .TypeVector and vt.words.len > 3) {
+            v1_count = vt.words[3];
+        } else if (vt.words.len > 1) {
+            const t = getDef(module, vt.words[1]);
+            if (t) |ti| {
+                if (ti.op == .TypeVector and ti.words.len > 3) {
+                    v1_count = ti.words[3];
+                }
+            }
+        }
+    }
+    // Check if all components come from the same source vector (single-source swizzle)
+    var single_source = true;
+    for (inst.words[5..]) |idx| {
+        if (idx >= v1_count) {
+            single_source = false;
+            break;
+        }
+    }
+    if (single_source) {
+        // All from v1 — emit as v1.xyzw swizzle
+        var sw = std.ArrayList(u8).initCapacity(arena, 5) catch return;
+        defer sw.deinit(arena);
+        const chars = "xyzw";
+        for (inst.words[5..]) |idx| {
+            if (idx < 4) try sw.append(arena, chars[idx]);
+        }
+        try writeIndentStatic(w, indent);
+        try w.print("let {s}: {s} = {s}.{s};\n", .{ result_name, rt, v1, sw.items });
+    } else {
+        // Mixed sources — construct from components
+        try writeIndentStatic(w, indent);
+        try w.print("let {s}: {s} = {s}(", .{ result_name, rt, rt });
+        var first = true;
+        for (inst.words[5..]) |idx| {
+            if (!first) try w.writeAll(", ");
+            first = false;
+            const src = if (idx < v1_count) v1 else v2;
+            // OpVectorShuffle selects from the CONCATENATION of v1 (indices
+            // 0..v1_count-1) and v2 (indices v1_count..); a component of v2 is
+            // `idx - v1_count`, NOT `idx % v1_count`. The two agree only when
+            // v1 and v2 have the SAME width (the common two-vecN case), so `%`
+            // silently picked the wrong v2 component whenever v2 was wider --
+            // e.g. shuffle(a:vec2, b:vec4, [0,4]) is (a.x, b.z) but `%` gave
+            // (a.x, b.x). v1's own components (idx < v1_count) are unaffected.
+            const comp = if (idx < v1_count) idx else idx - v1_count;
+            const sw = switch (comp) {
+                0 => ".x",
+                1 => ".y",
+                2 => ".z",
+                3 => ".w",
+                else => ".x",
+            };
+            try w.print("{s}{s}", .{ src, sw });
+        }
+        try w.writeAll(");\n");
+    }
+}
+
+/// Shared OpBitReverse emitter (reverseBits) — main dispatch and replay both
+/// call this. (#wgsl-replay-twin-drift; same pure-builtin class as
+/// emitBitFieldExtractWgsl.)
+fn emitBitReverseWgsl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    if (inst.words.len < 4) return;
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = reverseBits({s});\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
+}
+
+/// Shared OpBitCount emitter — main dispatch and replay both call this. Carries
+/// the signed-result constructor wrap (a past naga-invalid fix a twin would
+/// fork). (#wgsl-replay-twin-drift)
+fn emitBitCountWgsl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    if (inst.words.len < 4) return;
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    // GLSL bitCount ALWAYS returns a SIGNED int (genIType), but WGSL
+    // countOneBits returns the ARGUMENT's type — so an unsigned arg yields
+    // u32/vecNu while the result type rt is i32/vecNi (naga: "expected
+    // vec3<i32>, got vec3<u32>"). Wrap in rt(...) to match; it is an
+    // identity when the argument is already signed. (Same shape as the
+    // findMSB/findLSB bit-scan wrap.) (#170)
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = {s}(countOneBits({s}));\n", .{ names.get(inst.words[2]) orelse "v", rt, rt, names.get(inst.words[3]) orelse "0" });
+}
+
+/// Shared OpBitFieldSExtract/UExtract emitter (extractBits) — main dispatch
+/// and replay both call this. (#wgsl-replay-twin-drift)
+fn emitBitFieldExtractWgsl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    if (inst.words.len < 6) return;
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const rn = names.get(inst.words[2]) orelse "v";
+    const base = names.get(inst.words[3]) orelse "0";
+    const offset = names.get(inst.words[4]) orelse "0u";
+    const count = names.get(inst.words[5]) orelse "0u";
+    try writeIndentStatic(w, indent);
+    try w.print("let {s}: {s} = extractBits({s}, u32({s}), u32({s}));\n", .{ rn, rt, base, offset, count });
+}
+
+/// Shared OpCompositeInsert emitter — main dispatch and replay both call
+/// this. (#wgsl-replay-twin-drift)
+fn emitCompositeInsertWgsl(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    const rt = try wgslType(module, inst.words[1], names, arena);
+    const result_name = names.get(inst.words[2]) orelse "v";
+    const object = names.get(inst.words[3]) orelse "o";
+    const composite = names.get(inst.words[4]) orelse "c";
+    // Build access chain from indices with type-aware member names
+    var access = std.ArrayList(u8).initCapacity(arena, 64) catch return;
+    defer access.deinit(arena);
+    // Walk the type chain to resolve struct member names
+    var current_type: ?u32 = if (inst.words.len > 1) blk: {
+        // result type is the composite type
+        const ti = getDef(module, inst.words[1]);
+        break :blk if (ti) |t| t.words[1] else null;
+    } else null;
+    for (inst.words[5..]) |idx| {
+        if (current_type) |ct| {
+            const ct_inst = getDef(module, ct);
+            if (ct_inst) |cti| {
+                if (cti.op == .TypeStruct) {
+                    var mname_buf: [32]u8 = undefined;
+                    const mname = getMemberName(module, ct, idx, &mname_buf);
+                    try access.print(arena, ".{s}", .{mname});
+                    // Walk to member type
+                    if (idx + 2 < cti.words.len) current_type = cti.words[idx + 2] else current_type = null;
+                    continue;
+                } else if (cti.op == .TypeVector) {
+                    const sw = switch (idx) {
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        else => ".x",
+                    };
+                    try access.appendSlice(arena, sw);
+                    if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                    continue;
+                } else if (cti.op == .TypeMatrix) {
+                    try access.print(arena, "[{d}]", .{idx});
+                    if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                    continue;
+                } else if (cti.op == .TypeArray) {
+                    try access.print(arena, "[{d}]", .{idx});
+                    if (cti.words.len > 2) current_type = cti.words[2] else current_type = null;
+                    continue;
+                }
+            }
+        }
+        // Fallback: use vector swizzle
+        const sw = switch (idx) {
+            0 => ".x",
+            1 => ".y",
+            2 => ".z",
+            3 => ".w",
+            else => "[0]",
+        };
+        try access.appendSlice(arena, sw);
+    }
+    // Copy the base composite into a MUTABLE local, then overwrite the
+    // indexed component with the inserted object (`var`, not `let`, so
+    // the member assignment is legal WGSL).
+    try writeIndentStatic(w, indent);
+    try w.print("var {s}: {s} = {s};\n", .{ result_name, rt, composite });
+    try writeIndentStatic(w, indent);
+    try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
+}
+
 fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput)) !void {
     switch (inst.op) {
         .Variable => {
@@ -11979,26 +12006,49 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
         // is unordered = true on NaN, but FOrdNotEqual is false on NaN). (#170)
         .FOrdNotEqual => try emitOrderedNotEqual(module, names, inline_exprs, inst, w, arena, indent),
         else => {
-            // For all other instructions, try emitCall/emitBinOp patterns
-            // Comparison ops
-            const maybe_op = getBinOpSymbol(inst.op);
-            if (maybe_op != null) {
-                try emitBinOp(module, names, inline_exprs, inst, maybe_op.?, w, arena, indent);
-                return;
+            // #wgsl-replay-twin-drift: route the pure-expression ops the main
+            // dispatch emits natively through the SHARED emitters, so case-body
+            // and loop-header replay cannot drift from the main arms. Control
+            // flow ops stay honest-errors (a statement emitter must not guess
+            // phi/return semantics).
+            switch (inst.op) {
+                // VectorShuffle is deliberately NOT routed here yet: routing it
+                // unmasks a LATENT class where the
+                // if-arm replay's live names-map overwrites are shadowed by
+                // STALE inline_exprs entries (built at pre-scan with bare
+                // minted names) — gf_028 emitted `(v22 + v20)` for inlined
+                // extract exprs and exited 0 with naga-invalid output. Honest
+                // refusal until that staleness is fixed (zioshade-afi notes);
+                // BitFieldSExtract is a pure builtin call over plain operand
+                // names (no inline interplay) and is verified naga-clean on
+                // gf_058/072.
+                .BitFieldSExtract, .BitFieldUExtract => try emitBitFieldExtractWgsl(module, names, inst, w, arena, indent),
+                .BitReverse => try emitBitReverseWgsl(module, names, inst, w, arena, indent),
+                .BitCount => try emitBitCountWgsl(module, names, inst, w, arena, indent),
+                .CompositeInsert => try emitCompositeInsertWgsl(module, names, inst, w, arena, indent),
+                else => {
+                    // For all other instructions, try emitCall/emitBinOp patterns
+                    // Comparison ops
+                    const maybe_op = getBinOpSymbol(inst.op);
+                    if (maybe_op != null) {
+                        try emitBinOp(module, names, inline_exprs, inst, maybe_op.?, w, arena, indent);
+                        return;
+                    }
+                    // Unary conversion ops
+                    const maybe_conv = getConvFunc(inst.op);
+                    if (maybe_conv != null) {
+                        try emitCall(module, names, inst, maybe_conv.?, w, arena, indent);
+                        return;
+                    }
+                    // No mapping for this op in the switch/loop replay path. The old
+                    // fallback emitted `var <name>: T = <OpcodeName>(args)` — a call to a
+                    // non-existent WGSL function (e.g. `VectorShuffle(...)`), which naga
+                    // always rejects (silent-wrong). Fail loud instead. (No naga-passing
+                    // shader can reach here: the leaked opcode name is never valid WGSL.)
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' (opcode {d}) in switch/loop replay path", .{ opName(inst.op), @intFromEnum(inst.op) }) catch null;
+                    return error.UnsupportedOp;
+                },
             }
-            // Unary conversion ops
-            const maybe_conv = getConvFunc(inst.op);
-            if (maybe_conv != null) {
-                try emitCall(module, names, inst, maybe_conv.?, w, arena, indent);
-                return;
-            }
-            // No mapping for this op in the switch/loop replay path. The old
-            // fallback emitted `var <name>: T = <OpcodeName>(args)` — a call to a
-            // non-existent WGSL function (e.g. `VectorShuffle(...)`), which naga
-            // always rejects (silent-wrong). Fail loud instead. (No naga-passing
-            // shader can reach here: the leaked opcode name is never valid WGSL.)
-            last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL: unsupported op '{s}' (opcode {d}) in switch/loop replay path", .{ opName(inst.op), @intFromEnum(inst.op) }) catch null;
-            return error.UnsupportedOp;
         },
     }
 }
