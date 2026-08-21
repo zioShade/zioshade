@@ -5551,7 +5551,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (!use_ptr_inout and has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, .none, subpass_fragcoord_name);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, .none, subpass_fragcoord_name, null);
 
         try w.writeAll("}\n\n");
     }
@@ -6437,7 +6437,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     };
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, early_return_mode, subpass_fragcoord_name);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, early_return_mode, subpass_fragcoord_name, null);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -6650,7 +6650,36 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
 // Body emitter
 // ---------------------------------------------------------------------------
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8) !void {
+/// #wgsl-region-mode: the NAME/ANALYSIS walk state emitBody accumulates in its
+/// preamble and consults+mutates during emission. A region-mode (switch case
+/// body) recursive call passes the PARENT's context: these are one-shot
+/// function-wide mutations (inline-load renames, extract expressions, dead-set
+/// skipping), NOT re-derivable tables -- re-running the preamble over the
+/// already-mutated names minted expr-as-identifier names ('v17[v33]_ld') and
+/// running with a fresh empty context emitted lets for loads the parent had
+/// already inlined by name (both naga-invalid, both demonstrated on
+/// graphicsfuzz_039/052/054 before this struct existed). Control-flow state
+/// (loop_stack, merge_stack, indent) deliberately stays per-call: a region
+/// balances its own constructs.
+const SelPhi = struct { result_id: u32, value_id: u32, pred_label: u32 };
+
+const WalkCtx = struct {
+    use_count: std.AutoHashMapUnmanaged(u32, u32) = .empty,
+    def_op: std.AutoHashMapUnmanaged(u32, spirv.Op) = .empty,
+    inline_loads: std.AutoHashMap(u32, void),
+    declared_local_names: std.StringHashMap(void),
+    store_targets: std.AutoHashMap(u32, void),
+    sel_phis: std.AutoArrayHashMapUnmanaged(u32, std.ArrayList(SelPhi)) = .empty,
+    extract_old_names: std.AutoHashMap(u32, []const u8),
+    late_renamed_extracts: std.AutoHashMap(u32, void),
+    dead_conditions: std.AutoHashMap(u32, void),
+    dead_arith: std.AutoHashMap(u32, void),
+    inline_exprs: std.AutoHashMap(u32, []const u8),
+    hoisted_ids: std.AutoHashMap(u32, void),
+    loop_hoists: std.AutoHashMap(usize, std.ArrayList(u32)),
+};
+
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
     // #post-loop-header-use: `w` below is a one-instruction pending buffer over
@@ -6669,11 +6698,27 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             try writeIndentStatic(writer, depth);
         }
     }.write;
+    // #wgsl-region-mode: fresh context at every existing (top-level) call;
+    // a region-mode recursive call passes the parent's -- see WalkCtx.
+    const prepass = walk == null;
+    var ctx_storage: WalkCtx = .{
+        .inline_loads = std.AutoHashMap(u32, void).init(arena),
+        .declared_local_names = std.StringHashMap(void).init(arena),
+        .store_targets = std.AutoHashMap(u32, void).init(arena),
+        .extract_old_names = std.AutoHashMap(u32, []const u8).init(arena),
+        .late_renamed_extracts = std.AutoHashMap(u32, void).init(arena),
+        .dead_conditions = std.AutoHashMap(u32, void).init(arena),
+        .dead_arith = std.AutoHashMap(u32, void).init(arena),
+        .inline_exprs = std.AutoHashMap(u32, []const u8).init(arena),
+        .hoisted_ids = std.AutoHashMap(u32, void).init(arena),
+        .loop_hoists = std.AutoHashMap(usize, std.ArrayList(u32)).init(arena),
+    };
+    const ctx: *WalkCtx = if (walk) |wp| wp else &ctx_storage;
 
     // Skip function declaration instructions
     var i: usize = func_idx + 1;
     // Skip FunctionParameter instructions (parameters declared in function signature)
-    while (i < module.instructions.len) : (i += 1) {
+    while (prepass and i < module.instructions.len) : (i += 1) {
         const inst = module.instructions[i];
         if (inst.op == .Label) {
             i += 1;
@@ -6690,7 +6735,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var last_return_idx: usize = 0;
     {
         var ri: usize = func_idx + 1;
-        while (ri < module.instructions.len) : (ri += 1) {
+        while (prepass and ri < module.instructions.len) : (ri += 1) {
             const rinst = module.instructions[ri];
             if (rinst.op == .FunctionEnd) break;
             if (rinst.op == .Return or rinst.op == .ReturnValue) last_return_idx = ri;
@@ -6721,11 +6766,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var phi_updates = std.ArrayList(PhiUpdate).initCapacity(arena, 8) catch return;
     defer phi_updates.deinit(arena);
     // Selection phi: [merge_label] → list of (result_id, value_id, predecessor_label)
-    const SelPhi = struct { result_id: u32, value_id: u32, pred_label: u32 };
-    var sel_phis: std.AutoArrayHashMapUnmanaged(u32, std.ArrayList(SelPhi)) = .empty;
     {
         var si: usize = func_idx + 1;
-        while (si < module.instructions.len) : (si += 1) {
+        while (prepass and si < module.instructions.len) : (si += 1) {
             const scan_inst = module.instructions[si];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op == .Phi and scan_inst.words.len >= 7) {
@@ -6734,14 +6777,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // #phi-peek-window: a loop-header phi's OpLoopMerge can sit far past
                 // the phi (graphicsfuzz_015 has a 30-instruction header body between
                 // them). The old 30-instruction cap misread such a phi as a SELECTION
-                // phi: sel_phis then contained it, the .Phi arm suppressed its `var`
+                // phi: ctx.sel_phis then contained it, the .Phi arm suppressed its `var`
                 // (already_declared), and the branch-to-header emitted a bare update
                 // for a never-declared identifier (naga "no definition in scope").
                 // The Label/SelectionMerge/FunctionEnd stops below already bound the
                 // scan to the phi's own block, so widening the horizon cannot reach a
                 // LoopMerge of a LATER block; 256 covers any real header.
                 var pk: usize = si + 1;
-                while (pk < @min(si + 256, module.instructions.len)) : (pk += 1) {
+                while (prepass and pk < @min(si + 256, module.instructions.len)) : (pk += 1) {
                     if (module.instructions[pk].op == .LoopMerge) {
                         is_loop_phi = true;
                         break;
@@ -6753,7 +6796,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // Find the merge label this phi belongs to (the label of the current block)
                 var merge_label: ?u32 = null;
                 var li: usize = si;
-                while (li > func_idx) : (li -= 1) {
+                while (prepass and li > func_idx) : (li -= 1) {
                     if (module.instructions[li].op == .Label and module.instructions[li].words.len > 1) {
                         merge_label = module.instructions[li].words[1];
                         break;
@@ -6762,10 +6805,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (merge_label) |ml| {
                     // Parse all (value, predecessor) pairs
                     var pi: usize = 3;
-                    while (pi + 1 < scan_inst.words.len) : (pi += 2) {
+                    while (prepass and pi + 1 < scan_inst.words.len) : (pi += 2) {
                         const val_id = scan_inst.words[pi];
                         const pred_id = scan_inst.words[pi + 1];
-                        const gop = sel_phis.getOrPut(arena, ml) catch continue;
+                        const gop = ctx.sel_phis.getOrPut(arena, ml) catch continue;
                         if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(SelPhi).initCapacity(arena, 2) catch continue;
                         // append (not appendAssumeCapacity): a merge label accumulates one
                         // entry per (value,predecessor) pair across ALL phis at that merge —
@@ -6796,11 +6839,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     var defer_active = false;
 
     // Pre-scan: build use counts for result IDs to enable single-use load inlining
-    var use_count = std.AutoHashMapUnmanaged(u32, u32).empty;
-    var def_op = std.AutoHashMapUnmanaged(u32, spirv.Op).empty;
     {
         var si: usize = func_idx + 1;
-        while (si < module.instructions.len) : (si += 1) {
+        while (prepass and si < module.instructions.len) : (si += 1) {
             const scan_inst = module.instructions[si];
             if (scan_inst.op == .FunctionEnd) break;
             // Record the defining opcode for result IDs
@@ -6808,13 +6849,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // Most opcodes: words[1]=type, words[2]=result
                 // Record only for opcodes that produce named results
                 if (scan_inst.op != .Label and scan_inst.op != .FunctionParameter) {
-                    try def_op.put(arena, scan_inst.words[2], scan_inst.op);
+                    try ctx.def_op.put(arena, scan_inst.words[2], scan_inst.op);
                 }
             }
             // Count uses of each ID referenced in the instruction
             for (scan_inst.words[@min(1, scan_inst.words.len)..]) |word| {
                 // Count uses of each ID referenced in the instruction
-                const entry = try use_count.getOrPutValue(arena, word, 0);
+                const entry = try ctx.use_count.getOrPutValue(arena, word, 0);
                 entry.value_ptr.* += 1;
             }
         }
@@ -6823,21 +6864,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // For single-use OpLoad results, inline the source pointer name
     // This eliminates unnecessary 'let vN = ptr;' declarations
     // BUT: don't inline if the pointer is also a Store target (to preserve load-before-store semantics)
-    var inline_loads = std.AutoHashMap(u32, void).init(arena);
     // Names already used by an emitted function-local `var`, to dedup collisions:
     // glslang can emit two DISTINCT OpVariables with the SAME OpName string (e.g. the
     // compiler-generated `indexable` temps for dynamic indexing of a const array),
     // which would produce a WGSL "redefinition". (#170)
-    var declared_local_names = std.StringHashMap(void).init(arena);
     // Build set of pointer IDs that are Store targets in this function
-    var store_targets = std.AutoHashMap(u32, void).init(arena);
     {
         var si: usize = func_idx + 1;
-        while (si < module.instructions.len) : (si += 1) {
+        while (prepass and si < module.instructions.len) : (si += 1) {
             const scan_inst = module.instructions[si];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op == .Store and scan_inst.words.len > 1) {
-                store_targets.put(scan_inst.words[1], {}) catch {};
+                ctx.store_targets.put(scan_inst.words[1], {}) catch {};
             }
         }
     }
@@ -6857,7 +6895,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // plain emit (names[rid] is already unique).
     {
         var vdi: usize = func_idx + 1;
-        while (vdi < module.instructions.len) : (vdi += 1) {
+        while (prepass and vdi < module.instructions.len) : (vdi += 1) {
             const dvinst = module.instructions[vdi];
             if (dvinst.op == .FunctionEnd) break;
             if (dvinst.op != .Variable or dvinst.words.len < 4) continue;
@@ -6865,10 +6903,10 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             if (dsc != .Function) continue; // Private/Output/Input handled elsewhere
             const drid = dvinst.words[2];
             var dvn = names.get(drid) orelse "v";
-            if (declared_local_names.contains(dvn)) {
+            if (ctx.declared_local_names.contains(dvn)) {
                 var dn: u32 = 1;
                 var duniq = std.fmt.allocPrint(alloc, "{s}_{d}", .{ dvn, dn }) catch continue;
-                while (declared_local_names.contains(duniq)) {
+                while (prepass and ctx.declared_local_names.contains(duniq)) {
                     alloc.free(duniq);
                     dn += 1;
                     duniq = std.fmt.allocPrint(alloc, "{s}_{d}", .{ dvn, dn }) catch continue;
@@ -6876,7 +6914,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (names.fetchPut(drid, duniq) catch null) |old| alloc.free(old.value);
                 dvn = duniq;
             }
-            declared_local_names.put(arena.dupe(u8, dvn) catch continue, {}) catch continue;
+            ctx.declared_local_names.put(arena.dupe(u8, dvn) catch continue, {}) catch continue;
         }
     }
 
@@ -6899,8 +6937,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // Loads of AccessChain results are left to the value-name loop after the
     // pre-scan, since their names depend on the expressions it builds.
     {
-        var it = def_op.iterator();
-        while (it.next()) |entry| {
+        var it = ctx.def_op.iterator();
+        while (if (prepass) it.next() else null) |entry| {
             if (entry.value_ptr.* != .Load and entry.value_ptr.* != .CopyObject) continue;
             const result_id = entry.key_ptr.*;
             const load_inst = getDef(module, result_id) orelse continue;
@@ -6923,14 +6961,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             }
             const unconditional = (sc == .Output or sc == .Input or is_tex);
             // Mutable, non-special variables must capture the current value.
-            if (!unconditional and store_targets.contains(ptr_id)) continue;
+            if (!unconditional and ctx.store_targets.contains(ptr_id)) continue;
             const ptr_name = names.get(ptr_id) orelse continue;
             if (ptr_name.len == 0) continue;
             const current_name = names.get(result_id) orelse "";
             if (std.mem.eql(u8, ptr_name, current_name)) continue; // already aligned
             const name_copy = try alloc.dupe(u8, ptr_name);
             if (try names.fetchPut(result_id, name_copy)) |old| alloc.free(old.value);
-            try inline_loads.put(result_id, {});
+            try ctx.inline_loads.put(result_id, {});
         }
     }
 
@@ -6938,7 +6976,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // Without this, inline expressions reference raw names like v27 instead of v15.colors[v25]
     {
         var aci: usize = func_idx + 1;
-        while (aci < module.instructions.len) : (aci += 1) {
+        while (prepass and aci < module.instructions.len) : (aci += 1) {
             const ac_inst = module.instructions[aci];
             if (ac_inst.op == .FunctionEnd) break;
             if (ac_inst.op == .AccessChain and ac_inst.words.len > 3) {
@@ -6963,18 +7001,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     }
 
     // For single-use OpLoad results, inline the source pointer name (continued).
-    // `inline_loads` and `store_targets` were set up before the AccessChain
+    // `ctx.inline_loads` and `ctx.store_targets` were set up before the AccessChain
     // pre-scan above (so direct immutable-variable loads are named first). This
     // loop covers the remaining loads — notably loads of AccessChain results,
     // whose names depend on the expressions that pre-scan built.
     {
-        var it = def_op.iterator();
-        while (it.next()) |entry| {
+        var it = ctx.def_op.iterator();
+        while (if (prepass) it.next() else null) |entry| {
             if (entry.value_ptr.* == .Load or entry.value_ptr.* == .CopyObject) {
                 const result_id = entry.key_ptr.*;
                 // Already handled by the direct-variable pre-pass — its name and
                 // inline status are final; re-running would self-assignment-rename it.
-                if (inline_loads.contains(result_id)) continue;
+                if (ctx.inline_loads.contains(result_id)) continue;
                 // Immutable loads (pointers that are NOT store targets — inputs,
                 // uniforms, push-constants, spec-consts) are inlined to the source
                 // name at ANY use count: the value can't change, so substitution is
@@ -6991,7 +7029,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const ptr_name = names.get(ptr_id) orelse continue;
                         // Don't inline loads from pointers that are Store targets
                         // — they might be overwritten, so we need to capture the current value
-                        if (store_targets.contains(ptr_id)) continue;
+                        if (ctx.store_targets.contains(ptr_id)) continue;
                         // #wgsl-atomic-field: a load of an SSBO atomic field must
                         // NOT be inlined to the bare access expression (e.g. "b.x"):
                         // the field is declared atomic<T>, so a plain read is
@@ -7010,7 +7048,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             if (try names.fetchPut(result_id, name_copy)) |old| {
                                 alloc.free(old.value);
                             }
-                            try inline_loads.put(result_id, {});
+                            try ctx.inline_loads.put(result_id, {});
                         } else if (std.mem.eql(u8, ptr_name, current_name) and ptr_name.len > 0) {
                             // Name conflict: load result has same name as pointer
                             // Rename to avoid self-assignment (let u_val = u_val)
@@ -7029,18 +7067,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     }
 
     // Save old names for extract results before renaming (for stale name fixup)
-    var extract_old_names = std.AutoHashMap(u32, []const u8).init(arena);
     {
         var sni: usize = func_idx + 1;
-        while (sni < module.instructions.len) : (sni += 1) {
+        while (prepass and sni < module.instructions.len) : (sni += 1) {
             const sn = module.instructions[sni];
             if (sn.op == .FunctionEnd) break;
             if (sn.op == .CompositeExtract and sn.words.len > 2) {
                 if (names.get(sn.words[2])) |old| {
-                    // Use arena: extract_old_names is arena-allocated and only
+                    // Use arena: ctx.extract_old_names is arena-allocated and only
                     // read within this function, so the value strings should
                     // live in arena too (otherwise they leak when arena is freed).
-                    extract_old_names.put(sn.words[2], arena.dupe(u8, old) catch continue) catch {};
+                    ctx.extract_old_names.put(sn.words[2], arena.dupe(u8, old) catch continue) catch {};
                 }
             }
         }
@@ -7049,12 +7086,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // Pre-scan: inline single-use CompositeExtract results (v15 = v14.x → rename v15 to v14.x)
     // Extracts this pre-scan declines to rename, but which the emission path renames
     // anyway. Their names are NOT final here, so an expression cached over them would
-    // freeze a name that later changes. See the inline_exprs builder below.
-    var late_renamed_extracts = std.AutoHashMap(u32, void).init(arena);
+    // freeze a name that later changes. See the ctx.inline_exprs builder below.
     // Process in instruction order so parent extracts are renamed before children
     {
         var ii: usize = func_idx + 1;
-        while (ii < module.instructions.len) : (ii += 1) {
+        while (prepass and ii < module.instructions.len) : (ii += 1) {
             const scan_inst = module.instructions[ii];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op != .CompositeExtract or scan_inst.words.len <= 4) continue;
@@ -7070,20 +7106,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (src_def.op == .ConstantNull) {
                     if (zeroLiteralOfType(module, scan_inst.words[1], names, alloc)) |z| {
                         if (try names.fetchPut(scan_inst.words[2], z)) |old| alloc.free(old.value);
-                        try inline_loads.put(scan_inst.words[2], {});
+                        try ctx.inline_loads.put(scan_inst.words[2], {});
                     }
                     continue;
                 }
             }
             const result_id = scan_inst.words[2];
-            const uses = use_count.get(result_id) orelse 0;
+            const uses = ctx.use_count.get(result_id) orelse 0;
             if (uses > 3 or uses < 2) continue;
             // #rm-extract: an extract that reaches a row-major matrix member
             // must NOT be renamed to a bare `c.member` expression here -- a RAW
             // (buffer-loaded) source needs transpose(...) compensation, which
             // only the CompositeExtract arm emits, and an UNKNOWN source
             // (function call, select) must reach that arm to fail loudly.
-            // Renaming adds the id to inline_loads, which SKIPS the arm, so
+            // Renaming adds the id to ctx.inline_loads, which SKIPS the arm, so
             // skipping the rename is what routes it there. A LOGICAL source
             // (CompositeConstruct of the decorated type) renames safely.
             if (findRowMajorExtract(module, scan_inst.words[3], scan_inst.words[4..]) != null) {
@@ -7098,7 +7134,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const ptr_def = getDef(module, sd.words[3]);
                             if (ptr_def) |pd| {
                                 if (pd.op == .AccessChain) {
-                                    late_renamed_extracts.put(result_id, {}) catch {};
+                                    ctx.late_renamed_extracts.put(result_id, {}) catch {};
                                     continue; // skip
                                 }
                             }
@@ -7156,7 +7192,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (try names.fetchPut(result_id, new_name_buf)) |old| {
                         alloc.free(old.value);
                     }
-                    try inline_loads.put(result_id, {});
+                    try ctx.inline_loads.put(result_id, {});
                 } else {
                     // No rename needed — release the buffer we just allocated.
                     alloc.free(new_name_buf);
@@ -7170,14 +7206,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     {
         var fixup_names = std.ArrayList(struct { id: u32, new_val: []const u8 }).initCapacity(arena, 32) catch unreachable;
         var rn_it = names.iterator();
-        while (rn_it.next()) |entry| {
+        while (if (prepass) rn_it.next() else null) |entry| {
             const id = entry.key_ptr.*;
             const val = entry.value_ptr.*;
             var updated = val;
             var changed_any = false;
             // Apply all extract renames
-            var eon_it = extract_old_names.iterator();
-            while (eon_it.next()) |eon| {
+            var eon_it = ctx.extract_old_names.iterator();
+            while (if (prepass) eon_it.next() else null) |eon| {
                 const old_name = eon.value_ptr.*;
                 if (old_name.len < 2) continue;
                 const new_name = names.get(eon.key_ptr.*) orelse continue;
@@ -7212,10 +7248,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
     // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
     var dead_extracts = std.AutoHashMap(u32, void).init(arena);
-    var dead_conditions = std.AutoHashMap(u32, void).init(arena);
     {
         var si: usize = func_idx + 1;
-        while (si < module.instructions.len) : (si += 1) {
+        while (prepass and si < module.instructions.len) : (si += 1) {
             const scan_inst = module.instructions[si];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op == .CompositeConstruct and scan_inst.words.len > 3) {
@@ -7266,8 +7301,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // ONLY if they're not used elsewhere (single use absorbed by swizzle)
                     for (scan_inst.words[3..], 0..) |comp_id, ci| {
                         if (ci >= lead_count) break;
-                        const ext_uses = use_count.get(comp_id) orelse 0;
-                        // use_count includes definition (1) + uses. For single-use, total = 2.
+                        const ext_uses = ctx.use_count.get(comp_id) orelse 0;
+                        // ctx.use_count includes definition (1) + uses. For single-use, total = 2.
                         // Only mark dead if this CompositeConstruct is the sole consumer.
                         if (ext_uses <= 2) {
                             dead_extracts.put(comp_id, {}) catch {};
@@ -7281,7 +7316,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // Pre-scan: identify dead conditions that will be inlined into BranchConditional
     {
         var ci: usize = func_idx + 1;
-        while (ci < module.instructions.len) : (ci += 1) {
+        while (prepass and ci < module.instructions.len) : (ci += 1) {
             const scan_inst = module.instructions[ci];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.op == .BranchConditional and scan_inst.words.len >= 4) {
@@ -7295,7 +7330,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // Look backward for the nearest enclosing LoopMerge
                 // We look past SelectionMerge (if-blocks inside loops are still inside the loop)
                 var li: usize = ci;
-                while (li > func_idx) : (li -= 1) {
+                while (prepass and li > func_idx) : (li -= 1) {
                     const prev = module.instructions[li];
                     if (prev.op == .LoopMerge and prev.words.len >= 3) {
                         const merge_label = prev.words[1];
@@ -7308,7 +7343,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (is_loop_exit) {
                     const inlined = inlineConditionExpr(module, names, cond_id, arena, 0);
                     if (inlined != null) {
-                        markDeadConditions(module, cond_id, &dead_conditions, 0);
+                        markDeadConditions(module, cond_id, &ctx.dead_conditions, 0);
                     }
                 }
             }
@@ -7321,14 +7356,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // raw temp name (`u.v4[v15]` instead of `u.v4[u.n]`): buildAccessExprPlain
     // resolved the index via `names.get(index_id)`, and at that point the index
     // load still carried its SSA temp name. The emission loop rebuilds AccessChain
-    // names correctly, but inline_exprs (built just below) captures `names` NOW and
+    // names correctly, but ctx.inline_exprs (built just below) captures `names` NOW and
     // would otherwise freeze the stale index — which then reappears verbatim wherever
     // that arithmetic result is re-inlined (naga-rejected undefined identifier).
     // Rebuilding here, after all load/extract renames, is the same operation the
     // emission loop performs; doing it early makes the two agree.
     {
         var aci: usize = func_idx + 1;
-        while (aci < module.instructions.len) : (aci += 1) {
+        while (prepass and aci < module.instructions.len) : (aci += 1) {
             const ac_inst = module.instructions[aci];
             if (ac_inst.op == .FunctionEnd) break;
             if (ac_inst.op != .AccessChain or ac_inst.words.len <= 3) continue;
@@ -7352,15 +7387,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         // Re-propagate refreshed AccessChain names into the immutable loads that
         // were inlined to them (a load of an AccessChain pointer takes the chain's
         // name); their frozen names must follow the refresh too.
-        var it = def_op.iterator();
-        while (it.next()) |entry| {
+        var it = ctx.def_op.iterator();
+        while (if (prepass) it.next() else null) |entry| {
             if (entry.value_ptr.* != .Load and entry.value_ptr.* != .CopyObject) continue;
             const result_id = entry.key_ptr.*;
-            if (!inline_loads.contains(result_id)) continue;
+            if (!ctx.inline_loads.contains(result_id)) continue;
             const load_inst = getDef(module, result_id) orelse continue;
             if (load_inst.words.len <= 3) continue;
             const ptr_id = load_inst.words[3];
-            if (store_targets.contains(ptr_id)) continue;
+            if (ctx.store_targets.contains(ptr_id)) continue;
             const ptr_inst = getDef(module, ptr_id) orelse continue;
             if (ptr_inst.op != .AccessChain) continue;
             const ptr_name = names.get(ptr_id) orelse continue;
@@ -7373,13 +7408,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
     // Pre-scan: build inline expressions for single-use arithmetic operations
     // This eliminates chains like: let v13 = v12 * 6.0; let v17 = v13 + v16; → inline v13 into v17
-    var inline_exprs = std.AutoHashMap(u32, []const u8).init(arena);
-    var dead_arith = std.AutoHashMap(u32, void).init(arena);
     {
         // Build set of IDs used as Store operands (these feed mutable vars, don't inline)
         var store_operands = std.AutoHashMap(u32, void).init(arena);
         var si: usize = func_idx + 1;
-        while (si < module.instructions.len) : (si += 1) {
+        while (prepass and si < module.instructions.len) : (si += 1) {
             const sinst = module.instructions[si];
             if (sinst.op == .FunctionEnd) break;
             if (sinst.op == .Store and sinst.words.len > 2) {
@@ -7390,15 +7423,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         // These expressions are used as operands when building OTHER expressions,
         // but the original let bindings are NOT removed (to avoid dead references)
         var ii: usize = func_idx + 1;
-        while (ii < module.instructions.len) : (ii += 1) {
+        while (prepass and ii < module.instructions.len) : (ii += 1) {
             const scan_inst = module.instructions[ii];
             if (scan_inst.op == .FunctionEnd) break;
             if (scan_inst.words.len < 3) continue;
             const result_id = scan_inst.words[2];
             if (!isInlineableArithOp(scan_inst.op)) continue;
-            const uses = use_count.get(result_id) orelse 0;
+            const uses = ctx.use_count.get(result_id) orelse 0;
             if (uses != 2) continue;
-            if (dead_extracts.contains(result_id) or dead_conditions.contains(result_id)) continue;
+            if (dead_extracts.contains(result_id) or ctx.dead_conditions.contains(result_id)) continue;
             if (store_operands.contains(result_id)) continue;
             // buildInlineExpr resolves operands through `names` and freezes the result.
             // An operand the extract pre-scan declined to rename gets renamed anyway
@@ -7411,32 +7444,32 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             {
                 var oi: usize = 3;
                 var operand_renamed_late = false;
-                while (oi < scan_inst.words.len) : (oi += 1) {
-                    if (late_renamed_extracts.contains(scan_inst.words[oi])) {
+                while (prepass and oi < scan_inst.words.len) : (oi += 1) {
+                    if (ctx.late_renamed_extracts.contains(scan_inst.words[oi])) {
                         operand_renamed_late = true;
                         break;
                     }
                 }
                 if (operand_renamed_late) continue;
             }
-            const expr = buildInlineExpr(module, names, &inline_exprs, result_id, arena, 0) orelse continue;
-            try inline_exprs.put(result_id, expr);
+            const expr = buildInlineExpr(module, names, &ctx.inline_exprs, result_id, arena, 0) orelse continue;
+            try ctx.inline_exprs.put(result_id, expr);
         }
         // Second pass: find dead bindings (where the single user is also dead)
         // Fixpoint: keep iterating until no new dead IDs are found
         var changed = true;
-        while (changed) {
+        while (prepass and changed) {
             changed = false;
-            var fp_it = inline_exprs.iterator();
-            while (fp_it.next()) |entry| {
+            var fp_it = ctx.inline_exprs.iterator();
+            while (if (prepass) fp_it.next() else null) |entry| {
                 const result_id = entry.key_ptr.*;
-                if (dead_arith.contains(result_id)) continue; // already dead
-                const uses = use_count.get(result_id) orelse 0;
+                if (ctx.dead_arith.contains(result_id)) continue; // already dead
+                const uses = ctx.use_count.get(result_id) orelse 0;
                 if (uses != 2) continue;
                 // Find the single user instruction
                 var user_is_dead = false;
                 var fi: usize = func_idx + 1;
-                while (fi < module.instructions.len) : (fi += 1) {
+                while (prepass and fi < module.instructions.len) : (fi += 1) {
                     const finst = module.instructions[fi];
                     if (finst.op == .FunctionEnd) break;
                     if (finst.words.len > 2 and finst.words[2] == result_id) continue;
@@ -7450,8 +7483,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (found) {
                         if (finst.words.len > 2) {
                             const user_result = finst.words[2];
-                            // User is dead if it's already in dead_arith
-                            if (dead_arith.contains(user_result)) {
+                            // User is dead if it's already in ctx.dead_arith
+                            if (ctx.dead_arith.contains(user_result)) {
                                 user_is_dead = true;
                             }
                         }
@@ -7459,26 +7492,26 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     }
                 }
                 if (user_is_dead) {
-                    dead_arith.put(result_id, {}) catch {};
+                    ctx.dead_arith.put(result_id, {}) catch {};
                     changed = true;
                 }
             }
         }
         // Revive dead IDs whose names are referenced in surviving inline expressions
-        // If a dead ID's name appears in an inline_exprs value, the reference would be
+        // If a dead ID's name appears in an ctx.inline_exprs value, the reference would be
         // undeclared, so we must keep the binding
         {
             var revive_blk = std.ArrayList(u32).initCapacity(arena, 16) catch unreachable;
             var revive = &revive_blk;
-            var re_it = dead_arith.iterator();
-            while (re_it.next()) |entry| {
+            var re_it = ctx.dead_arith.iterator();
+            while (if (prepass) re_it.next() else null) |entry| {
                 const dead_id = entry.key_ptr.*;
                 const dead_name = names.get(dead_id) orelse continue;
                 if (dead_name.len < 2) continue; // skip short names like "v"
-                // Check if any inline_exprs value references this name
-                var ie_it = inline_exprs.iterator();
-                while (ie_it.next()) |ie_entry| {
-                    if (dead_arith.contains(ie_entry.key_ptr.*)) continue; // skip dead exprs
+                // Check if any ctx.inline_exprs value references this name
+                var ie_it = ctx.inline_exprs.iterator();
+                while (if (prepass) ie_it.next() else null) |ie_entry| {
+                    if (ctx.dead_arith.contains(ie_entry.key_ptr.*)) continue; // skip dead exprs
                     const expr = ie_entry.value_ptr.*;
                     if (std.mem.indexOf(u8, expr, dead_name) != null) {
                         // Check it's actually a variable reference (word boundary)
@@ -7501,7 +7534,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
             }
             for (revive.items) |rid| {
-                _ = dead_arith.remove(rid);
+                _ = ctx.dead_arith.remove(rid);
             }
         }
     }
@@ -7524,22 +7557,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
     // value, which is exactly the SSA value at the use. Over-approximates like
     // the C ports: the scan sees SPIR-V refs the emitter may fold away, so some
     // shaders get a redundant declare-then-assign split; semantically identical.
-    var hoisted_ids = std.AutoHashMap(u32, void).init(arena);
     // LoopMerge instruction index -> hoisted result ids defined inside ITS loop.
-    var loop_hoists = std.AutoHashMap(usize, std.ArrayList(u32)).init(arena);
     {
         var label_idx = std.AutoHashMap(u32, usize).init(arena);
         defer label_idx.deinit();
         {
             var si: usize = func_idx + 1;
-            while (si < module.instructions.len) : (si += 1) {
+            while (prepass and si < module.instructions.len) : (si += 1) {
                 const s = module.instructions[si];
                 if (s.op == .FunctionEnd) break;
                 if (s.op == .Label and s.words.len > 1) label_idx.put(s.words[1], si) catch {};
             }
         }
         var li: usize = func_idx + 1;
-        while (li < module.instructions.len) : (li += 1) {
+        while (prepass and li < module.instructions.len) : (li += 1) {
             const minst = module.instructions[li];
             if (minst.op == .FunctionEnd) break;
             if (minst.op != .LoopMerge or minst.words.len < 3) continue;
@@ -7551,7 +7582,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // is deferred and the in-loop region starts at the LoopMerge itself.
             var last_phi: ?usize = null;
             var pi: usize = li;
-            while (pi > func_idx) : (pi -= 1) {
+            while (prepass and pi > func_idx) : (pi -= 1) {
                 const p = module.instructions[pi];
                 if (p.op == .Label) break; // start of the header block
                 if (p.op != .Phi or p.words.len < 7) continue;
@@ -7566,9 +7597,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // is NOT a post-loop read (its incoming copy is made inside the loop,
             // where the value is in scope) - same as the MSL/HLSL/GLSL ports.
             var ci = merge_idx;
-            while (ci < module.instructions.len and (module.instructions[ci].op == .Label or module.instructions[ci].op == .Phi)) : (ci += 1) {}
+            while (prepass and ci < module.instructions.len and (module.instructions[ci].op == .Label or module.instructions[ci].op == .Phi)) : (ci += 1) {}
             var di = region_start;
-            while (di < merge_idx) : (di += 1) {
+            while (prepass and di < merge_idx) : (di += 1) {
                 const dinst = module.instructions[di];
                 if (dinst.op == .Phi or dinst.op == .Label or dinst.op == .Branch or dinst.op == .BranchConditional or dinst.op == .SelectionMerge or dinst.op == .LoopMerge or dinst.op == .FunctionEnd) continue;
                 // Ops that emit no `let name: T = ...` statement (name bindings,
@@ -7577,12 +7608,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // resolve through the names map instead.
                 if (dinst.op == .Variable or dinst.op == .AccessChain or dinst.op == .CompositeExtract or dinst.op == .CopyObject) continue;
                 const rid = common.resultIdFromOp(dinst.op, dinst.words) orelse continue;
-                if (hoisted_ids.contains(rid)) continue;
+                if (ctx.hoisted_ids.contains(rid)) continue;
                 // The def must actually emit a fresh statement under this name:
                 // dead/inlined ids are folded into their users (no statement) and
                 // a propagated pointer name would collide with the pointer's own
                 // declaration.
-                if (dead_arith.contains(rid) or dead_conditions.contains(rid) or inline_loads.contains(rid)) continue;
+                if (ctx.dead_arith.contains(rid) or ctx.dead_conditions.contains(rid) or ctx.inline_loads.contains(rid)) continue;
                 const nm = names.get(rid) orelse continue;
                 if (nm.len == 0 or nm.len > 56) continue;
                 var ident = nm[0] == '_' or std.ascii.isAlphabetic(nm[0]);
@@ -7597,11 +7628,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 if (!ident) continue;
                 var referenced = false;
                 var ri = ci;
-                while (ri < module.instructions.len) : (ri += 1) {
+                while (prepass and ri < module.instructions.len) : (ri += 1) {
                     const rinst = module.instructions[ri];
                     if (rinst.op == .FunctionEnd) break;
                     var wi: usize = 1;
-                    while (wi < rinst.words.len) : (wi += 1) {
+                    while (prepass and wi < rinst.words.len) : (wi += 1) {
                         if (rinst.words[wi] == rid) {
                             referenced = true;
                             break;
@@ -7610,8 +7641,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     if (referenced) break;
                 }
                 if (!referenced) continue;
-                hoisted_ids.put(rid, {}) catch continue;
-                const gop = loop_hoists.getOrPut(li) catch continue;
+                ctx.hoisted_ids.put(rid, {}) catch continue;
+                const gop = ctx.loop_hoists.getOrPut(li) catch continue;
                 if (!gop.found_existing) gop.value_ptr.* = std.ArrayList(u32).initCapacity(arena, 2) catch continue;
                 gop.value_ptr.append(arena, rid) catch {};
             }
@@ -7628,7 +7659,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         // then commit. Doing this HERE (rather than after the switch below)
         // survives the many `continue` arms: the pending buffer holds exactly
         // what was emitted since the last flush.
-        try hoistSweepAndFlush(&hoist_pending, alloc, &hoisted_ids, names, w_out);
+        try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
 
         // If deferring loop header instructions, skip them for now
         // They will be emitted inside the loop body when LoopMerge is encountered
@@ -7637,13 +7668,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
 
         // Skip dead condition bindings that were inlined into BranchConditional
-        if (inst.words.len > 2 and dead_conditions.contains(inst.words[2])) {
+        if (inst.words.len > 2 and ctx.dead_conditions.contains(inst.words[2])) {
             continue;
         }
 
         // Skip dead arithmetic bindings (user also inlined)
-        if (inst.words.len > 2 and dead_arith.contains(inst.words[2])) {
-            if (def_op.get(inst.words[2])) |def_op_val| {
+        if (inst.words.len > 2 and ctx.dead_arith.contains(inst.words[2])) {
+            if (ctx.def_op.get(inst.words[2])) |def_op_val| {
                 if (def_op_val == inst.op) continue;
             }
         }
@@ -7658,15 +7689,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 }
                 // #post-loop-header-use: the final instruction may itself be a
                 // hoisted definition - rewrite + commit before leaving.
-                try hoistSweepAndFlush(&hoist_pending, alloc, &hoisted_ids, names, w_out);
+                try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                 return;
             },
             .SelectionMerge => {
                 if (inst.words.len > 1) {
                     pending_merge = inst.words[1];
                     // Pre-declare selection phi variables before the if/else block
-                    if (sel_phis.count() > 0) {
-                        if (sel_phis.get(pending_merge.?)) |phi_list| {
+                    if (ctx.sel_phis.count() > 0) {
+                        if (ctx.sel_phis.get(pending_merge.?)) |phi_list| {
                             // Find the first (init) predecessor — get it from the Phi instruction
                             const first_phi_result = phi_list.items[0].result_id;
                             const phi_inst = getDef(module, first_phi_result);
@@ -7826,7 +7857,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                         while (ti < module.instructions.len) : (ti += 1) {
                                                             const tinst = module.instructions[ti];
                                                             if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
-                                                            try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                         }
                                                         // The arm's terminator was skipped by the loop above. When it branches
                                                         // to the SWITCH's merge it is a `break` out of the switch, and dropping
@@ -7849,7 +7880,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                             while (fi < module.instructions.len) : (fi += 1) {
                                                                 const finst = module.instructions[fi];
                                                                 if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
-                                                                try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                             }
                                                             try emitSwitchArmTerminator(module, fi, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                             break;
@@ -7872,7 +7903,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                             continue;
                                         }
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
+                                        try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                     }
                                     break;
                                 }
@@ -7880,7 +7911,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // #477: sel_phi update for this case's branch-to-merge
                             // (the case body's OpBranch is dropped by the loop above, so
                             // the main .Branch sel_phi update never fires from a case).
-                            if (sel_phis.get(merge_label.?)) |phi_list| {
+                            if (ctx.sel_phis.get(merge_label.?)) |phi_list| {
                                 for (phi_list.items) |sp| {
                                     if (sp.pred_label == default_label) {
                                         const rn = names.get(sp.result_id) orelse continue;
@@ -7950,7 +7981,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                             while (ti < module.instructions.len) : (ti += 1) {
                                                                 const tinst = module.instructions[ti];
                                                                 if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
-                                                                try emitSimpleInstruction(module, names, &inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                             }
                                                             try emitSwitchArmTerminator(module, ti, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                             break;
@@ -7968,7 +7999,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                                 while (fi < module.instructions.len) : (fi += 1) {
                                                                     const finst = module.instructions[fi];
                                                                     if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
-                                                                    try emitSimpleInstruction(module, names, &inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
                                                                 }
                                                                 try emitSwitchArmTerminator(module, fi, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                                 break;
@@ -7991,7 +8022,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                 continue;
                                             }
                                             if (dinst.op == .Switch) break;
-                                            try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
+                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
                                         }
                                         break;
                                     }
@@ -8011,7 +8042,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                 break;
                             }
                             // #477: sel_phi update for this case's branch-to-merge.
-                            if (sel_phis.get(merge_label.?)) |phi_list| {
+                            if (ctx.sel_phis.get(merge_label.?)) |phi_list| {
                                 for (phi_list.items) |sp| {
                                     if (sp.pred_label == target_label) {
                                         const rn = names.get(sp.result_id) orelse continue;
@@ -8110,7 +8141,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // `let v: T = e;` to `v = e;` by the pending-writer hoist
                     // sweep, so this pre-declared `var` is what every in-loop
                     // and post-loop read resolves to.
-                    if (loop_hoists.get(i)) |hl| {
+                    if (ctx.loop_hoists.get(i)) |hl| {
                         for (hl.items) |rid| {
                             const hname = names.get(rid) orelse continue;
                             const hdef = common.getDef(module, rid) orelse continue;
@@ -8135,12 +8166,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const dinst = module.instructions[di];
                             if (dinst.op == .Nop or dinst.op == .Label) continue;
                             // Skip dead conditions that were inlined
-                            if (dinst.words.len > 2 and dead_conditions.contains(dinst.words[2])) continue;
+                            if (dinst.words.len > 2 and ctx.dead_conditions.contains(dinst.words[2])) continue;
                             // Emit common instruction types inline
                             switch (dinst.op) {
                                 .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
                                 else => {
-                                    try emitSimpleInstruction(module, names, &inline_exprs, dinst, w, alloc, arena, indent, wrapped_members, matrix_outputs);
+                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, indent, wrapped_members, matrix_outputs);
                                 },
                             }
                         }
@@ -8156,7 +8187,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Check if this phi was already pre-declared by SelectionMerge
                     var already_declared = false;
                     {
-                        var spi = sel_phis.iterator();
+                        var spi = ctx.sel_phis.iterator();
                         while (spi.next()) |entry| {
                             for (entry.value_ptr.*.items) |sp| {
                                 if (sp.result_id == phi_result_id) {
@@ -8181,7 +8212,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     var lm_follows = false;
                     var lm_cont: ?u32 = null; // #selfloop: the LoopMerge's continue label
                     {
-                        // #phi-peek-window: see the sel_phis scan. Same widening, same
+                        // #phi-peek-window: see the ctx.sel_phis scan. Same widening, same
                         // Label stop; must agree with that scan or a phi classified as a
                         // loop phi here but as a selection phi there loses its declaration.
                         var pk = i + 1;
@@ -8279,7 +8310,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // extension to 256 that stops at a Label/SelectionMerge - a
                     // LoopMerge past a Label belongs to a different (nested/later)
                     // loop, and deferring across it would swallow that loop's header
-                    // into this one's replay (#phi-peek-window widened the sel_phis
+                    // into this one's replay (#phi-peek-window widened the ctx.sel_phis
                     // and lm_follows scans, which already stopped at Labels; the
                     // defer trigger needs the same reach for headers longer than 30
                     // instructions, graphicsfuzz_015 has one at exactly +30).
@@ -8352,7 +8383,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const inlined = inlineConditionExpr(module, names, inst.words[1], arena, 0);
                         const cond_expr = inlined orelse condition;
                         if (inlined != null) {
-                            dead_conditions.put(inst.words[1], {}) catch {};
+                            ctx.dead_conditions.put(inst.words[1], {}) catch {};
                         }
                         try writeInd(w, indent);
                         try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
@@ -8427,7 +8458,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (true_is_break) {
                             // if (cond) { break; }
                             const inlined2 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
-                            if (inlined2 != null) dead_conditions.put(inst.words[1], {}) catch {};
+                            if (inlined2 != null) ctx.dead_conditions.put(inst.words[1], {}) catch {};
                             try writeInd(w, indent);
                             try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
                             // #wrap-backedge: when the OTHER arm targets this loop's
@@ -8441,7 +8472,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         } else if (false_is_break) {
                             // if (!(cond)) { break; }
                             const inlined3 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
-                            if (inlined3 != null) dead_conditions.put(inst.words[1], {}) catch {};
+                            if (inlined3 != null) ctx.dead_conditions.put(inst.words[1], {}) catch {};
                             try writeInd(w, indent);
                             try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
                             // #wrap-backedge: twin of the true_is_break case (the
@@ -8484,7 +8515,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
+                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
                                                 }
                                             }
                                         }
@@ -8536,7 +8567,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
+                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
                                                 }
                                             }
                                         }
@@ -8625,8 +8656,8 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                     }
                     // Emit selection phi updates when branching to merge block
-                    if (sel_phis.count() > 0) {
-                        if (sel_phis.get(target)) |phi_list| {
+                    if (ctx.sel_phis.count() > 0) {
+                        if (ctx.sel_phis.get(target)) |phi_list| {
                             // Find current predecessor label (previous Label instruction)
                             var cur_pred: ?u32 = null;
                             var li: usize = if (i > 0) i - 1 else 0;
@@ -8783,7 +8814,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const rt = try wgslType(module, inst.words[1], names, arena);
                         // Local-var name collision was deduped in the pre-pass before
                         // any name-resolution stage ran; names[rid] is already the unique
-                        // emitted name and declared_local_names is already populated. (#170)
+                        // emitted name and ctx.declared_local_names is already populated. (#170)
                         const vn = names.get(inst.words[2]) orelse "v";
                         try writeInd(w, indent);
                         // #476: OpVariable Function with an Initializer operand (word[4]) —
@@ -8879,7 +8910,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Input variable load: propagate the parameter name (e.g., gl_FragCoord)
                     const a = try alloc.dupe(u8, ptr);
                     if (try names.fetchPut(inst.words[2], a)) |old| alloc.free(old.value);
-                } else if (inline_loads.contains(inst.words[2])) {
+                } else if (ctx.inline_loads.contains(inst.words[2])) {
                     // Single-use load: propagate name, skip declaration
                     // Re-resolve the pointer name in case AccessChain indices were updated
                     var resolved_ptr = ptr;
@@ -9177,7 +9208,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // CompositeExtract
             .CompositeExtract => {
                 // Skip dead extracts or inlined extracts (name was propagated to use site)
-                if (dead_extracts.contains(inst.words[2]) or inline_loads.contains(inst.words[2])) continue;
+                if (dead_extracts.contains(inst.words[2]) or ctx.inline_loads.contains(inst.words[2])) continue;
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 const result_name = names.get(inst.words[2]) orelse "v";
                 // Extracting from an OpConstantNull IS the zero value of the
@@ -9332,33 +9363,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .VectorShuffle => try emitVectorShuffleWgsl(module, names, inst, w, arena, indent),
 
             // Arithmetic
-            .FAdd, .IAdd => try emitBinOp(module, names, &inline_exprs, inst, "+", w, arena, indent),
-            .FSub, .ISub => try emitBinOp(module, names, &inline_exprs, inst, "-", w, arena, indent),
-            .FMul, .IMul => try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent),
-            .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, &inline_exprs, inst, "/", w, arena, indent),
-            .FMod => try emitFMod(module, names, &inline_exprs, inst, w, arena, indent),
-            .UMod, .SRem, .FRem => try emitBinOp(module, names, &inline_exprs, inst, "%", w, arena, indent),
+            .FAdd, .IAdd => try emitBinOp(module, names, &ctx.inline_exprs, inst, "+", w, arena, indent),
+            .FSub, .ISub => try emitBinOp(module, names, &ctx.inline_exprs, inst, "-", w, arena, indent),
+            .FMul, .IMul => try emitBinOp(module, names, &ctx.inline_exprs, inst, "*", w, arena, indent),
+            .FDiv, .SDiv, .UDiv => try emitBinOp(module, names, &ctx.inline_exprs, inst, "/", w, arena, indent),
+            .FMod => try emitFMod(module, names, &ctx.inline_exprs, inst, w, arena, indent),
+            .UMod, .SRem, .FRem => try emitBinOp(module, names, &ctx.inline_exprs, inst, "%", w, arena, indent),
             // OpSMod is floored (sign of DIVISOR); WGSL `%` is truncated (sign of dividend =
             // OpSRem), so `((x % y) + y) % y` adjusts it to floored for every sign combination
             // (verified exhaustively via naga const_assert). Kept out of the inline/symbol
             // tables below so it always materializes through emitSMod, never a bare `%`. (#170)
-            .SMod => try emitSMod(module, names, &inline_exprs, inst, w, arena, indent),
+            .SMod => try emitSMod(module, names, &ctx.inline_exprs, inst, w, arena, indent),
             // All three shifts share emitShift, which applies the u32/vecN<u32>
             // amount cast and the #170 constant over-shift mask. ShiftRightArithmetic
             // (signed `>>`) used to route through the generic emitBinOp, which did
             // neither — a signed const over-shift (or even an in-range signed shift,
             // needing the u32 cast) was naga-rejected (silent-wrong).
-            .ShiftLeftLogical => try emitShift(module, names, &inline_exprs, inst, "<<", w, arena, indent),
-            .ShiftRightLogical, .ShiftRightArithmetic => try emitShift(module, names, &inline_exprs, inst, ">>", w, arena, indent),
+            .ShiftLeftLogical => try emitShift(module, names, &ctx.inline_exprs, inst, "<<", w, arena, indent),
+            .ShiftRightLogical, .ShiftRightArithmetic => try emitShift(module, names, &ctx.inline_exprs, inst, ">>", w, arena, indent),
             .FNegate, .SNegate => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent);
                 try w.print("let {s}: {s} = -{s};\n", .{ names.get(inst.words[2]) orelse "v", rt, names.get(inst.words[3]) orelse "0" });
             },
-            .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent),
+            .VectorTimesScalar, .MatrixTimesScalar => try emitBinOp(module, names, &ctx.inline_exprs, inst, "*", w, arena, indent),
             .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix => {
                 // WGSL uses mul() — wait, WGSL doesn't have mul(). Use matrix multiplication operator *
-                try emitBinOp(module, names, &inline_exprs, inst, "*", w, arena, indent);
+                try emitBinOp(module, names, &ctx.inline_exprs, inst, "*", w, arena, indent);
             },
 
             // OuterProduct(u, v): u is the result's column vector type (R rows),
@@ -9371,34 +9402,34 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .Dot => try emitCall(module, names, inst, "dot", w, arena, indent),
 
             // Comparisons
-            .FOrdEqual, .IEqual => try emitBinOp(module, names, &inline_exprs, inst, "==", w, arena, indent),
+            .FOrdEqual, .IEqual => try emitBinOp(module, names, &ctx.inline_exprs, inst, "==", w, arena, indent),
             // WGSL `!=` follows IEEE-754, so it is the *unordered* not-equal (true
             // when either operand is NaN) — exactly OpFUnordNotEqual. glslang emits
             // FUnordNotEqual for every GLSL float `!=`/`notEqual()`. (#170)
-            .FUnordNotEqual, .INotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
-            .FOrdNotEqual => try emitOrderedNotEqual(module, names, &inline_exprs, inst, w, arena, indent),
-            .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, &inline_exprs, inst, "<", w, arena, indent),
-            .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, &inline_exprs, inst, ">", w, arena, indent),
-            .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, &inline_exprs, inst, "<=", w, arena, indent),
-            .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, &inline_exprs, inst, ">=", w, arena, indent),
+            .FUnordNotEqual, .INotEqual => try emitBinOp(module, names, &ctx.inline_exprs, inst, "!=", w, arena, indent),
+            .FOrdNotEqual => try emitOrderedNotEqual(module, names, &ctx.inline_exprs, inst, w, arena, indent),
+            .FOrdLessThan, .SLessThan, .ULessThan => try emitBinOp(module, names, &ctx.inline_exprs, inst, "<", w, arena, indent),
+            .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try emitBinOp(module, names, &ctx.inline_exprs, inst, ">", w, arena, indent),
+            .FOrdLessThanEqual, .SLessThanEqual, .ULessThanEqual => try emitBinOp(module, names, &ctx.inline_exprs, inst, "<=", w, arena, indent),
+            .FOrdGreaterThanEqual, .SGreaterThanEqual, .UGreaterThanEqual => try emitBinOp(module, names, &ctx.inline_exprs, inst, ">=", w, arena, indent),
             // Unordered float inequalities: `!(complementary ordered op)`, exact on
             // NaN (see emitUnorderedCompare). NOT `<`/`>=` -- those are ordered and
             // silent-wrong when an operand is NaN. (#170)
-            .FUnordLessThan => try emitUnorderedCompare(module, names, &inline_exprs, inst, ">=", w, arena, indent),
-            .FUnordGreaterThan => try emitUnorderedCompare(module, names, &inline_exprs, inst, "<=", w, arena, indent),
-            .FUnordLessThanEqual => try emitUnorderedCompare(module, names, &inline_exprs, inst, ">", w, arena, indent),
-            .FUnordGreaterThanEqual => try emitUnorderedCompare(module, names, &inline_exprs, inst, "<", w, arena, indent),
+            .FUnordLessThan => try emitUnorderedCompare(module, names, &ctx.inline_exprs, inst, ">=", w, arena, indent),
+            .FUnordGreaterThan => try emitUnorderedCompare(module, names, &ctx.inline_exprs, inst, "<=", w, arena, indent),
+            .FUnordLessThanEqual => try emitUnorderedCompare(module, names, &ctx.inline_exprs, inst, ">", w, arena, indent),
+            .FUnordGreaterThanEqual => try emitUnorderedCompare(module, names, &ctx.inline_exprs, inst, "<", w, arena, indent),
             // Unordered equality: (a==b) || isNaN(a) || isNaN(b), not the naive ordered
             // `==` (false on NaN). No single-operator complement, so a direct lowering. (#170)
-            .FUnordEqual => try emitUnorderedEqual(module, names, &inline_exprs, inst, w, arena, indent),
+            .FUnordEqual => try emitUnorderedEqual(module, names, &ctx.inline_exprs, inst, w, arena, indent),
 
             // Logical
-            .LogicalOr => try emitBinOp(module, names, &inline_exprs, inst, "||", w, arena, indent),
-            .LogicalAnd => try emitBinOp(module, names, &inline_exprs, inst, "&&", w, arena, indent),
+            .LogicalOr => try emitBinOp(module, names, &ctx.inline_exprs, inst, "||", w, arena, indent),
+            .LogicalAnd => try emitBinOp(module, names, &ctx.inline_exprs, inst, "&&", w, arena, indent),
             // Boolean equality (GLSL bool `==`/`!=`, `equal`/`notEqual` on bvecN).
             // WGSL `==`/`!=` apply to bool and are componentwise on vecN<bool>. (#170)
-            .LogicalEqual => try emitBinOp(module, names, &inline_exprs, inst, "==", w, arena, indent),
-            .LogicalNotEqual => try emitBinOp(module, names, &inline_exprs, inst, "!=", w, arena, indent),
+            .LogicalEqual => try emitBinOp(module, names, &ctx.inline_exprs, inst, "==", w, arena, indent),
+            .LogicalNotEqual => try emitBinOp(module, names, &ctx.inline_exprs, inst, "!=", w, arena, indent),
             .LogicalNot => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent);
@@ -9912,9 +9943,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             // Bitwise
-            .BitwiseOr => try emitBinOp(module, names, &inline_exprs, inst, "|", w, arena, indent),
-            .BitwiseXor => try emitBinOp(module, names, &inline_exprs, inst, "^", w, arena, indent),
-            .BitwiseAnd => try emitBinOp(module, names, &inline_exprs, inst, "&", w, arena, indent),
+            .BitwiseOr => try emitBinOp(module, names, &ctx.inline_exprs, inst, "|", w, arena, indent),
+            .BitwiseXor => try emitBinOp(module, names, &ctx.inline_exprs, inst, "^", w, arena, indent),
+            .BitwiseAnd => try emitBinOp(module, names, &ctx.inline_exprs, inst, "&", w, arena, indent),
             .Not => {
                 const rt = try wgslType(module, inst.words[1], names, arena);
                 try writeInd(w, indent);
