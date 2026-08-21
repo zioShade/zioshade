@@ -9572,17 +9572,16 @@ test "WGSL: loop nested in a switch case body emits and naga-validates" {
         \\               OpFunctionEnd
     );
     defer alloc.free(spv);
-    // PINS THE CURRENT honest error: the case-body replay cannot construct
-    // loops (#wgsl-loop-in-switch-case). FLIP THIS when the region-walker
-    // increment lands: assert emission ("switch", "loop {" inside it) +
-    // nagaValidateOrSkip(wgsl, "loop-in-switch-case"). The happy-path body
-    // is kept above so the flip is a one-hunk change.
-    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
-        alloc.free(ok);
-        return error.TestUnexpectedSuccess;
-    } else |e| {
-        try std.testing.expectEqual(error.UnsupportedLoopInSwitchCase, e);
-    }
+    // FLIPPED by the #wgsl-region-mode increment: the case-body walk dispatches
+    // a branch to a loop header into the real walker, SHARING the WalkCtx.
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "switch");
+    try assertContains(wgsl, "loop {");
+    const sw_i = std.mem.indexOf(u8, wgsl, "switch").?;
+    const loop_i = std.mem.indexOf(u8, wgsl, "loop {").?;
+    try std.testing.expect(loop_i > sw_i);
+    try nagaValidateOrSkip(wgsl, "loop-in-switch-case");
 }
 
 // #wgsl-replay-twin-drift: BitFieldSExtract had no arm in emitSimpleInstruction,
