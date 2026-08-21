@@ -2301,9 +2301,12 @@ test "wgsl: unsupported op in switch/loop replay path errors honestly" {
     // path (emitSimpleInstruction). Ops with no case there must fail loud, not
     // fall to the old fallback that emitted `<OpcodeName>(args)` (a call to a
     // non-existent WGSL function — naga reject, silent-wrong). The original
-    // repro used a cross-vector OpVectorShuffle; that op now routes through the
-    // SHARED emitter (#wgsl-replay-twin-drift), so the pin moved to a mid-case
-    // early return — a control-flow semantic a statement emitter must not guess.
+    // repro used a cross-vector OpVectorShuffle, which is still refused in the
+    // replay (deliberately — routing it un-masks the stale-inline class, see
+    // the fallback comment); the pin moved OFF it anyway, defensively, to a
+    // construct that must stay refused even after replay routing grows: a
+    // mid-case early return — a control-flow semantic a statement emitter must
+    // not guess.
     const source =
         \\#version 450
         \\layout(location = 0) in vec4 a;
@@ -9586,11 +9589,12 @@ test "WGSL: loop nested in a switch case body emits and naga-validates" {
 // so the same op inside a switch case body refused with "unsupported op in
 // switch/loop replay path" (graphicsfuzz_058/072 — the LOOP-side deferred-header
 // replay hits the same fallback). The fix is the anti-drift pattern: a shared
-// emitter called from BOTH dispatches (never a copy-pasted twin). VectorShuffle
-// and CompositeInsert extracted the same way stay UNROUTED in the replay for
-// now: routing them unmasks a latent stale-inline_exprs class in the if-arm
-// walk (gf_028 emitted bare-name exprs at exit 0) — honest refusal until that
-// is fixed; see the comment at the replay fallback.
+// emitter called from BOTH dispatches (never a copy-pasted twin). CompositeInsert
+// is routed the same way (corpus-verified naga-clean on gf_032). VectorShuffle
+// stays deliberately UNROUTED in the replay: routing it unmasks a latent
+// stale-inline_exprs class in the if-arm walk (gf_028 emitted bare-name exprs
+// at exit 0) — honest refusal until that is fixed; see the comment at the
+// replay fallback.
 test "WGSL: BitFieldSExtract emits inside a switch case body (shared emitter)" {
     const spv = try assembleSpirv("replay_bitfield_extract",
         \\               OpCapability Shader
