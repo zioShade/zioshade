@@ -7920,9 +7920,9 @@ fn emitInstruction(
         },
 
         // Comparisons
-        .FOrdEqual, .IEqual => try common.emitBinOp(module, names, inst, "==", w, alloc, hlslType),
+        .FOrdEqual, .IEqual, .LogicalEqual => try common.emitBinOp(module, names, inst, "==", w, alloc, hlslType),
         .FUnordEqual => try emitUnordEqual(module, names, inst, w, alloc),
-        .FUnordNotEqual, .INotEqual => try common.emitBinOp(module, names, inst, "!=", w, alloc, hlslType),
+        .FUnordNotEqual, .INotEqual, .LogicalNotEqual => try common.emitBinOp(module, names, inst, "!=", w, alloc, hlslType),
         .FOrdNotEqual => try emitOrdNotEqual(module, names, inst, w, alloc),
         .FOrdLessThan, .SLessThan, .ULessThan => try common.emitBinOp(module, names, inst, "<", w, alloc, hlslType),
         .FOrdGreaterThan, .SGreaterThan, .UGreaterThan => try common.emitBinOp(module, names, inst, ">", w, alloc, hlslType),

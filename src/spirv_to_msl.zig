@@ -3454,7 +3454,28 @@ pub fn spirvToMSL(alloc: std.mem.Allocator, spirv_words: []const u32, options: M
             if (!is_ssbo) continue;
             const binding = getDecVal(&decs, rid, .binding) orelse continue;
             const set = getDecVal(&decs, rid, .descriptor_set) orelse 0;
-            const name = names.get(rid) orelse continue;
+            // An anonymous instance (`buffer B { ... };`) carries OpName "" --
+            // PRESENT but empty -- which sails past `orelse continue` and printed
+            // `device & [[buffer(N)]]` plus a nameless `struct { ... }`: invalid
+            // MSL at exit 0 (silent-wrong) on external SPIR-V (glslang shape;
+            // zioshade's own frontend names the variable after the block, so
+            // frontend-driven tests never see it). Same root fix as the UBO arm
+            // below: fall back to the struct TYPE's name, then the binding, and
+            // publish back so the struct declaration, the parameter and every
+            // body reference agree on one name.
+            const sb_nm: []const u8 = blk: {
+                if (names.get(rid)) |n| {
+                    if (n.len > 0) break :blk n;
+                }
+                if (pointee_type) |ptid| {
+                    if (names.get(ptid)) |tn| {
+                        if (tn.len > 0) break :blk tn;
+                    }
+                }
+                break :blk std.fmt.allocPrint(aa, "_sb{d}", .{binding}) catch "_sb";
+            };
+            _ = names.put(rid, sb_nm) catch {};
+            const name = sb_nm;
             const ptr_inst = getDef(&module, inst.words[1]) orelse continue;
             if (ptr_inst.op == .TypePointer and ptr_inst.words.len >= 4) {
                 const ptid = ptr_inst.words[3];
@@ -4592,12 +4613,34 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                 // _Globals-style bare-member qualification (left as a follow-up).
                 const pti = getDef(m, pt);
                 if (pti != null and pti.?.op == .TypeStruct) {
-                    if (names.get(rid)) |nm| {
-                        const binding = getDecVal(decs, rid, .binding) orelse 0;
-                        const set = getDecVal(decs, rid, .descriptor_set) orelse 0;
-                        trackBinding(&max_buf_binding, binding);
-                        cb.append(alloc, .{ .name = nm, .type_id = pt, .binding = binding, .descriptor_set = set }) catch {};
-                    }
+                    // An anonymous push block (`layout(push_constant) uniform PC
+                    // { ... };`) carries OpName "" on the variable -- present but
+                    // empty -- which flowed into the cbuffer entry as "" and
+                    // printed `constant & name [[buffer(0)]]` plus a nameless
+                    // struct: invalid MSL at exit 0. Same fallback chain as the
+                    // UBO/SSBO arms: the variable name, then the struct TYPE's
+                    // name (glslang always names the type), published back so the
+                    // declaration, parameter and body references agree.
+                    const pc_nm: []const u8 = blk: {
+                        if (names.get(rid)) |n| {
+                            if (n.len > 0) break :blk n;
+                        }
+                        if (names.get(pt)) |tn| {
+                            if (tn.len > 0) break :blk tn;
+                        }
+                        // NOT "_Globals": that name is the synthesized loose-uniform
+                        // block below; a fully-nameless push block coexisting with
+                        // loose uniforms would then emit TWO `struct _Globals`
+                        // definitions + two `constant _Globals&` params (invalid MSL
+                        // at exit 0). Unreachable from glslang (it always names the
+                        // block type) but cheap to make structural.
+                        break :blk "_pc";
+                    };
+                    _ = names.put(rid, pc_nm) catch {};
+                    const binding = getDecVal(decs, rid, .binding) orelse 0;
+                    const set = getDecVal(decs, rid, .descriptor_set) orelse 0;
+                    trackBinding(&max_buf_binding, binding);
+                    cb.append(alloc, .{ .name = pc_nm, .type_id = pt, .binding = binding, .descriptor_set = set }) catch {};
                 }
             },
             else => {},
@@ -9196,6 +9239,8 @@ fn emitInstruction(
         .FUnordGreaterThanEqual => try emitNegatedCompare(m, names, inst, "<", w, alloc),
         .LogicalOr => try common.emitBinOp(m, names, inst, "||", w, alloc, mslType),
         .LogicalAnd => try common.emitBinOp(m, names, inst, "&&", w, alloc, mslType),
+        .LogicalEqual => try common.emitBinOp(m, names, inst, "==", w, alloc, mslType),
+        .LogicalNotEqual => try common.emitBinOp(m, names, inst, "!=", w, alloc, mslType),
         .IsNan => try common.emitCall(m, names, inst, "isnan", w, alloc, mslType),
         .IsInf => try common.emitCall(m, names, inst, "isinf", w, alloc, mslType),
         .LogicalNot => {

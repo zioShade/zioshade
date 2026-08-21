@@ -6037,3 +6037,77 @@ test "msl: a vec2-Vector1 shuffle reaching fc.zw threads float4 (#fragcoord-full
     defer alloc.free(msl);
     try assertContains(msl, "float4 _fragCoord");
 }
+
+test "anonymous SSBO instance emits a named device reference (not `device &`)" {
+    // glslang gives an anonymous block instance (`buffer B { ... };`) OpName ""
+    // -- PRESENT but empty -- which sails past the collector's `orelse continue`
+    // and prints `device & [[buffer(0)]]` plus a nameless `struct { ... }`:
+    // invalid MSL at exit 0 (silent-wrong) on EXTERNAL SPIR-V. zioshade's own
+    // frontend names the variable after the block, so in-repo frontend-driven
+    // tests never see the shape; this drives glslang like a real consumer.
+    const spv = try compileToSpirv("msl_anon_ssbo",
+        \\#version 450
+        \\layout(std430, binding=0) buffer B { uint cnt; };
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = vec4(float(cnt)); }
+    );
+    defer alloc.free(spv);
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "device B& B [[buffer(0)]]");
+    try assertNotContains(msl, "device & ");
+    try assertContains(msl, "struct B\n{");
+}
+
+test "anonymous UBO instance emits a named constant reference (not `constant &`)" {
+    // `uniform U { ... };` with no instance name -- same empty-OpName shape on
+    // the uniform path, from glslang (external SPIR-V).
+    const spv = try compileToSpirv("msl_anon_ubo",
+        \\#version 450
+        \\layout(std140, binding=0) uniform U { vec4 c; };
+        \\layout(location=0) out vec4 o;
+        \\void main(){ o = c; }
+    );
+    defer alloc.free(spv);
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "constant U& U_1 [[buffer(0)]]");
+    try assertNotContains(msl, "constant & ");
+}
+
+test "anonymous push_constant block emits a named constant reference (not `constant &`)" {
+    // `layout(push_constant) uniform PC { ... };` -- the anonymous push block
+    // was a documented follow-up, but the empty-OpName variable fell into the
+    // named-block path and printed an empty reference type at exit 0.
+    const spv = try compileToSpirv("msl_anon_push",
+        \\#version 450
+        \\layout(location=0) out vec4 o;
+        \\layout(push_constant) uniform PC { float t; };
+        \\void main(){ o = vec4(t); }
+    );
+    defer alloc.free(spv);
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "constant PC&");
+    try assertNotContains(msl, "constant & ");
+}
+
+test "OpLogicalEqual / OpLogicalNotEqual emit == / != (bool equality)" {
+    // Found by the MSL contract-diff run on spirv-cross's boolean-logic.frag:
+    // the MSL backend had LogicalOr/And/Not arms but no LogicalEqual /
+    // LogicalNotEqual, so `p == q` / `p != q` on bools refused with
+    // UnsupportedOpcode (the result was used). glslang-driven (external
+    // SPIR-V shape -- zioshade's own frontend corpus never exercised it).
+    const spv = try compileToSpirv("msl_logical_eq",
+        \\#version 450
+        \\layout(location=0) in float a;
+        \\layout(location=1) in float b;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ bool p = a > 0.0; bool q = b > 0.0; bool eq = p == q; bool ne = p != q; o = vec4(eq ? 0.1 : 0.2, ne ? 0.3 : 0.4, 0.0, 1.0); }
+    );
+    defer alloc.free(spv);
+    const msl = try zioshade.spirvToMSL(alloc, spv, .{});
+    defer alloc.free(msl);
+    try assertContains(msl, "==");
+    try assertContains(msl, "!=");
+}

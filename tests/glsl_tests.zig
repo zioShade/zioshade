@@ -3969,3 +3969,23 @@ test "GLSL emits case breaks when the switch default target is the merge (#switc
     while (std.mem.indexOfPos(u8, glsl, i, "break;")) |pos| : (count += 1) i = pos + 1;
     try std.testing.expect(count >= 4);
 }
+
+test "OpLogicalEqual / OpLogicalNotEqual emit == / != (bool equality)" {
+    // Found by the MSL contract-diff run: all three C-family backends had
+    // LogicalOr/And/Not arms but no LogicalEqual/LogicalNotEqual -- `p == q` /
+    // `p != q` on bools fell to the unhandled arm (GLSL/HLSL/MSL). Legal GLSL,
+    // legal SPIR-V (spirv-cross's boolean-logic.frag exercises it). Driven via
+    // glslang so the op arrives exactly as an external producer emits it.
+    const spv = try compileToSpirv("logical_eq",
+        \\#version 450
+        \\layout(location=0) in float a;
+        \\layout(location=1) in float b;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ bool p = a > 0.0; bool q = b > 0.0; bool eq = p == q; bool ne = p != q; o = vec4(eq ? 0.1 : 0.2, ne ? 0.3 : 0.4, 0.0, 1.0); }
+    );
+    defer alloc.free(spv);
+    const glsl = try zioshade.spirvToGLSL(alloc, spv, .{ .version = 450 });
+    defer alloc.free(glsl);
+    try assertContains(glsl, "==");
+    try assertContains(glsl, "!=");
+}
