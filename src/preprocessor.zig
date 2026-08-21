@@ -303,8 +303,12 @@ pub const Preprocessor = struct {
         // survives (the `#define F(x)` vs `#define F (x)` discriminator), and
         // multi-token spans stay contiguous (array-size expressions the parser
         // re-lexes).
-        const lexed_inc = try lexer.tokenize(self.alloc, resolved_source);
+        // Intern FIRST: an interned-but-unreferenced copy is harmlessly owned by
+        // extra_strings, while a tokenize-then-intern order leaks the lexed
+        // array when the intern fails (OOM) — the comment below promises
+        // every-exit-path freeing for inc_tokens, not for its inputs.
         const inc_base = try self.internText(resolved_source);
+        const lexed_inc = try lexer.tokenize(self.alloc, resolved_source);
         const inc_tokens = self.alloc.alloc(lexer.Token, lexed_inc.len) catch |e| {
             self.alloc.free(lexed_inc);
             return e;
@@ -713,7 +717,13 @@ pub const Preprocessor = struct {
             }
 
             const body_owned = try body.toOwnedSlice(self.alloc);
-            try self.rebaseBodyTokens(body_owned);
+            // The rebase can fail (internText OOM) after ownership transferred;
+            // free here rather than leak, matching the every-path discipline the
+            // include path keeps. (`name` follows the pre-existing pattern.)
+            self.rebaseBodyTokens(body_owned) catch |e| {
+                self.alloc.free(body_owned);
+                return e;
+            };
 
             try self.defines.put(self.alloc, name, .{
                 .function = .{
@@ -741,7 +751,10 @@ pub const Preprocessor = struct {
             }
 
             const body_owned = try body.toOwnedSlice(self.alloc);
-            try self.rebaseBodyTokens(body_owned);
+            self.rebaseBodyTokens(body_owned) catch |e| {
+                self.alloc.free(body_owned);
+                return e;
+            };
             try self.defines.put(self.alloc, name, .{ .object = body_owned });
         }
     }
