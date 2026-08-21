@@ -4628,7 +4628,13 @@ fn collectResources(m: *const ParsedModule, names: *std.AutoHashMap(u32, []const
                         if (names.get(pt)) |tn| {
                             if (tn.len > 0) break :blk tn;
                         }
-                        break :blk "_Globals";
+                        // NOT "_Globals": that name is the synthesized loose-uniform
+                        // block below; a fully-nameless push block coexisting with
+                        // loose uniforms would then emit TWO `struct _Globals`
+                        // definitions + two `constant _Globals&` params (invalid MSL
+                        // at exit 0). Unreachable from glslang (it always names the
+                        // block type) but cheap to make structural.
+                        break :blk "_pc";
                     };
                     _ = names.put(rid, pc_nm) catch {};
                     const binding = getDecVal(decs, rid, .binding) orelse 0;
