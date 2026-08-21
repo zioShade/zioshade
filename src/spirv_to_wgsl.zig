@@ -1983,9 +1983,14 @@ fn writeIndentStatic(w: anytype, depth: u32) !void {
 /// and HLSL (#587) all emit the continue; WGSL was the last backend still dropping it.
 /// Both are silent-wrong -- naga accepts the output either way.
 ///
-/// `switch_merge` is null at the two top-level case-body sites, where reaching the switch's
-/// merge is the ordinary end of the case and needs no `break;`. It is set only for the
-/// nested-selection arms, where falling out of the `if` would run the rest of the case.
+/// `implicit_break` distinguishes the two call shapes: true at the two
+/// top-level case-body sites, where reaching the switch's merge is the
+/// ordinary end of the case and needs no `break;` (WGSL cases do not fall
+/// through); false at the nested-selection arms, where falling out of an
+/// `if` straight to the switch's merge must emit `break;`. Targets outside
+/// {merge, extra_legit, loop_continue} refuse with
+/// UnsupportedSwitchCaseExit — the walk cannot follow them without silently
+/// truncating the case (#wgsl-switch-case-exit).
 fn emitSwitchArmTerminator(
     module: *const ParsedModule,
     idx: usize,
@@ -7790,9 +7795,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                         const dinst = module.instructions[si];
                                         if (dinst.op == .Label and dinst.words.len > 1 and dinst.words[1] == merge_label.?) break;
                                         if (dinst.op == .Branch) {
-                                            // No switch_merge here: reaching the switch's merge is
+                                            // implicit_break: reaching the switch's merge is
                                             // the ordinary end of the case and WGSL cases do not
-                                            // fall through, so only a loop continue emits anything.
+                                            // fall through, so neither merge nor fallthrough
+                                            // targets emit anything here; unknown targets refuse
+                                            // (UnsupportedSwitchCaseExit). NOTE: the default arm
+                                            // has no fallthrough chain duplication, so a default
+                                            // body branching into a later case still silently
+                                            // drops that fallthrough (pre-existing; the region
+                                            // walker replaces these walks).
                                             try emitSwitchArmTerminator(module, si, merge_label.?, true, switch_targets.items, if (in_loop) loop_continue_label else null, w, body_ind);
                                             break;
                                         }
