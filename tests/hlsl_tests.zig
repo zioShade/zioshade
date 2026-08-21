@@ -17276,3 +17276,22 @@ test "HLSL: single-struct row_major UBO keeps one spelling via the zioshade fron
     try assertContains(hlsl, "row_major float4x4 B;");
     try assertNotContains(hlsl, "RowMajor_1");
 }
+
+test "OpLogicalEqual / OpLogicalNotEqual emit == / != (bool equality)" {
+    // Same finding as the GLSL/MSL twins: the C-family backends had
+    // LogicalOr/And/Not but no LogicalEqual/LogicalNotEqual arm, so `p == q` /
+    // `p != q` on bools hit the unhandled path. glslang-driven (external
+    // SPIR-V shape).
+    const spv = try compileToSpirv("logical_eq",
+        \\#version 450
+        \\layout(location=0) in float a;
+        \\layout(location=1) in float b;
+        \\layout(location=0) out vec4 o;
+        \\void main(){ bool p = a > 0.0; bool q = b > 0.0; bool eq = p == q; bool ne = p != q; o = vec4(eq ? 0.1 : 0.2, ne ? 0.3 : 0.4, 0.0, 1.0); }
+    );
+    defer alloc.free(spv);
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{});
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "==");
+    try assertContains(hlsl, "!=");
+}
