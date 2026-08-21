@@ -2297,24 +2297,27 @@ test "wgsl: constant unsigned vector uses WGSL vec constructor, not GLSL uintN" 
 }
 
 test "wgsl: unsupported op in switch/loop replay path errors honestly" {
-    // A cross-vector OpVectorShuffle inside a switch reaches the switch/loop
-    // replay path (emitSimpleInstruction). Ops with no case there must fail loud,
-    // not fall to the old fallback that emitted `<OpcodeName>(args)` (a call to a
-    // non-existent WGSL function — naga reject, silent-wrong).
+    // A CONTROL-FLOW op inside a switch case body reaches the switch/loop replay
+    // path (emitSimpleInstruction). Ops with no case there must fail loud, not
+    // fall to the old fallback that emitted `<OpcodeName>(args)` (a call to a
+    // non-existent WGSL function — naga reject, silent-wrong). The original
+    // repro used a cross-vector OpVectorShuffle, which is still refused in the
+    // replay (deliberately — routing it un-masks the stale-inline class, see
+    // the fallback comment); the pin moved OFF it anyway, defensively, to a
+    // construct that must stay refused even after replay routing grows: a
+    // mid-case early return — a control-flow semantic a statement emitter must
+    // not guess.
     const source =
         \\#version 450
         \\layout(location = 0) in vec4 a;
-        \\layout(location = 1) in vec4 b;
         \\layout(location = 0) out vec4 o;
         \\void main() {
-        \\    vec4 c = vec4(0.0);
         \\    int m = int(a.x) % 3;
         \\    switch (m) {
-        \\        case 0: c = vec4(a.xy, b.zw); break;
-        \\        case 1: c = b.wzyx; break;
-        \\        default: c = a; break;
+        \\        case 0: o = a; return;
+        \\        default: o = vec4(0.0); break;
         \\    }
-        \\    o = c;
+        \\    o = a + vec4(0.1);
         \\}
     ;
     const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
@@ -9507,4 +9510,135 @@ test "wgsl: NonWritable storage buffer emits read mode (uniformity semantics)" {
     try assertContains(wgsl, "var<storage> ");
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "read_write") == null);
     try tintValidateOrSkip(wgsl, "ssbo-readonly");
+}
+
+// #wgsl-loop-in-switch-case: a loop nested inside a switch case body. The
+// .Switch handler's case-body replay cannot construct loops, so this refused
+// with UnsupportedLoopInSwitchCase (honest error). This test pins the full
+// lowering: the case body emits a real `loop { }`, the loop-header phi
+// (counter) and the accumulator flow through, and naga accepts the result.
+// Minimal shape mirrors graphicsfuzz_052 (1 loop, 1 switch, header phi).
+test "WGSL: loop nested in a switch case body emits and naga-validates" {
+    const spv = try assembleSpirv("loop_in_switch_case",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\         %fn = OpTypeFunction %void
+        \\         %f32 = OpTypeFloat 32
+        \\         %v4f = OpTypeVector %f32 4
+        \\         %u32 = OpTypeInt 32 0
+        \\        %bool = OpTypeBool
+        \\         %po4 = OpTypePointer Output %v4f
+        \\          %pf = OpTypePointer Function %f32
+        \\          %pu = OpTypePointer Function %u32
+        \\           %o = OpVariable %po4 Output
+        \\          %u0 = OpConstant %u32 0
+        \\          %u1 = OpConstant %u32 1
+        \\          %u3 = OpConstant %u32 3
+        \\          %f0 = OpConstant %f32 0.0
+        \\          %f1 = OpConstant %f32 1.0
+        \\        %main = OpFunction %void None %fn
+        \\       %entry = OpLabel
+        \\         %acc = OpVariable %pf Function %f0
+        \\        %svar = OpVariable %pu Function %u1
+        \\         %sel = OpLoad %u32 %svar
+        \\               OpSelectionMerge %swmerge None
+        \\               OpSwitch %sel %dflt 1 %case1
+        \\       %case1 = OpLabel
+        \\               OpBranch %lhdr
+        \\        %lhdr = OpLabel
+        \\           %i = OpPhi %u32 %u0 %case1 %inext %lbody
+        \\        %icmp = OpULessThan %bool %i %u3
+        \\               OpLoopMerge %lmerge %lbody None
+        \\               OpBranchConditional %icmp %lbody %lmerge
+        \\       %lbody = OpLabel
+        \\          %al = OpLoad %f32 %acc
+        \\          %as = OpFAdd %f32 %al %f1
+        \\               OpStore %acc %as
+        \\       %inext = OpIAdd %u32 %i %u1
+        \\               OpBranch %lhdr
+        \\      %lmerge = OpLabel
+        \\               OpBranch %swmerge
+        \\        %dflt = OpLabel
+        \\               OpBranch %swmerge
+        \\      %swmerge = OpLabel
+        \\          %af = OpLoad %f32 %acc
+        \\       %color = OpCompositeConstruct %v4f %af %f0 %f0 %f1
+        \\               OpStore %o %color
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    // PINS THE CURRENT honest error: the case-body replay cannot construct
+    // loops (#wgsl-loop-in-switch-case). FLIP THIS when the region-walker
+    // increment lands: assert emission ("switch", "loop {" inside it) +
+    // nagaValidateOrSkip(wgsl, "loop-in-switch-case"). The happy-path body
+    // is kept above so the flip is a one-hunk change.
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(error.UnsupportedLoopInSwitchCase, e);
+    }
+}
+
+// #wgsl-replay-twin-drift: BitFieldSExtract had no arm in emitSimpleInstruction,
+// so the same op inside a switch case body refused with "unsupported op in
+// switch/loop replay path" (graphicsfuzz_058/072 — the LOOP-side deferred-header
+// replay hits the same fallback). The fix is the anti-drift pattern: a shared
+// emitter called from BOTH dispatches (never a copy-pasted twin). CompositeInsert
+// is routed the same way (corpus-verified naga-clean on gf_032). VectorShuffle
+// stays deliberately UNROUTED in the replay: routing it unmasks a latent
+// stale-inline_exprs class in the if-arm walk (gf_028 emitted bare-name exprs
+// at exit 0) — honest refusal until that is fixed; see the comment at the
+// replay fallback.
+test "WGSL: BitFieldSExtract emits inside a switch case body (shared emitter)" {
+    const spv = try assembleSpirv("replay_bitfield_extract",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\         %fn = OpTypeFunction %void
+        \\         %f32 = OpTypeFloat 32
+        \\         %v4f = OpTypeVector %f32 4
+        \\         %u32 = OpTypeInt 32 0
+        \\          %pu = OpTypePointer Function %u32
+        \\         %po4 = OpTypePointer Output %v4f
+        \\           %o = OpVariable %po4 Output
+        \\          %f0 = OpConstant %f32 0.0
+        \\          %f1 = OpConstant %f32 1.0
+        \\          %u1 = OpConstant %u32 1
+        \\          %u4 = OpConstant %u32 4
+        \\          %u8 = OpConstant %u32 8
+        \\         %cu = OpConstant %u32 4042322160
+        \\     %zerov = OpConstantComposite %v4f %f0 %f0 %f0 %f1
+        \\        %main = OpFunction %void None %fn
+        \\       %entry = OpLabel
+        \\        %svar = OpVariable %pu Function %u1
+        \\         %sel = OpLoad %u32 %svar
+        \\               OpSelectionMerge %swmerge None
+        \\               OpSwitch %sel %dflt 1 %c1
+        \\          %c1 = OpLabel
+        \\          %r2 = OpBitFieldSExtract %u32 %cu %u4 %u8
+        \\          %r2f = OpConvertUToF %f32 %r2
+        \\          %r2v = OpCompositeConstruct %v4f %r2f %f0 %f0 %f1
+        \\               OpStore %o %r2v
+        \\               OpBranch %swmerge
+        \\        %dflt = OpLabel
+        \\               OpStore %o %zerov
+        \\               OpBranch %swmerge
+        \\      %swmerge = OpLabel
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "extractBits(");
+    try nagaValidateOrSkip(wgsl, "replay-bitfield-extract");
 }
