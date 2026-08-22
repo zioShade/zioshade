@@ -227,3 +227,20 @@ The 38 skips, by reason:
 - `warp-2` (28) - harness scope: shaders needing textures/SRVs, rasterizer
   ordered views (the interlock family), LOD/query ops, SSBO writes, or more than
   the one b0 CBV the root signature binds.
+
+## Gallery mode (single-shader shadertoy renders)
+
+```--gallery``` renders ONE shader under the wintty custom-shader contract:
+`cbuffer Globals : register(b1)` (the full shadertoy uniform set incl. cursor
+rects and iPalette), `Texture2D iChannel0 : register(t0)` fed a synthetic
+terminal frame (glyph rows + a bright cursor block), and a linear-clamp
+sampler at s0. Output is a PPM frame, not a diff:
+
+    warp_render.exe --gallery fullscreen.vs.cso shader.cso out.ppm
+
+`run.ps1 -Gallery -Dir <dir>` sweeps every \*.hlsl in a directory this way
+(DXC -> DXIL -> WARP render -> PPM) and reports PASS/FAIL per shader — a
+compile or render failure is a FAIL, not a skip, because gallery shaders ship
+to users. Driven from wintty by `just gallery-verify` (wintty repo,
+tools/gallery/verify.sh), which stages zioshade's HLSL for the whole bundled
+corpus, runs it here over ssh, and fetches the PPMs back as previews.

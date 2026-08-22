@@ -501,6 +501,11 @@ const LoopContext = struct {
 const OverloadEntry = struct {
     param_types: []const ast.Type,
     param_is_mutable: []const bool, // true for out/inout params
+    /// true for PURE-out params (`out`, not `inout`): the incoming value is
+    /// undefined, so a global passed as this arg must NOT be copy-loaded
+    /// (reading an unwritten Output variable feeds elimUninitVars a load it
+    /// erases, cascading into the whole body being DCE'd).
+    param_is_pure_out: []const bool = &.{},
     ir_id: u32,
     return_type: ast.Type = .void,
 };
@@ -840,6 +845,9 @@ const Analyzer = struct {
                     }
                     if (overload.param_is_mutable.len > 0) {
                         self.alloc.free(overload.param_is_mutable);
+                    }
+                    if (overload.param_is_pure_out.len > 0) {
+                        self.alloc.free(overload.param_is_pure_out);
                     }
                 }
                 entry.value_ptr.deinit(self.alloc);
@@ -2953,11 +2961,16 @@ const Analyzer = struct {
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
                     var mutable_buf = try self.alloc.alloc(bool, node.data.params.len);
-                    for (node.data.params, 0..) |p, i| mutable_buf[i] = if (p.qualifier) |q| (q.is_inout or q.is_out) else false;
+                    var pure_out_buf = try self.alloc.alloc(bool, node.data.params.len);
+                    for (node.data.params, 0..) |p, i| {
+                        mutable_buf[i] = if (p.qualifier) |q| (q.is_inout or q.is_out) else false;
+                        pure_out_buf[i] = if (p.qualifier) |q| (q.is_out and !q.is_inout) else false;
+                    }
                     param_types.deinit(self.alloc);
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
                         .param_is_mutable = mutable_buf,
+                        .param_is_pure_out = pure_out_buf,
                         .ir_id = func_ir_id,
                         .return_type = node.data.ty orelse .void,
                     });
@@ -2978,11 +2991,16 @@ const Analyzer = struct {
                     }
                     const owned_pts = try self.alloc.dupe(ast.Type, param_types.items);
                     var mutable_buf2 = try self.alloc.alloc(bool, node.data.params.len);
-                    for (node.data.params, 0..) |p, i| mutable_buf2[i] = if (p.qualifier) |q| (q.is_inout or q.is_out) else false;
+                    var pure_out_buf2 = try self.alloc.alloc(bool, node.data.params.len);
+                    for (node.data.params, 0..) |p, i| {
+                        mutable_buf2[i] = if (p.qualifier) |q| (q.is_inout or q.is_out) else false;
+                        pure_out_buf2[i] = if (p.qualifier) |q| (q.is_out and !q.is_inout) else false;
+                    }
                     param_types.deinit(self.alloc);
                     try gop.value_ptr.append(self.alloc, .{
                         .param_types = owned_pts,
                         .param_is_mutable = mutable_buf2,
+                        .param_is_pure_out = pure_out_buf2,
                         .ir_id = func_ir_id,
                         .return_type = node.data.ty orelse .void,
                     });
@@ -6169,7 +6187,15 @@ const Analyzer = struct {
                 // Resolve function overloads
                 var resolved_sym = sym_raw;
                 var resolved_mutable_params: []const bool = &[_]bool{};
+                var resolved_pure_out_params: []const bool = &[_]bool{};
                 var resolved_param_types: []const ast.Type = &[_]ast.Type{};
+                // True when an ARGUMENT-MATCHED user overload bound this call. A
+                // user function may shadow a GLSL builtin by name (ghostty
+                // community shaders define `vec2 normalize(vec2, float)`); such a
+                // call must lower as a call to the user's function, never as the
+                // builtin. Keying the builtin lowering on the name alone emitted a
+                // malformed 2-operand GLSL.std.450 Normalize OpExtInst here.
+                var user_overload_matched = false;
                 if (sym_raw != null and sym_raw.?.kind == .func) {
                     if (self.overloads.get(node.data.name)) |overload_list| {
                         // Try to match argument types against overload parameter types
@@ -6186,6 +6212,8 @@ const Analyzer = struct {
                                 resolved_sym = .{ .kind = .func, .ty = overload.return_type, .ir_id = overload.ir_id };
                                 resolved_mutable_params = overload.param_is_mutable;
                                 resolved_param_types = overload.param_types;
+                                resolved_pure_out_params = overload.param_is_pure_out;
+                                user_overload_matched = true;
                                 break;
                             }
                         }
@@ -6297,7 +6325,10 @@ const Analyzer = struct {
 
                 const result_id = self.allocId();
 
-                if (self.isGLSLBuiltin(node.data.name)) {
+                // `user_overload_matched`: an argument-matched user function
+                // shadows the builtin of the same name (see its declaration
+                // above); lower it as a call below, not as the builtin.
+                if (self.isGLSLBuiltin(node.data.name) and !user_overload_matched) {
                     // mod(x, y) → OpFMod (core SPIR-V, not GLSL.std.450)
                     if (std.mem.eql(u8, node.data.name, "mod")) {
                         const ret_ty = if (arg_tids.items.len > 0) arg_tids.items[0].ty else .float;
@@ -8717,11 +8748,53 @@ const Analyzer = struct {
                     }
                     const operands = try self.alloc.alloc(ir.Instruction.Operand, arg_tids.items.len + 1);
                     operands[0] = .{ .id = s.ir_id };
+                    // out/inout args whose lvalue is NOT Function storage need a
+                    // temporary local (copy-in, call, copy-back) — see below.
+                    const CopyBack = struct { global_ptr: u32, tmp: u32, ty: ast.Type };
+                    var copy_backs = std.ArrayListUnmanaged(CopyBack).empty;
+                    defer copy_backs.deinit(self.alloc);
                     for (arg_tids.items, 0..) |tid, i| {
                         if (i < resolved_mutable_params.len and resolved_mutable_params[i]) {
                             // out/inout param: pass pointer, not loaded value
                             const ptr_tid = try self.analyzeLValue(node.data.children[i]);
-                            operands[i + 1] = .{ .id = ptr_tid.id };
+                            const non_function_root = self.lvalueRootStorageClass(node.data.children[i]);
+                            if (non_function_root != null and non_function_root.? != .function) {
+                                // Passing a global (Output/Input/Private/...) pointer where
+                                // the callee's parameter is a Function pointer is invalid
+                                // SPIR-V — OpFunctionCall requires an exact pointer-type
+                                // match (spirv-val: "Argument ... type does not match ...
+                                // parameter type"). GLSL's semantics for passing a global
+                                // to an out/inout param are copy-in/copy-out: route
+                                // through a temporary Function local. The copy-in store
+                                // is dead for pure-out params (the callee overwrites it)
+                                // but harmless, and it keeps inout exact.
+                                const pt = if (i < resolved_param_types.len) resolved_param_types[i] else tid.ty;
+                                const tmp_id = self.allocId();
+                                const sc_operands = try self.alloc.alloc(ir.Instruction.Operand, 1);
+                                sc_operands[0] = .{ .literal_int = 7 }; // Function storage class
+                                try self.instructions.append(self.alloc, .{
+                                    .tag = .local_variable,
+                                    .result_type = null,
+                                    .result_id = tmp_id,
+                                    .operands = sc_operands,
+                                    .ty = pt,
+                                });
+                                const is_pure_out = i < resolved_pure_out_params.len and resolved_pure_out_params[i];
+                                if (!is_pure_out) {
+                                    // inout: the callee may READ the incoming
+                                    // value, so copy it in. A pure-out param's
+                                    // incoming value is undefined — a copy load
+                                    // of the not-yet-written global is exactly
+                                    // the load elimUninitVars erases (and the
+                                    // cascade that used to wipe main's body).
+                                    const incoming = try self.emitLoadCached(ptr_tid.id, pt);
+                                    try self.emitStore(tmp_id, incoming);
+                                }
+                                operands[i + 1] = .{ .id = tmp_id };
+                                try copy_backs.append(self.alloc, .{ .global_ptr = ptr_tid.id, .tmp = tmp_id, .ty = pt });
+                            } else {
+                                operands[i + 1] = .{ .id = ptr_tid.id };
+                            }
                         } else {
                             // Apply GLSL implicit scalar conversion when a non-literal
                             // argument's type differs from the parameter's (`f(intVar)`
@@ -8753,6 +8826,18 @@ const Analyzer = struct {
                         .operands = operands,
                         .ty = result_ty,
                     });
+                    // Copy-back for global out/inout args (see the call-arg loop):
+                    // the callee wrote the temporary; publish it to the global.
+                    // The load caches MUST drop first: the copy-in's
+                    // emitStore(tmp, incoming) registered a store-to-load
+                    // forwarding entry for tmp, so a cached read here would
+                    // return the PRE-call value and silently discard the
+                    // callee's write (the inout-global regression).
+                    self.invalidateLoadCachesAtBarrier();
+                    for (copy_backs.items) |cb| {
+                        const written = try self.emitLoadCached(cb.tmp, cb.ty);
+                        try self.emitStore(cb.global_ptr, written);
+                    }
                     // #234: zioshade emits a real OpFunctionCall (no inlining at semantic
                     // time) and has no cross-function memory-effect summary, so a callee
                     // that runs a barrier/atomic/store — or mutates an out/inout pointer

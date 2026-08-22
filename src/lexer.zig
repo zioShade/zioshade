@@ -482,6 +482,20 @@ pub fn tokenize(alloc: std.mem.Allocator, source: [:0]const u8) Error![]const To
 }
 
 const Tokenizer = struct {
+    /// True when everything between the previous newline (or the start of the
+    /// source) and `offset` is whitespace — the preprocessor "start of line"
+    /// test for an indented `#`.
+    fn onlyWhitespaceSinceLineStart(self: *const Tokenizer) bool {
+        var i = self.offset;
+        while (i > 0) {
+            i -= 1;
+            const c = self.source[i];
+            if (c == '\n') return true;
+            if (c != ' ' and c != '\t' and c != '\r') return false;
+        }
+        return true;
+    }
+
     source: [:0]const u8,
     tokens: std.ArrayListUnmanaged(Token),
     loc: Token.Loc,
@@ -504,8 +518,13 @@ const Tokenizer = struct {
             const start = self.offset;
             const start_loc = self.loc;
 
-            // Check for preprocessor directive at start of line
-            if (self.source[self.offset] == '#' and self.loc.column == 1) {
+            // Check for preprocessor directive at start of line. Per the
+            // C/GLSL preprocessor grammar the `#` may be preceded by
+            // whitespace only: real-world shaders indent directives inside
+            // function bodies (`    #if !defined(WEB)` — the sahaj-b cursor
+            // shaders bundled with wintty), which glslang accepts. Requiring
+            // column 1 silently dropped the directive AND its guarded block.
+            if (self.source[self.offset] == '#' and self.onlyWhitespaceSinceLineStart()) {
                 const tag = try self.parsePPDirective();
                 const len = self.offset - start;
                 try self.tokens.append(alloc, .{

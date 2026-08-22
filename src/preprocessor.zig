@@ -7,6 +7,18 @@ const builtin = @import("builtin");
 /// SAME lexer instance to build its token slice.
 pub const lexer = @import("lexer.zig");
 
+/// A macro name (or macro use site) can be any identifier-shaped token.
+/// GLSL built-in function names such as `texture2D` lex as KEYWORD tokens,
+/// yet `#define texture2D texture` is legal and appears in real shaders
+/// (ghostty's shadertoy prefix does exactly this), so every macro-name
+/// lookup must accept keywords too, keyed by text. glslang agrees.
+fn isMacroNameTag(tag: lexer.Token.Tag) bool {
+    if (tag == .identifier) return true;
+    const i = @intFromEnum(tag);
+    return i >= @intFromEnum(lexer.Token.Tag.kw_version) and
+        i <= @intFromEnum(lexer.Token.Tag.kw_false);
+}
+
 pub const Preprocessor = struct {
     alloc: std.mem.Allocator,
     defines: std.StringHashMapUnmanaged(Macro),
@@ -28,6 +40,12 @@ pub const Preprocessor = struct {
     has_ext_ray_tracing: bool = false,
     has_ext_fragment_shader_interlock: bool = false,
     has_ext_scalar_block_layout: bool = false,
+    /// Set once a #define names a macro after a keyword token (e.g.
+    /// `#define texture2D texture`): keyword tokens then become macro
+    /// expansion candidates. Sticky — an #undef of the keyword macro does
+    /// not clear it; a redundant text lookup on keyword tokens is harmless
+    /// and this keeps the common (no keyword macros) path unchanged.
+    has_keyword_macros: bool = false,
 
     // Include support
     include_paths: []const []const u8 = &.{},
@@ -353,7 +371,7 @@ pub const Preprocessor = struct {
                 .pp_undef => {
                     if (self.isActive()) {
                         j += 1;
-                        if (j < inc_tokens.len and inc_tokens[j].tag == .identifier) {
+                        if (j < inc_tokens.len and isMacroNameTag(inc_tokens[j].tag)) {
                             const name = self.getTokenText(inc_tokens[j]);
                             if (self.defines.fetchRemove(name)) |entry| {
                                 self.alloc.free(entry.key);
@@ -374,7 +392,7 @@ pub const Preprocessor = struct {
                 },
                 .pp_ifdef => {
                     j += 1;
-                    if (j < inc_tokens.len and inc_tokens[j].tag == .identifier) {
+                    if (j < inc_tokens.len and isMacroNameTag(inc_tokens[j].tag)) {
                         const name = self.getTokenText(inc_tokens[j]);
                         const defined = self.defines.contains(name);
                         try self.if_stack.append(self.alloc, .{
@@ -387,7 +405,7 @@ pub const Preprocessor = struct {
                 },
                 .pp_ifndef => {
                     j += 1;
-                    if (j < inc_tokens.len and inc_tokens[j].tag == .identifier) {
+                    if (j < inc_tokens.len and isMacroNameTag(inc_tokens[j].tag)) {
                         const name = self.getTokenText(inc_tokens[j]);
                         const defined = self.defines.contains(name);
                         try self.if_stack.append(self.alloc, .{
@@ -478,7 +496,11 @@ pub const Preprocessor = struct {
                     j += 1;
                 },
                 else => {
-                    if (self.isActive()) {
+                    // Keywords can be macro use sites; see the main loop's
+                    // else arm for the rationale and the cost gate.
+                    if (self.has_keyword_macros and isMacroNameTag(tok.tag) and self.isActive()) {
+                        try self.expandMacro(inc_tokens, &j, tok);
+                    } else if (self.isActive()) {
                         try self.output.append(self.alloc, tok);
                     }
                     j += 1;
@@ -653,7 +675,8 @@ pub const Preprocessor = struct {
         if (index.* >= tokens.len) return error.PreprocessFailed;
 
         const name_tok = tokens[index.*];
-        if (name_tok.tag != .identifier) return error.PreprocessFailed;
+        if (!isMacroNameTag(name_tok.tag)) return error.PreprocessFailed;
+        if (name_tok.tag != .identifier) self.has_keyword_macros = true;
 
         const name = try self.alloc.dupe(u8, self.getTokenText(name_tok));
         index.* += 1;
@@ -970,7 +993,9 @@ pub const Preprocessor = struct {
         var idx: usize = 0;
         while (idx < tokens.len) {
             const tok = tokens[idx];
-            if (tok.tag == .identifier) {
+            if (tok.tag == .identifier or
+                (self.has_keyword_macros and isMacroNameTag(tok.tag)))
+            {
                 try self.expandMacro(tokens, &idx, tok);
             } else {
                 try self.output.append(self.alloc, tok);
@@ -1234,7 +1259,7 @@ pub const Preprocessor = struct {
                 .pp_undef => {
                     if (self.isActive()) {
                         i += 1; // skip pp_undef
-                        if (i < tokens.len and tokens[i].tag == .identifier) {
+                        if (i < tokens.len and isMacroNameTag(tokens[i].tag)) {
                             const name = self.getTokenText(tokens[i]);
                             if (self.defines.fetchRemove(name)) |entry| {
                                 self.alloc.free(entry.key);
@@ -1254,7 +1279,7 @@ pub const Preprocessor = struct {
                 },
                 .pp_ifdef => {
                     i += 1; // skip pp_ifdef
-                    if (i < tokens.len and tokens[i].tag == .identifier) {
+                    if (i < tokens.len and isMacroNameTag(tokens[i].tag)) {
                         const name = self.getTokenText(tokens[i]);
                         const defined = self.defines.contains(name);
                         try self.if_stack.append(self.alloc, .{
@@ -1273,7 +1298,7 @@ pub const Preprocessor = struct {
                 },
                 .pp_ifndef => {
                     i += 1; // skip pp_ifndef
-                    if (i < tokens.len and tokens[i].tag == .identifier) {
+                    if (i < tokens.len and isMacroNameTag(tokens[i].tag)) {
                         const name = self.getTokenText(tokens[i]);
                         const defined = self.defines.contains(name);
                         try self.if_stack.append(self.alloc, .{
@@ -1444,10 +1469,18 @@ pub const Preprocessor = struct {
                     i += 1;
                 },
                 else => {
-                    if (self.isActive()) {
-                        try self.output.append(self.alloc, tok);
+                    // A keyword token can be a macro use site
+                    // (`#define texture2D texture`): route it through
+                    // expansion only when such a macro exists, so the common
+                    // no-keyword-macro compile pays nothing here.
+                    if (self.has_keyword_macros and isMacroNameTag(tok.tag) and self.isActive()) {
+                        try self.expandMacro(tokens, &i, tok);
+                    } else {
+                        if (self.isActive()) {
+                            try self.output.append(self.alloc, tok);
+                        }
+                        i += 1;
                     }
-                    i += 1;
                 },
             }
         }
@@ -1732,7 +1765,7 @@ const ExpressionEvaluator = struct {
                         if (next.tag == .l_paren) {
                             self.pos += 1;
                             if (self.peek()) |ident| {
-                                if (ident.tag == .identifier) {
+                                if (isMacroNameTag(ident.tag)) {
                                     const macro_name = self.preprocessor.getTokenText(ident);
                                     self.pos += 1;
                                     if (self.peek()) |close| {
@@ -1743,7 +1776,7 @@ const ExpressionEvaluator = struct {
                                     }
                                 }
                             }
-                        } else if (next.tag == .identifier) {
+                        } else if (isMacroNameTag(next.tag)) {
                             const macro_name = self.preprocessor.getTokenText(next);
                             self.pos += 1;
                             return if (self.preprocessor.defines.contains(macro_name)) 1 else 0;
@@ -1857,6 +1890,88 @@ test "expand function-like macro" {
         }
     }
     try std.testing.expect(found_plus);
+}
+
+// A macro may be named after a GLSL keyword (a built-in function name such as
+// `texture2D` lexes as a keyword token, not an identifier). Real-world shaders
+// do this (ghostty's shadertoy prefix: `#define texture2D texture`), and
+// glslang accepts it: the C/GLSL preprocessor treats any identifier-shaped
+// token as a macro name. Found by the wintty shader gallery corpus, where the
+// keyword-named define made the NEXT define silently vanish (the pipeline's
+// preprocessor-error fallback re-fed the raw source, so `speed` in
+// `#define speed 0.1` surfaced as UndeclaredIdentifier far from the cause).
+test "keyword-named object-like macro defines and expands" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define texture2D texture\n#define speed 0.1\nfloat x = speed;";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    // `speed` must have expanded to 0.1 (tagged double_literal by the lexer),
+    // proving BOTH defines registered despite the first being named after a
+    // keyword.
+    var found_float = false;
+    for (result) |tok| {
+        const text = pp.getTokenText(tok);
+        if (std.mem.eql(u8, text, "0.1")) {
+            found_float = true;
+        }
+    }
+    try std.testing.expect(found_float);
+}
+
+test "ifdef on keyword-named macro" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define texture2D texture\n#ifdef texture2D\nint x;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    var found_x = false;
+    for (result) |tok| {
+        if (tok.tag == .identifier) {
+            const text = pp.getTokenText(tok);
+            if (std.mem.eql(u8, text, "x")) {
+                found_x = true;
+            }
+        }
+    }
+    try std.testing.expect(found_x);
+}
+
+test "undef keyword-named macro" {
+    const alloc = std.testing.allocator;
+    var pp = Preprocessor.init(alloc);
+    defer pp.deinit();
+
+    const source = "#define texture2D texture\n#undef texture2D\n#ifdef texture2D\nint x;\n#else\nint y;\n#endif";
+    const tokens = try lexer.tokenize(alloc, source);
+    defer alloc.free(tokens);
+
+    const result = try pp.process(source, tokens);
+    defer alloc.free(result);
+
+    var found_x = false;
+    var found_y = false;
+    for (result) |tok| {
+        if (tok.tag == .identifier) {
+            const text = pp.getTokenText(tok);
+            if (std.mem.eql(u8, text, "x")) found_x = true;
+            if (std.mem.eql(u8, text, "y")) found_y = true;
+        }
+    }
+    try std.testing.expect(!found_x);
+    try std.testing.expect(found_y);
 }
 
 test "ifdef when defined" {

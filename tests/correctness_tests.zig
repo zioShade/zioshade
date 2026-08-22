@@ -2700,3 +2700,117 @@ test "frontend: vec/mat const globals via a function keep their initializers" {
     try std.testing.expect(spirvPrivateVarHasInitializer(spv));
     try spirvValOrSkip(spv);
 }
+
+// A user-defined function that shadows a GLSL builtin must win overload
+// resolution at the CALL SITE: ghostty community shaders (sahaj-b's cursor
+// set, bundled in the wintty gallery) define `vec2 normalize(vec2, float)`.
+// Keying call lowering on isGLSLBuiltin(name) alone lowered the user call as
+// GLSL.std.450 Normalize with BOTH arguments — a malformed 2-operand OpExtInst
+// that spirv-val rejects ("expected no more operands after 6 words") — so the
+// shader failed at DXC on the Windows box while the local compile gate (which
+// only checks zioshade exit codes) called it PASS.
+test "frontend: user function shadowing a builtin lowers as a call, not a malformed ExtInst" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 430
+        \\uniform vec3 iResolution;
+        \\layout(location = 0) out vec4 _fragColor;
+        \\vec2 normalize(vec2 value, float isPosition) {
+        \\    return (value * 2.0 - (iResolution.xy * isPosition)) / iResolution.y;
+        \\}
+        \\void mainImage(out vec4 fragColor, in vec2 fragCoord) {
+        \\    vec2 vu = normalize(fragCoord, 1.0);
+        \\    fragColor = vec4(vu, 0.0, 1.0);
+        \\}
+        \\void main() { mainImage(_fragColor, gl_FragCoord.xy); }
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // Walk the instruction stream; any GLSL.std.450 Normalize (instr 69) must
+    // carry exactly ONE operand (word count 6), and the walk must stay in
+    // bounds with self-consistent word counts.
+    var i: usize = 5; // skip header
+    var normalize_uses: usize = 0;
+    while (i < spv.len) : (i += 0) {
+        const word = spv[i];
+        const op: u16 = @intCast(word & 0xFFFF);
+        const wc: u16 = @intCast(word >> 16);
+        try std.testing.expect(wc >= 1);
+        try std.testing.expect(i + wc <= spv.len);
+        if (op == 12 and spv[i + 4] == 69) { // OpExtInst, GLSL.std.450 Normalize
+            normalize_uses += 1;
+            try std.testing.expectEqual(@as(u16, 6), wc);
+        }
+        i += wc;
+    }
+    // The user's shadowing definition means the builtin Normalize is never used.
+    try std.testing.expectEqual(@as(usize, 0), normalize_uses);
+}
+
+// Regression: a global passed as an INOUT parameter must receive the callee's
+// write. The copy-through-temporary for non-Function-storage args used a
+// cached copy-in store; emitStore's store-to-load forwarding then made the
+// copy-back load return the PRE-call value, so `bump(g)` left g unchanged
+// (silent-wrong). Found by review of the gallery-corpus fixes.
+test "frontend: inout global arg receives the callee's write" {
+    const alloc = std.testing.allocator;
+    const spv = try zioshade.compileToSPIRV(alloc,
+        \\#version 430
+        \\out vec4 _f;
+        \\int g = 41;
+        \\void bump(inout int x) { x = x + 1; }
+        \\void main() {
+        \\    bump(g);
+        \\    _f = vec4(float(g), 0.0, 0.0, 1.0);
+        \\}
+    , .{ .stage = .fragment });
+    defer alloc.free(spv);
+
+    // The callee's increment must reach the OUTPUT: find the OpIAdd the callee
+    // produced, then the int->float conversion of ITS result, then the store to
+    // the output variable using that converted value. (The value is computed,
+    // never materialized as a constant 42, so a constant scan asserts nothing.)
+    var i: usize = 5;
+    var iadd_result: u32 = 0;
+    iadd_result = 0;
+    while (i < spv.len) : (i += 0) {
+        const word = spv[i];
+        const op: u16 = @intCast(word & 0xFFFF);
+        const wc: u16 = @intCast(word >> 16);
+        if (wc < 1) break;
+        if (op == 128 and wc >= 5) iadd_result = spv[i + 2]; // OpIAdd
+        i += wc;
+    }
+    try std.testing.expect(iadd_result != 0);
+
+    // ConvertSToF (opcode 111) of the IAdd result.
+    var conv_result: u32 = 0;
+    i = 5;
+    while (i < spv.len) : (i += 0) {
+        const word = spv[i];
+        const op: u16 = @intCast(word & 0xFFFF);
+        const wc: u16 = @intCast(word >> 16);
+        if (wc < 1) break;
+        if (op == 111 and spv[i + 3] == iadd_result) conv_result = spv[i + 2];
+        i += wc;
+    }
+    try std.testing.expect(conv_result != 0);
+
+    // The output store's composite must use the converted value.
+    var used_in_composite = false;
+    i = 5;
+    while (i < spv.len) : (i += 0) {
+        const word = spv[i];
+        const op: u16 = @intCast(word & 0xFFFF);
+        const wc: u16 = @intCast(word >> 16);
+        if (wc < 1) break;
+        if (op == 80) { // OpCompositeConstruct
+            var wi: usize = i + 2;
+            while (wi < i + wc) : (wi += 1) {
+                if (spv[wi] == conv_result) used_in_composite = true;
+            }
+        }
+        i += wc;
+    }
+    try std.testing.expect(used_in_composite);
+}

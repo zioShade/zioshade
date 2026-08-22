@@ -18,7 +18,11 @@
 param(
   [Parameter(Mandatory=$true)][string]$Dir,
   [string]$Dxc = "dxc.exe",
-  [string]$Warp = ".\warp_render.exe"
+  [string]$Warp = ".\warp_render.exe",
+  # Gallery mode: render each single-shader .hlsl in -Dir through the
+  # shadertoy contract (Globals b1 + iChannel0 t0/s0) and write <name>.ppm.
+  # Used by the wintty shader-gallery verification (tools/gallery in wintty).
+  [switch]$Gallery
 )
 
 # SilentlyContinue (not Stop): warp_render writes "shader needs resources? -> skip" to
@@ -113,6 +117,31 @@ $writes
 
 $match = 0; $differ = 0; $skip = 0
 $differList = @()
+
+if ($Gallery) {
+  # Each <name>.hlsl is a complete zioshade-emitted pixel shader (entry `main`,
+  # SV_Position only, shadertoy resources b1/t0/s0). Compile, render once,
+  # write <name>.ppm. A DXIL compile failure or a render/setup failure is a
+  # FAIL here (not a skip): the gallery ships these shaders, so a shader that
+  # cannot render is a broken gallery entry, full stop.
+  $gPass = 0; $gFail = 0; $gFailList = @()
+  Get-ChildItem -Path $Dir -Filter "*.hlsl" | Where-Object { $_.Name -ne "fullscreen_vs.hlsl" } | ForEach-Object {
+    $name = $_.Name -replace '\.hlsl$',''
+    $cso = Join-Path $Dir "$name.cso"
+    & $Dxc -T ps_6_0 -E main -Wno-ignored-attributes $_.FullName -Fo $cso 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Host "FAIL dxc $name"; $gFail++; $gFailList += $name; return }
+    $ppm = Join-Path $Dir "$name.ppm"
+    & $Warp --gallery $vsCso $cso $ppm 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0) { Write-Host "FAIL warp-$LASTEXITCODE $name"; $gFail++; $gFailList += $name; return }
+    Write-Host "PASS $name"
+    $gPass++
+  }
+  Write-Host ""
+  Write-Host "GALLERY PASS = $gPass"
+  Write-Host "GALLERY FAIL = $gFail"
+  if ($gFail -gt 0) { Write-Host "failed: $($gFailList -join ', ')"; exit 1 }
+  exit 0
+}
 
 Get-ChildItem -Path $Dir -Filter "*.zs.hlsl" | ForEach-Object {
   $name = $_.Name -replace '\.zs\.hlsl$',''
