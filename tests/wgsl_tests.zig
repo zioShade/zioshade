@@ -9572,17 +9572,16 @@ test "WGSL: loop nested in a switch case body emits and naga-validates" {
         \\               OpFunctionEnd
     );
     defer alloc.free(spv);
-    // PINS THE CURRENT honest error: the case-body replay cannot construct
-    // loops (#wgsl-loop-in-switch-case). FLIP THIS when the region-walker
-    // increment lands: assert emission ("switch", "loop {" inside it) +
-    // nagaValidateOrSkip(wgsl, "loop-in-switch-case"). The happy-path body
-    // is kept above so the flip is a one-hunk change.
-    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
-        alloc.free(ok);
-        return error.TestUnexpectedSuccess;
-    } else |e| {
-        try std.testing.expectEqual(error.UnsupportedLoopInSwitchCase, e);
-    }
+    // FLIPPED by the #wgsl-region-mode increment: the case-body walk dispatches
+    // a branch to a loop header into the real walker, SHARING the WalkCtx.
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "switch");
+    try assertContains(wgsl, "loop {");
+    const sw_i = std.mem.indexOf(u8, wgsl, "switch").?;
+    const loop_i = std.mem.indexOf(u8, wgsl, "loop {").?;
+    try std.testing.expect(loop_i > sw_i);
+    try nagaValidateOrSkip(wgsl, "loop-in-switch-case");
 }
 
 // #wgsl-replay-twin-drift: BitFieldSExtract had no arm in emitSimpleInstruction,
@@ -9701,4 +9700,28 @@ test "WGSL: case-body branch to an internal block refuses (no silent truncation)
         const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
         try std.testing.expect(std.mem.indexOf(u8, detail, "internal") != null);
     }
+}
+
+// #wgsl-loop-merge-phi: a phi at a LOOP's merge block (e.g. the "did we break"
+// flag read after the loop) was never DECLARED -- the sel-phi machinery only
+// materializes under a SelectionMerge, and a loop exit has none. Reads after
+// the loop referenced an unbound identifier (naga "no definition in scope");
+// pre-existing on main, surfaced at scale by the region-mode work (gf_052's
+// v56) and by the ungated-dir sweep (loop_merge_phi_top, dowhile_merge_phi,
+// latch_phi_switch_continue all fail this way on main).
+test "WGSL: loop-merge phi is declared and naga-validates (loop_merge_phi_top)" {
+    const spv_bytes = @embedFile("fixtures/loop_merge_phi_top.spv");
+    const spv = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(spv);
+    @memcpy(std.mem.sliceAsBytes(spv), spv_bytes);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // VALUE PINS (review finding 4: naga validity alone cannot see a dropped
+    // assignment): the merge phi v20 must be ASSIGNED on BOTH exit paths --
+    // the header-test exit carries v15 (counter+100), the mid-loop break
+    // carries v17 (counter*7). Without either, the post-loop read sees the
+    // zero-init forever (valid WGSL, wrong value).
+    try assertContains(wgsl, "v20 = v15; break;");
+    try assertContains(wgsl, "v20 = v17; break;");
+    try nagaValidateOrSkip(wgsl, "loop-merge-phi-top");
 }
