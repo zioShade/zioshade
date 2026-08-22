@@ -9716,5 +9716,12 @@ test "WGSL: loop-merge phi is declared and naga-validates (loop_merge_phi_top)" 
     @memcpy(std.mem.sliceAsBytes(spv), spv_bytes);
     const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
+    // VALUE PINS (review finding 4: naga validity alone cannot see a dropped
+    // assignment): the merge phi v20 must be ASSIGNED on BOTH exit paths --
+    // the header-test exit carries v15 (counter+100), the mid-loop break
+    // carries v17 (counter*7). Without either, the post-loop read sees the
+    // zero-init forever (valid WGSL, wrong value).
+    try assertContains(wgsl, "v20 = v15; break;");
+    try assertContains(wgsl, "v20 = v17; break;");
     try nagaValidateOrSkip(wgsl, "loop-merge-phi-top");
 }

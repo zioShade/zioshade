@@ -6687,8 +6687,14 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
                 if (be < line.len + 1 and be + 1 < line.len and line[be] == ' ' and line[be + 1] == '=' and
                     (be + 2 >= line.len or line[be + 2] != '='))
                 {
-                    const base = line[bs .. std.mem.indexOfScalarPos(u8, line, bs, '.') orelse
-                        (std.mem.indexOfScalarPos(u8, line, bs, '[') orelse be)];
+                    // The identifier scan ends at `be` (identifiers cannot contain
+                    // '.'/'['), so the base is simply line[bs..be]. An earlier
+                    // version truncated at the first '.'/'[' to END OF LINE --
+                    // which for `{ v39 = 0.0; v40 = v23; break; }` cut at the FLOAT
+                    // LITERAL's dot and registered the base "v39 = 0": the var was
+                    // demoted to `let` and the mid-line assignment rejected (hard
+                    // naga-invalid for any float phi -- found in review).
+                    const base = line[bs..be];
                     if (base.len > 0) {
                         const name_copy = try arena.dupe(u8, base);
                         try mutable_names.put(name_copy, {});
@@ -7879,13 +7885,45 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         // loud rather than emit nothing (the silent-truncation class).
         if (range) |r| {
             if (r.stop_label) |sl| {
+                var cur_block_label: u32 = 0;
+                {
+                    var li2: usize = i;
+                    while (li2 > 0) : (li2 -= 1) {
+                        if (module.instructions[li2].op == .Label and module.instructions[li2].words.len > 1) {
+                            cur_block_label = module.instructions[li2].words[1];
+                            break;
+                        }
+                    }
+                }
+                // words[2] (the TRUE target) must be checked too -- a merge-flag
+                // BranchConditional (`if (flag) goto switch-merge else ...`)
+                // exits through words[2]; missing it dropped the break and the
+                // phi assignment (review finding 1b).
                 const branch_to_sl = (inst.op == .Branch or inst.op == .BranchConditional) and inst.words.len > 1 and
-                    (inst.words[1] == sl or (inst.op == .BranchConditional and inst.words.len > 3 and inst.words[3] == sl));
+                    (inst.words[1] == sl or
+                        (inst.op == .BranchConditional and ((inst.words.len > 3 and inst.words[3] == sl) or
+                            (inst.words.len > 2 and inst.words[2] == sl))));
                 const top_level = if_depth == 0 and loop_stack.items.len == 0;
                 if (inst.op == .Label and inst.words.len > 1 and inst.words[1] == sl and top_level) break;
                 if (branch_to_sl) {
                     if (top_level) {
-                        if (inst.op == .Branch) break; // implicit case end
+                        if (inst.op == .Branch) {
+                            // The implicit case end bypasses the .Branch sel-phi
+                            // update site, so a switch-merge phi with THIS pred
+                            // would keep its init: emit the assignments before
+                            // the implicit break (review finding 1b).
+                            var spi_x = ctx.sel_phis.iterator();
+                            while (spi_x.next()) |ent| {
+                                for (ent.value_ptr.*.items) |sp| {
+                                    if (sp.pred_label != cur_block_label) continue;
+                                    const rn_x = names.get(sp.result_id) orelse continue;
+                                    const vn_x = names.get(sp.value_id) orelse continue;
+                                    try writeInd(w, indent);
+                                    try w.print("{s} = {s};\n", .{ rn_x, vn_x });
+                                }
+                            }
+                            break;
+                        }
                         // A top-level BranchConditional opens a construct the
                         // walker handles natively; fall through.
                     } else {
@@ -8453,6 +8491,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             var seen_lmp = std.AutoHashMap(u32, void).init(arena);
                             for (phi_list.items) |sp| {
                                 if (seen_lmp.contains(sp.result_id)) continue;
+                                // A merge block claimed by BOTH a SelectionMerge and
+                                // this loop (canonical `if (c) { while ... }` with
+                                // nothing after the loop in the arm: the selection's
+                                // merge == the loop's merge) was declared TWICE --
+                                // the inner var shadows, the exit assignments write
+                                // the shadow, the post-if read sees the outer init.
+                                // The SelectionMerge declaration is in scope for the
+                                // exit assignments, so suppress here.
+                                if (ctx.declared_merge_phis.contains(sp.result_id)) continue;
                                 seen_lmp.put(sp.result_id, {}) catch {};
                                 var phi_result = names.get(sp.result_id);
                                 if (phi_result == null) {
@@ -8997,8 +9044,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         // direct / pure-trampoline break; this catches the store-then-branch
                         // case (mandelbrot-loop on unoptimized SPIR-V). break skips continuing{}.
                         if (loop_merge_label != null and target == loop_merge_label.?) {
+                            // #wgsl-loop-merge-phi: a side-effecting break block's
+                            // OpBranch to the loop merge must assign the merge phis
+                            // BEFORE breaking (loop_break_flag_valid: the flag/value
+                            // carriers stayed at their zero-init -- valid WGSL, wrong
+                            // values). Pred = the current (breaking) block.
+                            const lmp_side = try loopExitPhiAssignments(module, names, ctx, i, func_idx, loop_merge_label.?, arena, null);
                             try writeInd(w, indent);
-                            try w.writeAll("break;\n");
+                            if (lmp_side.len > 0) {
+                                try w.print("{{ {s}break; }}\n", .{lmp_side});
+                            } else {
+                                try w.writeAll("break;\n");
+                            }
                             continue;
                         }
                     }

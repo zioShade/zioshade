@@ -156,14 +156,19 @@ def wgsl_nested_switch_breaks(lines):
     """Switch-breaks that WGSL must emit explicitly. Ported from #582.
 
     A branch to a switch's merge needs an explicit `break;` only when it is an
-    early exit from inside a nested selection arm. Two other kinds of block
+    early exit from inside a nested selection arm. Three other kinds of block
     branch there and need nothing: a case label itself (WGSL cases do not fall
-    through, so the break is implicit) and a nested selection's merge block,
-    which is the natural end of the case body. Without the second exclusion
-    graphicsfuzz_037 reported two phantom drops.
+    through, so the break is implicit), a nested selection's merge block,
+    which is the natural end of the case body, and a LOOP's merge block — the
+    case body that ends with a loop branches to the switch merge from the
+    loop's merge block (the region-dispatch shape: `case 0: { loop {...} }`
+    with a trailing switch-break in the source). Without the second exclusion
+    graphicsfuzz_037 reported two phantom drops; without the third,
+    spirv-cross's loop_in_case.frag reported one the day WGSL started
+    EMITTING loops in case bodies (#wgsl-region-mode).
     """
     breaks = 0
-    arm_labels, merge_labels = set(), set()
+    arm_labels, merge_labels, loop_merge_labels = set(), set(), set()
     for ln in lines:
         bc = BRANCH_COND_RE.match(ln)
         if bc:
@@ -172,6 +177,9 @@ def wgsl_nested_switch_breaks(lines):
         sm = SEL_MERGE_RE.match(ln)
         if sm:
             merge_labels.add(sm.group(1))
+        lm2 = LOOP_MERGE_RE.match(ln)
+        if lm2:
+            loop_merge_labels.add(lm2.group(1))
 
     for i, ln in enumerate(lines):
         m = SWITCH_RE.match(ln)
@@ -204,6 +212,7 @@ def wgsl_nested_switch_breaks(lines):
                 and cur not in case_labels
                 and cur in arm_labels
                 and cur not in merge_labels
+                and cur not in loop_merge_labels
             ):
                 breaks += 1
     return breaks
