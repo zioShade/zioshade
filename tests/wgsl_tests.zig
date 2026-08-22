@@ -9701,3 +9701,20 @@ test "WGSL: case-body branch to an internal block refuses (no silent truncation)
         try std.testing.expect(std.mem.indexOf(u8, detail, "internal") != null);
     }
 }
+
+// #wgsl-loop-merge-phi: a phi at a LOOP's merge block (e.g. the "did we break"
+// flag read after the loop) was never DECLARED -- the sel-phi machinery only
+// materializes under a SelectionMerge, and a loop exit has none. Reads after
+// the loop referenced an unbound identifier (naga "no definition in scope");
+// pre-existing on main, surfaced at scale by the region-mode work (gf_052's
+// v56) and by the ungated-dir sweep (loop_merge_phi_top, dowhile_merge_phi,
+// latch_phi_switch_continue all fail this way on main).
+test "WGSL: loop-merge phi is declared and naga-validates (loop_merge_phi_top)" {
+    const spv_bytes = @embedFile("fixtures/loop_merge_phi_top.spv");
+    const spv = try alloc.alloc(u32, spv_bytes.len / 4);
+    defer alloc.free(spv);
+    @memcpy(std.mem.sliceAsBytes(spv), spv_bytes);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "loop-merge-phi-top");
+}

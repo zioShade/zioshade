@@ -2010,6 +2010,43 @@ fn labelIsLoopHeader(module: *const ParsedModule, label: u32) ?usize {
     return null;
 }
 
+/// #wgsl-loop-merge-phi: assignments for a LOOP-EXIT BranchConditional to the
+/// merge block -- the merge phis' values on this path. Emitted inside the
+/// inverted-test break: `if (!(cond)) { vN = X; break; }`. Empty when this
+/// exit has no merge phis (the common case -- returns the input break text).
+fn loopExitPhiAssignments(
+    module: *const ParsedModule,
+    names: *std.AutoHashMap(u32, []const u8),
+    ctx: *WalkCtx,
+    idx: usize,
+    func_idx: usize,
+    merge_label: u32,
+    arena: std.mem.Allocator,
+    eff_pred: ?u32,
+) ![]const u8 {
+    const phi_list = ctx.sel_phis.get(merge_label) orelse return "";
+    // Current predecessor: the Label of the block containing the branch at idx.
+    var cur_pred: ?u32 = null;
+    var li: usize = if (idx > 0) idx - 1 else 0;
+    while (li > func_idx) : (li -= 1) {
+        if (module.instructions[li].op == .Label and module.instructions[li].words.len > 1) {
+            cur_pred = module.instructions[li].words[1];
+            break;
+        }
+    }
+    // A trampoline-folded break (cond -> pure block -> merge) must use the
+    // TRAMPOLINE's label as the predecessor -- that is the phi's incoming pred.
+    const cp = eff_pred orelse (cur_pred orelse return "");
+    var buf = std.ArrayList(u8).empty;
+    for (phi_list.items) |sp| {
+        if (sp.pred_label != cp) continue;
+        const rn = names.get(sp.result_id) orelse continue;
+        const vn = names.get(sp.value_id) orelse continue;
+        try buf.print(arena, "{s} = {s}; ", .{ rn, vn });
+    }
+    return buf.items;
+}
+
 fn emitSwitchArmTerminator(
     module: *const ParsedModule,
     idx: usize,
@@ -6618,6 +6655,48 @@ fn letVarOptimization(alloc: std.mem.Allocator, wgsl: []const u8) ![]const u8 {
             }
         }
 
+        // #wgsl-loop-merge-phi: assignments INSIDE a braced statement on the same
+        // line -- the loop-exit idiom this backend emits is
+        // `if (!(cond)) { vN = X; break; }`, which the line-initial pattern above
+        // cannot see (the phi var then looked immutable, was demoted to `let`,
+        // and the mid-line assignment became an invalid left-hand side).
+        // Narrow scan: after every '{ ' or '; ' (statement starts inside a
+        // line -- the loop-exit idiom packs several: `{ v39 = 0.0; v40 = v23;
+        // break; }`) take an identifier followed by ' =' and register its base
+        // (up to first '.'/'[').
+        {
+            var bp: usize = 0;
+            while (true) {
+                const b1 = if (std.mem.indexOfPos(u8, line, bp, "{ ")) |x| x else line.len;
+                const b2 = if (std.mem.indexOfPos(u8, line, bp, "; ")) |x| x else line.len;
+                if (b1 == line.len and b2 == line.len) break;
+                const brace_idx = @min(b1, b2);
+                bp = brace_idx + 2;
+                const bs = brace_idx + 2;
+                if (bs >= line.len) break;
+                const c0 = line[bs];
+                const word0 = (c0 >= 'a' and c0 <= 'z') or (c0 >= 'A' and c0 <= 'Z') or c0 == '_';
+                if (!word0) continue;
+                var be = bs;
+                while (be < line.len) {
+                    const c = line[be];
+                    const word = (c >= 'a' and c <= 'z') or (c >= 'A' and c <= 'Z') or (c >= '0' and c <= '9') or c == '_';
+                    if (!word) break;
+                    be += 1;
+                }
+                if (be < line.len + 1 and be + 1 < line.len and line[be] == ' ' and line[be + 1] == '=' and
+                    (be + 2 >= line.len or line[be + 2] != '='))
+                {
+                    const base = line[bs .. std.mem.indexOfScalarPos(u8, line, bs, '.') orelse
+                        (std.mem.indexOfScalarPos(u8, line, bs, '[') orelse be)];
+                    if (base.len > 0) {
+                        const name_copy = try arena.dupe(u8, base);
+                        try mutable_names.put(name_copy, {});
+                    }
+                }
+            }
+        }
+
         line_start = le + 1;
     }
 
@@ -6702,6 +6781,13 @@ const WalkCtx = struct {
     /// expression form; a fresh-empty set in a region would emit a `let` for an
     /// id whose name is an access expression (expr-as-identifier, naga-invalid).
     dead_extracts: std.AutoHashMap(u32, void),
+    /// #wgsl-loop-merge-phi: merge-block phis the LoopMerge arm pre-declared
+    /// above the loop. The other phi-declaration sites (the SelectionMerge
+    /// pre-declaration, the .Phi arm's !already_declared path) must SKIP these
+    /// -- a second declaration shadows the outer var, the exit assignments then
+    /// mutate the shadow, and the post-loop read sees the zero init forever
+    /// (valid WGSL, wrong values).
+    declared_merge_phis: std.AutoHashMap(u32, void),
 };
 
 /// Replace pre-rename extract names inside CACHED expression strings -- the
@@ -6802,9 +6888,34 @@ fn fixStaleExtractNames(names: *std.AutoHashMap(u32, []const u8), ctx: *WalkCtx,
     }
 }
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx) !void {
-    _ = decorations;
-    _ = wrapped_uniform_arrays;    // #post-loop-header-use: `w` below is a one-instruction pending buffer over
+/// #wgsl-region-mode: an optional region-scoped entry into emitBody for code
+/// the .Switch case-body walks cannot replay (a loop nested in a case). The
+/// recursive call enters at `start_idx` (just past the region's opening Label),
+/// SHARES the parent's WalkCtx (preamble passes are prepass-guarded and do not
+/// re-run -- they are one-shot name mutations, see WalkCtx), stops at
+/// `stop_label` (the switch merge: a top-level terminator branching there is
+/// the implicit case end and emits nothing), and inherits the enclosing loop
+/// context so `continue;` semantics survive. Null at every existing call site.
+const RangeCtx = struct {
+    start_idx: usize,
+    stop_label: ?u32,
+    indent: u32,
+    loop_continue: ?u32 = null,
+    loop_merge: ?u32 = null,
+    depth: u32 = 0,
+};
+
+/// Depth cap for region-mode recursion (a case region containing a switch
+/// whose case contains a region, ...). The MSL emitBlock x emitWhileLoopMSL
+/// mutual recursion SIGSEGV'd on graphicsfuzz_022/082 before its guard; a
+/// stack overflow on valid input is a mandate violation, so refuse loudly.
+const max_region_depth: u32 = 256;
+
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx, range: ?RangeCtx) !void {
+    if (range) |r| {
+        if (r.depth >= max_region_depth) return error.UnsupportedRegionDepth;
+    }
+    // #post-loop-header-use: `w` below is a one-instruction pending buffer over
     // the real writer (`w_out`). The emit loop flushes it at the top of every
     // instruction so a hoisted loop value's `let` declaration can be rewritten
     // into an assignment to the `var` declared above the loop BEFORE it is
@@ -6836,6 +6947,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         .hoisted_ids = std.AutoHashMap(u32, void).init(arena),
         .loop_hoists = std.AutoHashMap(usize, std.ArrayList(u32)).init(arena),
         .dead_extracts = std.AutoHashMap(u32, void).init(arena),
+        .declared_merge_phis = std.AutoHashMap(u32, void).init(arena),
     };
     const ctx: *WalkCtx = if (walk) |wp| wp else &ctx_storage;
 
@@ -7877,7 +7989,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     }
                                     if (use_init and init_val_name != null) {
                                         try writeInd(w, indent);
-                                        try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val_name.? });
+                                        if (!ctx.declared_merge_phis.contains(sp.result_id)) {
+                                            try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val_name.? });
+                                        }
                                     } else {
                                         try writeInd(w, indent);
                                         try w.print("var {s}: {s};\n", .{ phi_result.?, phi_type });
@@ -8324,6 +8438,43 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             try w_out.print("var {s}: {s};\n", .{ hname, hty });
                         }
                     }
+                    // #wgsl-loop-merge-phi: declare the merge block's phis before the
+                    // loop. The sel-phi machinery only materializes under a
+                    // SelectionMerge, and a loop exit has none -- so a phi at the
+                    // loop's merge (e.g. the "did we break" flag read after the
+                    // loop) was never declared and post-loop reads referenced an
+                    // unbound identifier (naga "no definition in scope"; every pred
+                    // of a loop merge is INSIDE the loop, so the init is a type zero
+                    // -- each path into the merge assigns first: the header/body test
+                    // exits below, the mid-loop break via the .Branch sel-phi updates).
+
+                    if (ctx.sel_phis.get(merge)) |phi_list| {
+                        if (phi_list.items.len > 0) {
+                            var seen_lmp = std.AutoHashMap(u32, void).init(arena);
+                            for (phi_list.items) |sp| {
+                                if (seen_lmp.contains(sp.result_id)) continue;
+                                seen_lmp.put(sp.result_id, {}) catch {};
+                                var phi_result = names.get(sp.result_id);
+                                if (phi_result == null) {
+                                    var nbuf: [64]u8 = undefined;
+                                    const dname = std.fmt.bufPrint(&nbuf, "v{d}", .{sp.result_id}) catch "phi";
+                                    const dcopy = try alloc.dupe(u8, dname);
+                                    try names.put(sp.result_id, dcopy);
+                                    phi_result = dcopy;
+                                }
+                                const pdef = getDef(module, sp.result_id) orelse continue;
+                                if (pdef.words.len < 2) continue;
+                                const pty = wgslType(module, pdef.words[1], names, arena) catch continue;
+                                const pzero = zeroLiteralOfType(module, pdef.words[1], names, alloc) orelse continue;
+                                // REAL writer, bypassing the pending buffer (same as the
+                                // hoist decls above -- the sweep would rewrite this `var`).
+                                try writeInd(w_out, indent);
+                                try w_out.print("var {s}: {s} = {s};\n", .{ phi_result.?, pty, pzero });
+                                alloc.free(pzero);
+                                ctx.declared_merge_phis.put(sp.result_id, {}) catch {};
+                            }
+                        }
+                    }
                     try writeInd(w, indent);
                     try w.writeAll("loop {\n");
                     indent += 1;
@@ -8367,7 +8518,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         var spi = ctx.sel_phis.iterator();
                         while (spi.next()) |entry| {
                             for (entry.value_ptr.*.items) |sp| {
-                                if (sp.result_id == phi_result_id) {
+                                if (sp.result_id == phi_result_id or ctx.declared_merge_phis.contains(phi_result_id)) {
                                     already_declared = true;
                                     break;
                                 }
@@ -8562,8 +8713,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (inlined != null) {
                             ctx.dead_conditions.put(inst.words[1], {}) catch {};
                         }
+                        // #wgsl-loop-merge-phi: the exit path assigns the merge phis
+                        // before breaking (declared above the loop).
+                        const lmp_assigns = try loopExitPhiAssignments(module, names, ctx, i, func_idx, loop_merge_label.?, arena, null);
                         try writeInd(w, indent);
-                        try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
+                        if (lmp_assigns.len > 0) {
+                            try w.print("if (!({s})) {{ {s}break; }}\n", .{ cond_expr, lmp_assigns });
+                        } else {
+                            try w.print("if (!({s})) {{ break; }}\n", .{cond_expr});
+                        }
                         // #selfloop: a self-loop (continue == header) has no `continuing {}`
                         // block (the continue scan finds the header Label BEFORE the
                         // LoopMerge), so the loop-carried phi updates would never emit ->
@@ -8636,8 +8794,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // if (cond) { break; }
                             const inlined2 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
                             if (inlined2 != null) ctx.dead_conditions.put(inst.words[1], {}) catch {};
+                            // #wgsl-loop-merge-phi: a mid-loop break assigns the
+                            // merge phis before breaking (declared above the loop).
+                            const lmp_break = if (loop_merge_label) |lml| try loopExitPhiAssignments(module, names, ctx, i, func_idx, lml, arena, if (true_label == lml) null else true_label) else "";
                             try writeInd(w, indent);
-                            try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
+                            if (lmp_break.len > 0) {
+                                try w.print("if ({s}) {{ {s}break; }}\n", .{ inlined2 orelse condition, lmp_break });
+                            } else {
+                                try w.print("if ({s}) {{ break; }}\n", .{inlined2 orelse condition});
+                            }
                             // #wrap-backedge: when the OTHER arm targets this loop's
                             // header, the fall-through past the break IS the back edge
                             // (a continue block ending in a BranchConditional); the
@@ -8651,7 +8816,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             const inlined3 = inlineConditionExpr(module, names, inst.words[1], arena, 0);
                             if (inlined3 != null) ctx.dead_conditions.put(inst.words[1], {}) catch {};
                             try writeInd(w, indent);
-                            try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
+                            const lmp_assigns2 = try loopExitPhiAssignments(module, names, ctx, i, func_idx, loop_merge_label.?, arena, null);
+                            if (lmp_assigns2.len > 0) {
+                                try w.print("if (!({s})) {{ {s}break; }}\n", .{ inlined3 orelse condition, lmp_assigns2 });
+                            } else {
+                                try w.print("if (!({s})) {{ break; }}\n", .{inlined3 orelse condition});
+                            }
                             // #wrap-backedge: twin of the true_is_break case (the
                             // graphicsfuzz_059 shape: false->merge, true->header).
                             try emitWrapBackedgePhiUpdates(module, names, &phi_updates, &loop_stack, loop_header_label, loop_continue_label, true_label, w, indent);

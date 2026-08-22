@@ -791,8 +791,16 @@ test "WGSL emits else when then-branch nests an if (#wgsl-else-clobber)" {
 // need the construct.)
 const LOOP_IN_SWITCH_SPV = @embedFile("fixtures/loop_in_switch.spv");
 
-test "WGSL honest-errors on a loop nested in a switch case (#wgsl-loop-in-switch-case)" {
-    try std.testing.expectError(error.UnsupportedLoopInSwitchCase, crossWgsl(LOOP_IN_SWITCH_SPV));
+test "WGSL emits a loop nested in a switch case (#wgsl-region-mode)" {
+    // FLIPPED from the honest-error pin by the region-dispatch increment: the
+    // case-body walk hands a loop header to the real walker, sharing the
+    // parent's WalkCtx. Assert emission with the loop INSIDE the switch.
+    const wgsl = try crossWgsl(LOOP_IN_SWITCH_SPV);
+    defer alloc.free(wgsl);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "switch") != null);
+    const sw_i = std.mem.indexOf(u8, wgsl, "switch").?;
+    const loop_i = std.mem.indexOf(u8, wgsl, "loop {").?;
+    try std.testing.expect(loop_i > sw_i);
 }
 
 test "GLSL still emits a loop nested in a switch case (the construct is valid)" {
