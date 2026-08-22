@@ -6679,6 +6679,104 @@ const WalkCtx = struct {
     loop_hoists: std.AutoHashMap(usize, std.ArrayList(u32)),
 };
 
+/// Replace pre-rename extract names inside CACHED expression strings -- the
+/// values of `names` AND `ctx.inline_exprs`. Extracts get renamed at several
+/// points AFTER the preamble (notably the deferred loop-header replay, which
+/// expr-ifies header extracts at replay time with no `let` binding), but
+/// expressions cached over the old name (access-chain exprs, single-use
+/// arithmetic chains) keep referencing it: an identifier that is never bound
+/// (naga "no definition in scope" -- demonstrated on graphicsfuzz_052, where
+/// the cached `v17[v33]` referenced the replay-renamed `.y` extract while the
+/// live build correctly had `v17[v32.y]`). Sweeping both maps against the
+/// extract_old_names -> current-name table keeps every cached string
+/// consistent with the live name state. Word-boundary guarded (v33 must not
+/// match v334).
+fn fixStaleExtractNames(names: *std.AutoHashMap(u32, []const u8), ctx: *WalkCtx, alloc: std.mem.Allocator, arena: std.mem.Allocator) !void {
+    var fixup = std.ArrayList(struct { id: u32, new_val: []const u8, into_inline: bool }).initCapacity(alloc, 32) catch return;
+    // NOTE: no per-item free -- ownership of new_val transfers to the map on
+    // fetchPut (which frees the displaced old value); freeing here would
+    // hand the maps dangling strings (invalid-UTF8 output, caught on gf_052).
+    defer fixup.deinit(alloc);
+    // names values
+    {
+        var it = names.iterator();
+        while (it.next()) |entry| {
+            var updated = entry.value_ptr.*;
+            var owned = false; // intermediate concats are ours; the original belongs to the map (freed by fetchPut)
+            var changed = false;
+            var eon_it = ctx.extract_old_names.iterator();
+            while (eon_it.next()) |eon| {
+                const old_name = eon.value_ptr.*;
+                if (old_name.len < 2) continue;
+                const new_name = names.get(eon.key_ptr.*) orelse continue;
+                if (std.mem.eql(u8, old_name, new_name)) continue;
+                while (std.mem.indexOf(u8, updated, old_name)) |pos| {
+                    const before_ok = pos == 0 or switch (updated[pos - 1]) {
+                        ' ', '(', ',', '[', '+', '-', '*', '/', '=' => true,
+                        else => false,
+                    };
+                    const after_idx = pos + old_name.len;
+                    const after_ok = after_idx >= updated.len or switch (updated[after_idx]) {
+                        ' ', ')', ',', ']', '+', '-', '*', '/', '=', '.', '\t' => true,
+                        else => false,
+                    };
+                    if (before_ok and after_ok) {
+                        const replacement = std.mem.concat(alloc, u8, &[_][]const u8{ updated[0..pos], new_name, updated[after_idx..] }) catch break;
+                        if (owned) alloc.free(updated);
+                        updated = replacement;
+                        owned = true;
+                        changed = true;
+                    } else break;
+                }
+            }
+            if (changed) fixup.append(alloc, .{ .id = entry.key_ptr.*, .new_val = updated, .into_inline = false }) catch {};
+        }
+    }
+    // inline_exprs values
+    {
+        var it = ctx.inline_exprs.iterator();
+        while (it.next()) |entry| {
+            var updated = entry.value_ptr.*;
+            // arena-backed map: arena-allocate replacements (the map values are
+            // arena by convention); displacing a prior sweep value needs no free.
+            var changed = false;
+            var eon_it = ctx.extract_old_names.iterator();
+            while (eon_it.next()) |eon| {
+                const old_name = eon.value_ptr.*;
+                if (old_name.len < 2) continue;
+                const new_name = names.get(eon.key_ptr.*) orelse continue;
+                if (std.mem.eql(u8, old_name, new_name)) continue;
+                while (std.mem.indexOf(u8, updated, old_name)) |pos| {
+                    const before_ok = pos == 0 or switch (updated[pos - 1]) {
+                        ' ', '(', ',', '[', '+', '-', '*', '/', '=' => true,
+                        else => false,
+                    };
+                    const after_idx = pos + old_name.len;
+                    const after_ok = after_idx >= updated.len or switch (updated[after_idx]) {
+                        ' ', ')', ',', ']', '+', '-', '*', '/', '=', '.', '\t' => true,
+                        else => false,
+                    };
+                    if (before_ok and after_ok) {
+                        const replacement = std.mem.concat(arena, u8, &[_][]const u8{ updated[0..pos], new_name, updated[after_idx..] }) catch break;
+
+                        updated = replacement;
+
+                        changed = true;
+                    } else break;
+                }
+            }
+            if (changed) fixup.append(alloc, .{ .id = entry.key_ptr.*, .new_val = updated, .into_inline = true }) catch {};
+        }
+    }
+    for (fixup.items) |f| {
+        if (f.into_inline) {
+            _ = ctx.inline_exprs.fetchPut(f.id, f.new_val) catch {};
+        } else {
+            if (try names.fetchPut(f.id, f.new_val)) |old_entry| alloc.free(old_entry.value);
+        }
+    }
+}
+
 fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx) !void {
     _ = decorations;
     _ = wrapped_uniform_arrays;
@@ -7201,50 +7299,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
         }
     }
 
-    // Fix stale names: replace old extract names with new ones in all name values
-    // This fixes AccessChain/load names that captured the pre-rename extract name (e.g., v11 → gl_GlobalInvocationID.x)
-    {
-        var fixup_names = std.ArrayList(struct { id: u32, new_val: []const u8 }).initCapacity(arena, 32) catch unreachable;
-        var rn_it = names.iterator();
-        while (if (prepass) rn_it.next() else null) |entry| {
-            const id = entry.key_ptr.*;
-            const val = entry.value_ptr.*;
-            var updated = val;
-            var changed_any = false;
-            // Apply all extract renames
-            var eon_it = ctx.extract_old_names.iterator();
-            while (if (prepass) eon_it.next() else null) |eon| {
-                const old_name = eon.value_ptr.*;
-                if (old_name.len < 2) continue;
-                const new_name = names.get(eon.key_ptr.*) orelse continue;
-                if (std.mem.eql(u8, old_name, new_name)) continue; // no change
-                // Replace all occurrences of old_name in val
-                while (std.mem.indexOf(u8, updated, old_name)) |pos| {
-                    // Check word boundaries to avoid partial matches
-                    const before_ok = pos == 0 or switch (updated[pos - 1]) {
-                        ' ', '(', ',', '[', '+', '-', '*', '/', '=' => true,
-                        else => false,
-                    };
-                    const after_idx = pos + old_name.len;
-                    const after_ok = after_idx >= updated.len or switch (updated[after_idx]) {
-                        ' ', ')', ',', ']', '+', '-', '*', '/', '=', '.', '\t' => true,
-                        else => false,
-                    };
-                    if (before_ok and after_ok) {
-                        const replacement = try std.mem.concat(alloc, u8, &[_][]const u8{ updated[0..pos], new_name, updated[after_idx..] });
-                        updated = replacement;
-                        changed_any = true;
-                    } else break; // avoid infinite loop on non-match
-                }
-            }
-            if (changed_any) {
-                fixup_names.append(arena, .{ .id = id, .new_val = updated }) catch {};
-            }
-        }
-        for (fixup_names.items) |fn_item| {
-            if (try names.fetchPut(fn_item.id, fn_item.new_val)) |old| alloc.free(old.value);
-        }
-    }
+    // Fix stale names: replace old extract names with new ones in cached
+    // expression strings (names values; inline_exprs is empty at this point).
+    // Extracted into fixStaleExtractNames so the deferred loop-header replay
+    // can re-run it AFTER its own renames.
+    if (prepass) try fixStaleExtractNames(names, ctx, alloc, arena);
 
     // Pre-scan: identify dead CompositeExtract results that will be absorbed by swizzle optimization
     var dead_extracts = std.AutoHashMap(u32, void).init(arena);
@@ -8176,6 +8235,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             }
                         }
                         defer_start = null;
+                        // The replay renames header extracts AT REPLAY TIME
+                        // (expr-ification, no let binding); cached expressions
+                        // over the old names go stale. Re-sweep. (Found via
+                        // the #wgsl-region-mode work on graphicsfuzz_052: the
+                        // cached `v17[v33]` vs the live `v17[v32.y]`; the
+                        // class is not region-specific -- any loop-header
+                        // extract feeding a cached chain hits it.)
+                        try fixStaleExtractNames(names, ctx, alloc, arena);
                     }
                 }
             },
