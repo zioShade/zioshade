@@ -1,0 +1,166 @@
+{
+  "version": 1,
+  "notes": "The wintty shader gallery. Each entry is a Shadertoy-style GLSL fragment shader (mainImage) that wintty compiles to HLSL via zioshade at runtime. The uniform contract is src/renderer/shaders/shadertoy_prefix.glsl in the repo root. Verify the whole corpus with: just gallery-verify (see tools/gallery in the repo). cursor_warp is excluded pending a zioshade fix (locals assigned inside a conditional block and read after are emitted as undef reads; DXC rejects with \"Instructions should not read uninitialized value\").",
+  "shaders": [
+    {
+      "id": "cursor_tail",
+      "file": "cursor_tail.glsl",
+      "name": "Cursor tail",
+      "description": "A smooth trailing ribbon follows the cursor between cells.",
+      "category": "cursor",
+      "author": "Sahaj Bhatt",
+      "license": "MIT",
+      "source": "https://github.com/sahaj-b/ghostty-cursor-shaders"
+    },
+    {
+      "id": "cursor_sweep",
+      "file": "cursor_sweep.glsl",
+      "name": "Cursor sweep",
+      "description": "A sweeping highlight glides across the cursor row.",
+      "category": "cursor",
+      "author": "Sahaj Bhatt",
+      "license": "MIT",
+      "source": "https://github.com/sahaj-b/ghostty-cursor-shaders"
+    },
+    {
+      "id": "ripple_cursor",
+      "file": "ripple_cursor.glsl",
+      "name": "Cursor ripple",
+      "description": "A water ripple radiates from the cursor when it jumps.",
+      "category": "cursor",
+      "author": "Sahaj Bhatt",
+      "license": "MIT",
+      "source": "https://github.com/sahaj-b/ghostty-cursor-shaders"
+    },
+    {
+      "id": "ripple_rectangle_cursor",
+      "file": "ripple_rectangle_cursor.glsl",
+      "name": "Cursor rectangle ripple",
+      "description": "Ripple variant that keeps the selection rectangle crisp.",
+      "category": "cursor",
+      "author": "Sahaj Bhatt",
+      "license": "MIT",
+      "source": "https://github.com/sahaj-b/ghostty-cursor-shaders"
+    },
+    {
+      "id": "sonic_boom_cursor",
+      "file": "sonic_boom_cursor.glsl",
+      "name": "Sonic boom cursor",
+      "description": "An expanding shockwave marks each cursor jump.",
+      "category": "cursor",
+      "author": "Sahaj Bhatt",
+      "license": "MIT",
+      "source": "https://github.com/sahaj-b/ghostty-cursor-shaders"
+    },
+    {
+      "id": "rectangle_boom_cursor",
+      "file": "rectangle_boom_cursor.glsl",
+      "name": "Rectangle boom cursor",
+      "description": "Shockwave variant around the whole cursor rectangle.",
+      "category": "cursor",
+      "author": "Sahaj Bhatt",
+      "license": "MIT",
+      "source": "https://github.com/sahaj-b/ghostty-cursor-shaders"
+    },
+    {
+      "id": "cursor_teleport",
+      "file": "cursor_teleport.glsl",
+      "name": "Cursor teleport",
+      "description": "The cursor blinks out, streaks across as a ghost blur, and materializes at its new position.",
+      "category": "cursor",
+      "author": "wintty project",
+      "license": "MIT",
+      "source": ""
+    },
+    {
+      "id": "lightning_strike",
+      "file": "lightning_strike.glsl",
+      "name": "Lightning strike",
+      "description": "A jagged forked bolt strikes from the top edge onto the cursor with an impact flash.",
+      "category": "cursor",
+      "author": "wintty project",
+      "license": "MIT",
+      "source": ""
+    },
+    {
+      "id": "scanline",
+      "file": "scanline.glsl",
+      "name": "Scanline",
+      "description": "A bright CRT scanline rolls down the screen.",
+      "category": "screen",
+      "author": "zoitrok",
+      "license": "Unlicense",
+      "source": "https://github.com/zoitrok/ghostty-shaders"
+    },
+    {
+      "id": "pixels",
+      "file": "pixels.glsl",
+      "name": "Pixels",
+      "description": "A chunky pixel-grid shimmer over the frame.",
+      "category": "screen",
+      "author": "zoitrok",
+      "license": "Unlicense",
+      "source": "https://github.com/zoitrok/ghostty-shaders"
+    },
+    {
+      "id": "crt",
+      "file": "crt.glsl",
+      "name": "CRT",
+      "description": "Curvature, a rolling scanline, and a phosphor hum.",
+      "category": "screen",
+      "author": "wintty",
+      "license": "MIT",
+      "source": "https://github.com/deblasis/wintty"
+    },
+    {
+      "id": "text_glow",
+      "file": "text_glow.glsl",
+      "name": "Text glow",
+      "description": "A soft bloom around bright text. Subtle and static.",
+      "category": "screen",
+      "author": "wintty",
+      "license": "MIT",
+      "source": "https://github.com/deblasis/wintty"
+    },
+    {
+      "id": "snowfall",
+      "file": "snowfall.glsl",
+      "name": "Snowfall",
+      "description": "Three parallax layers of drifting snow.",
+      "category": "background",
+      "author": "wintty",
+      "license": "MIT",
+      "source": "https://github.com/deblasis/wintty"
+    },
+    {
+      "id": "aurora_background",
+      "file": "aurora_background.glsl",
+      "name": "Aurora",
+      "description": "A slow aurora glowing through the terminal background.",
+      "category": "background",
+      "author": "wintty",
+      "license": "MIT",
+      "source": "https://github.com/deblasis/wintty"
+    },
+    {
+      "id": "passthrough",
+      "file": "passthrough.glsl",
+      "name": "Passthrough (diagnostic)",
+      "description": "Shows iChannel0 untouched. If the screen is black or missing text, content is not reaching the shader.",
+      "category": "screen",
+      "author": "ghostty",
+      "license": "MIT",
+      "source": "https://github.com/ghostty-org/ghostty"
+    },
+    {
+      "id": "interference",
+      "file": "interference.glsl",
+      "name": "Interference",
+      "description": "Fallout-style CRT interference: a rolling signal band, twitching rows, static grain, and rare line tears. Fires constantly; no cursor action needed.",
+      "category": "effects",
+      "author": "wintty project",
+      "license": "MIT",
+      "source": ""
+    }
+  ]
+}

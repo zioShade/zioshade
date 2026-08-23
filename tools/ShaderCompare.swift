@@ -63,24 +63,82 @@ func createTestTexture(device: MTLDevice, w: Int, h: Int) -> MTLTexture {
 // Globals buffer — now that zioshade struct layout matches spirv-cross
 // (float4[4] for iChannelTime, float3[4] for iChannelResolution),
 // a single buffer works for both.
+//
+// Two uniform sets:
+//  - default: the historical zero-cursor values (unchanged output for every
+//    existing corpus).
+//  - SHADERCOMPARE_GALLERY_UNIFORMS=1: the wintty gallery mid-animation set
+//    (same values as tools/warp/warp_render.cpp, the harness that exposed the
+//    gallery bug classes): an in-flight cursor move at progress 0.1, cursor
+//    colors, a 256-entry palette ramp, and terminal colors. With all-zero
+//    cursor state the mode-change shaders (cursor_sweep, cursor_teleport,
+//    ripple/boom) short-circuit to their static path and their bug shapes
+//    never execute, so the WGSL render proxy sets this knob for the gallery
+//    corpus. Offsets are the std140 layout of shadertoy_prefix.glsl (they
+//    match the 4492-byte block both legs consume):
+//      0 iResolution, 12 iTime, 16 iTimeDelta, 20 iFrameRate, 24 iFrame,
+//      32 iChannelTime[4], 96 iChannelResolution[4], 160 iMouse, 176 iDate,
+//      192 iSampleRate, 208 iCurrentCursor, 224 iPreviousCursor,
+//      240 iCurrentCursorColor, 256 iPreviousCursorColor, 272 styles(2 int),
+//      280 iCursorVisible, 284 iTimeCursorChange, 288 iTimeFocus, 292 iFocus,
+//      304 iPalette[256], 4400 bg, 4416 fg, 4432 cursor, 4448 cursorText,
+//      4464 selFg, 4480 selBg.
 func makeGlobalsBuffer(device: MTLDevice, screenW: Int, screenH: Int) -> MTLBuffer {
     let size = 4492
     var data = [UInt8](repeating: 0, count: size)
+    let gallery = ProcessInfo.processInfo.environment["SHADERCOMPARE_GALLERY_UNIFORMS"] == "1"
     data.withUnsafeMutableBytes { ptr in
         let f = ptr.bindMemory(to: Float.self)
         f[0] = Float(screenW)   // resolution.x (packed_float3, offset 0)
         f[1] = Float(screenH)   // resolution.y
         f[2] = 1.0              // resolution.z
-        f[3] = 0.5              // time (offset 12)
+        f[3] = gallery ? 1.7 : 0.5   // time (offset 12)
         f[4] = 1.0/60.0         // time_delta (offset 16)
         f[5] = 60.0             // frame_rate (offset 20)
         let i32 = ptr.bindMemory(to: Int32.self)
-        i32[6] = 1              // frame (offset 24)
+        i32[6] = gallery ? 102 : 1   // frame (offset 24)
         // iChannelTime float4[4] at offset 32: zeros
-        // iChannelResolution float3[4] at offset 96: zeros
+        // iChannelResolution float3[4] at offset 96
+        if gallery {
+            for i in 0..<4 { f[24 + i*4] = Float(screenW); f[25 + i*4] = Float(screenH); f[26 + i*4] = 1.0 }
+        }
         // iMouse float4 at offset 160
-        f[40] = 128.0  // mouse.x
-        f[41] = 128.0  // mouse.y
+        if gallery {
+            f[40] = 64.0; f[41] = 64.0; f[42] = 64.0; f[43] = 64.0
+            // iDate float4 at offset 176
+            f[44] = 2026.0; f[45] = 8.0; f[46] = 22.0; f[47] = 43200.0
+            // iSampleRate float at offset 192
+            f[48] = 48000.0
+            // iCurrentCursor (xy = +X/+Y edge, zw = size; y-down)
+            f[52] = 49.0; f[53] = 78.0; f[54] = 9.0; f[55] = 18.0
+            // iPreviousCursor (a move is in flight)
+            f[56] = 159.0; f[57] = 122.0; f[58] = 18.0; f[59] = 18.0
+            // iCurrentCursorColor / iPreviousCursorColor
+            f[60] = 0.24; f[61] = 0.78; f[62] = 0.94; f[63] = 1.0
+            f[64] = 0.24; f[65] = 0.78; f[66] = 0.94; f[67] = 1.0
+            // iCurrentCursorStyle / iPreviousCursorStyle / iCursorVisible / iTimeCursorChange
+            i32[68] = 0; i32[69] = 0; i32[70] = 1; f[71] = 1.68
+            // (iTime - iTimeCursorChange)/DURATION at progress 0.1: peak trail.
+            // iTimeFocus / iFocus
+            f[72] = 5.0; i32[73] = 1
+            // iPalette[256] at offset 304: HSV-ish ramp (mirrors warp_render.cpp)
+            for i in 0..<256 {
+                let t = Float(i) / 255.0
+                f[76 + i*4 + 0] = t
+                f[76 + i*4 + 1] = t < 0.5 ? t * 2.0 : 2.0 - t * 2.0
+                f[76 + i*4 + 2] = 1.0 - t
+            }
+            // terminal colors
+            f[1100] = 0.08; f[1101] = 0.08; f[1102] = 0.10              // bg @4400
+            f[1104] = 0.85; f[1105] = 0.87; f[1106] = 0.90              // fg @4416
+            f[1108] = 0.24; f[1109] = 0.78; f[1110] = 0.94              // cursor @4432
+            f[1112] = 0.0;  f[1113] = 0.0;  f[1114] = 0.0               // cursorText @4448
+            f[1116] = 1.0;  f[1117] = 1.0;  f[1118] = 1.0               // selFg @4464
+            f[1120] = 0.25; f[1121] = 0.35; f[1122] = 0.5               // selBg @4480
+        } else {
+            f[40] = 128.0  // mouse.x
+            f[41] = 128.0  // mouse.y
+        }
     }
     return device.makeBuffer(bytes: data, length: size)!
 }

@@ -214,6 +214,16 @@ fn testShader(io: compat.IoType, alloc: std.mem.Allocator, path: []const u8, sav
     };
     defer alloc.free(words);
 
+    // Structural silent-wrong lint (zioshade-kgt class): a module-scope
+    // non-constant initializer must survive lowering as an OpVariable
+    // initializer or a store that dominates every read. spirv-val cannot see
+    // this class (the module is valid), so it is checked here, before the
+    // oracle run, on every fixture that reaches this point.
+    if (zioshade.spirv_lint.globalInitDominance(words)) |v| {
+        log("  LINT {s} (Private %{d} read before any dominating store; zioshade-kgt class)\n", .{ path, v.variable_id });
+        return .fail;
+    }
+
     // Write to temp file or specified path. These three are local I/O and
     // formatting, so a failure is the harness breaking, not a missing tool:
     // report .infra_error, never .skip.

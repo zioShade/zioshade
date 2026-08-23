@@ -1,0 +1,16 @@
+# Expected DIFFERs for tools/wgsl_render_check.sh (the WGSL render proxy).
+# Format: <corpus-dir>/<name>.frag: <reason>
+# Every entry MUST cite a reason: a bug id, or triaged-and-accepted + why.
+# Regenerate: tools/wgsl_render_check.sh --update-baseline   (see tool header.)
+#
+# The wintty gallery corpus (tests/wintty_gallery) has NO entries: all 16
+# shaders render MATCH on current main, including cursor_sweep (the
+# zioshade-8h7 early-return shape, fixed in the WGSL backend since the bug
+# was filed) and cursor_teleport (reworked in wintty to gate the animation
+# multiplicatively, so the store-sunk-into-branch shape is no longer present).
+# Keep it that way: a gallery entry here is a regression of the consumer
+# corpus and must not be added casually.
+tests/spirv-cross/array_sort2.frag: triaged-and-accepted: CHAOS per chaos-classify (FP-amplifying, no single correct pixel)
+tests/spirv-cross/loop-dominator-and-switch-default.frag: REAL BUG, standing: WGSL leg renders the whole frame black vs reference (maxdiff 255); DETERMINISTIC per chaos-classify; pre-existing at baseline creation (2026-08-23), fix owed in the WGSL control-flow lowering
+tests/spirv-cross/loop_trackers.frag: triaged-and-accepted: CHAOS per chaos-classify (FP-amplifying)
+tests/spirv-cross/weierstrass.frag: triaged-and-accepted: CHAOS per chaos-classify (maxdiff 2, FP boundary the safe-math re-render did not reconcile)

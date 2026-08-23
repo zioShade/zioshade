@@ -24,7 +24,7 @@ TMP=".zig-cache/wgsl-naga-sweep.wgsl"
 # mesh/ray), so the sweep covers only those stages — counting WGSL-impossible
 # stages as "REJECT" would be meaningless noise. (zioshade emitting WGSL for an
 # unsupported stage instead of honest-erroring is a separate issue, tracked.)
-SUITES="${SUITES:-tests/spirv-cross tests/glslang-430 tests/ghostty tests/compute tests/conformance/stress tests/external}"
+SUITES="${SUITES:-tests/spirv-cross tests/glslang-430 tests/ghostty tests/compute tests/conformance/stress tests/external tests/wintty_gallery}"
 
 if [ ! -x "$CLI" ] && [ ! -f "$CLI" ]; then
   echo "error: zioshade CLI not found at $CLI — run \`mise exec -- zig build\` first" >&2
