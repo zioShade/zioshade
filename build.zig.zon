@@ -1,6 +1,6 @@
 .{
     .name = .zioshade,
-    .version = "0.8.1",
+    .version = "0.8.2",
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         // Both dependencies are VENDORED under vendor/ (path deps) rather than
