@@ -55,7 +55,7 @@
 # when this sweep is promoted into CI -- not added here.
 #
 # Usage: tools/wgsl_tint_sweep.sh [corpus-dir ...]
-#   default corpora: tests/cts/graphicsfuzz tests/integer_corpus
+#   default corpora: tests/cts/graphicsfuzz tests/integer_corpus tests/wintty_gallery
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -69,7 +69,7 @@ TINT_BUILD=7213
 TINT_URL="https://github.com/eliemichel/dawn-prebuilt/releases/download/tint/${TINT_BUILD}/Tint-${TINT_BUILD}-macos-aarch64-Release.zip"
 
 CORPORA=("$@")
-[ ${#CORPORA[@]} -eq 0 ] && CORPORA=(tests/cts/graphicsfuzz tests/integer_corpus)
+[ ${#CORPORA[@]} -eq 0 ] && CORPORA=(tests/cts/graphicsfuzz tests/integer_corpus tests/wintty_gallery)
 
 if [ ! -x "$CLI" ] && [ ! -f "$CLI" ]; then
   echo "error: zioshade CLI not found at $CLI -- run \`mise exec -- zig build\` first" >&2
