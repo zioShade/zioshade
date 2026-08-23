@@ -14,6 +14,12 @@ pub const compat = @import("compat.zig");
 /// instruction in the repository's SPIR-V corpus. External callers should use
 /// the cross-compilation entry points rather than the parser internals.
 pub const spirv_cross_common = @import("spirv_cross_common.zig");
+/// Structural SPIR-V lints for silent-wrong bug classes no validity oracle
+/// can see (the module validates; it computes the wrong thing). Runs in the
+/// conformance runner over every fixture, so a regression of a closed bug
+/// class (zioshade-kgt: dropped module-scope runtime initializers) fails
+/// `just ci` even when the emitted SPIR-V still passes spirv-val.
+pub const spirv_lint = @import("spirv_lint.zig");
 
 // Internal modules — not part of the public API
 const lexer = @import("lexer.zig");

@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const runner = @import("runner.zig");
+const zioshade = @import("zioshade");
 
 const Stats = runner.Stats;
 const shouldFail = runner.shouldFail;
@@ -183,4 +184,147 @@ test "no arguments is the plain conformance run" {
     try std.testing.expect(!opts.strict_enumerate);
     try std.testing.expectEqual(@as(?[]const u8, null), opts.target);
     try std.testing.expectEqual(@as(?u32, null), opts.min_pass);
+}
+
+// ── zioshade-kgt SPIR-V lint (src/spirv_lint.zig) ─────────────────────
+//
+// The conformance runner lints every fixture's emitted SPIR-V for the
+// dropped-module-scope-runtime-initializer class, so the lint itself is
+// pinned here against both the historical bug shape and the fixed shapes.
+// The hand-built modules below transcribe the instruction sequence the
+// pre-fix compiler actually emitted (verified against a build of the commit
+// before the fix: a Private OpVariable with no Initializer operand, loads,
+// and no store anywhere).
+
+const lint = zioshade.spirv_lint.globalInitDominance;
+
+// SPIR-V magic + a plausible 1.5 header.
+const header = [_]u32{ zioshade.spirv.MAGIC, 0x0001_0500, 0, 64, 0 };
+
+test "kgt lint: uninitialised Private global read in entry function fires" {
+    const module = [_]u32{
+        header[0], header[1], header[2], header[3], header[4],
+        15 | (5 << 16), 4, 10, 0x6E69616D, 0, // OpEntryPoint Fragment %10 "main"
+        59 | (4 << 16), 3, 5, 6, // OpVariable Private %5, NO initializer
+        54 | (5 << 16), 1, 10, 0, 6, // OpFunction %10 (entry)
+        248 | (2 << 16), 11, // OpLabel
+        61 | (4 << 16), 3, 12, 5, // OpLoad %12 <- %5 : read before any store
+        56 | (1 << 16), // OpFunctionEnd
+    };
+    const v = lint(&module) orelse return error.ExpectedViolation;
+    try std.testing.expectEqual(@as(u32, 5), v.variable_id);
+}
+
+test "kgt lint: store before the load satisfies dominance" {
+    const module = [_]u32{
+        header[0],      header[1], header[2], header[3],  header[4],
+        15 | (5 << 16), 4,         10,        0x6E69616D, 0,
+        59 | (4 << 16), 3,         5,         6,          54 | (5 << 16),
+        1,              10,        0,         6,          248 | (2 << 16),
+        11,
+        62 | (3 << 16), 5,              13, // OpStore %5 <- %13 (the entry-prologue lowering)
+        61 | (4 << 16), 3,              12,
+        5,              56 | (1 << 16),
+    };
+    try std.testing.expectEqual(@as(?zioshade.spirv_lint.GlobalInitViolation, null), lint(&module));
+}
+
+test "kgt lint: OpVariable initializer operand satisfies the contract" {
+    const module = [_]u32{
+        header[0],      header[1], header[2], header[3],  header[4],
+        15 | (5 << 16), 4,         10,        0x6E69616D, 0,
+        59 | (5 << 16),  3,              5,              6, 9, // OpVariable Private %5 initializer %9
+        54 | (5 << 16),  1,              10,             0, 6,
+        248 | (2 << 16), 11,             61 | (4 << 16), 3, 12,
+        5,               56 | (1 << 16),
+    };
+    try std.testing.expectEqual(@as(?zioshade.spirv_lint.GlobalInitViolation, null), lint(&module));
+}
+
+test "kgt lint: read through OpAccessChain before any store fires" {
+    const module = [_]u32{
+        header[0],      header[1], header[2], header[3],  header[4],
+        15 | (5 << 16), 4,         10,        0x6E69616D, 0,
+        59 | (4 << 16), 3,               5,  6, // Private %5 (a vec4)
+        54 | (5 << 16), 1,               10, 0,
+        6,              248 | (2 << 16), 11,
+        65 | (5 << 16), 2, 14, 5, 15, // OpAccessChain %14 = %5[15] (a view)
+        61 | (4 << 16), 2, 16, 14, // OpLoad through the view, before any store
+        56 | (1 << 16),
+    };
+    const v = lint(&module) orelse return error.ExpectedViolation;
+    try std.testing.expectEqual(@as(u32, 5), v.variable_id);
+}
+
+test "kgt lint: helper-function read of a never-written global fires" {
+    // The historical shape: the wintty cursor shaders read the global inside
+    // mainImage (a HELPER called by main), so entry-only dominance cannot
+    // see it. Never-written-anywhere must.
+    const module = [_]u32{
+        header[0], header[1], header[2], header[3], header[4],
+        15 | (5 << 16), 4, 10, 0x6E69616D, 0, // entry is %10 (main)
+        59 | (4 << 16), 3, 5, 6, // Private %5, no initializer
+        54 | (5 << 16),  1,  10,             0, 6, // main
+        248 | (2 << 16), 11, 56 | (1 << 16),
+        54 | (5 << 16),  3,  20, 0, 6, // helper %20 (NOT the entry)
+        248 | (2 << 16), 21,
+        61 | (4 << 16), 3, 22, 5, // load of the never-stored global
+        56 | (1 << 16),
+    };
+    const v = lint(&module) orelse return error.ExpectedViolation;
+    try std.testing.expectEqual(@as(u32, 5), v.variable_id);
+}
+
+test "kgt lint: helper read of a global stored in the entry prologue passes" {
+    const module = [_]u32{
+        header[0],      header[1], header[2], header[3],  header[4],
+        15 | (5 << 16), 4,         10,        0x6E69616D, 0,
+        59 | (4 << 16), 3,         5,         6,          54 | (5 << 16),
+        1,              10,        0,         6,          248 | (2 << 16),
+        11,
+        62 | (3 << 16),  5,              13, // entry prologue store
+        56 | (1 << 16),  54 | (5 << 16), 3,
+        20,              0,              6,
+        248 | (2 << 16), 21,
+        61 | (4 << 16), 3, 22, 5, // helper load, dominated via call order
+        56 | (1 << 16),
+    };
+    try std.testing.expectEqual(@as(?zioshade.spirv_lint.GlobalInitViolation, null), lint(&module));
+}
+
+test "kgt lint: non-SPIR-V, truncated, and zero-store-free modules stay silent" {
+    // Not SPIR-V at all.
+    const not_spv = [_]u32{ 0, 1, 2, 3, 4, 5 };
+    try std.testing.expectEqual(@as(?zioshade.spirv_lint.GlobalInitViolation, null), lint(&not_spv));
+    // SPIR-V header with a declared word count past the end: malformed.
+    const truncated = [_]u32{ zioshade.spirv.MAGIC, 0x0001_0500, 0, 64, 0, 15 | (99 << 16), 4, 10 };
+    try std.testing.expectEqual(@as(?zioshade.spirv_lint.GlobalInitViolation, null), lint(&truncated));
+    // No Private globals: nothing to check.
+    const none = [_]u32{
+        header[0],      header[1], header[2], header[3],  header[4],
+        15 | (5 << 16), 4,         10,        0x6E69616D, 0,
+        59 | (4 << 16), 3,               5,  2, // OpVariable Uniform (not Private)
+        54 | (5 << 16), 1,               10, 0,
+        6,              248 | (2 << 16), 11, 56 | (1 << 16),
+    };
+    try std.testing.expectEqual(@as(?zioshade.spirv_lint.GlobalInitViolation, null), lint(&none));
+}
+
+test "kgt lint: a fixed compiler output passes (uniform-derived global init)" {
+    // The real pipeline, not a hand-built module: compile the kgt fixture
+    // shape with the current frontend and lint the emitted words. This is
+    // the regression the conformance runner enforces on
+    // tests/conformance/stress/global_runtime_init_uniform.frag.
+    const alloc = std.testing.allocator;
+    const src =
+        \\#version 450
+        \\layout(std140, binding = 1) uniform G { vec4 c; };
+        \\layout(location = 0) out vec4 o;
+        \\vec4 T = vec4(c.rgb * 2.0, c.a);
+        \\vec4 shade(float k) { return T * k; }
+        \\void main() { o = shade(0.25) + shade(0.75); }
+    ;
+    const words = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(words);
+    try std.testing.expectEqual(@as(?zioshade.spirv_lint.GlobalInitViolation, null), lint(words));
 }
