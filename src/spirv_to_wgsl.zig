@@ -9045,6 +9045,40 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             .Branch => {
                 if (inst.words.len > 1) {
                     const target = inst.words[1];
+                    // #wgsl-region-continue: a TOP-LEVEL branch to the enclosing
+                    // loop's continue block, inside a switch-case REGION. In the main
+                    // walk the continue block follows later in the instruction stream
+                    // (structured order), so the `.Branch` continue-target skip below
+                    // is exact. In region mode the walk STOPS at the switch merge and
+                    // the continue block sits after it, never reached. Skipping the
+                    // branch there let the walk fall through into the next block in
+                    // the stream, which on loop-dominator-and-switch-default is a
+                    // DIFFERENT case arm's body: the default arm's inner loop merged
+                    // straight to the outer continue, the dropped branch leaked the
+                    // case-0 store into the default arm, and the arm then fell out of
+                    // the switch so the outer-loop tail ran on the continue path too
+                    // (three silent-wrongs on one wire; naga-valid either way). The
+                    // case's `continue;` (the same spelling emitSwitchArmTerminator
+                    // uses) is exact and ENDS the region: control goes to the
+                    // enclosing loop's `continuing` block, which the parent walk owns
+                    // (so the outer loop's phi updates are NOT emitted inline). This
+                    // is checked against the RANGE's inherited continue label, not
+                    // `loop_continue_label`: the region's own innermost loop may have
+                    // just closed, in which case the pop-to-empty below already nulled
+                    // the live labels even though the region is still inside the outer
+                    // loop. Only at region top level (no open construct): inside a
+                    // construct the continue wires go through the BranchConditional
+                    // continue arms above.
+                    if (range != null) {
+                        if (range.?.loop_continue) |rc| {
+                            if (target == rc and if_depth == 0 and loop_stack.items.len == 0) {
+                                try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
+                                try writeIndentStatic(w_out, indent);
+                                try w_out.writeAll("continue;\n");
+                                return;
+                            }
+                        }
+                    }
                     // Check for loop-related branches
                     if (in_loop) {
                         if (target == loop_header_label) {
