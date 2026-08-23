@@ -1,0 +1,280 @@
+<!doctype html>
+<!--
+  Canvas-free static harness page for the WGSL browser render oracle
+  (tools/wgsl_browser_check.mjs). Served by the tool's built-in node http
+  server; fetches the WGSL under test from /case and renders it as a
+  fullscreen post pass, exactly the way the wintty.io shader player does.
+
+  Mirrors the player's hard-won constraints:
+    - ONE EXPLICIT bindGroupLayout (b0 texture, b1 uniform buffer, b2
+      sampler): zioshade DCEs unused bindings and a layout:'auto' pipeline
+      silently drops every submit.
+    - alphaMode 'opaque', preferred canvas format, entry point `main`.
+    - The verification readback is the PAGE SCREENSHOT taken by the driver
+      (CDP composites the WebGPU canvas correctly); WebGPU canvases read
+      back black via drawImage, so the page must NOT try to read pixels.
+
+  Uniform state: the fixed deterministic set documented in the tool header
+  (the ShaderCompare GALLERY set: mid-animation cursor move at progress 0.1).
+  Texture: the ShaderCompare reference pattern (r=x*255/w, g=y*255/h,
+  b=(x^y)&255 with INTEGER division), so the browser render and the
+  Metal-proxy reference consume byte-identical inputs.
+
+  Result is reported through window.__zwb (settled=true when done, or when
+  the shader was rejected / the page failed; the driver polls it).
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; background: #000; }
+  canvas { display: block; width: 256px; height: 256px; }
+</style>
+</head>
+<body>
+<canvas id="c" width="256" height="256"></canvas>
+<script>
+"use strict";
+
+// std140 byte offsets of the shadertoy Globals block (shared by the Metal
+// reference harness, the wintty app cbuffer, and the player's UNIFORM_OFFSETS).
+const O = {
+  iResolution: 0,
+  iTime: 12,
+  iTimeDelta: 16,
+  iFrameRate: 20,
+  iFrame: 24,
+  iChannelTime: 32,          // float4[4]
+  iChannelResolution: 96,    // float3[4], stride 16
+  iMouse: 160,
+  iDate: 176,
+  iSampleRate: 192,
+  iCurrentCursor: 208,
+  iPreviousCursor: 224,
+  iCurrentCursorColor: 240,
+  iPreviousCursorColor: 256,
+  iCurrentCursorStyle: 272,
+  iPreviousCursorStyle: 276,
+  iCursorVisible: 280,
+  iTimeCursorChange: 284,
+  iTimeFocus: 288,
+  iFocus: 292,
+  iPalette: 304,             // 256 x vec3, stride 16
+  iBackgroundColor: 4400,
+  iForegroundColor: 4416,
+  iCursorColor: 4432,
+  iCursorText: 4448,
+  iSelectionForegroundColor: 4464,
+  iSelectionBackgroundColor: 4480,
+  blockSize: 4496,
+};
+
+const RES = 256; // square render target, matches the Metal reference leg
+
+const FULLSCREEN_VS = `
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let x = f32(i & 1u) * 4.0 - 1.0;
+  let y = f32(i >> 1u) * 4.0 - 1.0;
+  return vec4<f32>(x, y, 0.0, 1.0);
+}
+`;
+
+// Deterministic uniform state (the ShaderCompare GALLERY set; see the tool
+// header for the full table and why mid-animation cursor values matter).
+function packUniforms() {
+  const buf = new ArrayBuffer(O.blockSize);
+  const v = new DataView(buf);
+  const f32 = (off, x) => v.setFloat32(off, x, true);
+  const i32 = (off, x) => v.setInt32(off, x, true);
+
+  f32(O.iResolution, RES); f32(O.iResolution + 4, RES); f32(O.iResolution + 8, 1.0);
+  f32(O.iTime, 1.7);
+  f32(O.iTimeDelta, 1.0 / 60.0);
+  f32(O.iFrameRate, 60.0);
+  i32(O.iFrame, 102);
+  // iChannelTime float4[4]: zeros
+  for (let i = 0; i < 4; i++) {
+    f32(O.iChannelResolution + i * 16, RES);
+    f32(O.iChannelResolution + i * 16 + 4, RES);
+    f32(O.iChannelResolution + i * 16 + 8, 1.0);
+  }
+  f32(O.iMouse, 64.0); f32(O.iMouse + 4, 64.0); f32(O.iMouse + 8, 64.0); f32(O.iMouse + 12, 64.0);
+  f32(O.iDate, 2026.0); f32(O.iDate + 4, 8.0); f32(O.iDate + 8, 22.0); f32(O.iDate + 12, 43200.0);
+  f32(O.iSampleRate, 48000.0);
+  // cursor rects: xy = +X/+Y edge (y-down), zw = size; a move is in flight
+  f32(O.iCurrentCursor, 49.0); f32(O.iCurrentCursor + 4, 78.0); f32(O.iCurrentCursor + 8, 9.0); f32(O.iCurrentCursor + 12, 18.0);
+  f32(O.iPreviousCursor, 159.0); f32(O.iPreviousCursor + 4, 122.0); f32(O.iPreviousCursor + 8, 18.0); f32(O.iPreviousCursor + 12, 18.0);
+  const ccol = [0.24, 0.78, 0.94, 1.0];
+  for (let i = 0; i < 4; i++) {
+    f32(O.iCurrentCursorColor + i * 4, ccol[i]);
+    f32(O.iPreviousCursorColor + i * 4, ccol[i]);
+  }
+  i32(O.iCurrentCursorStyle, 0); i32(O.iPreviousCursorStyle, 0);
+  i32(O.iCursorVisible, 1);
+  f32(O.iTimeCursorChange, 1.68); // (iTime - tcc)/DURATION at progress 0.1: peak trail
+  f32(O.iTimeFocus, 5.0); i32(O.iFocus, 1);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255.0;
+    f32(O.iPalette + i * 16, t);
+    f32(O.iPalette + i * 16 + 4, t < 0.5 ? t * 2.0 : 2.0 - t * 2.0);
+    f32(O.iPalette + i * 16 + 8, 1.0 - t);
+  }
+  const put3 = (off, c) => { f32(off, c[0]); f32(off + 4, c[1]); f32(off + 8, c[2]); };
+  put3(O.iBackgroundColor, [0.08, 0.08, 0.10]);
+  put3(O.iForegroundColor, [0.85, 0.87, 0.90]);
+  put3(O.iCursorColor, [0.24, 0.78, 0.94]);
+  put3(O.iCursorText, [0.0, 0.0, 0.0]);
+  put3(O.iSelectionForegroundColor, [1.0, 1.0, 1.0]);
+  put3(O.iSelectionBackgroundColor, [0.25, 0.35, 0.50]);
+  return buf;
+}
+
+// Reference texture, byte-identical to ShaderCompare.swift's createTestTexture
+// (integer division, so e.g. x=255 stores 253, not 255).
+function referenceTextureBytes() {
+  const px = new Uint8Array(RES * RES * 4);
+  for (let y = 0; y < RES; y++) {
+    for (let x = 0; x < RES; x++) {
+      const i = (y * RES + x) * 4;
+      px[i] = Math.trunc(x * 255 / RES);
+      px[i + 1] = Math.trunc(y * 255 / RES);
+      px[i + 2] = (x ^ y) & 255;
+      px[i + 3] = 255;
+    }
+  }
+  return px;
+}
+
+const state = {
+  settled: false,
+  fatal: null,          // page-level failure (no WebGPU / no adapter / no device)
+  pipelineError: null,  // validation error text from the pipeline-build error scope
+  compileErrors: [],    // tint compilation-info error messages
+  compileWarnings: [],
+  framesRendered: 0,
+  adapterInfo: null,
+  uncaptured: [],
+};
+window.__zwb = state;
+
+function fail(message) {
+  state.fatal = message;
+  state.settled = true;
+}
+
+async function main() {
+  if (!navigator.gpu) return fail("no navigator.gpu (WebGPU unavailable in this browser)");
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("webgpu");
+  if (!ctx) return fail("webgpu canvas context unavailable");
+
+  const adapter = await navigator.gpu.requestAdapter();
+  if (!adapter) return fail("WebGPU adapter unavailable (check --enable-unsafe-webgpu + swiftshader flags)");
+  try { state.adapterInfo = adapter.info ? adapter.info : await adapter.requestAdapterInfo(); } catch (e) {}
+  const device = await adapter.requestDevice();
+  device.addEventListener("uncapturederror", (ev) => {
+    state.uncaptured.push(ev.error ? ev.error.message : String(ev));
+  });
+
+  ctx.configure({ device, format: navigator.gpu.getPreferredCanvasFormat(), alphaMode: "opaque" });
+
+  const texture = device.createTexture({
+    size: [RES, RES],
+    format: "rgba8unorm",
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  device.queue.writeTexture({ texture }, referenceTextureBytes(), { bytesPerRow: RES * 4 }, [RES, RES]);
+  const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+
+  const uniforms = device.createBuffer({
+    size: O.blockSize,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(uniforms, 0, packUniforms());
+
+  // ONE explicit bind group layout, the wintty player contract: b0 texture,
+  // b1 uniform buffer, b2 sampler. Over-declaring is legal when a shader
+  // DCEs a binding away; layout:'auto' is not (silently dropped submits).
+  const bindGroupLayout = device.createBindGroupLayout({
+    entries: [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: {} },
+      { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "uniform" } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: {} },
+    ],
+  });
+  const pipelineLayout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] });
+  const bindGroup = device.createBindGroup({
+    layout: bindGroupLayout,
+    entries: [
+      { binding: 0, resource: texture.createView() },
+      { binding: 1, resource: { buffer: uniforms } },
+      { binding: 2, resource: sampler },
+    ],
+  });
+
+  const resp = await fetch("/case");
+  const { wgsl } = await resp.json();
+
+  device.pushErrorScope("validation");
+  const module = device.createShaderModule({ code: wgsl });
+  let pipeline;
+  try {
+    pipeline = device.createRenderPipeline({
+      layout: pipelineLayout,
+      vertex: { module: device.createShaderModule({ code: FULLSCREEN_VS }), entryPoint: "vs" },
+      fragment: {
+        module,
+        entryPoint: "main",
+        targets: [{ format: navigator.gpu.getPreferredCanvasFormat() }],
+      },
+      primitive: { topology: "triangle-list" },
+    });
+  } catch (e) {
+    state.pipelineError = "createRenderPipeline threw: " + (e && e.message ? e.message : String(e));
+    state.settled = true;
+    return;
+  }
+  const gpuError = await device.popErrorScope();
+  if (gpuError) state.pipelineError = gpuError.message;
+
+  try {
+    const info = await module.getCompilationInfo();
+    for (const m of info.messages) {
+      const line = ":" + m.lineNum + ":" + m.linePos + " " + m.message;
+      if (m.type === "error") state.compileErrors.push(line);
+      else state.compileWarnings.push(line);
+    }
+  } catch (e) { /* compilation info unavailable: pipeline error scope still rules */ }
+
+  // A tint rejection is final even if the error scope stayed quiet: never
+  // render (the class would otherwise fall through to a black canvas).
+  if (state.pipelineError || state.compileErrors.length > 0) {
+    state.settled = true;
+    return;
+  }
+
+  for (let frame = 0; frame < 3; frame++) {
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: ctx.getCurrentTexture().createView(),
+        loadOp: "clear",
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        storeOp: "store",
+      }],
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.draw(3);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+    await device.queue.onSubmittedWorkDone();
+    state.framesRendered++;
+  }
+  state.settled = true;
+}
+
+main().catch((e) => fail("harness exception: " + (e && e.message ? e.message : String(e))));
+</script>
+</body>
+</html>

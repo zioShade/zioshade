@@ -193,6 +193,25 @@ glsl-render:
 wgsl-render:
     @bash tools/wgsl_render_check.sh
 
+# WGSL BROWSER render oracle: execute the emitted WGSL in a real consumer WebGPU stack
+# (Chrome for Testing: tint + Dawn on SwiftShader) via a canvas-free harness page, then
+# pixel-diff a page screenshot against the same Metal-proxy reference wgsl-render uses,
+# at one fixed deterministic uniform state. Catches BOTH classes the naga round-trip
+# proxy is blind to: tint rejecting the WGSL at shader-module/pipeline build (the
+# zioshade-8k2 black-player class, reported as REJECT with the verbatim tint message)
+# and silent-wrong output. Baseline-gated like wgsl-render (tools/wgsl_browser_baseline.txt).
+# MANUAL ONLY, deliberately NOT in ci/ci-full: it needs a local Chrome for Testing, a
+# playwright import (ZWB_PLAYWRIGHT to point at one), node, and the Metal/spirv-cross/
+# glslang reference oracles; none of that is CI-safe or present on the hosted runners.
+#   just wgsl-browser                                  # the wintty gallery (default)
+#   just wgsl-browser tests/wintty_gallery tools/wgsl_browser_fixtures
+#   ZWB_NO_REFERENCE=1 just wgsl-browser               # weaker liveness-only mode
+wgsl-browser +dirs="tests/wintty_gallery":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{zig}} build cli
+    node tools/wgsl_browser_check.mjs {{dirs}}
+
 # WARP render-diff on the real DXC->DXIL->D3D12 path (tools/warp/, run on a Windows
 # box - WARP is the CPU rasterizer so no GPU needed). Renders zioshade's HLSL vs
 # SPIRV-Cross's HLSL on the same runtime and pixel-diffs: the final HLSL gate macOS

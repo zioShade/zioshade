@@ -1,0 +1,13 @@
+# Expected REJECT/FAIL entries for tools/wgsl_browser_check.mjs (the WGSL browser oracle).
+# Format: <corpus-dir>/<name>.frag: <reason>
+# Every entry MUST cite a reason: a bug id, or triaged-and-accepted + why.
+# Regenerate: node tools/wgsl_browser_check.mjs --update-baseline   (see tool header.)
+#
+# Gallery expectation: 0 REJECTs and no structural FAILs. 14/16 PASS at
+# maxdiff <= 1 (SwiftShader-vs-Metal is byte-tight for well-behaved shaders);
+# the two entries below are triaged cross-GPU FP divergence on CHAOS shaders,
+# NOT miscompiles. A new gallery entry (or a structural diff: a missing/extra
+# feature, a black region) is a consumer-corpus regression.
+tests/wintty_gallery/interference.frag: triaged-and-accepted: CHAOS per chaos-classify; structure identical side-by-side (same tiles, same phase fronts), diffs confined to high-frequency neighborhoods (local std 10.5 at diff px vs 5.3 at matching px), bit-deterministic across runs, and the Metal-proxy gate renders this shader MATCH Metal-vs-Metal so the WGSL semantics are agreed; residual is tint/SwiftShader-vs-Metal transcendental precision (max=57, avg=3.09, bad=3.5%)
+tests/wintty_gallery/lightning_strike.frag: triaged-and-accepted: CHAOS per chaos-classify; structure identical side-by-side (same bolt positions, same branching), every >32-diff pixel sits on a textured edge (local std 19.9 at diff px vs 0.7 at matching px), bit-deterministic across runs, and the Metal-proxy gate renders this shader MATCH Metal-vs-Metal; residual is tint/SwiftShader-vs-Metal transcendental precision (max=193, avg=0.79, bad=1.4%)
+tools/wgsl_browser_fixtures/8k2_uniform_sample.frag: intentional standing repro, not a regression: the zioshade-8k2 shape (textureSample reached under an early return), accepted by naga, rejected by tint at shader-module/pipeline build ("'textureSample' must only be called from uniform control flow"); pinned so the fixture corpus permanently proves the REJECT path. When the WGSL backend starts lowering this shape to uniform-control-flow-safe code this entry goes STALE and must be removed
