@@ -244,3 +244,24 @@ compile or render failure is a FAIL, not a skip, because gallery shaders ship
 to users. Driven from wintty by `just gallery-verify` (wintty repo,
 tools/gallery/verify.sh), which stages zioshade's HLSL for the whole bundled
 corpus, runs it here over ssh, and fetches the PPMs back as previews.
+
+### Gallery pair-diff (the actual gate)
+
+Single-render PASS only proved "DXC compiled it and the WARP render exited 0",
+and a silent whole-frame-black lowering bug passed exactly that way (uniform-derived
+global initializers were dropped; every gallery cursor shader rendered a black
+trail while the gate stayed green). So `-Gallery` now pairs: when a
+`<name>.sc.hlsl` (the spirv-cross reference HLSL for the same GLSL, produced on
+the dev machine by glslang -> SPIR-V -> `spirv-cross --hlsl --shader-model 60`)
+sits next to `<name>.hlsl`, both are compiled to DXIL and rendered through the
+SAME gallery resources (one cbuffer, one iChannel0, one command list) by
+
+    warp_render.exe --gallery-diff fullscreen.vs.cso <name>.cso <name>.sc.cso <name>
+
+which writes `<name>.zs.ppm` + `<name>.sc.ppm` and diffs with the harness
+tolerance (<=1 per channel, same as the two-PSO differential mode). PASS then
+requires a frame match; a divergence prints `GALLERY-DIFFER <name>` with the
+maxdiff, tallies `GALLERY DIFFER = N`, and exits 1. A missing `.sc.hlsl` keeps
+the old single-render PASS (logged `no reference`), so the sweep stays usable
+on a bare staged directory; `.sc.hlsl`/`.gen_vs.hlsl` are excluded from the
+glob so references pair instead of rendering as standalone entries.
