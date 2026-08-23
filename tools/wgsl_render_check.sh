@@ -32,6 +32,19 @@
 # other corpus a glslang refusal stays a plain skip-glslang (the historical
 # behavior), so the fallback never silently widens the compared population.
 #
+# ── Undefined-read sources (skip-undef-read) ────────────────────────────────
+# A source that reads undefined Function memory (loop-dominator-and-switch-
+# default reads `vec4 f4;` before any store) has NO deterministic reference:
+# the spirv-cross leg keeps the variable uninitialized and renders whatever
+# the GPU thread memory held (rendering that reference against itself differs
+# on half the frame), while the WGSL leg must zero-initialize -- WGSL has no
+# uninitialized var. No compiler output can reconcile the two, so such
+# sources are skipped as a CLASS by tools/spv_undef_read.py (never by name;
+# a miss stays a loud DIFFER). This is an oracle-validity limit, not a
+# compiler pass/fail: the silent-wrong lowering bugs such shaders can still
+# carry are gated by the minimized UB-free shapes in tests/wgsl_tests.zig
+# and by every defined-memory shader in this sweep.
+#
 # ── Baseline / GATE semantics ────────────────────────────────────────────────
 # This check is wired into `just ci-full`. It exits NONZERO on any NEW DIFFER
 # and passes on known ones, so the standing (triaged) DIFFERs and the open WGSL
@@ -128,6 +141,20 @@ for DIR in "${DIRS[@]}"; do
         bump skip-glslang; continue
       fi
     fi
+    # #undef-read-oracle: a source that READS undefined Function memory (no
+    # initializer, first read before any store, on the unconditional prefix;
+    # tools/spv_undef_read.py documents the two conservative exclusions) has
+    # no deterministic reference leg: spirv-cross keeps the variable
+    # uninitialized, so the reference renders whatever the GPU thread memory
+    # held (rendering the reference MSL against itself differs on half the
+    # frame), while the WGSL leg must zero-initialize -- WGSL has no
+    # uninitialized var, so no zioshade output can ever match. The comparison
+    # is not an oracle for such a source; skip it as a CLASS (like
+    # skip-binding: a harness limit, never a gate pass/fail), not per name.
+    # A missing python3/spirv-dis degrades to compare-as-before.
+    if python3 tools/spv_undef_read.py "$d.src.spv" >/dev/null 2>&1; then
+      bump skip-undef-read; continue
+    fi
     v=$(check_one "$d"); keyv=${v%% *}; bump "$keyv"
     case "$v" in DIFFER*) DIFFERS+=("$key"$'\t'"$v");; esac
   done
@@ -214,7 +241,7 @@ fi
 
 echo ""
 echo "=== WGSL render proxy coverage ==="
-for k in MATCH "EDGE(fast-math-fp)" DIFFER skip-binding skip-glslang skip-crossmsl skip-zwgsl skip-naga skip-zcrossmsl skip-render; do
+for k in MATCH "EDGE(fast-math-fp)" DIFFER skip-binding skip-glslang skip-crossmsl skip-zwgsl skip-naga skip-zcrossmsl skip-render skip-undef-read; do
   echo "  $k: ${C[$k]:-0}"
 done
 echo "  fallback-zfrontend (src.spv via zioshade, glslang refused source): ${#FALLBACKS[@]}"

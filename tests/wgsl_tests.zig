@@ -9702,6 +9702,89 @@ test "WGSL: case-body branch to an internal block refuses (no silent truncation)
     }
 }
 
+// #wgsl-region-continue (loop-dominator-and-switch-default): a switch-case
+// region whose DEFAULT arm contains a loop that, on exit, branches straight
+// to the ENCLOSING loop's continue target (GLSL `continue` out of a switch
+// default after a while-loop: the inner loop's merge OpBranches the outer
+// loop's continue block). The region walker stopped at the switch merge, and
+// the .Branch continue-target skip (exact in the main walk, where the
+// continue block follows in the stream) DROPPED the wire: the walk fell
+// through into the NEXT block in the stream, which in glslang's layout is a
+// DIFFERENT case arm's body. The default arm then (a) leaked the case-0
+// store and (b) fell out of the switch so the outer-loop tail ran on the
+// continue path too. Rendered wrong-but-naga-valid through the WGSL leg
+// (whole-frame black on the UB-flavored corpus original; the deterministic
+// tail here is the minimized UB-free shape: default must skip the tail).
+test "WGSL: default arm's loop-to-outer-continue emits continue, leaks no arm body" {
+    const source =
+        \\#version 310 es
+        \\precision mediump float;
+        \\layout(location = 0) out vec4 fragColor;
+        \\void main()
+        \\{
+        \\    vec4 f4 = vec4(2.0);
+        \\    int c = int(f4.x);
+        \\    for (int j = 0; j < c; j++)
+        \\    {
+        \\        switch (c)
+        \\        {
+        \\            case 0:
+        \\                f4.y = 0.125;
+        \\                break;
+        \\            case 1:
+        \\                f4.y = 1.0;
+        \\                break;
+        \\            default:
+        \\            {
+        \\                int i = 0;
+        \\                while (i++ < c) {
+        \\                    f4.y += 0.25;
+        \\                }
+        \\                continue;
+        \\            }
+        \\        }
+        \\        f4.y += 0.5;
+        \\    }
+        \\    fragColor = f4;
+        \\}
+        \\
+    ;
+    const spv = try compileToSpirv("region_continue", source);
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+
+    const dflt = std.mem.indexOf(u8, wgsl, "default: {") orelse return error.TestExpectedDefaultArm;
+    const loop_i = std.mem.indexOfPos(u8, wgsl, dflt, "loop {") orelse return error.TestExpectedInnerLoop;
+    const case0 = std.mem.indexOfPos(u8, wgsl, loop_i, "case 0:") orelse return error.TestExpectedCase0;
+    const arm = wgsl[dflt..case0]; // the default arm, textually
+    // (1) the arm ends in `continue;` past the inner loop: the region walk
+    // must END at the outer-loop continue wire, not fall out of the switch
+    // (after the last `continue;` only the arm's closing braces remain).
+    const cont_i = std.mem.lastIndexOf(u8, arm, "continue;") orelse return error.TestExpectedContinue;
+    for (arm[cont_i + "continue;".len ..]) |ch| {
+        try std.testing.expect(ch == '}' or ch == '\n' or ch == ' ' or ch == '\t');
+    }
+    // (2) exactly one `continue;` in the arm (no duplicated wires).
+    var cont_count: usize = 0;
+    var scan: usize = 0;
+    while (std.mem.indexOfPos(u8, arm, scan, "continue;")) |hit| {
+        cont_count += 1;
+        scan = hit + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 1), cont_count);
+    // (3) no other arm's body leaked into the default arm (the dropped wire
+    // fell through into the case-0 block in glslang's layout: its store,
+    // spelled `0.125f` here, must appear ONLY in the case-0 arm).
+    try std.testing.expect(std.mem.indexOf(u8, arm, "0.125f") == null);
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "0.125f") != null);
+    // (4) the outer-loop tail survives AFTER the switch for the case paths
+    // (only the default path skips it).
+    const tail = std.mem.indexOf(u8, wgsl, "0.5f") orelse return error.TestExpectedOuterTail;
+    try std.testing.expect(tail > case0);
+    try nagaValidateOrSkip(wgsl, "region-continue");
+}
+
 // #wgsl-loop-merge-phi: a phi at a LOOP's merge block (e.g. the "did we break"
 // flag read after the loop) was never DECLARED -- the sel-phi machinery only
 // materializes under a SelectionMerge, and a loop exit has none. Reads after

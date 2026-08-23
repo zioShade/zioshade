@@ -11,6 +11,5 @@
 # Keep it that way: a gallery entry here is a regression of the consumer
 # corpus and must not be added casually.
 tests/spirv-cross/array_sort2.frag: triaged-and-accepted: CHAOS per chaos-classify (FP-amplifying, no single correct pixel)
-tests/spirv-cross/loop-dominator-and-switch-default.frag: REAL BUG, standing: WGSL leg renders the whole frame black vs reference (maxdiff 255); DETERMINISTIC per chaos-classify; pre-existing at baseline creation (2026-08-23), fix owed in the WGSL control-flow lowering
 tests/spirv-cross/loop_trackers.frag: triaged-and-accepted: CHAOS per chaos-classify (FP-amplifying)
 tests/spirv-cross/weierstrass.frag: triaged-and-accepted: CHAOS per chaos-classify (maxdiff 2, FP boundary the safe-math re-render did not reconcile)
