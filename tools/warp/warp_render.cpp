@@ -524,12 +524,17 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         slot(g, 12)[0] = 48000.f;
         // c13/c14: current/previous cursor (xy = +X/+Y edge, zw = size; y-down)
         float* cc = slot(g, 13); cc[0] = 49.f; cc[1] = 78.f; cc[2] = 9.f; cc[3] = 18.f;
-        float* pc = slot(g, 14); pc[0] = 159.f; pc[1] = 122.f; pc[2] = 9.f; pc[3] = 18.f;
+        float* pc = slot(g, 14); pc[0] = 159.f; pc[1] = 122.f; pc[2] = 18.f; pc[3] = 18.f;
         // c15/c16: cursor colors
         float* ccol = slot(g, 15); ccol[0] = .24f; ccol[1] = .78f; ccol[2] = .94f; ccol[3] = 1.f;
         memcpy(slot(g, 16), ccol, 16);
         // c17: styles(int), cursorVisible(int), iTimeCursorChange
-        iset(slot(g, 17), 0, 0); iset(slot(g, 17), 1, 0); iset(slot(g, 17), 2, 1); slot(g, 17)[3] = .2f;
+        iset(slot(g, 17), 0, 0); iset(slot(g, 17), 1, 0); iset(slot(g, 17), 2, 1); slot(g, 17)[3] = 1.68f;
+        // ^ cursor shaders key their trail off
+        // (iTime - iTimeCursorChange)/DURATION with fast out-easing
+        // (ease(0.5) is already ~0.875): the full-length sweep exists only
+        // in the first ~15% of the 0.2s window. 1.68 puts the frame at
+        // progress=0.1, peak visible trail between the two cursors.
         // c18: iTimeFocus, iFocus(int)
         slot(g, 18)[0] = 5.f; iset(slot(g, 18), 1, 1);
         // c19..c274: iPalette[256] — a simple HSV-ish ramp.

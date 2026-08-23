@@ -330,11 +330,24 @@ pub fn analyzeWithOptions(alloc: std.mem.Allocator, root: *ast.Root, options: An
                     if (inst.operands.len > 0) alloc.free(inst.operands);
                 }
                 analyzer.instructions.shrinkRetainingCapacity(mark);
+                // The initializer does not analyze at global scope. That is
+                // expected for statements spilled out of a mis-parsed
+                // function (a function named after a GLSL qualifier, e.g.
+                // `float smooth(...)`, leaves its locals as top-level
+                // var_decls referencing the function's params). Such a
+                // local must NOT become an entry prologue store: evaluating
+                // it in main's scope fails on the undeclared param and
+                // breaks the whole shader. Drop it here, before any
+                // function analysis runs.
+                removeRuntimeInit(&analyzer, gid);
                 continue;
             };
             if (analyzer.isConstantId(res.id)) {
                 target.?.initializer_id = res.id;
                 analyzer.global_const_init_map.put(alloc, gid, res.id) catch {};
+                // The OpVariable carries the initializer itself; take it off
+                // the entry-prologue list so it is not stored twice.
+                removeRuntimeInit(&analyzer, gid);
             } else {
                 analyzer.purgeRolledBackConstCache(analyzer.instructions.items[mark..]);
                 for (analyzer.instructions.items[mark..]) |inst| {
@@ -656,6 +669,21 @@ fn eliminateDeadFunctions(alloc: std.mem.Allocator, mod: ir.Module) !ir.Module {
     return result;
 }
 
+/// Drop `gid` from the entry-prologue runtime-init list, if present.
+fn removeRuntimeInit(analyzer: *Analyzer, gid: u32) void {
+    for (analyzer.global_runtime_inits.items, 0..) |ri, idx| {
+        if (ri.gid == gid) {
+            _ = analyzer.global_runtime_inits.orderedRemove(idx);
+            break;
+        }
+    }
+}
+
+/// A module-scope global whose initializer is not a compile-time constant
+/// (it reads a uniform or calls a helper). GLSL runs these before main, so
+/// the entry prologue stores each to its Private OpVariable.
+const GlobalRuntimeInit = struct { gid: u32, node: ast.Node };
+
 const Analyzer = struct {
     const TypedId = struct {
         ty: ast.Type,
@@ -706,6 +734,15 @@ const Analyzer = struct {
     /// Maps global-variable ir_id → AST initializer node for `const` global arrays.
     /// Stored during collectTopLevel so we can evaluate the initializer lazily later.
     global_const_ast_inits: std.AutoHashMapUnmanaged(u32, ast.Node) = .empty,
+    /// Globals whose initializer could NOT be const-folded (it reads a
+    /// uniform or calls a helper: `vec4 TRAIL_COLOR = f(iCurrentCursorColor);`),
+    /// in declaration order. GLSL executes such initializers before main, so
+    /// analyzeFunction lowers each as a store to the Private OpVariable at
+    /// entry-function start. Without this the initializer was silently DROPPED
+    /// — the const-fold pass rolls back anything non-constant — and every
+    /// backend read a zeroed global: the cursor shaders' trail rendered
+    /// black/invisible (wintty gallery WARP render vs SPIRV-Cross).
+    global_runtime_inits: std.ArrayListUnmanaged(GlobalRuntimeInit) = .empty,
     in_entry_block: bool = true,
     cache_globals: bool = true, // true in entry block and loop headers (blocks that dominate subsequent blocks)
     pure_op_cache: std.AutoHashMapUnmanaged(u64, u32) = .empty, // hash(type, op, operands) -> result_id
@@ -794,6 +831,7 @@ const Analyzer = struct {
         self.global_ptr_ids.deinit(self.alloc);
         self.global_const_init_map.deinit(self.alloc);
         self.global_const_ast_inits.deinit(self.alloc);
+        self.global_runtime_inits.deinit(self.alloc);
         self.pure_op_cache.deinit(self.alloc);
         self.global_pure_op_cache.deinit(self.alloc);
         // Free owned name keys AND member slices in the types map.
@@ -2721,6 +2759,17 @@ const Analyzer = struct {
                         (ty == .array or ty == .int or ty == .uint or ty == .float or ty == .bool or ty.isVector() or ty.isMatrix()))
                     {
                         self.global_const_ast_inits.put(self.alloc, ir_id, node.data.children[0]) catch {};
+                        // Also record in declaration order: if the const-fold
+                        // pass cannot fold it, the entry prologue stores it.
+                        // Module-scope Private globals only: this branch also
+                        // runs for function-local declarations (same node
+                        // shape), and a local's initializer must NOT become
+                        // an entry prologue store — evaluating it in main's
+                        // scope fails on the function's params/locals.
+                        self.global_runtime_inits.append(self.alloc, .{
+                            .gid = ir_id,
+                            .node = node.data.children[0],
+                        }) catch {};
                     }
                 } // end if name.len > 0
             },
@@ -3139,6 +3188,20 @@ const Analyzer = struct {
         }
 
         // Note: instructions already contain param init stores, don't clear them
+
+        // Globals with non-constant initializers (uniform-derived values like
+        // the cursor shaders' `TRAIL_COLOR`) execute before main per GLSL.
+        // The const-fold pass only handles compile-time constants, so lower
+        // each remaining initializer as a store to its Private OpVariable
+        // here, at entry-function start, ahead of any body statement.
+        if (self.global_runtime_inits.items.len > 0 and
+            std.mem.eql(u8, node.data.name, "main"))
+        {
+            for (self.global_runtime_inits.items) |ri| {
+                const res = try self.analyzeExpression(ri.node);
+                try self.emitStore(ri.gid, res.id);
+            }
+        }
 
         for (node.data.children) |child| {
             self.analyzeStatement(child) catch |err| {
@@ -12231,6 +12294,102 @@ test "semantic: in-range spec-derived GLOBAL const still lowers correctly" {
     var module = try analyze(testing.allocator, &root);
     defer module.deinit();
     try testing.expect(module.functions.len >= 1);
+}
+
+// ── Uniform-derived global initializer regression guard (wintty cursor shaders).
+// A module-scope global whose initializer reads a uniform (`vec4 TRAIL_COLOR =
+// f(iCurrentCursorColor);`) is NOT a compile-time constant. GLSL executes it
+// before main; the Design-A pass can only fold constants, so without the
+// entry-prologue store the initializer was silently DROPPED — the Private
+// OpVariable had no initializer and no stores, every backend read zeroes, and
+// the cursor shaders' trail rendered black/invisible on a dark terminal
+// (found by the wintty gallery WARP render vs SPIRV-Cross, 2026-08-23).
+
+test "semantic: uniform-derived global initializer stores at entry start (not dropped)" {
+    const source =
+        \\layout(location = 0) out vec4 o;
+        \\layout(std140) uniform G { vec4 c; };
+        \\vec4 T = vec4(c.rgb * 2.0, c.a);
+        \\void main() { o = T; }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    // The global lowers to a Private OpVariable with NO constant initializer
+    // (it can't fold) — the fix must supply the value via an entry store.
+    var gid: u32 = 0;
+    var found = false;
+    for (module.globals) |g| {
+        if (g.storage_class == .private and g.initializer_id == null) {
+            gid = g.result_id;
+            found = true;
+        }
+    }
+    try testing.expect(found);
+
+    var stored_before_use = false;
+    for (module.functions) |f| {
+        if (!std.mem.eql(u8, f.name, "main")) continue;
+        for (f.body) |inst| {
+            if (inst.tag != .store or inst.operands.len != 2) continue;
+            switch (inst.operands[0]) {
+                .id => |ptr| {
+                    if (ptr == gid) stored_before_use = true;
+                },
+                else => {},
+            }
+        }
+    }
+    try testing.expect(stored_before_use);
+}
+
+test "semantic: constant global initializer still folds (no redundant entry store)" {
+    // The const path must keep working: a foldable initializer lands on the
+    // OpVariable itself and must NOT also produce a runtime entry store.
+    const source =
+        \\layout(location = 0) out vec4 o;
+        \\const float K = 2.0;
+        \\float T = K * 3.0;
+        \\void main() { o = vec4(T); }
+    ;
+    const tokens = try lexer.tokenize(testing.allocator, source);
+    defer testing.allocator.free(tokens);
+    var root = try parser.parse(testing.allocator, source, tokens);
+    defer parser.freeTree(testing.allocator, &root);
+    var module = try analyze(testing.allocator, &root);
+    defer module.deinit();
+
+    var folded: u32 = 0;
+    var found = false;
+    for (module.globals) |g| {
+        if (g.storage_class == .private) {
+            found = true;
+            if (g.initializer_id != null) folded += 1;
+        }
+    }
+    try testing.expect(found);
+    try testing.expect(folded >= 1);
+
+    for (module.functions) |f| {
+        if (!std.mem.eql(u8, f.name, "main")) continue;
+        for (f.body) |inst| {
+            if (inst.tag != .store or inst.operands.len != 2) continue;
+            switch (inst.operands[0]) {
+                .id => |ptr| {
+                    for (module.globals) |g| {
+                        if (g.storage_class == .private and g.result_id == ptr) {
+                            try testing.expect(g.initializer_id == null); // not double-initialized
+                        }
+                    }
+                },
+                else => {},
+            }
+        }
+    }
 }
 
 // ── Defensive-hardening regression guards for the constructor/array folding
