@@ -185,6 +185,11 @@ wgsl-tint:
 # backend's output is render-correct (as glslang/naga parse it); single-oracle proxy.
 glsl-render:
     @bash tools/glsl_render_check.sh
+# Baseline-GATED (in ci-full): sweeps tests/spirv-cross + the vendored wintty gallery
+# (tests/wintty_gallery, with mid-animation cursor uniforms), and exits nonzero on any
+# DIFFER not pinned in tools/wgsl_render_baseline.txt. Standing triaged DIFFERs and
+# known open bugs live in that file with their reasons; regenerate + triage with
+# `tools/wgsl_render_check.sh --update-baseline` (see the tool header).
 wgsl-render:
     @bash tools/wgsl_render_check.sh
 
@@ -559,10 +564,13 @@ ci: fmt-check check-min-word-count check-version-sync build cli examples test te
     @echo "═══════════════════════════════════════"
 
 # Adds the gates that cannot run on the hosted runners: DXC (HLSL), Metal (MSL
-# render), and the spirv-cross / naga structural differentials.
+# render), the spirv-cross / naga structural differentials, and the baseline-gated
+# WGSL render proxy over the spirv-cross corpus + the vendored wintty gallery
+# (the consumer corpus that exposed the silent-wrong classes no compile-only
+# gate sees; the render leg is what catches them).
 #
 # `ci` plus the gates that need local oracles or hardware
-ci-full: ci validate-dxc validate-metal oracle-diff
+ci-full: ci validate-dxc validate-metal oracle-diff wgsl-render
     @echo ""
     @echo "═══════════════════════════════════════"
     @echo "  CI-FULL PASSED (incl. local oracles)"
