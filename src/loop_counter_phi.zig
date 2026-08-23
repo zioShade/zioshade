@@ -86,11 +86,148 @@ fn isLoopUpdateBlock(words: []const u32, block: u32, cont_label: u32) bool {
     return predecessorCount(words, cont_label, &last_pred) == 1 and last_pred == block;
 }
 
-/// Whether `pred`'s terminator branches to `target` (i.e. `pred` is a direct CFG
-/// predecessor of `target`). Used to confirm the init store's block is a real
-/// predecessor of the loop header before using it as the `[init, pred]` phi
-/// operand — a cross-loop accumulator (e.g. `sum` initialised outside a nested
-/// loop) has its init store far from the inner header and must NOT be converted.
+/// Iterative dominator sets over the module's basic blocks (label ids are
+/// unique across functions, so one module-wide graph is sound). Built for the
+/// loopCounterToPhi dominance gate: substituting a load with a loop-header
+/// phi is only valid SSA where the header dominates the load's block.
+const Dominators = struct {
+    const Self = @This();
+
+    /// Per-block bitset (dense block index -> set of dominator indices).
+    label_to_index: std.AutoHashMapUnmanaged(u32, u32),
+    nblocks: usize,
+    words_per: usize,
+    dom_sets: []u64,
+
+    fn deinit(self: *Self, alloc: std.mem.Allocator) void {
+        self.label_to_index.deinit(alloc);
+        alloc.free(self.dom_sets);
+    }
+
+    /// One pass: collect blocks + predecessor edges; then the classic
+    /// iterative fixpoint dom(b) = {b} ∪ ⋂ dom(p) over predecessors, with
+    /// dom(entry) = {entry} for each function entry (a label with no
+    /// predecessors). Unreachable blocks simply keep their own bit.
+    fn build(alloc: std.mem.Allocator, words: []const u32) !Self {
+        var labels = std.ArrayListUnmanaged(u32).empty;
+        defer labels.deinit(alloc);
+        var label_to_index = std.AutoHashMapUnmanaged(u32, u32).empty;
+        errdefer label_to_index.deinit(alloc);
+        var preds = std.ArrayListUnmanaged(std.ArrayListUnmanaged(u32)).empty;
+        defer {
+            for (preds.items) |*p| p.deinit(alloc);
+            preds.deinit(alloc);
+        }
+
+        var cur_label: u32 = 0;
+        var pos: u32 = 5;
+        while (pos < words.len) {
+            const wc: u32 = words[pos] >> 16;
+            const op: u16 = @truncate(words[pos] & 0xFFFF);
+            if (wc == 0) break;
+            const ie = pos + wc;
+            if (ie > words.len) break;
+            if (op == 248 and wc >= 2) { // OpLabel
+                cur_label = words[pos + 1];
+                const gop = try label_to_index.getOrPut(alloc, cur_label);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = @intCast(labels.items.len);
+                    try labels.append(alloc, cur_label);
+                    try preds.append(alloc, .empty);
+                }
+            } else if (labels.items.len > 0) {
+                switch (op) {
+                    249 => if (wc >= 2) { // OpBranch
+                        try addPredEdge(alloc, &label_to_index, &labels, &preds, cur_label, words[pos + 1]);
+                    },
+                    250 => if (wc >= 4) { // OpBranchConditional
+                        try addPredEdge(alloc, &label_to_index, &labels, &preds, cur_label, words[pos + 2]);
+                        try addPredEdge(alloc, &label_to_index, &labels, &preds, cur_label, words[pos + 3]);
+                    },
+                    251 => { // OpSwitch: default + every case target
+                        if (wc >= 3) {
+                            try addPredEdge(alloc, &label_to_index, &labels, &preds, cur_label, words[pos + 2]);
+                        }
+                        var k: u32 = pos + 4;
+                        while (k + 1 < pos + wc) : (k += 2) {
+                            try addPredEdge(alloc, &label_to_index, &labels, &preds, cur_label, words[k + 1]);
+                        }
+                    },
+                    else => {},
+                }
+            }
+            pos = ie;
+        }
+
+        const n = labels.items.len;
+        const words_per = (n + 63) / 64;
+        const dom_sets = try alloc.alloc(u64, n * words_per);
+        errdefer alloc.free(dom_sets);
+        // Initialize to "all blocks" so the fixpoint intersection converges
+        // from ⊤; function entries (no predecessors) get {self} immediately.
+        @memset(dom_sets, ~@as(u64, 0));
+        for (0..n) |bi| {
+            if (preds.items[bi].items.len == 0) {
+                const base = bi * words_per;
+                @memset(dom_sets[base .. base + words_per], 0);
+                dom_sets[base + bi / 64] |= @as(u64, 1) << @intCast(bi % 64);
+            }
+        }
+
+        const acc = try alloc.alloc(u64, words_per);
+        defer alloc.free(acc);
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (0..n) |bi| {
+                if (preds.items[bi].items.len == 0) continue;
+                @memset(acc, ~@as(u64, 0));
+                for (preds.items[bi].items) |plbl| {
+                    const pidx = label_to_index.get(plbl) orelse continue;
+                    const pbase = pidx * words_per;
+                    for (0..words_per) |w| acc[w] &= dom_sets[pbase + w];
+                }
+                acc[bi / 64] |= @as(u64, 1) << @intCast(bi % 64);
+                const base = bi * words_per;
+                for (0..words_per) |w| {
+                    if (dom_sets[base + w] != acc[w]) {
+                        dom_sets[base + w] = acc[w];
+                        changed = true;
+                    }
+                }
+            }
+        }
+        return .{ .label_to_index = label_to_index, .nblocks = n, .words_per = words_per, .dom_sets = dom_sets };
+    }
+
+    /// Record that block `src` branches to `target` (creating `target`'s entry
+    /// if its label has not been seen yet).
+    fn addPredEdge(
+        alloc: std.mem.Allocator,
+        label_to_index: *std.AutoHashMapUnmanaged(u32, u32),
+        labels: *std.ArrayListUnmanaged(u32),
+        preds: *std.ArrayListUnmanaged(std.ArrayListUnmanaged(u32)),
+        src: u32,
+        target: u32,
+    ) !void {
+        const gop = try label_to_index.getOrPut(alloc, target);
+        if (!gop.found_existing) {
+            gop.value_ptr.* = @intCast(labels.items.len);
+            try labels.append(alloc, target);
+            try preds.append(alloc, .empty);
+        }
+        try preds.items[gop.value_ptr.*].append(alloc, src);
+    }
+
+    /// True if block `a` dominates block `b` (unknown labels: false).
+    fn dominates(self: *const Self, a: u32, b: u32) bool {
+        const ai = self.label_to_index.get(a) orelse return false;
+        const bi = self.label_to_index.get(b) orelse return false;
+        if (ai / 64 >= self.words_per) return false;
+        return (self.dom_sets[bi * self.words_per + ai / 64] & (@as(u64, 1) << @intCast(ai % 64))) != 0;
+    }
+};
+
 fn isDirectPredecessor(words: []const u32, pred: u32, target: u32) bool {
     var pos: u32 = 5;
     var in_block = false;
@@ -260,6 +397,12 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
     var phi_inserts = std.ArrayListUnmanaged(PhiInsert).empty;
     defer phi_inserts.deinit(alloc);
 
+    // Dominator sets for the load-substitution gate below, built once for the
+    // whole module (the per-candidate loops only query it). A build failure
+    // (OOM) leaves every variable a memory var — correct, just unoptimized.
+    var dom = Dominators.build(alloc, words) catch return words;
+    defer dom.deinit(alloc);
+
     for (vars.items) |v| {
         if (v.stores.items.len != 2) continue;
         if (v.loads.items.len == 0) continue;
@@ -304,9 +447,26 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
             if (cont_store.?.block != cont_label and
                 unconditionalBranchTarget(words, cont_label) != hdr_label) continue;
 
-            // Check: all loads are in loop-dominated blocks (not pre-header store block or merge)
-            // For structured SPIR-V, any block that is NOT the pre-header or merge is dominated by the header
-            const pre_block = pre_store.?.block;
+            // Check: all loads are in blocks DOMINATED by the loop header. The
+            // promotion substitutes every load with the loop-header phi, which
+            // is only valid SSA where the header dominates the use. The old
+            // heuristic ("any block that is NOT the pre-header or merge is
+            // dominated by the header") is false for a loop nested inside a
+            // selection: the selection's merge block is reachable via the
+            // bypass edge without ever entering the loop, so a post-if read
+            // was rewritten to a phi that does not dominate it (spirv-val:
+            // "does not dominate its use"; the wintty cursor_teleport class).
+            {
+                var all_dominated = true;
+                for (v.loads.items) |l| {
+                    if (l.block == hdr_label) continue; // the header dominates itself
+                    if (!dom.dominates(hdr_label, l.block)) {
+                        all_dominated = false;
+                        break;
+                    }
+                }
+                if (!all_dominated) continue;
+            }
 
             // First try: load in loop header (existing pattern, reuse load result as phi result)
             var phi_result: ?u32 = null;
@@ -317,22 +477,16 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                 }
             }
 
-            // Second try: no load in header, but all loads in loop-dominated blocks
+            // Second try: no load in header, but all loads in loop-dominated blocks.
+            // Extra guard the dominance gate cannot see: a load in the loop's
+            // MERGE block reads the loop-EXIT value, which equals the header
+            // phi only for a top-test exit (for/while: the test at the header
+            // rejects before any update). A do-while exits from the latch
+            // AFTER the update store, so the merge read is the post-update
+            // value, not the phi (promoting it silently miscompiles the
+            // counter read after the loop). With no header load there is no
+            // evidence of a top-test exit, so keep the merge load in memory.
             if (phi_result == null) {
-                // Check all loads are NOT in pre-header or merge block
-                var all_dominated = true;
-                for (v.loads.items) |l| {
-                    if (l.block == pre_block) {
-                        all_dominated = false;
-                        break;
-                    }
-                    // Check if load is in the merge block by looking for OpLabel with merge block label
-                    // For simplicity, we check if the load block is the merge target of this loop
-                }
-                if (!all_dominated) continue;
-
-                // Also check: no load in the loop's merge block
-                // Find the merge block by looking for OpLoopMerge in the header block
                 var found_merge: u32 = 0;
                 var mp2: u32 = 5;
                 var in_hdr_block = false;
@@ -349,18 +503,15 @@ pub fn loopCounterToPhi(alloc: std.mem.Allocator, words: []const u32) error{OutO
                     mp2 += mwc;
                 }
                 if (found_merge > 0) {
+                    var merge_load = false;
                     for (v.loads.items) |l| {
                         if (l.block == found_merge) {
-                            all_dominated = false;
+                            merge_load = true;
                             break;
                         }
                     }
+                    if (merge_load) continue;
                 }
-                if (!all_dominated) continue;
-
-                // All loads are in dominated blocks. Use first load's result as phi result.
-                // But we need a fresh ID for the phi result since no load is in the header.
-                // Actually, we can still reuse any load result — just use the first one.
                 phi_result = v.loads.items[0].result_id;
                 // reuse is fine, we'll just substitute all loads
             }

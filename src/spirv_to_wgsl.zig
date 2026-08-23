@@ -7971,10 +7971,48 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // Pre-declare selection phi variables before the if/else block
                     if (ctx.sel_phis.count() > 0) {
                         if (ctx.sel_phis.get(pending_merge.?)) |phi_list| {
-                            // Find the first (init) predecessor — get it from the Phi instruction
-                            const first_phi_result = phi_list.items[0].result_id;
-                            const phi_inst = getDef(module, first_phi_result);
-                            const init_pred = if (phi_inst != null and phi_inst.?.words.len >= 5) phi_inst.?.words[4] else null;
+                            // The `var x = <init>` declaration doubles as the assignment
+                            // on the edge that BYPASSES the arms (the conditional's false
+                            // target is the merge block). That edge leaves the SELECTION
+                            // HEADER — the block this OpSelectionMerge sits in — so the
+                            // initializer must be the phi incoming whose predecessor IS
+                            // the header block. SPIR-V does NOT fix incoming order, so
+                            // the old "first incoming's predecessor" heuristic picked the
+                            // TAKEN arm's value whenever it was listed first (the wintty
+                            // cursor_sweep shape): the arm value failed the defined-before
+                            // test below and the emitter silently fell back to a zero-init
+                            // `var x: T;` — dropping the not-taken incoming entirely. The
+                            // bypass edge then read a type zero instead of the pre-if
+                            // value (naga-valid, whole-frame black: zioshade-8h7).
+                            var header_label: ?u32 = null;
+                            {
+                                var hp: usize = i;
+                                while (hp > 0) : (hp -= 1) {
+                                    const hinst = module.instructions[hp];
+                                    if (hinst.op == .Label and hinst.words.len > 1) {
+                                        header_label = hinst.words[1];
+                                        break;
+                                    }
+                                }
+                            }
+                            var init_pred: ?u32 = null;
+                            if (header_label != null) {
+                                for (phi_list.items) |sp| {
+                                    if (sp.pred_label == header_label.?) {
+                                        init_pred = header_label;
+                                        break;
+                                    }
+                                }
+                            }
+                            // if/else where BOTH merge predecessors are arms (no bypass
+                            // edge): every edge into the merge assigns at its branch, so
+                            // the declaration's initializer is never read. Keep the legacy
+                            // first-incoming predecessor so the var is still declared.
+                            if (init_pred == null) {
+                                const first_phi_result = phi_list.items[0].result_id;
+                                const phi_inst = getDef(module, first_phi_result);
+                                init_pred = if (phi_inst != null and phi_inst.?.words.len >= 5) phi_inst.?.words[4] else null;
+                            }
                             // Emit var declarations for all phi results using init values
                             var seen = std.AutoHashMap(u32, void).init(arena);
                             for (phi_list.items) |sp| {

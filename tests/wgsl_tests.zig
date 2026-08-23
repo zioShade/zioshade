@@ -9725,3 +9725,290 @@ test "WGSL: loop-merge phi is declared and naga-validates (loop_merge_phi_top)" 
     try assertContains(wgsl, "v20 = v17; break;");
     try nagaValidateOrSkip(wgsl, "loop-merge-phi-top");
 }
+
+// ---------------------------------------------------------------------------
+// Wintty shader-gallery regression guards (zioshade-8h7, cursor_teleport,
+// zioshade-kgt). Every test drives the FULL pipeline through zioshade's own
+// frontend (GLSL -> SPIR-V -> WGSL) with the real wintty shadertoy contract
+// (Globals UBO at binding 1, iChannel0 combined sampler at binding 0,
+// mainImage called from main with an out param). These are SILENT-WRONG
+// classes: the broken WGSL was either naga-valid-but-black (the whole point
+// of the gallery render gate) or naga-invalid out-of-scope, and none of the
+// existing gates saw them because the corpus had no shadertoy-shaped shader
+// with these control-flow nests.
+// ---------------------------------------------------------------------------
+
+const shadertoy_prefix = @embedFile("wintty/shadertoy_prefix.glsl");
+
+/// prefix + body as one NUL-terminated source. Caller frees.
+fn shadertoySource(body: []const u8) ![:0]const u8 {
+    const raw = try std.mem.concat(alloc, u8, &.{ shadertoy_prefix, "\n", body });
+    defer alloc.free(raw);
+    return alloc.dupeZ(u8, raw);
+}
+
+/// The body of the emitted `fn mainImage` (the walker output under test);
+/// the @fragment main() wrapper is excluded.
+fn mainImageBody(wgsl: []const u8) []const u8 {
+    const start = std.mem.indexOf(u8, wgsl, "fn mainImage") orelse return wgsl;
+    const rest = wgsl[start..];
+    const end = std.mem.indexOf(u8, rest, "\n@fragment") orelse rest.len;
+    return rest[0..end];
+}
+
+/// True if some variable is initialized from `rhs_name` (e.g. "v34") on a
+/// line inside [0, until_idx): either `var vN: T = v34;` (declaration with
+/// initializer) or `vN = v34;` where `vN` was declared as a `var` earlier.
+/// This is the shape the if-merge phi MUST take when the not-taken incoming
+/// survives: the merge var's incoming value is stored BEFORE the conditional,
+/// so the bypass edge reads the pre-if value instead of a type zero.
+fn hasInitializedVarBefore(hay: []const u8, until_idx: usize, rhs_name: []const u8) bool {
+    const assign_tail = std.mem.concat(alloc, u8, &.{ " = ", rhs_name, ";" }) catch return false;
+    defer alloc.free(assign_tail);
+    var line_start: usize = 0;
+    while (line_start < until_idx) {
+        const line_end = std.mem.indexOfPos(u8, hay, line_start, "\n") orelse hay.len;
+        const line = std.mem.trim(u8, hay[line_start..@min(line_end, until_idx)], " \t");
+        if (std.mem.startsWith(u8, line, "var ") and std.mem.endsWith(u8, line, assign_tail)) {
+            return true;
+        }
+        if (std.mem.endsWith(u8, line, assign_tail)) {
+            // Assignment store; the target must be a var (not a `let`), or the
+            // emitter made it immutable and the branch store cannot exist.
+            const target = line[0 .. line.len - assign_tail.len];
+            var probe: ?usize = std.mem.indexOf(u8, hay[0..line_start], "var ");
+            while (probe) |p| {
+                const rest = hay[p + 4 ..];
+                const t_end = std.mem.indexOf(u8, rest, ":") orelse break;
+                if (std.mem.eql(u8, std.mem.trim(u8, rest[0..t_end], " \t"), target)) return true;
+                probe = std.mem.indexOfPos(u8, hay, p + 4, "var ");
+            }
+        }
+        if (line_end >= hay.len) break;
+        line_start = line_end + 1;
+    }
+    return false;
+}
+
+// zioshade-8h7, early-return shape (the pre-workaround crt.glsl): a bezel
+// early return in mainImage followed by the normal texture/color path. The
+// emitted WGSL must keep BOTH paths -- the early `return` inside the if AND
+// the texture samples after it (the structured-exit lowering must not drop
+// the fall-through code). NOTE the residual, separately-tracked failure this
+// test deliberately does NOT gate: Chrome/tint additionally reject this
+// shape with "'textureSample' must only be called from uniform control
+// flow" (the samples sit after a fragment-dependent early return; naga
+// accepts, which is why the naga gate never saw it) — that is zioshade-8k2
+// Class A, deferred: routing to textureSampleLevel would change mip
+// semantics. Until 8k2 lands, this guard pins the STRUCTURE only.
+test "wintty gallery: early return in mainImage keeps BOTH code paths (8h7)" {
+    const src = try shadertoySource(
+        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
+        \\{
+        \\    vec2 uv = fragCoord.xy / iResolution.xy;
+        \\    if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+        \\        fragColor = vec4(0.0, 0.0, 0.0, 1.0);
+        \\        return;
+        \\    }
+        \\    vec3 col;
+        \\    col.r = texture(iChannel0, uv).r;
+        \\    col.g = texture(iChannel0, uv).g;
+        \\    col.b = texture(iChannel0, uv).b;
+        \\    col *= 0.5 + 0.5 * sin(fragCoord.y * 0.3 + iTime);
+        \\    fragColor = vec4(col, 1.0);
+        \\}
+        \\
+    );
+    defer alloc.free(src);
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+
+    const body = mainImageBody(wgsl);
+    const if_idx = std.mem.indexOf(u8, body, "if (") orelse return error.TestExpectedIf;
+    const ret_idx = std.mem.indexOf(u8, body, "return") orelse return error.TestExpectedReturn;
+    const tex_idx = std.mem.indexOf(u8, body, "textureSample") orelse return error.TestExpectedTextureSample;
+    // Early-exit path: the return sits INSIDE the conditional...
+    try std.testing.expect(if_idx < ret_idx);
+    // ...and the normal path: all three texture samples come AFTER it, none
+    // dropped into dead code.
+    try std.testing.expect(ret_idx < tex_idx);
+    var samples: usize = 0;
+    var scan = tex_idx;
+    while (std.mem.indexOfPos(u8, body, scan, "textureSample")) |hit| {
+        samples += 1;
+        scan = hit + 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), samples);
+    try nagaValidateOrSkip(wgsl, "8h7-early-return");
+}
+
+// zioshade-8h7, trailing-conditional shape (the cursor_sweep class): a local
+// initialized BEFORE the if from the texture sample, reassigned inside the
+// arm, read after. The selection-merge phi's NOT-TAKEN incoming (the sample)
+// was dropped when the taken incoming happened to be listed first in the
+// OpPhi: the merge var was emitted as a bare `var vN: vec4f;` zero-init, so
+// the bypass edge returned zero and the shader rendered whole-frame black
+// (naga-valid, hence invisible to validity gates).
+test "wintty gallery: trailing conditional keeps the not-taken phi incoming (8h7, cursor_sweep class)" {
+    const src = try shadertoySource(
+        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
+        \\{
+        \\    vec4 fc = texture(iChannel0, fragCoord.xy / iResolution.xy);
+        \\    vec4 newColor = fc;
+        \\    if (distance(iCurrentCursor.xy, iPreviousCursor.xy) > 1.5) {
+        \\        newColor = mix(newColor, vec4(1.0, 0.5, 0.2, 1.0), 0.5);
+        \\        newColor = mix(newColor, fc, 0.5);
+        \\    }
+        \\    fragColor = newColor;
+        \\}
+        \\
+    );
+    defer alloc.free(src);
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+
+    const body = mainImageBody(wgsl);
+    const if_idx = std.mem.indexOf(u8, body, "if (") orelse return error.TestExpectedIf;
+    const tex_idx = std.mem.indexOf(u8, body, "textureSample") orelse return error.TestExpectedTextureSample;
+    // The sample feeds the phi, so it must be emitted BEFORE the conditional.
+    try std.testing.expect(tex_idx < if_idx);
+    // VALUE PIN: the merge var is declared AND initialized from the sample's
+    // let BEFORE the if -- the not-taken path must read the sample, not a
+    // zero. The sample's let name is the `vN` of `let vN: vec4f = textureSample`.
+    const sample_let = blk: {
+        const let_idx = std.mem.lastIndexOf(u8, body[0..tex_idx], "let ") orelse return error.TestExpectedSampleLet;
+        const line_end = std.mem.indexOfPos(u8, body, let_idx, ":") orelse return error.TestExpectedSampleLet;
+        break :blk std.mem.trim(u8, body[let_idx + 4 .. line_end], " \t");
+    };
+    if (!hasInitializedVarBefore(body, if_idx, sample_let)) {
+        std.debug.print("no initialized merge var from {s} before the if:\n{s}\n", .{ sample_let, body });
+        return error.TestExpectedInitializedMergeVar;
+    }
+    try nagaValidateOrSkip(wgsl, "8h7-trailing-conditional");
+}
+
+// cursor_teleport (found by the gallery cursor agent): a local initialized
+// BEFORE an if and loop-modified INSIDE it. The frontend's SSA spill placed
+// the incoming store at the top of the taken branch (the loop's preheader,
+// which is the then-arm), so the not-taken path read zero, and
+// loopCounterToPhi then promoted it to a loop-header phi read outside its
+// dominance (spirv-val: "does not dominate its use"; the WGSL referenced a
+// var declared inside the if after its closing brace, naga "no definition in
+// scope"). The incoming store must land BEFORE the if.
+test "wintty gallery: loop-modified local keeps its incoming store before the if (cursor_teleport)" {
+    const src = try shadertoySource(
+        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
+        \\{
+        \\    vec2 uv = fragCoord.xy / iResolution.xy;
+        \\    vec3 col = texture(iChannel0, uv).rgb;
+        \\    if (iTimeCursorChange > 0.5) {
+        \\        for (int i = 0; i < 8; i++) {
+        \\            col += vec3(0.01);
+        \\        }
+        \\    }
+        \\    fragColor = vec4(col, 1.0);
+        \\}
+        \\
+    );
+    defer alloc.free(src);
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    // The frontend dominance violation is the first failure mode: spirv-val
+    // must accept the module (the loop-header phi is read in a block the
+    // bypass edge reaches without entering the loop).
+    try spirvValValidateOrSkip(spv, "cursor-teleport");
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+
+    const body = mainImageBody(wgsl);
+    const if_idx = std.mem.indexOf(u8, body, "if (") orelse return error.TestExpectedIf;
+    const tex_idx = std.mem.indexOf(u8, body, "textureSample") orelse return error.TestExpectedTextureSample;
+    // The sample must be emitted BEFORE the conditional (it is the incoming
+    // value of the merge, not a branch-local).
+    try std.testing.expect(tex_idx < if_idx);
+    // VALUE PIN: the loop-carried merge var is declared AND initialized from
+    // the sample's extract BEFORE the if, so the bypass edge reads the
+    // texture color instead of zero.
+    const sample_let = blk: {
+        const ext_idx = std.mem.indexOf(u8, body[0..if_idx], ".xyz") orelse return error.TestExpectedExtract;
+        const let_idx = std.mem.lastIndexOf(u8, body[0..ext_idx], "let ") orelse return error.TestExpectedExtract;
+        const line_end = std.mem.indexOfPos(u8, body, let_idx, ":") orelse return error.TestExpectedExtract;
+        break :blk std.mem.trim(u8, body[let_idx + 4 .. line_end], " \t");
+    };
+    if (!hasInitializedVarBefore(body, if_idx, sample_let)) {
+        std.debug.print("no initialized merge var from {s} before the if:\n{s}\n", .{ sample_let, body });
+        return error.TestExpectedInitializedMergeVar;
+    }
+    // And the WGSL must be consumable by a browser frontend at all (the
+    // broken emission referenced the branch-local var after its scope end).
+    try nagaValidateOrSkip(wgsl, "cursor-teleport");
+    try tintValidateOrSkip(wgsl, "cursor-teleport");
+}
+
+// Second face of the same class: a local FIRST assigned inside the if-arm,
+// loop-modified after it, read after the if. loopCounterToPhi promoted it to
+// a loop-header phi and substituted the post-if load -- a block the bypass
+// edge reaches without entering the loop, which spirv-val rejects. Such a
+// variable must stay a memory var (load/store), not become a phi.
+test "wintty gallery: arm-assigned local is not promoted to a non-dominating loop phi" {
+    const src = try shadertoySource(
+        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
+        \\{
+        \\    vec2 uv = fragCoord.xy / iResolution.xy;
+        \\    vec3 col;
+        \\    if (iTimeCursorChange > 0.5) {
+        \\        col = texture(iChannel0, uv).rgb;
+        \\        for (int i = 0; i < 8; i++) {
+        \\            col += vec3(0.01);
+        \\        }
+        \\    }
+        \\    fragColor = vec4(col, 1.0);
+        \\}
+        \\
+    );
+    defer alloc.free(src);
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    try spirvValValidateOrSkip(spv, "arm-assigned-loop-phi");
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try nagaValidateOrSkip(wgsl, "arm-assigned-loop-phi");
+}
+
+// zioshade-kgt, browser leg: a module-scope global whose initializer reads a
+// uniform is stored at entry-function start (the semantic-level regression
+// lives in src/semantic.zig; this pins that the initializer actually reaches
+// the WGSL, which is what a WebGPU browser executes -- the original symptom
+// was the cursor trail rendering black on wintty.io because the dropped
+// initializer made every read of the global return zeroes). The backend may
+// inline the store away entirely, so the pin is on the initializer's
+// ARITHMETIC surviving into the entry point, not on a `var<private>` decl.
+test "wintty gallery: uniform-derived global initializer reaches the WGSL entry point (kgt)" {
+    const src = try shadertoySource(
+        \\vec4 T = vec4(iCurrentCursorColor.rgb * 2.0, iCurrentCursorColor.a);
+        \\void mainImage( out vec4 fragColor, in vec2 fragCoord )
+        \\{
+        \\    vec2 uv = fragCoord.xy / iResolution.xy;
+        \\    fragColor = T + texture(iChannel0, uv) * 0.001;
+        \\}
+        \\
+    );
+    defer alloc.free(src);
+    const spv = try zioshade.compileToSPIRV(alloc, src, .{ .stage = .fragment });
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+
+    // The uniform read and the initializer's arithmetic must both be present;
+    // with the initializer dropped, T read as zeroes and neither appeared.
+    try assertContains(wgsl, "iCurrentCursorColor");
+    try assertContains(wgsl, "* 2.0f");
+    // The initializer is uniform-derived, so it must NOT fold into the
+    // declaration as a constant.
+    try assertNotContains(wgsl, "var<private> T = ");
+    try nagaValidateOrSkip(wgsl, "kgt-wgsl-entry");
+}
