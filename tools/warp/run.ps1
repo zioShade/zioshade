@@ -22,6 +22,11 @@ param(
   # Gallery mode: render each single-shader .hlsl in -Dir through the
   # shadertoy contract (Globals b1 + iChannel0 t0/s0) and write <name>.ppm.
   # Used by the wintty shader-gallery verification (tools/gallery in wintty).
+  # When a <name>.sc.hlsl (spirv-cross reference) sits next to <name>.hlsl, the
+  # two are rendered through the SAME gallery resources and diffed
+  # (warp_render --gallery-diff): PASS then requires the frames to match, so a
+  # silently-wrong lowering (e.g. whole-frame-black) FAILS the gate instead of
+  # passing on "compiled + exited 0".
   [switch]$Gallery
 )
 
@@ -124,12 +129,41 @@ if ($Gallery) {
   # write <name>.ppm. A DXIL compile failure or a render/setup failure is a
   # FAIL here (not a skip): the gallery ships these shaders, so a shader that
   # cannot render is a broken gallery entry, full stop.
-  $gPass = 0; $gFail = 0; $gFailList = @()
-  Get-ChildItem -Path $Dir -Filter "*.hlsl" | Where-Object { $_.Name -ne "fullscreen_vs.hlsl" } | ForEach-Object {
+  # When <name>.sc.hlsl (the spirv-cross reference for the same GLSL) is staged
+  # next to it, both are rendered through the SAME gallery resources and the
+  # frames are diffed (--gallery-diff): PASS requires a frame match, and a
+  # divergence FAILS the run. The .sc.hlsl/.gen_vs.hlsl suffixes are stripped
+  # from the glob below so references pair with their shader instead of being
+  # rendered as independent gallery entries.
+  $gPass = 0; $gFail = 0; $gDiffer = 0
+  $gFailList = @(); $gDifferList = @()
+  Get-ChildItem -Path $Dir -Filter "*.hlsl" |
+    Where-Object { $_.Name -ne "fullscreen_vs.hlsl" -and
+                   $_.Name -notlike "*.sc.hlsl" -and
+                   $_.Name -notlike "*.gen_vs.hlsl" } | ForEach-Object {
     $name = $_.Name -replace '\.hlsl$',''
     $cso = Join-Path $Dir "$name.cso"
     & $Dxc -T ps_6_0 -E main -Wno-ignored-attributes $_.FullName -Fo $cso 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Host "FAIL dxc $name"; $gFail++; $gFailList += $name; return }
+    $scHlsl = Join-Path $Dir "$name.sc.hlsl"
+    if (Test-Path $scHlsl) {
+      # Paired mode: compile the reference, render both, require a match.
+      $scCso = Join-Path $Dir "$name.sc.cso"
+      & $Dxc -T ps_6_0 -E main -Wno-ignored-attributes $scHlsl -Fo $scCso 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) { Write-Host "FAIL dxc-sc $name"; $gFail++; $gFailList += $name; return }
+      $out = & $Warp --gallery-diff $vsCso $cso $scCso (Join-Path $Dir $name) 2>$null
+      $code = $LASTEXITCODE
+      if ($code -eq 0) { Write-Host "PASS $name"; $gPass++ }
+      elseif ($code -eq 1) {
+        Write-Host "GALLERY-DIFFER $name"; $out | ForEach-Object { Write-Host "  $_" }
+        $gDiffer++; $gDifferList += $name
+      } else {
+        Write-Host "FAIL warp-$code $name"; $out | ForEach-Object { Write-Host "  $_" }
+        $gFail++; $gFailList += $name
+      }
+      return
+    }
+    Write-Host "(no reference: $name)"  # single-render PASS, backward compatible
     $ppm = Join-Path $Dir "$name.ppm"
     & $Warp --gallery $vsCso $cso $ppm 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) { Write-Host "FAIL warp-$LASTEXITCODE $name"; $gFail++; $gFailList += $name; return }
@@ -139,7 +173,10 @@ if ($Gallery) {
   Write-Host ""
   Write-Host "GALLERY PASS = $gPass"
   Write-Host "GALLERY FAIL = $gFail"
-  if ($gFail -gt 0) { Write-Host "failed: $($gFailList -join ', ')"; exit 1 }
+  Write-Host "GALLERY DIFFER = $gDiffer"
+  if ($gFail -gt 0) { Write-Host "failed: $($gFailList -join ', ')" }
+  if ($gDiffer -gt 0) { Write-Host "diverged: $($gDifferList -join ', ')" }
+  if ($gFail -gt 0 -or $gDiffer -gt 0) { exit 1 }
   exit 0
 }
 

@@ -16,6 +16,13 @@
 //   exit 1 + "DIFFER" = a real pixel divergence (an HLSL miscompile)
 //   exit 2            = setup/compile/pipeline error (treat as skip)
 //
+//         warp_render.exe --gallery <vs.cso> <ps.cso> <out.ppm>
+//         warp_render.exe --gallery-diff <vs.cso> <zs.cso> <sc.cso> <out_prefix>
+//   (--gallery renders one shadertoy-contract shader to a PPM; --gallery-diff
+//    renders zioshade's and the spirv-cross reference's HLSL through the SAME
+//    gallery resources and compares, writing <prefix>.zs.ppm / <prefix>.sc.ppm.
+//    Same exit contract: 0 match / 1 differ / 2 setup failure.)
+//
 // Build (x64 Native Tools cmd, Windows SDK on PATH):
 //   cl /std:c++17 /EHsc /O2 warp_render.cpp /link d3d12.lib dxgi.lib
 //
@@ -55,6 +62,73 @@ static bool readFile(const char* path, std::vector<char>& out) {
 }
 
 #define HRCHECK(hr, msg) do { if (FAILED(hr)) { fprintf(stderr, "%s (hr=0x%08lx)\n", msg, (unsigned long)(hr)); return 2; } } while(0)
+
+// Write an RGBA8 readback as a P6 PPM (RGB, 255 maxval).
+static bool writePpm(const char* path, const std::vector<unsigned char>& rgba) {
+    FILE* f = fopen(path, "wb");
+    if (!f) { fprintf(stderr, "cannot write %s\n", path); return false; }
+    fprintf(f, "P6\n%u %u\n255\n", W, H);
+    for (size_t i = 0; i < rgba.size(); i += 4) {
+        unsigned char rgb[3] = { rgba[i], rgba[i + 1], rgba[i + 2] };
+        fwrite(rgb, 1, 3, f);
+    }
+    fclose(f);
+    printf("dumped %s\n", path);
+    return true;
+}
+
+// Compare two RGBA8 readbacks and print the standard diff report. The tolerance
+// is <=1 per channel (the same verdict as the macOS Metal harness); both the
+// two-PSO diff mode and the gallery pair-diff mode go through here so there is
+// exactly one epsilon in the tool. Returns 0 = MATCH, 1 = DIFFER.
+static int reportDiff(const std::vector<unsigned char>& a, const std::vector<unsigned char>& b) {
+    long maxD = 0, total = 0, diffPx = 0;
+    for (size_t i = 0; i < a.size(); i++) {
+        long d = labs((long)a[i] - (long)b[i]);
+        if (d > maxD) maxD = d;
+        total += d;
+        // Count a pixel once when ANY of its channels differs (evaluated at the
+        // pixel's last byte). Two earlier forms misreported "Different: 0" next
+        // to a DIFFER verdict: keying on (i % 4) == 0 missed non-red-only
+        // divergence, and requiring d > 0 at the alpha byte missed RGB-only
+        // divergence with equal alpha (seen live: maxdiff 240, Different: 0).
+        if ((i % 4) == 3) {
+            bool any = false;
+            for (int c = 0; c < 4; c++) any |= a[i - 3 + c] != b[i - 3 + c];
+            if (any) diffPx++;
+        }
+    }
+    printf("Resolution: %ux%u  Pixels: %u  Different: %ld\n", W, H, W * H, diffPx);
+    printf("Max channel diff: %ld\n", maxD);
+    printf("Avg channel diff: %.4f\n", (double)total / (double)a.size());
+    bool match = (maxD <= 1);
+    printf("%s\n", match ? "MATCH (<=1 per-channel)" : "DIFFER (max diff)");
+    return match ? 0 : 1;
+}
+
+// WARP device + direct queue shared by every mode. `debugLayer` enables the
+// D3D12 debug layer when present (an invalid command list is otherwise a silent
+// whole-list drop: zero frame, no HRESULT); the gallery modes opt in, the plain
+// pair-diff path keeps its historical no-debug-layer shape.
+static int createWarpDevice(CP<ID3D12Device>& dev, CP<ID3D12CommandQueue>& queue, bool debugLayer) {
+    if (debugLayer) {
+        if (HMODULE d3d12 = GetModuleHandleA("d3d12.dll")) {
+            typedef HRESULT(__stdcall* PFN_GetDebugInterface)(const IID&, void**);
+            if (auto fn = (PFN_GetDebugInterface)GetProcAddress(d3d12, "D3D12GetDebugInterface")) {
+                ID3D12Debug* dbg = nullptr;
+                if (SUCCEEDED(fn(IID_PPV_ARGS(&dbg))) && dbg) { dbg->EnableDebugLayer(); dbg->Release(); }
+            }
+        }
+    }
+    CP<IDXGIFactory4> factory;
+    HRCHECK(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
+    CP<IDXGIAdapter> warp;
+    HRCHECK(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "EnumWarpAdapter");
+    HRCHECK(D3D12CreateDevice(warp.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)), "D3D12CreateDevice(WARP)");
+    D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    HRCHECK(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)), "CreateCommandQueue");
+    return 0;
+}
 
 // Render one pixel shader with the shared VS; fill `pixels` (W*H*4, RGBA8).
 //
@@ -316,6 +390,14 @@ static int renderOne(ID3D12Device* dev, ID3D12CommandQueue* queue,
 // Usage: warp_render.exe --gallery <vs.cso> <ps.cso> <out.ppm>
 //   exit 0 = rendered, PPM written; exit 2 = setup/PSO error (skip)
 //
+// Gallery PAIR-DIFF mode (--gallery-diff, below): with `psRef` set, the same
+// setup renders a second pixel shader (the spirv-cross reference HLSL) to its
+// own render target from the SAME cbuffer/texture contents, and the two frames
+// are compared with the harness tolerance (reportDiff). This closes the gate
+// gap where a gallery shader passed as long as DXC compiled it and the render
+// exited 0: a silent whole-frame-black lowering bug rendered "successfully".
+//   exit 0 = rendered identical; 1 = DIFFER; 2 = setup/PSO error.
+//
 // The uniform values mirror a real terminal mid-frame: 256x256, t=1.7s, a
 // block cursor at pixel (40,60) size 9x18 (wintty convention: xy = the +X/+Y
 // edge of the glyph, origin top-left, +Y down), cursor colors, a 256-entry
@@ -326,7 +408,9 @@ static const UINT GAL_CBUFFER_FLOAT4S = 281; // c0..c280 per the packoffsets
 
 static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
                          const std::vector<char>& vs, const std::vector<char>& ps,
-                         const char* outPpm) {
+                         const char* outPpm,
+                         const std::vector<char>* psRef = nullptr,
+                         const char* outPpmRef = nullptr) {
     // Root signature: root CBV at b1, descriptor table SRV t0, sampler s0.
     CP<ID3D12RootSignature> rootSig;
     CP<ID3D12DescriptorHeap> srvHeap, sampHeap;
@@ -368,8 +452,11 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         HRCHECK(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&sampHeap)), "CreateDescriptorHeap(sampler)");
     }
 
-    // PSO: same fullscreen-triangle shape as the differential path.
+    // PSO: same fullscreen-triangle shape as the differential path. Pair mode
+    // builds a second PSO (same everything, reference PS) so both draws share
+    // one root signature, one command list, one texture/cbuffer upload.
     CP<ID3D12PipelineState> pso;
+    CP<ID3D12PipelineState> psoRef;
     {
         D3D12_GRAPHICS_PIPELINE_STATE_DESC pd = {};
         pd.pRootSignature = rootSig.get();
@@ -385,10 +472,15 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         pd.RTVFormats[0] = DXGI_FORMAT_R8G8B8A8_UNORM;
         pd.SampleDesc.Count = 1;
         HRCHECK(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&pso)), "CreateGraphicsPipelineState(gallery)");
+        if (psRef) {
+            pd.PS = { psRef->data(), psRef->size() };
+            HRCHECK(dev->CreateGraphicsPipelineState(&pd, IID_PPV_ARGS(&psoRef)), "CreateGraphicsPipelineState(gallery ref)");
+        }
     }
 
-    // Render target.
+    // Render target (pair mode: one per pixel shader).
     CP<ID3D12Resource> rt;
+    CP<ID3D12Resource> rtRef;
     D3D12_HEAP_PROPERTIES dhp = {}; dhp.Type = D3D12_HEAP_TYPE_DEFAULT;
     {
         D3D12_RESOURCE_DESC rd = {};
@@ -399,12 +491,21 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         D3D12_CLEAR_VALUE cv = {}; cv.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
         HRCHECK(dev->CreateCommittedResource(&dhp, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&rt)), "CreateCommittedResource(gallery rt)");
+        if (psRef)
+            HRCHECK(dev->CreateCommittedResource(&dhp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_RENDER_TARGET, &cv, IID_PPV_ARGS(&rtRef)), "CreateCommittedResource(gallery rt ref)");
     }
     CP<ID3D12DescriptorHeap> rtvHeap;
-    { D3D12_DESCRIPTOR_HEAP_DESC hd = {}; hd.NumDescriptors = 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
+    { D3D12_DESCRIPTOR_HEAP_DESC hd = {}; hd.NumDescriptors = psRef ? 2 : 1; hd.Type = D3D12_DESCRIPTOR_HEAP_TYPE_RTV;
       HRCHECK(dev->CreateDescriptorHeap(&hd, IID_PPV_ARGS(&rtvHeap)), "CreateDescriptorHeap(rtv)"); }
     D3D12_CPU_DESCRIPTOR_HANDLE rtv = rtvHeap->GetCPUDescriptorHandleForHeapStart();
     dev->CreateRenderTargetView(rt.get(), nullptr, rtv);
+    D3D12_CPU_DESCRIPTOR_HANDLE rtvRef = {};
+    if (psRef) {
+        rtvRef = rtv;
+        rtvRef.ptr += dev->GetDescriptorHandleIncrementSize(D3D12_DESCRIPTOR_HEAP_TYPE_RTV);
+        dev->CreateRenderTargetView(rtRef.get(), nullptr, rtvRef);
+    }
 
     // iChannel0: a synthetic terminal frame — dark background, deterministic
     // pseudo-random glyph blocks in rows, one bright cursor block. Built on the
@@ -558,9 +659,10 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         free(g);
     }
 
-    // Readback buffer.
+    // Readback buffer (pair mode: one per render target).
     const UINT rowPitch = W * 4;
     CP<ID3D12Resource> readback;
+    CP<ID3D12Resource> readbackRef;
     {
         D3D12_HEAP_PROPERTIES rhp = {}; rhp.Type = D3D12_HEAP_TYPE_READBACK;
         D3D12_RESOURCE_DESC rd = {};
@@ -570,6 +672,9 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         rd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
         HRCHECK(dev->CreateCommittedResource(&rhp, D3D12_HEAP_FLAG_NONE, &rd,
             D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readback)), "CreateCommittedResource(gallery readback)");
+        if (psRef)
+            HRCHECK(dev->CreateCommittedResource(&rhp, D3D12_HEAP_FLAG_NONE, &rd,
+                D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&readbackRef)), "CreateCommittedResource(gallery readback ref)");
     }
 
     CP<ID3D12CommandAllocator> alloc;
@@ -602,7 +707,9 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         cl->ResourceBarrier(1, &b);
     }
 
-    // 2) Draw.
+    // 2) Draw. Pair mode draws the reference PSO right after, into its own
+    //    render target, before any barrier: same texture, same cbuffer, same
+    //    frame of command state.
     D3D12_VIEWPORT vp = { 0, 0, (float)W, (float)H, 0, 1 };
     D3D12_RECT sc = { 0, 0, (LONG)W, (LONG)H };
     ID3D12DescriptorHeap* heaps[] = { srvHeap.get(), sampHeap.get() };
@@ -613,13 +720,19 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
     cl->SetGraphicsRootDescriptorTable(2, sampHeap->GetGPUDescriptorHandleForHeapStart());
     cl->RSSetViewports(1, &vp);
     cl->RSSetScissorRects(1, &sc);
+    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cl->OMSetRenderTargets(1, &rtv, FALSE, nullptr);
     const float clear[4] = { 0, 0, 0, 1 };
     cl->ClearRenderTargetView(rtv, clear, 0, nullptr);
-    cl->IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     cl->DrawInstanced(3, 1, 0, 0);
+    if (psRef) {
+        cl->SetPipelineState(psoRef.get());
+        cl->OMSetRenderTargets(1, &rtvRef, FALSE, nullptr);
+        cl->ClearRenderTargetView(rtvRef, clear, 0, nullptr);
+        cl->DrawInstanced(3, 1, 0, 0);
+    }
 
-    // 3) RT -> COPY_SOURCE.
+    // 3) RT(s) -> COPY_SOURCE, copy into the readback buffer(s).
     {
         D3D12_RESOURCE_BARRIER b = {};
         b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
@@ -628,6 +741,10 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
         b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
         cl->ResourceBarrier(1, &b);
+        if (psRef) {
+            b.Transition.pResource = rtRef.get();
+            cl->ResourceBarrier(1, &b);
+        }
     }
     {
         D3D12_TEXTURE_COPY_LOCATION dst = {};
@@ -643,6 +760,11 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
         src.SubresourceIndex = 0;
         cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        if (psRef) {
+            dst.pResource = readbackRef.get();
+            src.pResource = rtRef.get();
+            cl->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
     }
     HRCHECK(cl->Close(), "Close");
     ID3D12CommandList* lists[] = { cl.get() };
@@ -672,26 +794,35 @@ static int renderGallery(ID3D12Device* dev, ID3D12CommandQueue* queue,
         }
     }
 
+    // Map + write out. Diagnostics: a per-frame channel sum so an all-black
+    // frame is visible in the log without fetching the PPM.
     void* mapped = nullptr; D3D12_RANGE rr = { 0, (SIZE_T)rowPitch * H };
     HRCHECK(readback->Map(0, &rr, &mapped), "Map gallery readback");
-    FILE* f = fopen(outPpm, "wb");
-    if (!f) { fprintf(stderr, "cannot write %s\n", outPpm); return 2; }
-    fprintf(f, "P6\n%u %u\n255\n", W, H);
-    for (UINT i = 0; i < W * H * 4; i += 4) {
-        unsigned char rgb[3] = { ((unsigned char*)mapped)[i], ((unsigned char*)mapped)[i + 1], ((unsigned char*)mapped)[i + 2] };
-        fwrite(rgb, 1, 3, f);
-    }
-    fclose(f);
+    std::vector<unsigned char> pixels((size_t)W * H * 4);
+    memcpy(pixels.data(), mapped, pixels.size());
     D3D12_RANGE nw = { 0, 0 };
-    // Diagnostics: report a channel sum so an all-black frame is visible in
-    // the log without fetching the PPM.
+    readback->Unmap(0, &nw);
     {
         unsigned long long sum = 0;
-        for (UINT i = 0; i < W * H * 4; i++) sum += ((unsigned char*)mapped)[i];
-        fprintf(stderr, "frame sum = %llu\n", sum);
+        for (unsigned char c : pixels) sum += c;
+        fprintf(stderr, "frame sum (zs) = %llu\n", sum);
     }
-    readback->Unmap(0, &nw);
-    printf("rendered %s\n", outPpm);
+    if (!writePpm(outPpm, pixels)) return 2;
+
+    if (psRef) {
+        void* mappedRef = nullptr;
+        HRCHECK(readbackRef->Map(0, &rr, &mappedRef), "Map gallery readback ref");
+        std::vector<unsigned char> pixelsRef((size_t)W * H * 4);
+        memcpy(pixelsRef.data(), mappedRef, pixelsRef.size());
+        readbackRef->Unmap(0, &nw);
+        {
+            unsigned long long sum = 0;
+            for (unsigned char c : pixelsRef) sum += c;
+            fprintf(stderr, "frame sum (sc) = %llu\n", sum);
+        }
+        if (!writePpm(outPpmRef, pixelsRef)) return 2;
+        return reportDiff(pixels, pixelsRef);
+    }
     return 0;
 }
 
@@ -700,28 +831,28 @@ int main(int argc, char** argv) {
     if (argc == 5 && argv[1] && strcmp(argv[1], "--gallery") == 0) {
         std::vector<char> vs, ps;
         if (!readFile(argv[2], vs) || !readFile(argv[3], ps)) return 2;
-        // Debug layer when available: an invalid command list is otherwise a
-        // silent whole-list drop (zero frame, no HRESULT).
-        if (HMODULE d3d12 = GetModuleHandleA("d3d12.dll")) {
-            typedef HRESULT(__stdcall* PFN_GetDebugInterface)(const IID&, void**);
-            if (auto fn = (PFN_GetDebugInterface)GetProcAddress(d3d12, "D3D12GetDebugInterface")) {
-                ID3D12Debug* dbg = nullptr;
-                if (SUCCEEDED(fn(IID_PPV_ARGS(&dbg))) && dbg) { dbg->EnableDebugLayer(); dbg->Release(); }
-            }
-        }
-        CP<IDXGIFactory4> factory;
-        HRCHECK(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
-        CP<IDXGIAdapter> warp;
-        HRCHECK(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "EnumWarpAdapter");
         CP<ID3D12Device> dev;
-        HRCHECK(D3D12CreateDevice(warp.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)), "D3D12CreateDevice(WARP)");
         CP<ID3D12CommandQueue> queue;
-        { D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-          HRCHECK(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)), "CreateCommandQueue"); }
+        int rc = createWarpDevice(dev, queue, true);
+        if (rc) return rc;
         return renderGallery(dev.get(), queue.get(), vs, ps, argv[4]);
     }
+    // Gallery pair-diff mode: same setup, zioshade PS vs spirv-cross reference
+    // PS, same cbuffer/texture contents, frames compared (above).
+    if (argc == 6 && argv[1] && strcmp(argv[1], "--gallery-diff") == 0) {
+        std::vector<char> vs, zs, sc;
+        if (!readFile(argv[2], vs) || !readFile(argv[3], zs) || !readFile(argv[4], sc)) return 2;
+        CP<ID3D12Device> dev;
+        CP<ID3D12CommandQueue> queue;
+        int rc = createWarpDevice(dev, queue, true);
+        if (rc) return rc;
+        std::string ppmZs = std::string(argv[5]) + ".zs.ppm";
+        std::string ppmSc = std::string(argv[5]) + ".sc.ppm";
+        return renderGallery(dev.get(), queue.get(), vs, zs, ppmZs.c_str(), &sc, ppmSc.c_str());
+    }
     if (argc < 4) { fprintf(stderr, "usage: warp_render <vs.cso> <psA.cso> <psB.cso> [out_prefix | probeVs.cso probePs.cso [depthClear]]\n"
-                                    "       warp_render --gallery <vs.cso> <ps.cso> <out.ppm>\n"); return 2; }
+                                    "       warp_render --gallery <vs.cso> <ps.cso> <out.ppm>\n"
+                                    "       warp_render --gallery-diff <vs.cso> <zs.cso> <sc.cso> <out_prefix>\n"); return 2; }
     std::vector<char> vs, psA, psB;
     if (!readFile(argv[1], vs) || !readFile(argv[2], psA) || !readFile(argv[3], psB)) return 2;
     // Depth mode: argv[4]/argv[5] carry the probe pass shaders (distinguished from
@@ -735,15 +866,9 @@ int main(int argc, char** argv) {
         if (argc >= 7 && argv[6]) depthClear = (float)atof(argv[6]);
     }
 
-    CP<IDXGIFactory4> factory;
-    HRCHECK(CreateDXGIFactory2(0, IID_PPV_ARGS(&factory)), "CreateDXGIFactory2");
-    CP<IDXGIAdapter> warp;
-    HRCHECK(factory->EnumWarpAdapter(IID_PPV_ARGS(&warp)), "EnumWarpAdapter");
     CP<ID3D12Device> dev;
-    HRCHECK(D3D12CreateDevice(warp.get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&dev)), "D3D12CreateDevice(WARP)");
     CP<ID3D12CommandQueue> queue;
-    { D3D12_COMMAND_QUEUE_DESC qd = {}; qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-      HRCHECK(dev->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue)), "CreateCommandQueue"); }
+    { int rc = createWarpDevice(dev, queue, false); if (rc) return rc; }
 
     std::vector<unsigned char> a, b;
     int r1 = depthMode ? renderOne(dev.get(), queue.get(), vs, psA, a, probeVs, probePs, depthClear)
@@ -759,40 +884,9 @@ int main(int argc, char** argv) {
     if (!depthMode && argc >= 5 && argv[4]) dumpPrefix = argv[4];
     if (depthMode && argc >= 8 && argv[7]) dumpPrefix = argv[7];
     if (dumpPrefix) {
-        for (int k = 0; k < 2; k++) {
-            const std::vector<unsigned char>& px = k ? b : a;
-            std::string path = std::string(dumpPrefix) + (k ? "B.ppm" : "A.ppm");
-            FILE* f = fopen(path.c_str(), "wb");
-            if (f) {
-                fprintf(f, "P6\n%u %u\n255\n", W, H);
-                for (size_t i = 0; i < px.size(); i += 4) {
-                    unsigned char rgb[3] = { px[i], px[i + 1], px[i + 2] };
-                    fwrite(rgb, 1, 3, f);
-                }
-                fclose(f);
-                printf("dumped %s\n", path.c_str());
-            }
-        }
+        writePpm((std::string(dumpPrefix) + "A.ppm").c_str(), a);
+        writePpm((std::string(dumpPrefix) + "B.ppm").c_str(), b);
     }
 
-    long maxD = 0, total = 0, diffPx = 0;
-    for (size_t i = 0; i < a.size(); i++) {
-        long d = labs((long)a[i] - (long)b[i]);
-        if (d > maxD) maxD = d;
-        total += d;
-        // Count a pixel once when ANY of its channels differs. The old form keyed
-        // on (i % 4) == 0, so a green, blue, or alpha-only divergence reported
-        // "Different: 0" next to a DIFFER verdict, which misleads during triage.
-        if (d > 0 && (i % 4) == 3) {
-            bool any = false;
-            for (int c = 0; c < 4; c++) any |= a[i - 3 + c] != b[i - 3 + c];
-            if (any) diffPx++;
-        }
-    }
-    printf("Resolution: %ux%u  Pixels: %u  Different: %ld\n", W, H, W * H, diffPx);
-    printf("Max channel diff: %ld\n", maxD);
-    printf("Avg channel diff: %.4f\n", (double)total / (double)a.size());
-    bool match = (maxD <= 1);
-    printf("%s\n", match ? "MATCH (<=1 per-channel)" : "DIFFER (max diff)");
-    return match ? 0 : 1;
+    return reportDiff(a, b);
 }
