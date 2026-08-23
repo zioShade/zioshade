@@ -1780,18 +1780,64 @@ const Analyzer = struct {
                     store_ops[0] = .{ .id = var_id };
                     store_ops[1] = .{ .id = init_val };
                     _ = self.load_cache.remove(var_id);
-                    try self.instructions.append(self.alloc, .{
+                    const store_inst = ir.Instruction{
                         .tag = .store,
                         .result_type = null,
                         .result_id = null,
                         .operands = store_ops,
                         .ty = .void,
-                    });
+                    };
+                    // The init store must be visible on EVERY path that can
+                    // read the variable. Appending at the current position is
+                    // wrong when the spill fires from inside a branch -- the
+                    // classic case is a loop nested in an if: unssaAllScopes
+                    // runs at the loop header, which sits INSIDE the then-arm,
+                    // so a variable declared (and initialized) BEFORE the if
+                    // got its store sunk into the arm and the not-taken path
+                    // read an uninitialized var (the cursor_teleport idle
+                    // frame rendered black; loopCounterToPhi then promoted it
+                    // to a loop-header phi read outside its dominance).
+                    // Same placement rule as materializeSSA below.
+                    const insert_idx = self.ssaSpillStoreIndex(init_val);
+                    try self.instructions.insert(self.alloc, insert_idx, store_inst);
+                    self.fixupInsertPointsAfterInsert(insert_idx);
                 }
                 entry.value_ptr.*.ir_id = var_id;
                 entry.value_ptr.*.is_ssa = false;
                 entry.value_ptr.*.init_value = null;
             }
+        }
+    }
+
+    /// Where an SSA spill's init store must go so it dominates every possible
+    /// read: if the initializer was computed BEFORE the outermost enclosing
+    /// if (or is not an instruction result at all -- a constant), before that
+    /// if (the dominating header block); otherwise at the current position
+    /// (the initializer itself is branch-local).
+    fn ssaSpillStoreIndex(self: *Analyzer, init_val: u32) usize {
+        if (self.if_insert_points.items.len == 0) return self.instructions.items.len;
+        var init_pos: ?usize = null;
+        for (self.instructions.items, 0..) |inst, idx| {
+            if (inst.result_id != null and inst.result_id.? == init_val) {
+                init_pos = idx;
+                break;
+            }
+        }
+        if (init_pos) |ip| {
+            // init computed before the if — safe (and required) to store there.
+            if (ip < self.if_insert_points.items[0]) return self.if_insert_points.items[0];
+            return self.instructions.items.len;
+        }
+        // Not an instruction result (a constant id): before the outermost if.
+        return self.if_insert_points.items[0];
+    }
+
+    /// Inserting an instruction at `insert_idx` shifts every saved if-insert
+    /// point at or past it by one; without this fixup a later spill lands one
+    /// instruction off (or inside the SelectionMerge it was meant to precede).
+    fn fixupInsertPointsAfterInsert(self: *Analyzer, insert_idx: usize) void {
+        for (self.if_insert_points.items) |*pt| {
+            if (pt.* >= insert_idx) pt.* += 1;
         }
     }
 
@@ -4103,38 +4149,12 @@ const Analyzer = struct {
                         .operands = store_ops,
                         .ty = .void,
                     };
-                    if (self.if_insert_points.items.len > 0) {
-                        // Insert after the init_value instruction.
-                        // The init_value is in the same scope where the variable was declared.
-                        // Find it by scanning backwards from current position.
-                        const insert_idx = blk: {
-                            // If the init_value is a constant or was computed before the
-                            // outermost if, use the outermost insert point (before SelectionMerge).
-                            // Otherwise, append at current position (init was computed in current scope).
-                            var init_pos: ?usize = null;
-                            for (self.instructions.items, 0..) |inst, i| {
-                                if (inst.result_id != null and inst.result_id.? == init_val) {
-                                    init_pos = i;
-                                    break;
-                                }
-                            }
-                            if (init_pos) |ip| {
-                                // Check if init_value is before the outermost if-insert point
-                                if (ip < self.if_insert_points.items[0]) {
-                                    // init computed before the if — safe to place store before if
-                                    break :blk self.if_insert_points.items[0];
-                                } else {
-                                    // init computed inside a branch — append at current position
-                                    break :blk self.instructions.items.len;
-                                }
-                            } else {
-                                // init_value not found as instruction result (might be constant)
-                                break :blk self.if_insert_points.items[0];
-                            }
-                        };
-                        self.instructions.insert(self.alloc, insert_idx, store_inst) catch return null;
-                    } else {
+                    const insert_idx = self.ssaSpillStoreIndex(init_val);
+                    if (insert_idx == self.instructions.items.len) {
                         self.instructions.append(self.alloc, store_inst) catch return null;
+                    } else {
+                        self.instructions.insert(self.alloc, insert_idx, store_inst) catch return null;
+                        self.fixupInsertPointsAfterInsert(insert_idx);
                     }
                 }
                 sym.ir_id = var_id;
