@@ -771,13 +771,16 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
-    // WGSL records an actionable detail for some honest errors (errors carry no
-    // payload) — surface it so the message is more than just the error name.
-    if (err == error.UnsupportedExtInst or err == error.UnsupportedEarlyReturn) {
-        if (zioshade.wgslLastErrorDetail()) |detail| {
-            std.debug.print("error: cross-compilation failed: {s}: {s}\n", .{ @errorName(err), detail });
-            std.process.exit(1);
-        }
+    // WGSL records an actionable detail for its honest errors (errors carry no
+    // payload); surface it so the message is more than just the error name.
+    // Presence is the gate, not a list of error names: spirv_to_wgsl clears the
+    // detail at the start of every compile and only its refusal recorders set
+    // it, so a non-null detail always belongs to the error being reported. An
+    // allowlist here would silently strand each new refusal's message, which is
+    // the same as having written no message at all.
+    if (zioshade.wgslLastErrorDetail()) |detail| {
+        std.debug.print("error: cross-compilation failed: {s}: {s}\n", .{ @errorName(err), detail });
+        std.process.exit(1);
     }
     // HLSL: push constants are accessed by instance name in the body but the cbuffer
     // model flattens members to globals, so a named-instance push constant can't be
@@ -897,13 +900,12 @@ fn crossErr(err: anyerror) noreturn {
         );
         std.process.exit(1);
     }
-    // WGSL honest-errors (UnsupportedOp / UnsupportedExtInst /
-    // UniformityAnalysisDidNotConverge) carry a precise reason in
-    // spirv_to_wgsl.last_error_detail (which construct is unrepresentable / which GLSL.std.450
-    // instruction has no mapping / which internal invariant broke). Surface it so the refusal
-    // is actionable instead of a bare error name. Gated to WGSL errors so a stale detail can't
-    // leak into a non-WGSL error.
-    const wgsl_detail: ?[]const u8 = if (err == error.UnsupportedOp or err == error.UnsupportedExtInst or err == error.UniformityAnalysisDidNotConverge) zioshade.wgslLastErrorDetail() else null;
+    // WGSL honest-errors carry a precise reason in spirv_to_wgsl.last_error_detail
+    // (which construct is unrepresentable, which GLSL.std.450 instruction has no
+    // mapping, which workaround to reach for). Surface it so the refusal is
+    // actionable instead of a bare error name. Presence is the gate rather than a
+    // list of error names, for the reason spelled out at the sibling site above.
+    const wgsl_detail: ?[]const u8 = zioshade.wgslLastErrorDetail();
     if (wgsl_detail) |d| {
         std.debug.print("error: cross-compilation failed: {s}: {s}\n", .{ @errorName(err), d });
     } else {
