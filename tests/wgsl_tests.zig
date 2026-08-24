@@ -11,36 +11,13 @@ const ShaderTest = struct {
     source: [:0]const u8,
 };
 
+/// Compile GLSL to SPIR-V with glslangValidator's defaults. Skips (rather than
+/// fails) when glslang is absent or rejects the source, keeping `zig build
+/// test` hermetic. The body lives in `compileToSpirvWithArgs` below; this was a
+/// near-verbatim second copy of it until the two drifted apart became a real
+/// risk.
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
-    // Write source to temp file
-    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.frag", .{name});
-    defer alloc.free(tmp_src);
-    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.spv", .{name});
-    defer alloc.free(tmp_spv);
-
-    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
-
-    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
-    defer alloc.free(glslang);
-    var main_io = zioshade.compat.MainIo().init(alloc);
-    defer main_io.deinit();
-    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-    // If glslang rejects the source the `.spv` is never written; skip rather than
-    // surface a confusing FileNotFound from the open below (mirrors the exit-code
-    // guard in nagaValidateOrSkip).
-    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
-
-    const data = try zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024);
-    // Convert bytes to u32 words with proper alignment
-    const words_len = data.len / 4;
-    const words = try alloc.alloc(u32, words_len);
-    for (0..words_len) |i| {
-        words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
-    }
-    alloc.free(data);
-    return words;
+    return compileToSpirvWithArgs(name, source, &.{});
 }
 
 /// Assemble SPIR-V text (spirv-as) into words. glslang never emits some spec-valid shapes
@@ -179,6 +156,10 @@ fn assertContains(haystack: []const u8, needle: []const u8) !void {
         return error.TestExpectedFind;
     }
 }
+
+/// OpPhi, for the shape guards that assert glslang really emitted one. Named
+/// so the call sites do not carry a bare 245.
+const op_phi: u16 = @intFromEnum(zioshade.spirv.Op.Phi);
 
 /// Count instructions with the given SPIR-V opcode in a word stream (skips the
 /// 5-word header). Used for IR-level regression guards that don't depend on a
@@ -10116,6 +10097,13 @@ test "wintty gallery: uniform-derived global initializer reaches the WGSL entry 
 // considers uniform (reconverged ifs, uniform-buffer conditions, const-bounded
 // loops, helpers called from uniform flow) MUST keep the implicit form --
 // downgrading those would silently change mip selection for every consumer.
+//
+// Every one of them runs BOTH local oracles, for the same reason the follow-up
+// round further down spells out: tint is the only one that actually runs
+// WGSL's uniformity analysis, so a text assertion alone cannot tell a correct
+// KEEP from the originally shipped bug (a wrong "keep" IS that bug), and F1
+// proved a text-only assertion passes happily on invalid WGSL. Both helpers
+// skip when their tool is absent, so `zig build test` stays hermetic.
 // ---------------------------------------------------------------------------
 
 test "wgsl: early-return branch then sample emits textureSampleLevel 0 (8k2)" {
@@ -10138,6 +10126,8 @@ test "wgsl: early-return branch then sample emits textureSampleLevel 0 (8k2)" {
     // level-0 form is what SPIRV-Cross emits when implicit LOD is unavailable.
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-early-return");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-early-return");
 }
 
 test "wgsl: sample inside a non-uniform if arm emits textureSampleLevel 0 (8k2)" {
@@ -10156,6 +10146,8 @@ test "wgsl: sample inside a non-uniform if arm emits textureSampleLevel 0 (8k2)"
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-if-arm");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-if-arm");
 }
 
 test "wgsl: straight-line sample keeps textureSample (8k2 control)" {
@@ -10171,6 +10163,8 @@ test "wgsl: straight-line sample keeps textureSample (8k2 control)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSample(tex");
     try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-uniform-flow-control");
+    try tintValidateOrSkip(wgsl, "8k2-uniform-flow-control");
 }
 
 test "wgsl: sample after a completing if keeps textureSample (8k2 reconvergence)" {
@@ -10193,6 +10187,8 @@ test "wgsl: sample after a completing if keeps textureSample (8k2 reconvergence)
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSample(tex");
     try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-reconverged-if");
+    try tintValidateOrSkip(wgsl, "8k2-reconverged-if");
 }
 
 test "wgsl: uniform-buffer condition keeps textureSample (8k2)" {
@@ -10214,6 +10210,8 @@ test "wgsl: uniform-buffer condition keeps textureSample (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSample(tex");
     try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-uniform-cond-if");
+    try tintValidateOrSkip(wgsl, "8k2-uniform-cond-if");
 }
 
 test "wgsl: const-bounded loop keeps textureSample (8k2)" {
@@ -10233,6 +10231,8 @@ test "wgsl: const-bounded loop keeps textureSample (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSample(tex");
     try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-const-bound-loop");
+    try tintValidateOrSkip(wgsl, "8k2-const-bound-loop");
 }
 
 test "wgsl: varying-bound loop downgrades to textureSampleLevel (8k2)" {
@@ -10253,6 +10253,8 @@ test "wgsl: varying-bound loop downgrades to textureSampleLevel (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-varying-bound-loop");
+    try tintValidateOrSkip(wgsl, "8k2-varying-bound-loop");
 }
 
 test "wgsl: helper called from uniform flow keeps textureSample (8k2)" {
@@ -10269,6 +10271,8 @@ test "wgsl: helper called from uniform flow keeps textureSample (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSample(tex");
     try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-helper-uniform-call");
+    try tintValidateOrSkip(wgsl, "8k2-helper-uniform-call");
 }
 
 test "wgsl: helper called from non-uniform flow downgrades (8k2)" {
@@ -10291,6 +10295,8 @@ test "wgsl: helper called from non-uniform flow downgrades (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-helper-nonuniform-call");
+    try tintValidateOrSkip(wgsl, "8k2-helper-nonuniform-call");
 }
 
 test "wgsl: sample after a conditional break downgrades (8k2)" {
@@ -10315,6 +10321,8 @@ test "wgsl: sample after a conditional break downgrades (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-cond-break-loop");
+    try tintValidateOrSkip(wgsl, "8k2-cond-break-loop");
 }
 
 test "wgsl: phi of constants across a non-uniform if is a non-uniform condition (8k2)" {
@@ -10337,6 +10345,8 @@ test "wgsl: phi of constants across a non-uniform if is a non-uniform condition 
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-phi-of-consts");
+    try tintValidateOrSkip(wgsl, "8k2-phi-of-consts");
 }
 
 test "wgsl: phi across a uniform if stays a uniform condition (8k2)" {
@@ -10357,6 +10367,8 @@ test "wgsl: phi across a uniform if stays a uniform condition (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSample(tex");
     try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-phi-uniform-edge");
+    try tintValidateOrSkip(wgsl, "8k2-phi-uniform-edge");
 }
 
 test "wgsl: uniform-buffer read with non-uniform index is non-uniform (8k2)" {
@@ -10379,13 +10391,17 @@ test "wgsl: uniform-buffer read with non-uniform index is non-uniform (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-indexed-uniform-read");
+    try tintValidateOrSkip(wgsl, "8k2-indexed-uniform-read");
 }
 
-test "wgsl: helper parameter uniformity tracks the call-site argument (8k2)" {
-    // A parameter gating the sample is uniform iff EVERY call site passes a
-    // uniform argument (probed: tint accepts a uniform arg, rejects a
-    // non-uniform one). Same helper, two call shapes.
-    const src_uniform_arg =
+// A parameter gating the sample is uniform iff EVERY call site passes a
+// uniform argument (probed: tint accepts a uniform arg, rejects a non-uniform
+// one). Same helper, two call shapes, one behaviour each: they used to share a
+// single test through two anonymous blocks, which meant the first failure hid
+// the second verdict entirely.
+test "wgsl: a helper parameter fed a UNIFORM argument keeps textureSample (8k2)" {
+    const spv = try compileToSpirv("param_uniform_arg",
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(binding=1) uniform Globals { float flag; };
@@ -10393,16 +10409,18 @@ test "wgsl: helper parameter uniformity tracks the call-site argument (8k2)" {
         \\layout(location=0) out vec4 fragColor;
         \\vec4 samp(float x, vec2 uv) { if (x > 0.5) { return texture(tex, uv); } return vec4(0.0); }
         \\void main(){ fragColor = samp(flag, vUV); }
-    ;
-    {
-        const spv = try compileToSpirv("param_uniform_arg", src_uniform_arg);
-        defer alloc.free(spv);
-        const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
-        defer alloc.free(wgsl);
-        try assertContains(wgsl, "textureSample(tex");
-        try assertNotContains(wgsl, "textureSampleLevel(tex");
-    }
-    const src_nonuniform_arg =
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-param-uniform-arg");
+    try tintValidateOrSkip(wgsl, "8k2-param-uniform-arg");
+}
+
+test "wgsl: a helper parameter fed a NON-uniform argument downgrades (8k2)" {
+    const spv = try compileToSpirv("param_nonuniform_arg",
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
         \\layout(binding=1) uniform Globals { float flag; };
@@ -10410,15 +10428,14 @@ test "wgsl: helper parameter uniformity tracks the call-site argument (8k2)" {
         \\layout(location=0) out vec4 fragColor;
         \\vec4 samp(float x, vec2 uv) { if (x > 0.5) { return texture(tex, uv); } return vec4(0.0); }
         \\void main(){ fragColor = samp(vUV.x, vUV); }
-    ;
-    {
-        const spv = try compileToSpirv("param_nonuniform_arg", src_nonuniform_arg);
-        defer alloc.free(spv);
-        const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
-        defer alloc.free(wgsl);
-        try assertContains(wgsl, "textureSampleLevel(tex");
-        try assertNotContains(wgsl, "textureSample(tex");
-    }
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-param-nonuniform-arg");
+    try tintValidateOrSkip(wgsl, "8k2-param-nonuniform-arg");
 }
 
 test "wgsl: early return then bias sample pins level 0 and drops the bias (8k2)" {
@@ -10444,6 +10461,8 @@ test "wgsl: early return then bias sample pins level 0 and drops the bias (8k2)"
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSampleBias(");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-bias");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-bias");
 }
 
 test "wgsl: early return then shadow sample emits textureSampleCompareLevel (8k2)" {
@@ -10463,6 +10482,8 @@ test "wgsl: early return then shadow sample emits textureSampleCompareLevel (8k2
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleCompareLevel(");
     try assertNotContains(wgsl, "textureSampleCompare(shadowTex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-dref");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-dref");
 }
 
 test "wgsl: early return then textureProj emits textureSampleLevel (8k2)" {
@@ -10482,6 +10503,8 @@ test "wgsl: early return then textureProj emits textureSampleLevel (8k2)" {
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
     try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-proj");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-proj");
 }
 
 // ---------------------------------------------------------------------------
@@ -10528,6 +10551,51 @@ fn compileToSpirvWithArgs(name: []const u8, source: [:0]const u8, extra: []const
     return words;
 }
 
+// The header, names, decorations and scalar types every hand-authored SPIR-V
+// fixture in this section repeats verbatim, split out so a fixture shows only
+// the shape it is actually pinning. `%img` and `%pcoord` are the two
+// declarations that vary, so each fixture supplies those (plus its coordinate
+// vector type) between the two halves. The OpNames are what make the emitted
+// WGSL readable enough to assert on with a full call-shape literal.
+const asm_8k2_head =
+    \\               OpCapability Shader
+    \\               OpMemoryModel Logical GLSL450
+    \\               OpEntryPoint Fragment %main "main" %c %o %t %s
+    \\               OpExecutionMode %main OriginUpperLeft
+    \\               OpName %t "tex"
+    \\               OpName %s "texSampler"
+    \\               OpName %c "uv"
+    \\               OpName %o "fragColor"
+    \\               OpDecorate %t DescriptorSet 0
+    \\               OpDecorate %t Binding 1
+    \\               OpDecorate %s DescriptorSet 0
+    \\               OpDecorate %s Binding 0
+    \\               OpDecorate %c Location 0
+    \\               OpDecorate %o Location 0
+    \\       %void = OpTypeVoid
+    \\          %3 = OpTypeFunction %void
+    \\       %bool = OpTypeBool
+    \\      %float = OpTypeFloat 32
+    \\    %v4float = OpTypeVector %float 4
+    \\
+;
+
+/// The sampled-image / pointer / variable declarations that follow, given an
+/// `%img` image type and a `%pcoord` input-pointer type.
+const asm_8k2_resources =
+    \\         %si = OpTypeSampledImage %img
+    \\       %samp = OpTypeSampler
+    \\      %puimg = OpTypePointer UniformConstant %img
+    \\     %pusamp = OpTypePointer UniformConstant %samp
+    \\        %po4 = OpTypePointer Output %v4float
+    \\          %t = OpVariable %puimg UniformConstant
+    \\          %s = OpVariable %pusamp UniformConstant
+    \\          %c = OpVariable %pcoord Input
+    \\          %o = OpVariable %po4 Output
+    \\    %float_0 = OpConstant %float 0
+    \\
+;
+
 // --- F1: the DEPTH downgrade emitted an f32 level, which is invalid WGSL ----
 //
 // WGSL's depth overloads of textureSampleLevel constrain the level to i32/u32.
@@ -10537,35 +10605,12 @@ fn compileToSpirvWithArgs(name: []const u8, source: [:0]const u8, extra: []const
 // downgrade paths, which is exactly why it shipped.
 
 test "wgsl: non-uniform depth sample downgrades with an INTEGER level (8k2 F1)" {
-    const spv = try assembleSpirv("nonuniform_depth_downgrade",
-        \\               OpCapability Shader
-        \\               OpMemoryModel Logical GLSL450
-        \\               OpEntryPoint Fragment %main "main" %c %o %t %s
-        \\               OpExecutionMode %main OriginUpperLeft
-        \\               OpDecorate %t DescriptorSet 0
-        \\               OpDecorate %t Binding 1
-        \\               OpDecorate %s DescriptorSet 0
-        \\               OpDecorate %s Binding 0
-        \\               OpDecorate %c Location 0
-        \\               OpDecorate %o Location 0
-        \\       %void = OpTypeVoid
-        \\          %3 = OpTypeFunction %void
-        \\       %bool = OpTypeBool
-        \\      %float = OpTypeFloat 32
+    const spv = try assembleSpirv("nonuniform_depth_downgrade", asm_8k2_head ++
         \\    %v2float = OpTypeVector %float 2
-        \\    %v4float = OpTypeVector %float 4
         \\        %img = OpTypeImage %float 2D 1 0 0 1 Unknown
-        \\         %si = OpTypeSampledImage %img
-        \\       %samp = OpTypeSampler
-        \\        %pi2 = OpTypePointer Input %v2float
-        \\      %puimg = OpTypePointer UniformConstant %img
-        \\     %pusamp = OpTypePointer UniformConstant %samp
-        \\        %po4 = OpTypePointer Output %v4float
-        \\          %t = OpVariable %puimg UniformConstant
-        \\          %s = OpVariable %pusamp UniformConstant
-        \\          %c = OpVariable %pi2 Input
-        \\          %o = OpVariable %po4 Output
-        \\    %float_0 = OpConstant %float 0
+        \\     %pcoord = OpTypePointer Input %v2float
+        \\
+    ++ asm_8k2_resources ++
         \\         %z4 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
         \\       %main = OpFunction %void None %3
         \\          %5 = OpLabel
@@ -10589,44 +10634,23 @@ test "wgsl: non-uniform depth sample downgrades with an INTEGER level (8k2 F1)" 
     defer alloc.free(spv);
     const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
-    try assertContains(wgsl, "textureSampleLevel(");
-    // the level literal must be the INTEGER 0
-    try assertContains(wgsl, ", 0));");
+    // The FULL call shape, not just a trailing `, 0));`: that fragment matches
+    // any line anywhere in the module, so it would pass on output whose level
+    // argument sat on some other call entirely. The level literal here must be
+    // the INTEGER 0, and the depth result is widened by splat.
+    try assertContains(wgsl, "vec4f(textureSampleLevel(tex, texSampler, uv, 0))");
     try assertNotContains(wgsl, ", 0.0));");
     try nagaValidateOrSkip(wgsl, "8k2-depth-downgrade");
     try tintValidateOrSkip(wgsl, "8k2-depth-downgrade");
 }
 
 test "wgsl: non-uniform ARRAYED depth sample downgrades with an INTEGER level (8k2 F1)" {
-    const spv = try assembleSpirv("nonuniform_depth_array_downgrade",
-        \\               OpCapability Shader
-        \\               OpMemoryModel Logical GLSL450
-        \\               OpEntryPoint Fragment %main "main" %c %o %t %s
-        \\               OpExecutionMode %main OriginUpperLeft
-        \\               OpDecorate %t DescriptorSet 0
-        \\               OpDecorate %t Binding 1
-        \\               OpDecorate %s DescriptorSet 0
-        \\               OpDecorate %s Binding 0
-        \\               OpDecorate %c Location 0
-        \\               OpDecorate %o Location 0
-        \\       %void = OpTypeVoid
-        \\          %3 = OpTypeFunction %void
-        \\       %bool = OpTypeBool
-        \\      %float = OpTypeFloat 32
+    const spv = try assembleSpirv("nonuniform_depth_array_downgrade", asm_8k2_head ++
         \\    %v3float = OpTypeVector %float 3
-        \\    %v4float = OpTypeVector %float 4
         \\        %img = OpTypeImage %float 2D 1 1 0 1 Unknown
-        \\         %si = OpTypeSampledImage %img
-        \\       %samp = OpTypeSampler
-        \\        %pi3 = OpTypePointer Input %v3float
-        \\      %puimg = OpTypePointer UniformConstant %img
-        \\     %pusamp = OpTypePointer UniformConstant %samp
-        \\        %po4 = OpTypePointer Output %v4float
-        \\          %t = OpVariable %puimg UniformConstant
-        \\          %s = OpVariable %pusamp UniformConstant
-        \\          %c = OpVariable %pi3 Input
-        \\          %o = OpVariable %po4 Output
-        \\    %float_0 = OpConstant %float 0
+        \\     %pcoord = OpTypePointer Input %v3float
+        \\
+    ++ asm_8k2_resources ++
         \\         %z4 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
         \\       %main = OpFunction %void None %3
         \\          %5 = OpLabel
@@ -10650,9 +10674,10 @@ test "wgsl: non-uniform ARRAYED depth sample downgrades with an INTEGER level (8
     defer alloc.free(spv);
     const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
-    // the layer is split out and rounded, and the level is the INTEGER 0
-    try assertContains(wgsl, "i32(round(");
-    try assertContains(wgsl, ", 0));");
+    // Full call shape (see the non-arrayed test above for why a bare `, 0));`
+    // is not enough): the layer is split out and rounded, and the level is the
+    // INTEGER 0.
+    try assertContains(wgsl, "vec4f(textureSampleLevel(tex, texSampler, uv.xy, i32(round(uv.z)), 0))");
     try assertNotContains(wgsl, ", 0.0));");
     try nagaValidateOrSkip(wgsl, "8k2-depth-array-downgrade");
     try tintValidateOrSkip(wgsl, "8k2-depth-array-downgrade");
@@ -10793,35 +10818,12 @@ test "wgsl: a Vulkan-1.1 READ-WRITE storage-gated branch downgrades (8k2 F2)" {
 // of this test at all is the assertion: without the guard the test RUNNER dies.
 
 test "wgsl: a loop header with a second back edge does not blow the stack (8k2 F6)" {
-    const spv = try assembleSpirv("double_backedge_header",
-        \\               OpCapability Shader
-        \\               OpMemoryModel Logical GLSL450
-        \\               OpEntryPoint Fragment %main "main" %c %o %t %s
-        \\               OpExecutionMode %main OriginUpperLeft
-        \\               OpDecorate %t DescriptorSet 0
-        \\               OpDecorate %t Binding 1
-        \\               OpDecorate %s DescriptorSet 0
-        \\               OpDecorate %s Binding 0
-        \\               OpDecorate %c Location 0
-        \\               OpDecorate %o Location 0
-        \\       %void = OpTypeVoid
-        \\          %3 = OpTypeFunction %void
-        \\       %bool = OpTypeBool
-        \\      %float = OpTypeFloat 32
+    const spv = try assembleSpirv("double_backedge_header", asm_8k2_head ++
         \\    %v2float = OpTypeVector %float 2
-        \\    %v4float = OpTypeVector %float 4
         \\        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
-        \\         %si = OpTypeSampledImage %img
-        \\       %samp = OpTypeSampler
-        \\        %pi2 = OpTypePointer Input %v2float
-        \\      %puimg = OpTypePointer UniformConstant %img
-        \\     %pusamp = OpTypePointer UniformConstant %samp
-        \\        %po4 = OpTypePointer Output %v4float
-        \\          %t = OpVariable %puimg UniformConstant
-        \\          %s = OpVariable %pusamp UniformConstant
-        \\          %c = OpVariable %pi2 Input
-        \\          %o = OpVariable %po4 Output
-        \\    %float_0 = OpConstant %float 0
+        \\     %pcoord = OpTypePointer Input %v2float
+        \\
+    ++ asm_8k2_resources ++
         \\       %main = OpFunction %void None %3
         \\      %entry = OpLabel
         \\         %cl = OpLoad %v2float %c
@@ -10937,7 +10939,7 @@ test "wgsl: a real OpPhi over a NON-uniform short circuit downgrades (8k2 F9)" {
     );
     defer alloc.free(spv);
     // the shape only pins the .Phi path if glslang really emitted one
-    try std.testing.expect(countSpirvOpcode(spv, 245) > 0); // OpPhi
+    try std.testing.expect(countSpirvOpcode(spv, op_phi) > 0);
     const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSampleLevel(tex");
@@ -10959,7 +10961,7 @@ test "wgsl: a real OpPhi over a UNIFORM short circuit keeps textureSample (8k2 F
         \\}
     );
     defer alloc.free(spv);
-    try std.testing.expect(countSpirvOpcode(spv, 245) > 0); // OpPhi
+    try std.testing.expect(countSpirvOpcode(spv, op_phi) > 0);
     const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
     defer alloc.free(wgsl);
     try assertContains(wgsl, "textureSample(tex");
