@@ -7912,14 +7912,27 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // update site, so a switch-merge phi with THIS pred
                             // would keep its init: emit the assignments before
                             // the implicit break (review finding 1b).
+                            //
+                            // #region-stop-hoist-flush: the assignments must go
+                            // to the REAL writer. `w` buffers into the hoist
+                            // pending buffer, which is committed only by
+                            // hoistSweepAndFlush -- and the `break` below exits
+                            // the emit loop with no further flush, so writing
+                            // through `w` here silently DROPPED every
+                            // assignment on this edge (the phi kept its init:
+                            // naga-invalid when the init was mis-scoped,
+                            // silently-wrong otherwise). Same shape as the
+                            // #wgsl-region-continue edge: flush, then write
+                            // past the pending buffer.
+                            try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                             var spi_x = ctx.sel_phis.iterator();
                             while (spi_x.next()) |ent| {
                                 for (ent.value_ptr.*.items) |sp| {
                                     if (sp.pred_label != cur_block_label) continue;
                                     const rn_x = names.get(sp.result_id) orelse continue;
                                     const vn_x = names.get(sp.value_id) orelse continue;
-                                    try writeInd(w, indent);
-                                    try w.print("{s} = {s};\n", .{ rn_x, vn_x });
+                                    try writeInd(w_out, indent);
+                                    try w_out.print("{s} = {s};\n", .{ rn_x, vn_x });
                                 }
                             }
                             break;
@@ -7930,6 +7943,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "a construct inside a switch-case region branches to the switch merge; WGSL cannot spell that break without a flag variable", .{}) catch null;
                         return error.UnsupportedRegionExit;
                     }
+                }
+            }
+            // #wgsl-region-loop-break: a branch to the ENCLOSING loop's merge
+            // from inside a switch-case region is a break that must exit the
+            // LOOP, but WGSL binds `break` to the innermost switch or loop --
+            // inside the case it exits the switch, not the loop, and WGSL has
+            // no labeled break. The walker previously DROPPED the edge and
+            // fell through into the next block in the instruction stream
+            // (leaking a different arm's body into this case, then running
+            // the loop tail on the break path: valid WGSL, wrong control
+            // flow; both the OpBranch and the BranchConditional-arm forms).
+            // spirv-val keeps the deeper shape out (a branch from inside the
+            // region's own loop "exits the loop ... not via a structured
+            // exit"), so this edge only arises at region top level, plain or
+            // under selections. Refuse loud rather than mis-bind; the
+            // flag-variable rewrite the message names is the manual
+            // workaround. (`continue`, by contrast, binds to the loop through
+            // the switch, which is why #wgsl-region-continue can spell its
+            // twin.)
+            if (r.loop_merge) |om| {
+                const branch_to_om = (inst.op == .Branch or inst.op == .BranchConditional) and inst.words.len > 1 and
+                    (inst.words[1] == om or
+                        (inst.op == .BranchConditional and ((inst.words.len > 3 and inst.words[3] == om) or
+                            (inst.words.len > 2 and inst.words[2] == om))));
+                if (branch_to_om) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "a construct inside a switch-case region branches to the enclosing loop's merge (a break out of the loop taken from inside the switch); WGSL binds break to the switch there and has no labeled break, so it cannot be spelled without a flag variable", .{}) catch null;
+                    return error.UnsupportedRegionExit;
                 }
             }
         }
@@ -8041,8 +8081,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                             if (val_op == .Constant or val_op == .ConstantComposite or val_op == .ConstantTrue or val_op == .ConstantFalse or val_op == .Undef) {
                                                 use_init = true;
                                             } else if (val_op == .Load or val_op == .Variable) {
-                                                // Loads from variables declared before the if-else are safe
-                                                use_init = true;
+                                                // Loads from variables declared before the if-else are
+                                                // safe ONLY when the LOAD ITSELF precedes the
+                                                // SelectionMerge: a load emitted inside an arm (or a
+                                                // switch-case region) binds its `let` there, so the
+                                                // name is not in scope at the pre-declaration site
+                                                // (naga "no definition in scope"; region_stop_phi_flush).
+                                                if (sp.value_id < module.id_defs.len) {
+                                                    if (module.id_defs[sp.value_id]) |vidx| {
+                                                        if (vidx < i) use_init = true;
+                                                    }
+                                                }
                                             } else {
                                                 // Check if the value's definition index is before this SelectionMerge.
                                                 // Use the index-backed id_defs map: the old text scan compared

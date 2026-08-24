@@ -18,6 +18,10 @@
 # every element in a copy and re-running (both flipped to FAITHFUL).
 # DISCRIMINATOR: initialize all reads in a copy; FAITHFUL => UB artifact,
 # UNFAITHFUL => real bug.
+# NOW AUTO-SKIPPED: tools/glsl_faithfulness.sh runs tools/spv_undef_read.py on
+# the assembled source SPIR-V (the same conservative class the render gates
+# skip on) and reports skip-undef-read, counted below; a miss stays a loud
+# UNFAITHFUL and still needs the manual discriminator above.
 #
 #
 # ARTIFACT CLASS 4 (undefined-math domain at zero varyings): the harness feeds
@@ -63,7 +67,7 @@ done < "$LIST"
 
 echo ""
 echo "=== GLSL faithfulness sweep ($DIR, pure-gl_FragCoord only) ==="
-for k in FAITHFUL "FAITHFUL(edge)" "UNFAITHFUL(real GLSL bug)" skip-glslang skip-zglsl skip-zglslang skip-naga skip-render skip-nooutput; do
+for k in FAITHFUL "FAITHFUL(edge)" "UNFAITHFUL(real GLSL bug)" skip-glslang skip-zglsl skip-zglslang skip-naga skip-render skip-nooutput skip-undef-read; do
   echo "  $k: ${C[$k]:-0}"
 done
 echo "  total: $total"

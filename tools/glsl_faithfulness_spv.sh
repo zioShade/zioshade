@@ -69,6 +69,17 @@ check_one() {
   gs=$(glslang_stage "$spv")
   [ -z "$gs" ] && { echo "skip-stage"; return; }
   [ "$gs" != "frag" ] && { echo "skip-stage"; return; }  # NagaCompare is fragment-only
+  # #undef-read-oracle (ported from tools/wgsl_render_check.sh, same skip class
+  # as the .frag gate tools/glsl_faithfulness.sh): a module that READS undefined
+  # Function memory (no initializer, first read before any store, on the
+  # unconditional prefix; tools/spv_undef_read.py documents the two conservative
+  # exclusions) has undefined values, and the two renders may legitimately
+  # differ -- a DIFFER here is oracle noise, not a zioshade-GLSL bug. Skip the
+  # CLASS (never by name; a miss stays a loud UNFAITHFUL). A missing
+  # python3/spirv-dis degrades to compare-as-before.
+  if python3 tools/spv_undef_read.py "$spv" >/dev/null 2>&1; then
+    echo "skip-undef-read"; return
+  fi
   d="$SHARE/$name"
 
   "$CLI" glsl "$spv" > "$d.z.glsl" 2>"$d.zglsl.err"; rc=$?
@@ -110,7 +121,7 @@ done
 echo ""
 echo "=== GLSL faithfulness (.spv): zioshade-MSL(source) vs naga(zioshade-GLSL->spv) ==="
 echo "  (EXPERIMENTAL: ~4/88 adjudicated; NOT statistical evidence of correctness.)"
-for k in FAITHFUL "FAITHFUL(edge)" UNFAITHFUL skip-stage skip-zglsl skip-zglslang skip-refmsl skip-naga skip-render \
+for k in FAITHFUL "FAITHFUL(edge)" UNFAITHFUL skip-stage skip-zglsl skip-zglslang skip-refmsl skip-naga skip-render skip-undef-read \
          CRASH-zglsl CRASH-refmsl CRASH-zglslang CRASH-naga; do
   echo "  $k: ${C[$k]:-0}"
 done
