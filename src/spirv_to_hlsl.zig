@@ -5657,7 +5657,7 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
         alloc.free(succs);
     }
     const preds = try alloc.alloc(std.ArrayList(usize), nblocks);
-    for (preds) |*p| p.* = .{};
+    for (preds) |*p| p.* = .empty;
     defer {
         for (preds) |*p| p.deinit(alloc);
         alloc.free(preds);
@@ -5763,7 +5763,7 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
 /// (getOrPut hands back UNDEFINED storage for new keys).
 fn appendSite(map: *std.AutoHashMap(u32, std.ArrayListUnmanaged(InitSite)), id: u32, site: InitSite, alloc: std.mem.Allocator) !void {
     const gop = try map.getOrPut(id);
-    if (!gop.found_existing) gop.value_ptr.* = .{};
+    if (!gop.found_existing) gop.value_ptr.* = .empty;
     try gop.value_ptr.append(alloc, site);
 }
 
@@ -5803,7 +5803,7 @@ fn blockSuccessors(alloc: std.mem.Allocator, module: *const ParsedModule, body: 
         for (tmp) |*l| l.deinit(alloc);
         alloc.free(tmp);
     }
-    for (tmp) |*l| l.* = .{};
+    for (tmp) |*l| l.* = .empty;
 
     var cur: ?usize = null;
     for (body) |inst| {
