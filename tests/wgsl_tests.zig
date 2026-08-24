@@ -9880,6 +9880,200 @@ test "WGSL: region implicit case end assigns switch-merge phis (region-stop hois
     try nagaValidateOrSkip(wgsl, "region-stop-phi-flush");
 }
 
+// #wgsl-region-loop-break: a branch to the ENCLOSING loop's merge from inside
+// a switch-case REGION is a break that must exit the loop, but WGSL binds
+// `break` to the innermost switch or loop (inside the case: the switch), and
+// WGSL has no labeled break. The region walker DROPPED the edge and fell
+// through into the next block in the instruction stream, leaking the default
+// arm's store into case 1 and then running the loop tail on the break path
+// (valid WGSL, wrong control flow: n stays 9 instead of 5). Honest error
+// instead; the unconditional-OpBranch and BranchConditional-arm forms both
+// hit it. The twin CONTINUE edge is spellable (`continue` binds to the loop
+// through the switch) and is handled by #wgsl-region-continue.
+test "WGSL: region break to the enclosing loop merge refuses (no mis-bound break)" {
+    const spv = try assembleSpirv("region_loop_break",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\         %fn = OpTypeFunction %void
+        \\         %f32 = OpTypeFloat 32
+        \\         %v4f = OpTypeVector %f32 4
+        \\         %u32 = OpTypeInt 32 0
+        \\        %bool = OpTypeBool
+        \\          %pu = OpTypePointer Function %u32
+        \\         %po4 = OpTypePointer Output %v4f
+        \\           %o = OpVariable %po4 Output
+        \\          %f0 = OpConstant %f32 0.0
+        \\          %f1 = OpConstant %f32 1.0
+        \\          %u0 = OpConstant %u32 0
+        \\          %u1 = OpConstant %u32 1
+        \\          %u3 = OpConstant %u32 3
+        \\          %u4 = OpConstant %u32 4
+        \\          %u5 = OpConstant %u32 5
+        \\          %u9 = OpConstant %u32 9
+        \\         %one = OpConstantComposite %v4f %f1 %f0 %f0 %f1
+        \\        %main = OpFunction %void None %fn
+        \\       %entry = OpLabel
+        \\         %ci = OpVariable %pu Function %u1
+        \\          %n = OpVariable %pu Function %u0
+        \\               OpBranch %lhdr
+        \\        %lhdr = OpLabel
+        \\           %i = OpPhi %u32 %u0 %entry %inext %lcont
+        \\        %cmp = OpSLessThan %bool %i %u4
+        \\               OpLoopMerge %lmerge %lcont None
+        \\               OpBranchConditional %cmp %lbody %lmerge
+        \\       %lbody = OpLabel
+        \\         %sel = OpLoad %u32 %ci
+        \\               OpSelectionMerge %swm None
+        \\               OpSwitch %sel %dflt 1 %c1
+        \\          %c1 = OpLabel
+        \\               OpBranch %ihdr
+        \\        %ihdr = OpLabel
+        \\           %j = OpPhi %u32 %u0 %c1 %jnext %icont
+        \\        %icmp = OpSLessThan %bool %j %u1
+        \\               OpLoopMerge %imerge %icont None
+        \\               OpBranchConditional %icmp %ibody %imerge
+        \\       %ibody = OpLabel
+        \\               OpStore %n %u3
+        \\               OpBranch %icont
+        \\       %icont = OpLabel
+        \\       %jnext = OpIAdd %u32 %j %u1
+        \\               OpBranch %ihdr
+        \\       %imerge = OpLabel
+        \\               OpStore %n %u5
+        \\               OpBranch %lmerge
+        \\       %dflt = OpLabel
+        \\               OpStore %n %u1
+        \\               OpBranch %swm
+        \\         %swm = OpLabel
+        \\               OpStore %n %u9
+        \\               OpBranch %lcont
+        \\       %lcont = OpLabel
+        \\       %inext = OpIAdd %u32 %i %u1
+        \\               OpBranch %lhdr
+        \\      %lmerge = OpLabel
+        \\        %res = OpLoad %u32 %n
+        \\         %rf = OpConvertUToF %f32 %res
+        \\         %rv = OpCompositeConstruct %v4f %rf %f0 %f0 %f1
+        \\               OpStore %o %rv
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        // If this fires, the dropped-edge class is back (or was never
+        // reached): the emitted WGSL would run the loop tail on the break
+        // path and leak the default arm's body into case 1.
+        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(error.UnsupportedRegionExit, e);
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try std.testing.expect(std.mem.indexOf(u8, detail, "enclosing loop's merge") != null);
+    }
+}
+
+// #wgsl-region-loop-break, BranchConditional form: the same break taken as a
+// CONDITIONAL arm (`if (i < 1) { n = 5; break the loop; }` after the region's
+// inner loop closed). The regular-if arm lowered it to `if (v) { n = 5; }`
+// and silently dropped the exit, so the loop tail ran on the break path too
+// (n = 9 instead of 5). Same honest error as the OpBranch form.
+test "WGSL: region conditional break to the enclosing loop merge refuses" {
+    const spv = try assembleSpirv("region_loop_break_cond",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\         %fn = OpTypeFunction %void
+        \\         %f32 = OpTypeFloat 32
+        \\         %v4f = OpTypeVector %f32 4
+        \\         %u32 = OpTypeInt 32 0
+        \\        %bool = OpTypeBool
+        \\          %pu = OpTypePointer Function %u32
+        \\         %po4 = OpTypePointer Output %v4f
+        \\           %o = OpVariable %po4 Output
+        \\          %f0 = OpConstant %f32 0.0
+        \\          %f1 = OpConstant %f32 1.0
+        \\          %u0 = OpConstant %u32 0
+        \\          %u1 = OpConstant %u32 1
+        \\          %u3 = OpConstant %u32 3
+        \\          %u4 = OpConstant %u32 4
+        \\          %u5 = OpConstant %u32 5
+        \\          %u9 = OpConstant %u32 9
+        \\         %one = OpConstantComposite %v4f %f1 %f0 %f0 %f1
+        \\        %main = OpFunction %void None %fn
+        \\       %entry = OpLabel
+        \\         %ci = OpVariable %pu Function %u1
+        \\          %n = OpVariable %pu Function %u0
+        \\               OpBranch %lhdr
+        \\        %lhdr = OpLabel
+        \\           %i = OpPhi %u32 %u0 %entry %inext %lcont
+        \\        %cmp = OpSLessThan %bool %i %u4
+        \\               OpLoopMerge %lmerge %lcont None
+        \\               OpBranchConditional %cmp %lbody %lmerge
+        \\       %lbody = OpLabel
+        \\         %sel = OpLoad %u32 %ci
+        \\               OpSelectionMerge %swm None
+        \\               OpSwitch %sel %dflt 1 %c1
+        \\          %c1 = OpLabel
+        \\               OpBranch %ihdr
+        \\        %ihdr = OpLabel
+        \\           %j = OpPhi %u32 %u0 %c1 %jnext %icont
+        \\        %icmp = OpSLessThan %bool %j %u1
+        \\               OpLoopMerge %imerge %icont None
+        \\               OpBranchConditional %icmp %ibody %imerge
+        \\       %ibody = OpLabel
+        \\               OpStore %n %u3
+        \\               OpBranch %icont
+        \\       %icont = OpLabel
+        \\       %jnext = OpIAdd %u32 %j %u1
+        \\               OpBranch %ihdr
+        \\       %imerge = OpLabel
+        \\         %bc = OpSLessThan %bool %i %u1
+        \\               OpSelectionMerge %isel2 None
+        \\               OpBranchConditional %bc %obr %inrm2
+        \\         %obr = OpLabel
+        \\               OpStore %n %u5
+        \\               OpBranch %lmerge
+        \\       %inrm2 = OpLabel
+        \\               OpBranch %isel2
+        \\       %isel2 = OpLabel
+        \\               OpBranch %swm
+        \\       %dflt = OpLabel
+        \\               OpStore %n %u1
+        \\               OpBranch %swm
+        \\         %swm = OpLabel
+        \\               OpStore %n %u9
+        \\               OpBranch %lcont
+        \\       %lcont = OpLabel
+        \\       %inext = OpIAdd %u32 %i %u1
+        \\               OpBranch %lhdr
+        \\      %lmerge = OpLabel
+        \\        %res = OpLoad %u32 %n
+        \\         %rf = OpConvertUToF %f32 %res
+        \\         %rv = OpCompositeConstruct %v4f %rf %f0 %f0 %f1
+        \\               OpStore %o %rv
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(error.UnsupportedRegionExit, e);
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try std.testing.expect(std.mem.indexOf(u8, detail, "enclosing loop's merge") != null);
+    }
+}
+
 // #wgsl-loop-merge-phi: a phi at a LOOP's merge block (e.g. the "did we break"
 // flag read after the loop) was never DECLARED -- the sel-phi machinery only
 // materializes under a SelectionMerge, and a loop exit has none. Reads after

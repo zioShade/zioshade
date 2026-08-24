@@ -7945,6 +7945,33 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     }
                 }
             }
+            // #wgsl-region-loop-break: a branch to the ENCLOSING loop's merge
+            // from inside a switch-case region is a break that must exit the
+            // LOOP, but WGSL binds `break` to the innermost switch or loop --
+            // inside the case it exits the switch, not the loop, and WGSL has
+            // no labeled break. The walker previously DROPPED the edge and
+            // fell through into the next block in the instruction stream
+            // (leaking a different arm's body into this case, then running
+            // the loop tail on the break path: valid WGSL, wrong control
+            // flow; both the OpBranch and the BranchConditional-arm forms).
+            // spirv-val keeps the deeper shape out (a branch from inside the
+            // region's own loop "exits the loop ... not via a structured
+            // exit"), so this edge only arises at region top level, plain or
+            // under selections. Refuse loud rather than mis-bind; the
+            // flag-variable rewrite the message names is the manual
+            // workaround. (`continue`, by contrast, binds to the loop through
+            // the switch, which is why #wgsl-region-continue can spell its
+            // twin.)
+            if (r.loop_merge) |om| {
+                const branch_to_om = (inst.op == .Branch or inst.op == .BranchConditional) and inst.words.len > 1 and
+                    (inst.words[1] == om or
+                        (inst.op == .BranchConditional and ((inst.words.len > 3 and inst.words[3] == om) or
+                            (inst.words.len > 2 and inst.words[2] == om))));
+                if (branch_to_om) {
+                    last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "a construct inside a switch-case region branches to the enclosing loop's merge (a break out of the loop taken from inside the switch); WGSL binds break to the switch there and has no labeled break, so it cannot be spelled without a flag variable", .{}) catch null;
+                    return error.UnsupportedRegionExit;
+                }
+            }
         }
 
         // If deferring loop header instructions, skip them for now
