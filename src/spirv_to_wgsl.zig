@@ -1266,8 +1266,12 @@ fn vectorComponentCount(module: *const ParsedModule, value_id: u32) ?u32 {
 }
 
 /// Emit a WGSL depth-compare sample for OpImageSampleDref{Implicit,Explicit}Lod.
-/// `builtin` is "textureSampleCompare" (implicit) or "textureSampleCompareLevel"
-/// (explicit — WGSL drops the SPIR-V Lod operand, always sampling mip 0).
+/// `builtin` is "textureSampleCompare" or "textureSampleCompareLevel"; the
+/// caller picks. CompareLevel is used for the EXPLICIT form (WGSL drops the
+/// SPIR-V Lod operand, always sampling mip 0) AND for an implicit form the
+/// uniformity prepass marked as sitting in non-uniform control flow, where
+/// textureSampleCompare is a tint reject and CompareLevel is the ungated
+/// spelling (#wgsl-uniformity-8k2).
 ///
 /// glslang packs the depth reference (and, for arrayed forms, the array layer)
 /// into the coordinate, but WGSL wants the spatial coordinate sliced to exactly
@@ -4731,7 +4735,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     // sits in non-uniform control flow (see computeNonuniformImplicitLodSamples).
     // The emitter lowers exactly these to textureSampleLevel(..., 0.0) /
     // textureSampleCompareLevel so tint/Dawn cannot reject the module.
-    const nonuniform_implicit = try computeNonuniformImplicitLodSamples(arena, &module);
+    const nonuniform_implicit = try computeNonuniformImplicitLodSamples(arena, &module, &decorations);
 
     // #170: an SSBO that is an ARRAY of blocks whose struct holds a runtime-sized
     // array (`buffer SSBO { vec4 data[]; } ssbos[2];`) has no core-WGSL form —
@@ -6972,10 +6976,15 @@ const max_region_depth: u32 = 256;
 //         the trip-count conditions (probe p07/p09).
 //   * OpKill is NOT an exit for postdominance (probe p20: a discard does not
 //     poison the following flow; the invocation keeps executing statements).
-//   * value seeds: constants, and loads through pointers rooted at a
-//     Uniform / PushConstant variable WHOSE dynamic indices are uniform
-//     (probe p04: a member read is uniform; p22: a NON-uniform index into a
-//     uniform array is not).
+//   * value seeds: constants, and loads through pointers rooted at a variable
+//     THIS BACKEND EMITS AS `var<uniform>` OR READ-ONLY `var<storage>`, whose
+//     dynamic indices are uniform (probe p04: a member read is uniform; p22: a
+//     NON-uniform index into a uniform array is not). The predicate is the
+//     emitted ADDRESS SPACE, not the SPIR-V storage class: glslang targeting
+//     Vulkan 1.0 puts an SSBO in StorageClass Uniform (BufferBlock on the
+//     struct) and from Vulkan 1.1 in StorageClass StorageBuffer, and WGSL
+//     calls a read_write storage read NON-uniform and a read-only one uniform.
+//     See readIsUniformStorage.
 //   * values propagate through pure ops; a phi is uniform only when every
 //     incoming value is uniform AND every incoming edge left its block on a
 //     uniform branch (probe p17: a phi of constants across a non-uniform if
@@ -6986,8 +6995,32 @@ const max_region_depth: u32 = 256;
 //     resolved by the same downward fixpoint.
 // The analysis is deliberately conservative where WGSL offers no expression
 // for more precision (function-call RESULTS and pointer PARAMETERS are
-// non-uniform values), and never claims uniformity the probes showed tint
-// rejecting, so the emitted module can only be MORE accepted, never less.
+// non-uniform values).
+//
+// WHAT THIS DOES NOT COVER. An earlier version of this comment claimed the
+// analysis "never claims uniformity the probes showed tint rejecting, so the
+// emitted module can only be MORE accepted, never less". That was FALSE and is
+// retracted. It was wrong on its own terms once (the value seed keyed off the
+// SPIR-V storage class, so a Vulkan-1.0 SSBO read counted as uniform, the
+// implicit sample was kept, and tint rejected the module; fixed above by
+// readIsUniformStorage), and the claim is not something the analysis can
+// promise in general: it is a heuristic mirror of tint's rules, not tint. Two
+// known imprecisions in the SAFE direction, both silent MIP CHANGES rather
+// than rejects, are left standing on purpose:
+//   * varStoresUniform is flow-INSENSITIVE: it requires EVERY store into a
+//     variable anywhere in the function to be uniform, so reusing one scratch
+//     local for a later non-uniform value retroactively poisons the earlier
+//     uniform loads. tint accepts those; we downgrade.
+//   * a FunctionCall RESULT is never a uniform value, however uniform its
+//     inputs and body are.
+// And one gap in the UNSAFE direction is knowingly OUT OF SCOPE here: WGSL
+// gates the DERIVATIVE builtins (dpdx/dpdxCoarse/dpdxFine and the dpdy/fwidth
+// families, emitted further down this file) on uniform control flow exactly as
+// it gates textureSample, and this prepass neither analyses nor lowers them.
+// A shader that takes a derivative after flow diverges still renders black in
+// the browser. There is no level-pin trick to fall back on for a derivative,
+// so closing that half needs its own design; it is not covered by anything
+// below.
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Terminator classification for one CFG block of the uniformity walk.
@@ -7008,7 +7041,6 @@ const UniBlock = struct {
     /// predecessor block indices (resolved once the whole function is parsed)
     preds: []const usize = &.{},
     flow: bool = true,
-    reachable: bool = false,
 };
 
 /// One OpFunctionCall site: the callee, the block the call sits in, and the
@@ -7062,6 +7094,9 @@ const UniFunc = struct {
 
 const UniformityAnalysis = struct {
     module: *const ParsedModule,
+    /// the module's decorations, needed to tell a real UBO and a READ-ONLY
+    /// storage buffer (both uniform reads) from a read_write one (not)
+    decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
     arena: std.mem.Allocator,
     funcs: []UniFunc,
     func_by_id: std.AutoHashMap(u32, usize),
@@ -7146,12 +7181,17 @@ const UniformityAnalysis = struct {
             var j: usize = i + 1;
             while (j < m.instructions.len and m.instructions[j].op != .FunctionEnd) : (j += 1) {
                 const inst = m.instructions[j];
-                if (inst.words.len > 2) {
-                    // Attribute every result id in this function to it, so
-                    // phi and parameter classification can find the context.
-                    // Instructions without a result (labels, branches) never
-                    // reach words[2] meaningfully and are never queried.
-                    if (inst.op != .Label) try a.owner_func.put(inst.words[2], my_index);
+                // Attribute every RESULT id in this function to it, so phi and
+                // parameter classification can find the context. The id must
+                // come from the same predicate the module parser used to build
+                // id_defs: words[2] is a result only where the opcode HAS one
+                // (for OpStore it is the stored value, for OpBranchConditional
+                // the true label, for OpSelectionMerge the control-mask
+                // LITERAL), and putting those in would attribute an unrelated
+                // id to this function -- .Phi would then look up the wrong
+                // block and call a uniform value non-uniform.
+                if (common.resultIdFromOp(inst.op, inst.words)) |rid| {
+                    if (inst.op != .Label) try a.owner_func.put(rid, my_index);
                 }
                 switch (inst.op) {
                     .FunctionParameter => {
@@ -7275,8 +7315,7 @@ const UniformityAnalysis = struct {
                 for (resolved.items, 0..) |*blk, bi| blk.preds = preds[bi].items;
             }
             // resolve each loop's prelude chain and governing conditions
-            for (loops.items, 0..) |*lp, li| {
-                _ = li;
+            for (loops.items) |*lp| {
                 var prelude = std.ArrayListUnmanaged(usize).empty;
                 var governing = std.ArrayListUnmanaged(u32).empty;
                 var cb: usize = lp.header;
@@ -7354,6 +7393,13 @@ const UniformityAnalysis = struct {
     /// (OpReturn/OpReturnValue/OpUnreachable) then a path bypasses `target`.
     /// OpKill is deliberately NOT an exit (probe p20: a discard does not
     /// poison the following flow, so kill paths are dead ends, not exits).
+    ///
+    /// An allocation failure in the DFS scratch answers `false` (no
+    /// postdominance) rather than propagating: the caller chain is all `bool`.
+    /// That is the CONSERVATIVE direction -- it can only cost extra
+    /// downgrades, never an implicit sample tint would reject -- but it does
+    /// mean a shader compiled under memory pressure can pick a different mip
+    /// than the same shader compiled normally.
     fn postdominates(a: *UniformityAnalysis, fi: usize, from: usize, target: usize) bool {
         const uf = &a.funcs[fi];
         a.visited.clearRetainingCapacity();
@@ -7383,18 +7429,36 @@ const UniformityAnalysis = struct {
         return null;
     }
 
+    /// Recursion cap for the regionEntry -> loopEntryFlow -> edgeContribution
+    /// cycle, matching the 64 the other recursive helpers here use
+    /// (pointerRoot, pointerParamOf, chainIndicesUniform).
+    ///
+    /// The cycle is NOT self-terminating on arbitrary SPIR-V: a loop header
+    /// with a second back edge from one of its own PRELUDE blocks (a prelude
+    /// block whose non-uniform conditional targets the header on both arms)
+    /// sends regionEntry(prelude) -> loopEntryFlow(header) ->
+    /// edgeContribution(prelude, header) -> regionEntry(prelude) round forever
+    /// and blows the stack. spirv-val rejects that module, but the CTS and
+    /// external-ingestion paths feed non-glslang SPIR-V and the other three
+    /// backends honest-error on it, so a SIGSEGV here is a mandate violation.
+    /// Hitting the cap yields NON-uniform, the conservative direction: the
+    /// sample is downgraded, never wrongly kept implicit.
+    const max_flow_depth: u32 = 64;
+
     /// The flow a block contributes when reconvergence at its target makes
     /// the branch's divergence irrelevant: the loop's ENTRY flow for prelude
     /// blocks, the block's own flow elsewhere.
-    fn regionEntry(a: *UniformityAnalysis, fi: usize, bi: usize) bool {
-        if (a.preludeLoop(fi, bi)) |lp| return a.loopEntryFlow(fi, lp.header);
+    fn regionEntry(a: *UniformityAnalysis, fi: usize, bi: usize, depth: u32) bool {
+        if (depth > max_flow_depth) return false;
+        if (a.preludeLoop(fi, bi)) |lp| return a.loopEntryFlow(fi, lp.header, depth + 1);
         return a.funcs[fi].blocks[bi].flow;
     }
 
     /// A loop header's entry flow: the OR of its non-back-edge incoming
     /// contributions (the back edge arrives per-iteration and is judged by
     /// the governing condition instead).
-    fn loopEntryFlow(a: *UniformityAnalysis, fi: usize, header: usize) bool {
+    fn loopEntryFlow(a: *UniformityAnalysis, fi: usize, header: usize, depth: u32) bool {
+        if (depth > max_flow_depth) return false;
         const uf = &a.funcs[fi];
         var f = if (header == uf.entry_block) uf.entry_flow else false;
         for (uf.blocks[header].preds) |pi| {
@@ -7403,7 +7467,7 @@ const UniformityAnalysis = struct {
             if (a.preludeLoop(fi, header)) |lp| {
                 if (lp.continue_block == pi) continue;
             }
-            if (a.edgeContribution(fi, pi, header)) f = true;
+            if (a.edgeContribution(fi, pi, header, depth + 1)) f = true;
         }
         return f;
     }
@@ -7414,27 +7478,32 @@ const UniformityAnalysis = struct {
     ///   Conditional/switch on a NON-uniform value: uniform iff `ti`
     ///   postdominates `pi` (every invocation reconverges there), and then
     ///   the flow that survives is the REGION ENTRY flow (probe p10).
-    fn edgeContribution(a: *UniformityAnalysis, fi: usize, pi: usize, ti: usize) bool {
+    fn edgeContribution(a: *UniformityAnalysis, fi: usize, pi: usize, ti: usize, depth: u32) bool {
+        if (depth > max_flow_depth) return false;
         const uf = &a.funcs[fi];
         switch (uf.blocks[pi].term) {
             .branch => return uf.blocks[pi].flow,
             .cond => |c| {
                 if (a.values.contains(c.cond)) return uf.blocks[pi].flow;
-                return a.postdominates(fi, pi, ti) and a.regionEntry(fi, pi);
+                return a.postdominates(fi, pi, ti) and a.regionEntry(fi, pi, depth + 1);
             },
             .swit => |s| {
                 if (a.values.contains(s.sel)) return uf.blocks[pi].flow;
-                return a.postdominates(fi, pi, ti) and a.regionEntry(fi, pi);
+                return a.postdominates(fi, pi, ti) and a.regionEntry(fi, pi, depth + 1);
             },
             else => return false,
         }
     }
 
     /// Recompute the flow of every block of function `fi` from the current
-    /// value state and entry flow; returns true when any block moved
-    /// true -> false. Flow is an OR over incoming contributions: a block is
-    /// uniform when some incoming edge delivers the full invocation set
-    /// (either directly, or by reconverging every path that diverged).
+    /// value state and entry flow; returns true when ANY block's flow changed.
+    /// The outer fixpoint reads that as "not stable yet", which is sound
+    /// because flow is monotone here: `entry_flow` and the value set only ever
+    /// move DOWN, so a block's flow only ever moves true -> false and "any
+    /// change" and "moved true -> false" are the same predicate.
+    /// Flow is an OR over incoming contributions: a block is uniform when some
+    /// incoming edge delivers the full invocation set (either directly, or by
+    /// reconverging every path that diverged).
     fn recomputeFlow(a: *UniformityAnalysis, fi: usize) bool {
         const uf = &a.funcs[fi];
         if (uf.blocks.len == 0) return false;
@@ -7446,13 +7515,13 @@ const UniformityAnalysis = struct {
                 var f = if (bi == uf.entry_block) uf.entry_flow else false;
                 for (b.preds) |pi| {
                     if (pi >= uf.blocks.len) continue;
-                    if (a.edgeContribution(fi, pi, bi)) f = true;
+                    if (a.edgeContribution(fi, pi, bi, 0)) f = true;
                 }
                 // Prelude blocks (loop header chain + continue block) execute
                 // once PER ITERATION: their flow is the loop entry flow gated
                 // by the uniformity of the trip-count conditions.
                 if (a.preludeLoop(fi, bi)) |lp| {
-                    var g = a.loopEntryFlow(fi, lp.header);
+                    var g = a.loopEntryFlow(fi, lp.header, 0);
                     for (lp.governing) |cond| {
                         if (!a.values.contains(cond)) g = false;
                     }
@@ -7585,7 +7654,7 @@ const UniformityAnalysis = struct {
                 const rdef = common.getDef(a.module, root) orelse return false;
                 if (rdef.words.len <= 3) return false;
                 const sc: spirv.StorageClass = @enumFromInt(rdef.words[3]);
-                if (sc == .Uniform or sc == .PushConstant) {
+                if (a.readIsUniformStorage(root, sc)) {
                     // probe p22: every dynamic index in the chain must itself
                     // be a uniform value, or the loaded element varies.
                     return a.chainIndicesUniform(ptr, 0);
@@ -7640,6 +7709,44 @@ const UniformityAnalysis = struct {
         }
     }
 
+    /// Is a read through the variable `root` (storage class `sc`) a UNIFORM
+    /// value for WGSL's own uniformity analysis?
+    ///
+    /// The answer must be decided by the ADDRESS SPACE THIS BACKEND EMITS, not
+    /// by the SPIR-V storage class, because the two are not in bijection:
+    ///   * StorageClass Uniform is a real UBO (`var<uniform>`, uniform read)
+    ///     UNLESS the block struct carries BufferBlock, which is how glslang
+    ///     targeting Vulkan 1.0 spells an SSBO -- that emits `var<storage, ...>`.
+    ///   * StorageClass StorageBuffer (glslang from Vulkan 1.1 on, and tint)
+    ///     is always an SSBO.
+    /// A storage buffer is then a uniform read only when it is READ-ONLY:
+    /// WGSL's uniformity analysis treats a `var<storage>` read as uniform and a
+    /// `var<storage, read_write>` read as non-uniform (the same rule the
+    /// .StorageBuffer emission arm documents). PushConstant has no WGSL address
+    /// space and is emitted as a plain uniform buffer, so it is a uniform read.
+    ///
+    /// Deciding this from the storage class alone was wrong in BOTH directions:
+    /// a Vulkan-1.0 SSBO was called uniform (the implicit sample was kept and
+    /// tint rejected the module -- the very black-shader failure this prepass
+    /// exists to prevent), while the SAME GLSL built for Vulkan 1.1 with
+    /// `readonly` was called non-uniform and needlessly downgraded.
+    fn readIsUniformStorage(a: *UniformityAnalysis, root: u32, sc: spirv.StorageClass) bool {
+        switch (sc) {
+            .PushConstant => return true,
+            .Uniform, .StorageBuffer => {},
+            else => return false,
+        }
+        const is_ssbo = if (sc == .StorageBuffer) true else blk: {
+            const vdef = common.getDef(a.module, root) orelse break :blk false;
+            if (vdef.words.len <= 1) break :blk false;
+            const ptr_inst = common.getDef(a.module, vdef.words[1]) orelse break :blk false;
+            if (ptr_inst.op != .TypePointer or ptr_inst.words.len <= 3) break :blk false;
+            break :blk hasDec(a.decorations, arrayElementType(a.module, ptr_inst.words[3]), .buffer_block);
+        };
+        if (!is_ssbo) return true; // a real UBO
+        return hasDec(a.decorations, root, .non_writable);
+    }
+
     /// Every dynamic index of an access chain rooted at `ptr_id` is a
     /// uniform value (probe p22).
     fn chainIndicesUniform(a: *UniformityAnalysis, ptr_id: u32, depth: u32) bool {
@@ -7680,10 +7787,12 @@ const UniLoopMerge = struct { merge: u32, cont: u32 };
 fn computeNonuniformImplicitLodSamples(
     arena: std.mem.Allocator,
     module: *const ParsedModule,
+    decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
 ) !std.AutoHashMap(u32, void) {
     var out = std.AutoHashMap(u32, void).init(arena);
     var a = UniformityAnalysis{
         .module = module,
+        .decorations = decorations,
         .arena = arena,
         .funcs = &.{},
         .func_by_id = std.AutoHashMap(u32, usize).init(arena),
@@ -7707,9 +7816,18 @@ fn computeNonuniformImplicitLodSamples(
         if (def != null) try a.values.put(@intCast(id), {});
     }
 
+    // Round cap: paranoia against hostile input, NOT an expected exit. Every
+    // fixpoint component only moves DOWN, so convergence is bounded by the id
+    // count; a module that still has not settled after 1000 rounds means an
+    // invariant broke. Exiting quietly there would ship the LAST round's
+    // half-settled answer, which is OPTIMISTIC (values still marked uniform
+    // that another round would have cleared) and so can keep an implicit
+    // sample tint rejects: the exact silent-wrong this prepass exists to
+    // prevent. Fail loud instead.
+    const max_rounds: u32 = 1000;
     var rounds: u32 = 0;
     var stable = false;
-    while (!stable and rounds < 1000) : (rounds += 1) {
+    while (!stable and rounds < max_rounds) : (rounds += 1) {
         stable = true;
         // 1. block flows from the current values and entry flows
         for (0..a.funcs.len) |fi| {
@@ -7763,6 +7881,11 @@ fn computeNonuniformImplicitLodSamples(
                 }
             }
         }
+    }
+
+    if (!stable) {
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL uniformity prepass did not converge in {d} rounds", .{max_rounds}) catch null;
+        return error.UniformityAnalysisDidNotConverge;
     }
 
     for (a.funcs) |uf| {
@@ -10930,9 +11053,14 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         try writeInd(w, indent);
                         if (nonuniform_flow) {
                             // level pinned to 0 (#wgsl-uniformity-8k2; the depth
-                            // scalar is widened by splat exactly as below)
+                            // scalar is widened by splat exactly as below).
+                            // DEPTH takes an INTEGER level (`0`, not `0.0`):
+                            // WGSL's depth overload constrains L to i32/u32, so
+                            // the f32 literal is a tint AND naga reject. Same
+                            // rule the ImageSampleExplicitLod depth arm applies
+                            // with its i32() wrap. (#wgsl-cts)
                             if (shape.depth) {
-                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0.0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
                             } else {
                                 try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
                             }
@@ -10949,8 +11077,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     } else {
                         try writeInd(w, indent);
                         if (nonuniform_flow) {
+                            // DEPTH takes an INTEGER level (see the arrayed arm).
                             if (shape.depth) {
-                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}, 0.0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, off_suffix });
+                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}, 0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, off_suffix });
                             } else {
                                 try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
                             }
@@ -11972,7 +12101,18 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // #wgsl-uniformity-8k2: textureSampleCompare is uniformity-gated;
                 // for the IMPLICIT variant in non-uniform flow use the ungated
                 // textureSampleCompareLevel (same arguments; samples mip 0).
-                const cmp_builtin: []const u8 = if (nonuniform_implicit.contains(inst.words[2])) "textureSampleCompareLevel" else "textureSampleCompare";
+                // The EXPLICIT variant takes that form UNCONDITIONALLY: its
+                // SPIR-V Lod is dropped just above (WGSL has no projective
+                // compare-with-LOD builtin), so the level-pinned builtin is the
+                // faithful spelling exactly as on the non-proj
+                // ImageSampleDrefExplicitLod path -- and the prepass only ever
+                // records the four *ImplicitLod opcodes, so consulting it here
+                // could never have marked an Explicit sample and this arm was
+                // emitting the gated builtin for every one of them.
+                const cmp_builtin: []const u8 = if (inst.op == .ImageSampleProjDrefExplicitLod or nonuniform_implicit.contains(inst.words[2]))
+                    "textureSampleCompareLevel"
+                else
+                    "textureSampleCompare";
                 try w.print("let {s}: {s} = {s}({s}, {s}, {s}{s} / {s}{s}, {s} / {s}{s}{s});\n", .{ result_name, rt, cmp_builtin, tex_name, sampler_arg, coord, lead, coord, last_comp, dref, coord, last_comp, off_suffix });
             },
 
