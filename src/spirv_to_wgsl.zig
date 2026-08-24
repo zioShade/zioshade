@@ -7023,14 +7023,14 @@ const max_region_depth: u32 = 256;
 //     uniform loads. tint accepts those; we downgrade.
 //   * a FunctionCall RESULT is never a uniform value, however uniform its
 //     inputs and body are.
-// And one gap in the UNSAFE direction is knowingly OUT OF SCOPE here: WGSL
-// gates the DERIVATIVE builtins (dpdx/dpdxCoarse/dpdxFine and the dpdy/fwidth
-// families, emitted further down this file) on uniform control flow exactly as
-// it gates textureSample, and this prepass neither analyses nor lowers them.
-// A shader that takes a derivative after flow diverges still renders black in
-// the browser. There is no level-pin trick to fall back on for a derivative,
-// so closing that half needs its own design; it is not covered by anything
-// below.
+// And one gap in the UNSAFE direction is knowingly OUT OF SCOPE here
+// (#wgsl-uniformity-8k2-derivatives): WGSL gates the DERIVATIVE builtins
+// (dpdx/dpdxCoarse/dpdxFine and the dpdy/fwidth families, emitted further down
+// this file) on uniform control flow exactly as it gates textureSample, and
+// this prepass neither analyses nor lowers them. A shader that takes a
+// derivative after flow diverges still renders black in the browser. There is
+// no level-pin trick to fall back on for a derivative, so closing that half
+// needs its own design; it is not covered by anything below.
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Terminator classification for one CFG block of the uniformity walk.
@@ -11092,24 +11092,21 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (inst.words.len <= 7) return error.UnsupportedImageOperands;
                         off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[7]) orelse "vec2<i32>(0)"});
                     }
+                    // Pick the builtin and its trailing scalar ONCE, then print
+                    // once per coordinate shape, the way the Dref arms below
+                    // do. The four parallel format strings this replaces are
+                    // exactly how the invalid float depth level (F1) shipped:
+                    // a rule fixed in one copy and missed in the others.
+                    const bias_builtin: []const u8 = if (nonuniform_flow) "textureSampleLevel" else "textureSampleBias";
+                    // level pinned to 0, bias dropped (see above)
+                    const bias_last: []const u8 = if (nonuniform_flow) "0.0" else bias;
+                    try writeInd(w, indent);
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
-                        try writeInd(w, indent);
-                        if (nonuniform_flow) {
-                            // level pinned to 0, bias dropped (see above)
-                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
-                        } else {
-                            try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, bias, off_suffix });
-                        }
+                        try w.print("let {s}: {s} = {s}({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, bias_builtin, tex_name, sampler_arg, coord, cs, coord, ls, bias_last, off_suffix });
                     } else {
-                        try writeInd(w, indent);
-                        if (nonuniform_flow) {
-                            // level pinned to 0, bias dropped (see above)
-                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
-                        } else {
-                            try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, bias, off_suffix });
-                        }
+                        try w.print("let {s}: {s} = {s}({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, bias_builtin, tex_name, sampler_arg, coord, bias_last, off_suffix });
                     }
                 } else {
                     // Non-Bias path. The only image operand WGSL's plain textureSample
@@ -11127,47 +11124,31 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         if (inst.words.len <= 6) return error.UnsupportedImageOperands;
                         off_suffix = try std.fmt.allocPrint(arena, ", {s}", .{names.get(inst.words[6]) orelse "vec2<i32>(0)"});
                     }
+                    // Same Dref-arm shape as the Bias path: decide the three
+                    // things that vary once, print once per coordinate shape.
+                    // Seven parallel format strings here is how the invalid
+                    // float depth level (F1) reached a release.
+                    const builtin: []const u8 = if (nonuniform_flow) "textureSampleLevel" else "textureSample";
+                    // The level pin (#wgsl-uniformity-8k2). DEPTH takes an
+                    // INTEGER level (`0`, not `0.0`): WGSL's depth overload
+                    // constrains L to i32/u32, so the f32 literal is a tint AND
+                    // naga reject. Same rule the ImageSampleExplicitLod depth
+                    // arm applies with its i32() wrap. (#wgsl-cts)
+                    const level_arg: []const u8 = if (!nonuniform_flow) "" else if (shape.depth) ", 0" else ", 0.0";
+                    // WGSL's non-comparison DEPTH sample returns a SCALAR f32,
+                    // while SPIR-V's result is the vec4: widen by splat so the
+                    // declared vec4 let still typechecks (naga's own WGSL front
+                    // lowers `textureSample(depth2d, ...)` to exactly this
+                    // OpImageSample* + extract-0 shape). (#wgsl-cts)
+                    const splat_open: []const u8 = if (shape.depth) try std.fmt.allocPrint(arena, "{s}(", .{rt}) else "";
+                    const splat_close: []const u8 = if (shape.depth) ")" else "";
+                    try writeInd(w, indent);
                     if (shape.arrayed) {
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
-                        try writeInd(w, indent);
-                        if (nonuniform_flow) {
-                            // level pinned to 0 (#wgsl-uniformity-8k2; the depth
-                            // scalar is widened by splat exactly as below).
-                            // DEPTH takes an INTEGER level (`0`, not `0.0`):
-                            // WGSL's depth overload constrains L to i32/u32, so
-                            // the f32 literal is a tint AND naga reject. Same
-                            // rule the ImageSampleExplicitLod depth arm applies
-                            // with its i32() wrap. (#wgsl-cts)
-                            if (shape.depth) {
-                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
-                            } else {
-                                try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
-                            }
-                        } else if (shape.depth) {
-                            // WGSL's non-comparison DEPTH sample returns a SCALAR f32,
-                            // while SPIR-V's result is the vec4: widen by splat so the
-                            // declared vec4 let still typechecks (naga's own WGSL
-                            // front lowers `textureSample(depth2d, ...)` to exactly
-                            // this OpImageSample* + extract-0 shape). (#wgsl-cts)
-                            try w.print("let {s}: {s} = {s}(textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
-                        } else {
-                            try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s}, i32(round({s}{s})){s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
-                        }
+                        try w.print("let {s}: {s} = {s}{s}({s}, {s}, {s}{s}, i32(round({s}{s})){s}{s}){s};\n", .{ result_name, rt, splat_open, builtin, tex_name, sampler_arg, coord, cs, coord, ls, level_arg, off_suffix, splat_close });
                     } else {
-                        try writeInd(w, indent);
-                        if (nonuniform_flow) {
-                            // DEPTH takes an INTEGER level (see the arrayed arm).
-                            if (shape.depth) {
-                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}, 0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, off_suffix });
-                            } else {
-                                try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
-                            }
-                        } else if (shape.depth) {
-                            try w.print("let {s}: {s} = {s}(textureSample({s}, {s}, {s}{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, off_suffix });
-                        } else {
-                            try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
-                        }
+                        try w.print("let {s}: {s} = {s}{s}({s}, {s}, {s}{s}{s}){s};\n", .{ result_name, rt, splat_open, builtin, tex_name, sampler_arg, coord, level_arg, off_suffix, splat_close });
                     }
                 }
             },
@@ -11559,6 +11540,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // Derivatives. Ordered to match the SPIR-V spec numbering:
             // plain (207-209), Fine (210-212), Coarse (213-215). WGSL has a
             // direct builtin for every one of the nine variants.
+            // NOT fully handled, though: see #wgsl-uniformity-8k2-derivatives
+            // in the uniformity-prepass header above. WGSL gates all nine on
+            // UNIFORM CONTROL FLOW exactly as it gates textureSample, and the
+            // prepass neither analyses nor lowers them, so a derivative taken
+            // after flow diverges is still a tint reject (a black shader in the
+            // browser). A one-to-one builtin is the whole story for the SPELLING
+            // only.
             .DPdx => try emitCall(module, names, inst, "dpdx", w, arena, indent),
             .DPdy => try emitCall(module, names, inst, "dpdy", w, arena, indent),
             .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena, indent),
@@ -13429,11 +13417,12 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // #wgsl-uniformity-8k2: a sample inside a switch CASE is in
             // non-uniform flow whenever the selector is (probe p14), so the
             // replay path applies the same level-0 downgrade as the main walk.
-            if (nonuniform_implicit.contains(inst.words[2])) {
-                try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, 0.0);\n", .{ result_name, rt, tex_name, sampler_arg, coord });
-            } else {
-                try w.print("let {s}: {s} = textureSample({s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord });
-            }
+            // Builtin and level picked into consts and printed once, the shape
+            // the main path and the Dref arms use.
+            const nonuniform_flow = nonuniform_implicit.contains(inst.words[2]);
+            const builtin: []const u8 = if (nonuniform_flow) "textureSampleLevel" else "textureSample";
+            const level_arg: []const u8 = if (nonuniform_flow) ", 0.0" else "";
+            try w.print("let {s}: {s} = {s}({s}, {s}, {s}{s});\n", .{ result_name, rt, builtin, tex_name, sampler_arg, coord, level_arg });
         },
         .AccessChain => {
             // Rename result to composite.field expression
