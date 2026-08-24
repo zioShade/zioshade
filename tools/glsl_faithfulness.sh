@@ -28,6 +28,18 @@ check_one() {
   local d="$SHARE/$name"
   sed 's/^\(out [a-z0-9]*vec4 [A-Za-z_][A-Za-z0-9_]*;\)/layout(location=0) \1/' "$frag" > "$d.g.frag"
   glslangValidator -V -S frag "$d.g.frag" -o "$d.src.spv" >/dev/null 2>&1 || { echo "skip-glslang"; return; }
+  # #undef-read-oracle (ported from tools/wgsl_render_check.sh): a source that
+  # READS undefined Function memory (no initializer, first read before any
+  # store, on the unconditional prefix; tools/spv_undef_read.py documents the
+  # two conservative exclusions) has undefined values, and the two renders may
+  # legitimately differ -- the sweep's ARTIFACT CLASS 2 (array_size_literal_led
+  # and const_expr_array_size both flipped FAITHFUL once every read was
+  # initialized in a copy). Such a DIFFER is oracle noise, not a zioshade-GLSL
+  # bug, so skip the whole CLASS (never by name; a miss stays a loud
+  # UNFAITHFUL). A missing python3/spirv-dis degrades to compare-as-before.
+  if python3 tools/spv_undef_read.py "$d.src.spv" >/dev/null 2>&1; then
+    echo "skip-undef-read"; return
+  fi
   # z.spv = zioshade-GLSL(source) -> glslang  (the round-tripped SPIR-V the proxy uses)
   "$CLI" glsl "$d.src.spv" --stage fragment > "$d.z.glsl" 2>/dev/null || { echo "skip-zglsl"; return; }
   glslangValidator -V -S frag "$d.z.glsl" -o "$d.z.spv" >/dev/null 2>&1 || { echo "skip-zglslang"; return; }
@@ -53,6 +65,6 @@ done
 
 echo ""
 echo "=== GLSL faithfulness (zioshade-MSL on round-tripped vs source SPIR-V) ==="
-for k in FAITHFUL "FAITHFUL(edge)" "UNFAITHFUL(real GLSL bug)" skip-glslang skip-zglsl skip-zglslang skip-zAmsl skip-zBmsl skip-binding skip-render; do
+for k in FAITHFUL "FAITHFUL(edge)" "UNFAITHFUL(real GLSL bug)" skip-glslang skip-zglsl skip-zglslang skip-zAmsl skip-zBmsl skip-binding skip-render skip-undef-read; do
   echo "  $k: ${C[$k]:-0}"
 done
