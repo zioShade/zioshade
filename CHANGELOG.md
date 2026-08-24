@@ -56,7 +56,10 @@ All notable changes to zioshade are documented here. The format is loosely based
   is spelled `((T)0)` for a scalar, vector, matrix or struct, and a per-element
   brace list for an array (`float w[4] = {((float)0), ((float)0), ((float)0),
   ((float)0)};`, nested once per dimension), which is what spirv-cross's
-  `--force-zero-initialized-variables` emits too. The two shorter spellings are
+  `--force-zero-initialized-variables` emits too. An array whose extent cannot
+  be read is refused rather than emitted: there is no other array spelling both
+  oracles accept, so the alternative is knowingly emitting output glslang
+  rejects. The two shorter spellings are
   both traps: DXC rejects `{0}`, and glslang's HLSL frontend rejects a cast to an
   array type, so `((float[4])0)` compiles under DXC while turning the always-on
   `hlsl-glslang-all` gate INVALID (12 corpus outputs emitted it; they escaped the

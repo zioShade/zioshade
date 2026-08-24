@@ -3575,23 +3575,6 @@ fn hlslGetArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8
     return common.commonGetArraySuffix(module.instructions, module.id_defs, ptr_type_id, true);
 }
 
-/// Element count of a declaration suffix like "[4]" or "[2][3]" (the product of
-/// its dimensions), or null if the suffix is empty or not a plain dimension list.
-fn hlslArraySuffixElems(arr_suffix: []const u8) ?u64 {
-    if (arr_suffix.len == 0) return null;
-    var total: u64 = 1;
-    var rest = arr_suffix;
-    while (rest.len > 0) {
-        if (rest[0] != '[') return null;
-        const close = std.mem.indexOfScalar(u8, rest, ']') orelse return null;
-        const n = std.fmt.parseInt(u32, rest[1..close], 10) catch return null;
-        if (n == 0) return null;
-        total *|= n;
-        rest = rest[close + 1 ..];
-    }
-    return total;
-}
-
 /// The zero-initializer expression for a local declared `type_name name<arr_suffix>`.
 ///
 /// Non-array: the cast form `((T)0)`, which is the HLSL idiom for zeroing a scalar,
@@ -3607,26 +3590,24 @@ fn hlslArraySuffixElems(arr_suffix: []const u8) ?u64 {
 /// still rejects the read (verified, exit 5) -- the shape of bug this whole pass exists
 /// to prevent.
 fn hlslWriteZeroInit(out: *std.ArrayList(u8), alloc: std.mem.Allocator, type_name: []const u8, arr_suffix: []const u8) !void {
-    // Cap the expansion: a huge local array would otherwise emit one enormous line.
-    // Above the cap the DXC-only cast form is the lesser evil (correct where it is
-    // parsed, and no such local exists in any corpus shader today).
-    const too_big = if (hlslArraySuffixElems(arr_suffix)) |n| n > 4096 else false;
-    if (arr_suffix.len == 0 or arr_suffix[0] != '[' or too_big) {
+    // Non-arrays take the cast form, which both oracles accept for scalars,
+    // vectors, matrices and structs.
+    if (arr_suffix.len == 0 or arr_suffix[0] != '[') {
         try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
         return;
     }
-    const close = std.mem.indexOfScalar(u8, arr_suffix, ']') orelse {
-        try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
-        return;
-    };
-    const n = std.fmt.parseInt(u32, arr_suffix[1..close], 10) catch {
-        try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
-        return;
-    };
-    if (n == 0) {
-        try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
-        return;
-    }
+    // Anything that looks like an array but whose extent cannot be read is
+    // refused rather than emitted. There is no array spelling both oracles
+    // accept other than the brace list, so the alternative is knowingly
+    // emitting output that glslang rejects, which is the silent-wrong trade
+    // this whole pass exists to avoid. No cap on the expansion either: a
+    // large local array emits a long line, which is ugly but correct, and
+    // correctness is not negotiable against line length.
+    const close = std.mem.indexOfScalar(u8, arr_suffix, ']') orelse
+        return error.UnsupportedArrayZeroInit;
+    const n = std.fmt.parseInt(u32, arr_suffix[1..close], 10) catch
+        return error.UnsupportedArrayZeroInit;
+    if (n == 0) return error.UnsupportedArrayZeroInit;
     const rest = arr_suffix[close + 1 ..];
     try out.append(alloc, '{');
     var i: u32 = 0;
