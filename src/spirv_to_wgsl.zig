@@ -278,6 +278,16 @@ fn isAddCarryOrSubBorrow(op: spirv.Op) bool {
     return isAddCarry(op) or isSubBorrow(op);
 }
 
+/// OpTerminateInvocation = 4416, SPIR-V 1.6's replacement for OpKill (and the
+/// SPV_KHR_terminate_invocation form every recent glslang emits for `discard`
+/// when targeting 1.6). `spirv.Op` is non-exhaustive and does NOT name it, so
+/// like OpIAddCarry above it has to be matched by raw opcode number. It is a
+/// DISCARD-LIKE BLOCK TERMINATOR, which is what the uniformity prepass cares
+/// about: see the classification note in `UniformityAnalysis.parse`.
+fn isTerminateInvocation(op: spirv.Op) bool {
+    return @intFromEnum(op) == 4416;
+}
+
 /// Record which GLSL.std.450 instruction had no WGSL mapping (into the
 /// threadlocal detail), then return the honest error. Use at every
 /// `UnsupportedExtInst` site: `return recordUnsupportedExtInst(op);`.
@@ -7128,15 +7138,34 @@ const UniformityAnalysis = struct {
     visited: std.AutoHashMap(usize, void),
     dfs_stack: std.ArrayListUnmanaged(usize) = .empty,
 
+    /// Recursion cap shared by EVERY recursive helper in this struct: the
+    /// pointer/index walks (pointerRoot, pointerParamOf, chainIndicesUniform)
+    /// and the regionEntry -> loopEntryFlow -> edgeContribution cycle.
+    ///
+    /// The flow cycle is NOT self-terminating on arbitrary SPIR-V: a loop
+    /// header with a second back edge from one of its own PRELUDE blocks (a
+    /// prelude block whose non-uniform conditional targets the header on both
+    /// arms) sends regionEntry(prelude) -> loopEntryFlow(header) ->
+    /// edgeContribution(prelude, header) -> regionEntry(prelude) round forever
+    /// and blows the stack. spirv-val rejects that module, but the CTS and
+    /// external-ingestion paths feed non-glslang SPIR-V and the other three
+    /// backends honest-error on it, so a SIGSEGV here is a mandate violation.
+    /// Hitting the cap yields NON-uniform / no-root, the conservative
+    /// direction: the sample is downgraded, never wrongly kept implicit.
+    const max_flow_depth: u32 = 64;
+
     /// Walk a pointer chain to its root OpVariable id (null when the chain
     /// bottoms out at a parameter or an unknown op).
     fn pointerRoot(a: *UniformityAnalysis, ptr_id: u32, depth: u32) ?u32 {
-        if (depth > 64) return null;
+        if (depth > max_flow_depth) return null;
         const inst = common.getDef(a.module, ptr_id) orelse return null;
         return switch (inst.op) {
             .Variable => ptr_id,
-            .AccessChain => a.pointerRoot(inst.words[3], depth + 1),
-            .CopyObject => a.pointerRoot(inst.words[3], depth + 1),
+            // getDef only guarantees words.len >= 3 (the instruction defines an
+            // id); a TRUNCATED chain op would index past the end. Non-glslang
+            // SPIR-V reaches this walk, so answer "unknown root" rather than
+            // panic.
+            .AccessChain, .CopyObject => if (inst.words.len > 3) a.pointerRoot(inst.words[3], depth + 1) else null,
             else => null,
         };
     }
@@ -7146,10 +7175,11 @@ const UniformityAnalysis = struct {
     /// GLSL parameter this way, so loads/stores through parameters are the
     /// COMMON shape for helper functions, not an exotic one.
     fn pointerParamOf(a: *UniformityAnalysis, params: []const u32, ptr_id: u32, depth: u32) ?usize {
-        if (depth > 64) return null;
+        if (depth > max_flow_depth) return null;
         const inst = common.getDef(a.module, ptr_id) orelse return null;
         switch (inst.op) {
-            .AccessChain, .CopyObject => return a.pointerParamOf(params, inst.words[3], depth + 1),
+            // truncated chain op: unknown parameter, not an out-of-bounds index
+            .AccessChain, .CopyObject => return if (inst.words.len > 3) a.pointerParamOf(params, inst.words[3], depth + 1) else null,
             .FunctionParameter => {
                 for (params, 0..) |pid, pi| {
                     if (pid == ptr_id) return pi;
@@ -7280,7 +7310,24 @@ const UniformityAnalysis = struct {
                             try samples.append(a.arena, .{ .result = inst.words[2], .block = cur_block });
                         }
                     },
-                    else => {},
+                    else => {
+                        // OpTerminateInvocation is SPIR-V 1.6's OpKill: a
+                        // DISCARD-LIKE block terminator. spirv.Op does not name
+                        // it, so it cannot have a `.TerminateInvocation` arm and
+                        // lands here; without this line the block would keep its
+                        // `.unreach` default and `postdominates` would count it
+                        // as an EXIT, which is the exact OPPOSITE of the
+                        // deliberate OpKill rule documented there (a discard is a
+                        // dead end, not a path that bypasses the merge). It gets
+                        // the OpKill classification for the same reason: a
+                        // terminated invocation contributes no path to a return.
+                        // Nothing can observe this yet -- the WGSL emitter
+                        // honest-errors on opcode 4416 ("unsupported op ... in
+                        // main emit path"), so no module carrying one reaches
+                        // emission -- but the classification is then already
+                        // right the day the emitter grows a `discard;` arm.
+                        if (isTerminateInvocation(inst.op)) terms.items[cur_block] = .kill;
+                    },
                 }
             }
             // resolve label ids -> block indices (targets may be defined later)
@@ -7299,7 +7346,8 @@ const UniformityAnalysis = struct {
                     .swit => |s| for (s.targets) |t| {
                         if (lmap.get(t)) |ti| try succs.append(a.arena, ti);
                     },
-                    else => {},
+                    // terminators that leave the function: no successor block
+                    .ret, .kill, .unreach => {},
                 }
                 try resolved.append(a.arena, .{ .label = blk.label, .term = term, .succs = succs.items });
             }
@@ -7336,7 +7384,9 @@ const UniformityAnalysis = struct {
                             if (nxt == cb) break; // degenerate self chain
                             cb = nxt;
                         },
-                        else => break,
+                        // the header chain left the function before reaching any
+                        // conditional: there is no trip-count condition to record
+                        .ret, .kill, .unreach => break,
                     }
                 }
                 var continue_block: ?usize = null;
@@ -7347,7 +7397,8 @@ const UniformityAnalysis = struct {
                         switch (resolved.items[ci].term) {
                             .cond => |c| try governing.append(a.arena, c.cond),
                             .swit => |s| try governing.append(a.arena, s.sel),
-                            else => {},
+                            // an unconditional continue governs nothing
+                            .branch, .ret, .kill, .unreach => {},
                         }
                     }
                 }
@@ -7413,7 +7464,9 @@ const UniformityAnalysis = struct {
             a.visited.put(bi, {}) catch return false;
             switch (uf.blocks[bi].term) {
                 .ret, .unreach => return false, // an exit path avoids `target`
-                else => {},
+                // .kill is deliberately NOT an exit (see the doc comment); the
+                // rest have successors the DFS keeps walking.
+                .branch, .cond, .swit, .kill => {},
             }
             for (uf.blocks[bi].succs) |s| a.dfs_stack.append(a.arena, s) catch return false;
         }
@@ -7428,22 +7481,6 @@ const UniformityAnalysis = struct {
         }
         return null;
     }
-
-    /// Recursion cap for the regionEntry -> loopEntryFlow -> edgeContribution
-    /// cycle, matching the 64 the other recursive helpers here use
-    /// (pointerRoot, pointerParamOf, chainIndicesUniform).
-    ///
-    /// The cycle is NOT self-terminating on arbitrary SPIR-V: a loop header
-    /// with a second back edge from one of its own PRELUDE blocks (a prelude
-    /// block whose non-uniform conditional targets the header on both arms)
-    /// sends regionEntry(prelude) -> loopEntryFlow(header) ->
-    /// edgeContribution(prelude, header) -> regionEntry(prelude) round forever
-    /// and blows the stack. spirv-val rejects that module, but the CTS and
-    /// external-ingestion paths feed non-glslang SPIR-V and the other three
-    /// backends honest-error on it, so a SIGSEGV here is a mandate violation.
-    /// Hitting the cap yields NON-uniform, the conservative direction: the
-    /// sample is downgraded, never wrongly kept implicit.
-    const max_flow_depth: u32 = 64;
 
     /// The flow a block contributes when reconvergence at its target makes
     /// the branch's divergence irrelevant: the loop's ENTRY flow for prelude
@@ -7491,7 +7528,10 @@ const UniformityAnalysis = struct {
                 if (a.values.contains(s.sel)) return uf.blocks[pi].flow;
                 return a.postdominates(fi, pi, ti) and a.regionEntry(fi, pi, depth + 1);
             },
-            else => return false,
+            // a block that leaves the function has no edge into `ti` at all;
+            // reaching here means the pred list disagrees with the terminator
+            // (truncated/malformed input), so contribute nothing.
+            .ret, .kill, .unreach => return false,
         }
     }
 
@@ -7572,7 +7612,8 @@ const UniformityAnalysis = struct {
         switch (uf.blocks[pb].term) {
             .cond => |c| return a.values.contains(c.cond),
             .swit => |s| return a.values.contains(s.sel),
-            else => return true,
+            // an unconditional branch selects nothing, so the edge is uniform
+            .branch, .ret, .kill, .unreach => return true,
         }
     }
 
@@ -7642,6 +7683,10 @@ const UniformityAnalysis = struct {
                 return true;
             },
             .Load => {
+                // getDef only guarantees words.len >= 3; OpLoad's pointer
+                // operand is words[3], so a truncated load would index past the
+                // end. Conservative answer: not a uniform value.
+                if (inst.words.len <= 3) return false;
                 const ptr = inst.words[3];
                 // A load through a pointer parameter of the owning function
                 // (glslang's parameter ABI) is judged from the arguments.
@@ -7694,6 +7739,11 @@ const UniformityAnalysis = struct {
                 // GLSL.std.450 pure math; id operands start at words[5]. Any
                 // pointer operand (Modf/Frexp) is never a uniform value, so
                 // those forms refuse themselves.
+                // A well-formed OpExtInst is at least 5 words (result type,
+                // result id, set id, instruction literal); getDef only
+                // guarantees 3, so a truncated one must answer non-uniform
+                // rather than slice past the end.
+                if (inst.words.len < 5) return false;
                 for (inst.words[5..]) |op_id| {
                     if (!a.values.contains(op_id)) return false;
                 }
@@ -7750,17 +7800,21 @@ const UniformityAnalysis = struct {
     /// Every dynamic index of an access chain rooted at `ptr_id` is a
     /// uniform value (probe p22).
     fn chainIndicesUniform(a: *UniformityAnalysis, ptr_id: u32, depth: u32) bool {
-        if (depth > 64) return false;
+        if (depth > max_flow_depth) return false;
         const inst = common.getDef(a.module, ptr_id) orelse return false;
         switch (inst.op) {
             .Variable => return true,
             .AccessChain => {
+                // base operand at words[3], indices from words[4]; getDef only
+                // guarantees 3 words, so a truncated chain answers non-uniform
+                // rather than indexing past the end.
+                if (inst.words.len <= 3) return false;
                 for (inst.words[4..]) |idx| {
                     if (!a.values.contains(idx)) return false;
                 }
                 return a.chainIndicesUniform(inst.words[3], depth + 1);
             },
-            .CopyObject => return a.chainIndicesUniform(inst.words[3], depth + 1),
+            .CopyObject => return if (inst.words.len > 3) a.chainIndicesUniform(inst.words[3], depth + 1) else false,
             else => return false,
         }
     }
@@ -7784,11 +7838,18 @@ const UniLoopMerge = struct { merge: u32, cont: u32 };
 /// control flow in the generated WGSL, so the emitter can lower exactly those
 /// to the uniformity-safe explicit-Level forms. Empty (not an error) for the
 /// common module with no such sample.
+///
+/// The error set is written out rather than inferred. This function introduced
+/// a NEW error name into a file whose call chain is inferred end to end, and an
+/// inferred set gives nobody downstream a reason to notice: spelling it here is
+/// what makes adding another one a visible, reviewable change (and what pins
+/// `UniformityAnalysisDidNotConverge` as the ONLY non-OOM failure this prepass
+/// can produce, which is what the cli.zig detail gate relies on).
 fn computeNonuniformImplicitLodSamples(
     arena: std.mem.Allocator,
     module: *const ParsedModule,
     decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
-) !std.AutoHashMap(u32, void) {
+) error{ OutOfMemory, UniformityAnalysisDidNotConverge }!std.AutoHashMap(u32, void) {
     var out = std.AutoHashMap(u32, void).init(arena);
     var a = UniformityAnalysis{
         .module = module,
@@ -7824,6 +7885,13 @@ fn computeNonuniformImplicitLodSamples(
     // that another round would have cleared) and so can keep an implicit
     // sample tint rejects: the exact silent-wrong this prepass exists to
     // prevent. Fail loud instead.
+    //
+    // Why fail loud and not fail SAFE (mark every implicit sample non-uniform
+    // and carry on)? Fail-safe would compile, but it would silently change mip
+    // selection for every sample in the module -- a visibly different image
+    // from a bug nobody was told about, which is the failure mode this whole
+    // prepass exists to remove. A refusal is loud, actionable and rare (no
+    // input has ever reached it), so it is the honest trade here.
     const max_rounds: u32 = 1000;
     var rounds: u32 = 0;
     var stable = false;
@@ -7884,7 +7952,7 @@ fn computeNonuniformImplicitLodSamples(
     }
 
     if (!stable) {
-        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "WGSL uniformity prepass did not converge in {d} rounds", .{max_rounds}) catch null;
+        last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "the WGSL uniformity prepass did not converge in {d} rounds. Every component of that fixpoint only moves DOWN, so this is an INTERNAL INVARIANT failure in zioshade, not a problem with your shader. Workaround: none; please file a bug against zioshade with the shader (or the SPIR-V) that produced this.", .{max_rounds}) catch null;
         return error.UniformityAnalysisDidNotConverge;
     }
 
