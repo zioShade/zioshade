@@ -11,36 +11,13 @@ const ShaderTest = struct {
     source: [:0]const u8,
 };
 
+/// Compile GLSL to SPIR-V with glslangValidator's defaults. Skips (rather than
+/// fails) when glslang is absent or rejects the source, keeping `zig build
+/// test` hermetic. The body lives in `compileToSpirvWithArgs` below; this was a
+/// near-verbatim second copy of it until the two drifted apart became a real
+/// risk.
 fn compileToSpirv(name: []const u8, source: [:0]const u8) ![]u32 {
-    // Write source to temp file
-    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.frag", .{name});
-    defer alloc.free(tmp_src);
-    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.spv", .{name});
-    defer alloc.free(tmp_spv);
-
-    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
-
-    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
-    defer alloc.free(glslang);
-    var main_io = zioshade.compat.MainIo().init(alloc);
-    defer main_io.deinit();
-    const result = zioshade.compat.processRun(main_io.io(), alloc, &.{ glslang, "-V", tmp_src, "-o", tmp_spv }) catch return error.SkipZigTest;
-    defer alloc.free(result.stdout);
-    defer alloc.free(result.stderr);
-    // If glslang rejects the source the `.spv` is never written; skip rather than
-    // surface a confusing FileNotFound from the open below (mirrors the exit-code
-    // guard in nagaValidateOrSkip).
-    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
-
-    const data = try zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024);
-    // Convert bytes to u32 words with proper alignment
-    const words_len = data.len / 4;
-    const words = try alloc.alloc(u32, words_len);
-    for (0..words_len) |i| {
-        words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
-    }
-    alloc.free(data);
-    return words;
+    return compileToSpirvWithArgs(name, source, &.{});
 }
 
 /// Assemble SPIR-V text (spirv-as) into words. glslang never emits some spec-valid shapes
@@ -179,6 +156,10 @@ fn assertContains(haystack: []const u8, needle: []const u8) !void {
         return error.TestExpectedFind;
     }
 }
+
+/// OpPhi, for the shape guards that assert glslang really emitted one. Named
+/// so the call sites do not carry a bare 245.
+const op_phi: u16 = @intFromEnum(zioshade.spirv.Op.Phi);
 
 /// Count instructions with the given SPIR-V opcode in a word stream (skips the
 /// 5-word header). Used for IR-level regression guards that don't depend on a
@@ -10383,4 +10364,971 @@ test "wintty gallery: uniform-derived global initializer reaches the WGSL entry 
     // declaration as a constant.
     try assertNotContains(wgsl, "var<private> T = ");
     try nagaValidateOrSkip(wgsl, "kgt-wgsl-entry");
+}
+
+// ---------------------------------------------------------------------------
+// zioshade-8k2: WGSL uniformity analysis for implicit-Lod sampling.
+//
+// WGSL gates the implicit-Lod sampling builtins (textureSample,
+// textureSampleBias, textureSampleCompare and their proj-lowered forms) on
+// UNIFORM CONTROL FLOW: tint (Chrome/Dawn) and naga reject a module where the
+// call sits after flow has diverged -- the classic shape is a shader that
+// early-returns inside a conditional and then samples (the wintty "crt"
+// gallery class, which rendered black in the browser player while every text
+// and proxy gate was green). The fix mirrors what SPIRV-Cross does when a
+// sampling form is not available in the target: pin the level to 0
+// (textureSampleLevel(..., 0.0), textureSampleCompareLevel) instead of
+// emitting a builtin the consumer rejects.
+//
+// The tests below pin BOTH directions on the shapes Chrome/tint was probed on
+// (tools/wgsl_browser_check.mjs with hand-written overrides): flow that tint
+// considers non-uniform MUST downgrade to the Level form, and flow tint
+// considers uniform (reconverged ifs, uniform-buffer conditions, const-bounded
+// loops, helpers called from uniform flow) MUST keep the implicit form --
+// downgrading those would silently change mip selection for every consumer.
+//
+// Every one of them runs BOTH local oracles, for the same reason the follow-up
+// round further down spells out: tint is the only one that actually runs
+// WGSL's uniformity analysis, so a text assertion alone cannot tell a correct
+// KEEP from the originally shipped bug (a wrong "keep" IS that bug), and F1
+// proved a text-only assertion passes happily on invalid WGSL. Both helpers
+// skip when their tool is absent, so `zig build test` stays hermetic.
+// ---------------------------------------------------------------------------
+
+test "wgsl: early-return branch then sample emits textureSampleLevel 0 (8k2)" {
+    const spv = try compileToSpirv("nonuniform_early_return",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // The sample sits after a conditional return: only a subset of invocations
+    // reaches it, so the implicit form would be a tint reject. The explicit
+    // level-0 form is what SPIRV-Cross emits when implicit LOD is unavailable.
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-early-return");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-early-return");
+}
+
+test "wgsl: sample inside a non-uniform if arm emits textureSampleLevel 0 (8k2)" {
+    const spv = try compileToSpirv("nonuniform_if_arm",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = texture(tex, vUV); }
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-if-arm");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-if-arm");
+}
+
+test "wgsl: straight-line sample keeps textureSample (8k2 control)" {
+    const spv = try compileToSpirv("uniform_flow_control",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = texture(tex, vUV); }
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-uniform-flow-control");
+    try tintValidateOrSkip(wgsl, "8k2-uniform-flow-control");
+}
+
+test "wgsl: sample after a completing if keeps textureSample (8k2 reconvergence)" {
+    // Both arms fall through to the merge: every invocation that entered the
+    // if reaches the sample, so the flow RECONVERGES and tint keeps the
+    // implicit form. Downgrading here would change mip selection for no reason.
+    const spv = try compileToSpirv("reconverged_if",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    vec4 c = vec4(0.0);
+        \\    if (vUV.x < 0.0) { c = vec4(1.0); }
+        \\    fragColor = c + texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-reconverged-if");
+    try tintValidateOrSkip(wgsl, "8k2-reconverged-if");
+}
+
+test "wgsl: uniform-buffer condition keeps textureSample (8k2)" {
+    // A read of a var<uniform> member is a UNIFORM VALUE for the analysis, so
+    // branching on it does not diverge flow (probed on tint: accepted).
+    const spv = try compileToSpirv("uniform_cond_if",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (flag > 0.5) { fragColor = texture(tex, vUV); }
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-uniform-cond-if");
+    try tintValidateOrSkip(wgsl, "8k2-uniform-cond-if");
+}
+
+test "wgsl: const-bounded loop keeps textureSample (8k2)" {
+    const spv = try compileToSpirv("const_bound_loop",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    vec4 col = vec4(0.0);
+        \\    for (int i = 0; i < 4; i++) { col += texture(tex, vUV); }
+        \\    fragColor = col;
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-const-bound-loop");
+    try tintValidateOrSkip(wgsl, "8k2-const-bound-loop");
+}
+
+test "wgsl: varying-bound loop downgrades to textureSampleLevel (8k2)" {
+    const spv = try compileToSpirv("varying_bound_loop",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    int n = int(vUV.x);
+        \\    vec4 col = vec4(0.0);
+        \\    for (int i = 0; i < n; i++) { col += texture(tex, vUV); }
+        \\    fragColor = col;
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-varying-bound-loop");
+    try tintValidateOrSkip(wgsl, "8k2-varying-bound-loop");
+}
+
+test "wgsl: helper called from uniform flow keeps textureSample (8k2)" {
+    const spv = try compileToSpirv("helper_uniform_call",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\vec4 samp(vec2 uv) { return texture(tex, uv); }
+        \\void main(){ fragColor = samp(vUV); }
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-helper-uniform-call");
+    try tintValidateOrSkip(wgsl, "8k2-helper-uniform-call");
+}
+
+test "wgsl: helper called from non-uniform flow downgrades (8k2)" {
+    // The helper's ENTRY flow is the flow of its call site: called from inside
+    // a non-uniform branch, its sample must take the Level form even though
+    // the helper body itself is straight-line (probed on tint: rejected).
+    const spv = try compileToSpirv("helper_nonuniform_call",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\vec4 samp(vec2 uv) { return texture(tex, uv); }
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = samp(vUV); }
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-helper-nonuniform-call");
+    try tintValidateOrSkip(wgsl, "8k2-helper-nonuniform-call");
+}
+
+test "wgsl: sample after a conditional break downgrades (8k2)" {
+    // After `if (c) break;` the rest of the loop body is executed by a subset
+    // of the invocations that entered the iteration (probed on tint: rejected).
+    const spv = try compileToSpirv("cond_break_loop",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    vec4 col = vec4(0.0);
+        \\    for (int i = 0; i < 4; i++) {
+        \\        if (vUV.x > 8.0) { break; }
+        \\        col += texture(tex, vUV);
+        \\    }
+        \\    fragColor = col;
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-cond-break-loop");
+    try tintValidateOrSkip(wgsl, "8k2-cond-break-loop");
+}
+
+test "wgsl: phi of constants across a non-uniform if is a non-uniform condition (8k2)" {
+    // x is a phi of two constants, but WHICH one arrives is chosen by
+    // non-uniform flow, so tint treats x as a non-uniform VALUE (probed:
+    // rejected). A value-only analysis would wrongly keep textureSample.
+    const spv = try compileToSpirv("phi_of_consts",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    float x = 0.0;
+        \\    if (vUV.x > 8.0) { x = 1.0; }
+        \\    if (x > 0.5) { fragColor = texture(tex, vUV); } else { fragColor = vec4(0.0); }
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-phi-of-consts");
+    try tintValidateOrSkip(wgsl, "8k2-phi-of-consts");
+}
+
+test "wgsl: phi across a uniform if stays a uniform condition (8k2)" {
+    const spv = try compileToSpirv("phi_uniform_edge",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    float x = 0.0;
+        \\    if (flag > 0.5) { x = 1.0; }
+        \\    if (x > 0.5) { fragColor = texture(tex, vUV); } else { fragColor = vec4(0.0); }
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-phi-uniform-edge");
+    try tintValidateOrSkip(wgsl, "8k2-phi-uniform-edge");
+}
+
+test "wgsl: uniform-buffer read with non-uniform index is non-uniform (8k2)" {
+    // globals.arr[vUV-derived] is NOT a uniform value for the analysis even
+    // though the storage is var<uniform>: the loaded element differs per
+    // invocation (probed on tint: rejected).
+    const spv = try compileToSpirv("indexed_uniform_read",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float arr[4]; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (arr[int(vUV.x) & 3] > 0.5) { fragColor = texture(tex, vUV); }
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-indexed-uniform-read");
+    try tintValidateOrSkip(wgsl, "8k2-indexed-uniform-read");
+}
+
+// A parameter gating the sample is uniform iff EVERY call site passes a
+// uniform argument (probed: tint accepts a uniform arg, rejects a non-uniform
+// one). Same helper, two call shapes, one behaviour each: they used to share a
+// single test through two anonymous blocks, which meant the first failure hid
+// the second verdict entirely.
+test "wgsl: a helper parameter fed a UNIFORM argument keeps textureSample (8k2)" {
+    const spv = try compileToSpirv("param_uniform_arg",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\vec4 samp(float x, vec2 uv) { if (x > 0.5) { return texture(tex, uv); } return vec4(0.0); }
+        \\void main(){ fragColor = samp(flag, vUV); }
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-param-uniform-arg");
+    try tintValidateOrSkip(wgsl, "8k2-param-uniform-arg");
+}
+
+test "wgsl: a helper parameter fed a NON-uniform argument downgrades (8k2)" {
+    const spv = try compileToSpirv("param_nonuniform_arg",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\vec4 samp(float x, vec2 uv) { if (x > 0.5) { return texture(tex, uv); } return vec4(0.0); }
+        \\void main(){ fragColor = samp(vUV.x, vUV); }
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-param-nonuniform-arg");
+    try tintValidateOrSkip(wgsl, "8k2-param-nonuniform-arg");
+}
+
+test "wgsl: early return then bias sample pins level 0 and drops the bias (8k2)" {
+    // textureSampleBias is uniformity-gated exactly like textureSample, and
+    // WGSL has no textureQueryLod to fold a bias into an explicit level: the
+    // only non-gated form is textureSampleLevel, so the bias operand is
+    // dropped and the level pinned to 0 (the same trade SPIRV-Cross's MSL
+    // backend makes for a bias it cannot express on sample_compare).
+    const spv = try compileToSpirv("nonuniform_bias",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = texture(tex, vUV, 0.25);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSampleBias(");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-bias");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-bias");
+}
+
+test "wgsl: early return then shadow sample emits textureSampleCompareLevel (8k2)" {
+    const spv = try compileToSpirv("nonuniform_dref",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DShadow shadowTex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = vec4(texture(shadowTex, vec3(vUV, 0.5)));
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleCompareLevel(");
+    try assertNotContains(wgsl, "textureSampleCompare(shadowTex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-dref");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-dref");
+}
+
+test "wgsl: early return then textureProj emits textureSampleLevel (8k2)" {
+    const spv = try compileToSpirv("nonuniform_proj",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec4 vP;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vP.x < 0.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = textureProj(tex, vP);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-nonuniform-proj");
+    try tintValidateOrSkip(wgsl, "8k2-nonuniform-proj");
+}
+
+// ---------------------------------------------------------------------------
+// zioshade-8k2 review follow-ups. Every test below was watched RED on the
+// pre-fix tree where it pins a bug, and each downgraded/kept form is checked
+// against BOTH local oracles (naga and tint); tint is the one that actually
+// runs WGSL's uniformity analysis, so a "keep" test is only meaningful with it.
+// ---------------------------------------------------------------------------
+
+/// compileToSpirv with extra glslangValidator flags. The SPIR-V shape of an
+/// SSBO depends on the target env (Vulkan 1.0 spells it StorageClass Uniform +
+/// BufferBlock, Vulkan 1.1 spells it StorageClass StorageBuffer), and the
+/// uniformity prepass has to reach the same verdict for both.
+fn compileToSpirvWithArgs(name: []const u8, source: [:0]const u8, extra: []const []const u8) ![]u32 {
+    const tmp_src = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.frag", .{name});
+    defer alloc.free(tmp_src);
+    const tmp_spv = try zioshade.compat.tempFilePathFmt(alloc, "wgsl_test_{s}.spv", .{name});
+    defer alloc.free(tmp_spv);
+    try zioshade.compat.writeFileAbsolute(alloc, tmp_src, std.mem.sliceTo(source, 0));
+
+    const glslang = zioshade.compat.resolveVulkanTool(alloc, "glslangValidator") catch return error.SkipZigTest;
+    defer alloc.free(glslang);
+
+    var argv = std.ArrayListUnmanaged([]const u8).empty;
+    defer argv.deinit(alloc);
+    try argv.append(alloc, glslang);
+    try argv.append(alloc, "-V");
+    for (extra) |e| try argv.append(alloc, e);
+    try argv.append(alloc, tmp_src);
+    try argv.append(alloc, "-o");
+    try argv.append(alloc, tmp_spv);
+
+    var main_io = zioshade.compat.MainIo().init(alloc);
+    defer main_io.deinit();
+    const result = zioshade.compat.processRun(main_io.io(), alloc, argv.items) catch return error.SkipZigTest;
+    defer alloc.free(result.stdout);
+    defer alloc.free(result.stderr);
+    if (!((result.term.exitedCode() orelse 1) == 0)) return error.SkipZigTest;
+
+    const data = try zioshade.compat.readFileAbsolute(alloc, tmp_spv, 1024 * 1024);
+    defer alloc.free(data);
+    const words = try alloc.alloc(u32, data.len / 4);
+    for (0..words.len) |i| words[i] = std.mem.readInt(u32, data[i * 4 ..][0..4], .little);
+    return words;
+}
+
+// The header, names, decorations and scalar types every hand-authored SPIR-V
+// fixture in this section repeats verbatim, split out so a fixture shows only
+// the shape it is actually pinning. `%img` and `%pcoord` are the two
+// declarations that vary, so each fixture supplies those (plus its coordinate
+// vector type) between the two halves. The OpNames are what make the emitted
+// WGSL readable enough to assert on with a full call-shape literal.
+const asm_8k2_head =
+    \\               OpCapability Shader
+    \\               OpMemoryModel Logical GLSL450
+    \\               OpEntryPoint Fragment %main "main" %c %o %t %s
+    \\               OpExecutionMode %main OriginUpperLeft
+    \\               OpName %t "tex"
+    \\               OpName %s "texSampler"
+    \\               OpName %c "uv"
+    \\               OpName %o "fragColor"
+    \\               OpDecorate %t DescriptorSet 0
+    \\               OpDecorate %t Binding 1
+    \\               OpDecorate %s DescriptorSet 0
+    \\               OpDecorate %s Binding 0
+    \\               OpDecorate %c Location 0
+    \\               OpDecorate %o Location 0
+    \\       %void = OpTypeVoid
+    \\          %3 = OpTypeFunction %void
+    \\       %bool = OpTypeBool
+    \\      %float = OpTypeFloat 32
+    \\    %v4float = OpTypeVector %float 4
+    \\
+;
+
+/// The sampled-image / pointer / variable declarations that follow, given an
+/// `%img` image type and a `%pcoord` input-pointer type.
+const asm_8k2_resources =
+    \\         %si = OpTypeSampledImage %img
+    \\       %samp = OpTypeSampler
+    \\      %puimg = OpTypePointer UniformConstant %img
+    \\     %pusamp = OpTypePointer UniformConstant %samp
+    \\        %po4 = OpTypePointer Output %v4float
+    \\          %t = OpVariable %puimg UniformConstant
+    \\          %s = OpVariable %pusamp UniformConstant
+    \\          %c = OpVariable %pcoord Input
+    \\          %o = OpVariable %po4 Output
+    \\    %float_0 = OpConstant %float 0
+    \\
+;
+
+// --- F1: the DEPTH downgrade emitted an f32 level, which is invalid WGSL ----
+//
+// WGSL's depth overloads of textureSampleLevel constrain the level to i32/u32.
+// The downgrade arms emitted `0.0` and both oracles rejected the result:
+// tint "no matching call ... 'L' is 'i32' or 'u32'", naga "Sample level
+// (exact) type has an invalid type". Nothing covered the depth or arrayed
+// downgrade paths, which is exactly why it shipped.
+
+test "wgsl: non-uniform depth sample downgrades with an INTEGER level (8k2 F1)" {
+    const spv = try assembleSpirv("nonuniform_depth_downgrade", asm_8k2_head ++
+        \\    %v2float = OpTypeVector %float 2
+        \\        %img = OpTypeImage %float 2D 1 0 0 1 Unknown
+        \\     %pcoord = OpTypePointer Input %v2float
+        \\
+    ++ asm_8k2_resources ++
+        \\         %z4 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
+        \\       %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %cl = OpLoad %v2float %c
+        \\         %cx = OpCompositeExtract %float %cl 0
+        \\        %cmp = OpFOrdLessThan %bool %cx %float_0
+        \\               OpSelectionMerge %merge None
+        \\               OpBranchConditional %cmp %then %merge
+        \\       %then = OpLabel
+        \\               OpStore %o %z4
+        \\               OpReturn
+        \\      %merge = OpLabel
+        \\        %sal = OpLoad %samp %s
+        \\        %tal = OpLoad %img %t
+        \\        %sii = OpSampledImage %si %tal %sal
+        \\          %r = OpImageSampleImplicitLod %v4float %sii %cl
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // The FULL call shape, not just a trailing `, 0));`: that fragment matches
+    // any line anywhere in the module, so it would pass on output whose level
+    // argument sat on some other call entirely. The level literal here must be
+    // the INTEGER 0, and the depth result is widened by splat.
+    try assertContains(wgsl, "vec4f(textureSampleLevel(tex, texSampler, uv, 0))");
+    try assertNotContains(wgsl, ", 0.0));");
+    try nagaValidateOrSkip(wgsl, "8k2-depth-downgrade");
+    try tintValidateOrSkip(wgsl, "8k2-depth-downgrade");
+}
+
+test "wgsl: non-uniform ARRAYED depth sample downgrades with an INTEGER level (8k2 F1)" {
+    const spv = try assembleSpirv("nonuniform_depth_array_downgrade", asm_8k2_head ++
+        \\    %v3float = OpTypeVector %float 3
+        \\        %img = OpTypeImage %float 2D 1 1 0 1 Unknown
+        \\     %pcoord = OpTypePointer Input %v3float
+        \\
+    ++ asm_8k2_resources ++
+        \\         %z4 = OpConstantComposite %v4float %float_0 %float_0 %float_0 %float_0
+        \\       %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %cl = OpLoad %v3float %c
+        \\         %cx = OpCompositeExtract %float %cl 0
+        \\        %cmp = OpFOrdLessThan %bool %cx %float_0
+        \\               OpSelectionMerge %merge None
+        \\               OpBranchConditional %cmp %then %merge
+        \\       %then = OpLabel
+        \\               OpStore %o %z4
+        \\               OpReturn
+        \\      %merge = OpLabel
+        \\        %sal = OpLoad %samp %s
+        \\        %tal = OpLoad %img %t
+        \\        %sii = OpSampledImage %si %tal %sal
+        \\          %r = OpImageSampleImplicitLod %v4float %sii %cl
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // Full call shape (see the non-arrayed test above for why a bare `, 0));`
+    // is not enough): the layer is split out and rounded, and the level is the
+    // INTEGER 0.
+    try assertContains(wgsl, "vec4f(textureSampleLevel(tex, texSampler, uv.xy, i32(round(uv.z)), 0))");
+    try assertNotContains(wgsl, ", 0.0));");
+    try nagaValidateOrSkip(wgsl, "8k2-depth-array-downgrade");
+    try tintValidateOrSkip(wgsl, "8k2-depth-array-downgrade");
+}
+
+test "wgsl: non-uniform ARRAYED sample downgrades and keeps the layer arg (8k2 F1)" {
+    const spv = try compileToSpirv("nonuniform_arrayed_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2DArray tex;
+        \\layout(location=0) in vec3 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex, tex_sampler, vUV.xy, i32(round(vUV.z)), 0.0)");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-arrayed-downgrade");
+    try tintValidateOrSkip(wgsl, "8k2-arrayed-downgrade");
+}
+
+test "wgsl: non-uniform OFFSET sample downgrades and keeps the offset (8k2 F1)" {
+    // Dropping the const offset on the downgrade would be silent-wrong: the
+    // level pin is the only thing the lowering is allowed to change.
+    const spv = try compileToSpirv("nonuniform_offset_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = textureOffset(tex, vUV, ivec2(1, -1));
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex, tex_sampler, vUV, 0.0, vec2<i32>(1, -1))");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-offset-downgrade");
+    try tintValidateOrSkip(wgsl, "8k2-offset-downgrade");
+}
+
+// --- F2: the uniform-value seed keyed off the SPIR-V storage class ---------
+//
+// The same GLSL got OPPOSITE verdicts depending on glslang's --target-env:
+// at Vulkan 1.0 an SSBO lands in StorageClass Uniform, was called uniform, the
+// implicit sample was kept, and tint rejected the module ("must only be called
+// from uniform control flow") -- the black-shader failure this prepass exists
+// to prevent. At Vulkan 1.1 the same buffer lands in StorageClass StorageBuffer
+// and was called non-uniform even when READ-ONLY, so it was needlessly
+// downgraded although tint accepts the implicit form there.
+
+test "wgsl: a Vulkan-1.0 SSBO-gated branch is NON-uniform and downgrades (8k2 F2)" {
+    const spv = try compileToSpirvWithArgs("ssbo_vk10_gate",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) buffer B { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (flag > 0.5) { fragColor = texture(tex, vUV); }
+        \\}
+    , &.{});
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // emitted as a read_write storage buffer, whose read WGSL calls non-uniform
+    try assertContains(wgsl, "var<storage, read_write>");
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-ssbo-vk10");
+    try tintValidateOrSkip(wgsl, "8k2-ssbo-vk10");
+}
+
+test "wgsl: a Vulkan-1.1 READ-ONLY storage-gated branch stays uniform (8k2 F2)" {
+    const spv = try compileToSpirvWithArgs("ssbo_vk11_readonly_gate",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) readonly buffer B { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (flag > 0.5) { fragColor = texture(tex, vUV); }
+        \\}
+    , &.{ "--target-env", "vulkan1.1" });
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // read-only `var<storage>`: WGSL's uniformity analysis calls that read
+    // uniform, so downgrading here would change mip selection for nothing.
+    try assertContains(wgsl, "var<storage> ");
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-ssbo-vk11-ro");
+    try tintValidateOrSkip(wgsl, "8k2-ssbo-vk11-ro");
+}
+
+test "wgsl: a Vulkan-1.1 READ-WRITE storage-gated branch downgrades (8k2 F2)" {
+    const spv = try compileToSpirvWithArgs("ssbo_vk11_rw_gate",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) buffer B { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (flag > 0.5) { fragColor = texture(tex, vUV); }
+        \\}
+    , &.{ "--target-env", "vulkan1.1" });
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var<storage, read_write>");
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-ssbo-vk11-rw");
+    try tintValidateOrSkip(wgsl, "8k2-ssbo-vk11-rw");
+}
+
+// --- F6: the flow recursion had no depth guard -----------------------------
+//
+// A loop header with a SECOND back edge, from one of its own prelude blocks
+// whose non-uniform conditional targets the header on both arms, sent
+// regionEntry -> loopEntryFlow -> edgeContribution -> regionEntry round
+// forever: exit 139, EXC_BAD_ACCESS at the stack guard, while MSL/HLSL/GLSL
+// all returned an honest error on the same module. spirv-val rejects the
+// module, but the CTS and external-ingestion paths feed non-glslang SPIR-V and
+// a stack overflow is a mandate violation whatever the input. Reaching the end
+// of this test at all is the assertion: without the guard the test RUNNER dies.
+
+test "wgsl: a loop header with a second back edge does not blow the stack (8k2 F6)" {
+    const spv = try assembleSpirv("double_backedge_header", asm_8k2_head ++
+        \\    %v2float = OpTypeVector %float 2
+        \\        %img = OpTypeImage %float 2D 0 0 0 1 Unknown
+        \\     %pcoord = OpTypePointer Input %v2float
+        \\
+    ++ asm_8k2_resources ++
+        \\       %main = OpFunction %void None %3
+        \\      %entry = OpLabel
+        \\         %cl = OpLoad %v2float %c
+        \\         %cx = OpCompositeExtract %float %cl 0
+        \\        %cmp = OpFOrdLessThan %bool %cx %float_0
+        \\               OpBranch %header
+        \\     %header = OpLabel
+        \\               OpLoopMerge %merge %cont None
+        \\               OpBranch %b1
+        \\         %b1 = OpLabel
+        \\               OpBranchConditional %cmp %header %header
+        \\       %cont = OpLabel
+        \\               OpBranch %header
+        \\      %merge = OpLabel
+        \\        %sal = OpLoad %samp %s
+        \\        %tal = OpLoad %img %t
+        \\        %sii = OpSampledImage %si %tal %sal
+        \\          %r = OpImageSampleImplicitLod %v4float %sii %cl
+        \\               OpStore %o %r
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    // Either an honest error or a completed compile is acceptable; a SIGSEGV
+    // (which is what this used to do) is not, and reaching the next line at
+    // all is the proof.
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |wgsl| {
+        alloc.free(wgsl);
+    } else |_| {}
+}
+
+// --- F7: the proj-Dref EXPLICIT arm consulted a set that can never hold it --
+//
+// The prepass only records the four *ImplicitLod opcodes, so
+// OpImageSampleProjDrefExplicitLod could never be marked and always got the
+// uniformity-GATED textureSampleCompare -- even though this arm drops the
+// SPIR-V Lod anyway, which is exactly the case textureSampleCompareLevel
+// spells (the non-proj ImageSampleDrefExplicitLod path already does this).
+// glslang always attaches the Lod operand, which this backend honest-errors
+// on, so the reachable shape is authored SPIR-V.
+
+test "wgsl: projective Dref EXPLICIT lod uses textureSampleCompareLevel (8k2 F7)" {
+    const spv = try assembleSpirv("proj_dref_explicit",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %c %o %t %s
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %t DescriptorSet 0
+        \\               OpDecorate %t Binding 1
+        \\               OpDecorate %s DescriptorSet 0
+        \\               OpDecorate %s Binding 0
+        \\               OpDecorate %c Location 0
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\          %3 = OpTypeFunction %void
+        \\      %float = OpTypeFloat 32
+        \\    %v4float = OpTypeVector %float 4
+        \\        %img = OpTypeImage %float 2D 1 0 0 1 Unknown
+        \\         %si = OpTypeSampledImage %img
+        \\       %samp = OpTypeSampler
+        \\        %pi4 = OpTypePointer Input %v4float
+        \\      %puimg = OpTypePointer UniformConstant %img
+        \\     %pusamp = OpTypePointer UniformConstant %samp
+        \\        %po4 = OpTypePointer Output %v4float
+        \\        %int = OpTypeInt 32 1
+        \\      %v2int = OpTypeVector %int 2
+        \\      %int_0 = OpConstant %int 0
+        \\        %off = OpConstantComposite %v2int %int_0 %int_0
+        \\          %t = OpVariable %puimg UniformConstant
+        \\          %s = OpVariable %pusamp UniformConstant
+        \\          %c = OpVariable %pi4 Input
+        \\          %o = OpVariable %po4 Output
+        \\       %main = OpFunction %void None %3
+        \\          %5 = OpLabel
+        \\         %cl = OpLoad %v4float %c
+        \\        %sal = OpLoad %samp %s
+        \\        %tal = OpLoad %img %t
+        \\        %sii = OpSampledImage %si %tal %sal
+        \\       %dref = OpCompositeExtract %float %cl 2
+        \\          %r = OpImageSampleProjDrefExplicitLod %float %sii %cl %dref ConstOffset %off
+        \\         %r4 = OpCompositeConstruct %v4float %r %r %r %r
+        \\               OpStore %o %r4
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleCompareLevel(");
+    try assertNotContains(wgsl, "= textureSampleCompare(");
+    try nagaValidateOrSkip(wgsl, "8k2-proj-dref-explicit");
+    try tintValidateOrSkip(wgsl, "8k2-proj-dref-explicit");
+}
+
+// --- F9: the real OpPhi path, and the load-bearing keep rules --------------
+//
+// The two tests named "phi" in the first round do NOT reach valueIsUniform's
+// .Phi case: glslangValidator emits ZERO OpPhi for a `float x = 0.0; if (c) x
+// = 1.0;` (verified with spirv-dis) -- those go through varStoresUniform. A
+// SHORT-CIRCUIT `&&` is what actually produces an OpPhi, so these two are the
+// first tests to exercise .Phi and phiEdgeUniform at all.
+
+test "wgsl: a real OpPhi over a NON-uniform short circuit downgrades (8k2 F9)" {
+    const spv = try compileToSpirv("real_phi_nonuniform",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x > 0.5 && vUV.y < 2.0) { fragColor = texture(tex, vUV); }
+        \\}
+    );
+    defer alloc.free(spv);
+    // the shape only pins the .Phi path if glslang really emitted one
+    try std.testing.expect(countSpirvOpcode(spv, op_phi) > 0);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-real-phi-nonuniform");
+    try tintValidateOrSkip(wgsl, "8k2-real-phi-nonuniform");
+}
+
+test "wgsl: a real OpPhi over a UNIFORM short circuit keeps textureSample (8k2 F9)" {
+    const spv = try compileToSpirv("real_phi_uniform",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float flag; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (flag > 0.5 && flag < 2.0) { fragColor = texture(tex, vUV); }
+        \\}
+    );
+    defer alloc.free(spv);
+    try std.testing.expect(countSpirvOpcode(spv, op_phi) > 0);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-real-phi-uniform");
+    try tintValidateOrSkip(wgsl, "8k2-real-phi-uniform");
+}
+
+test "wgsl: a sample after a conditional discard keeps textureSample (8k2 F9)" {
+    // The most load-bearing KEEP rule for real shaders: OpKill is not an exit
+    // for postdominance (probe p20). Treating a discard as an exit would
+    // downgrade a huge share of ordinary fragment shaders, and tint accepts
+    // the implicit form here.
+    const spv = try compileToSpirv("kill_then_sample",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    if (vUV.x < 0.0) { discard; }
+        \\    fragColor = texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-kill-then-sample");
+    try tintValidateOrSkip(wgsl, "8k2-kill-then-sample");
+}
+
+test "wgsl: a sample after a const-bounded loop keeps textureSample (8k2 F9)" {
+    // Post-loop reconvergence: every invocation leaves a uniformly-bounded
+    // loop at the merge, so the flow there is the loop's entry flow.
+    const spv = try compileToSpirv("post_loop_reconvergence",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    vec4 col = vec4(0.0);
+        \\    for (int i = 0; i < 4; i++) { col += vec4(float(i)); }
+        \\    fragColor = col + texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-post-loop-reconvergence");
+    try tintValidateOrSkip(wgsl, "8k2-post-loop-reconvergence");
+}
+
+test "wgsl: a sample in a switch CASE downgrades on the replay path (8k2 F9)" {
+    // The switch case-body walk goes through emitSimpleInstruction, the FIFTH
+    // emission site, which had no coverage. A non-uniform selector makes every
+    // case body non-uniform flow (probe p14).
+    const spv = try compileToSpirv("switch_case_replay_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    switch (int(vUV.x)) {
+        \\        case 0: fragColor = texture(tex, vUV); break;
+        \\        default: fragColor = vec4(1.0); break;
+        \\    }
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "switch ");
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-switch-case-replay");
+    try tintValidateOrSkip(wgsl, "8k2-switch-case-replay");
 }
