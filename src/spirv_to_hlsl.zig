@@ -3575,6 +3575,68 @@ fn hlslGetArraySuffix(module: *const ParsedModule, ptr_type_id: u32) ![]const u8
     return common.commonGetArraySuffix(module.instructions, module.id_defs, ptr_type_id, true);
 }
 
+/// Element count of a declaration suffix like "[4]" or "[2][3]" (the product of
+/// its dimensions), or null if the suffix is empty or not a plain dimension list.
+fn hlslArraySuffixElems(arr_suffix: []const u8) ?u64 {
+    if (arr_suffix.len == 0) return null;
+    var total: u64 = 1;
+    var rest = arr_suffix;
+    while (rest.len > 0) {
+        if (rest[0] != '[') return null;
+        const close = std.mem.indexOfScalar(u8, rest, ']') orelse return null;
+        const n = std.fmt.parseInt(u32, rest[1..close], 10) catch return null;
+        if (n == 0) return null;
+        total *|= n;
+        rest = rest[close + 1 ..];
+    }
+    return total;
+}
+
+/// The zero-initializer expression for a local declared `type_name name<arr_suffix>`.
+///
+/// Non-array: the cast form `((T)0)`, which is the HLSL idiom for zeroing a scalar,
+/// vector, matrix or struct.
+///
+/// Array: a brace list of per-element zeros, `{((float)0), ((float)0), ...}`, nested
+/// once per dimension. The obvious `((float[4])0)` spelling is DXC-only: glslang's
+/// HLSL frontend rejects a cast to an array type outright ("cannot cast to array"),
+/// which turns every zero-initialized array into an INVALID in the always-on
+/// `hlsl-glslang-all` gate while the DXC gate stays green. spirv-cross emits the same
+/// brace list for --force-zero-initialized-variables. `= {}` is NOT an option: glslang
+/// accepts it, but DXC compiles it to no initialization at all, so the DXIL validator
+/// still rejects the read (verified, exit 5) -- the shape of bug this whole pass exists
+/// to prevent.
+fn hlslWriteZeroInit(out: *std.ArrayList(u8), alloc: std.mem.Allocator, type_name: []const u8, arr_suffix: []const u8) !void {
+    // Cap the expansion: a huge local array would otherwise emit one enormous line.
+    // Above the cap the DXC-only cast form is the lesser evil (correct where it is
+    // parsed, and no such local exists in any corpus shader today).
+    const too_big = if (hlslArraySuffixElems(arr_suffix)) |n| n > 4096 else false;
+    if (arr_suffix.len == 0 or arr_suffix[0] != '[' or too_big) {
+        try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
+        return;
+    }
+    const close = std.mem.indexOfScalar(u8, arr_suffix, ']') orelse {
+        try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
+        return;
+    };
+    const n = std.fmt.parseInt(u32, arr_suffix[1..close], 10) catch {
+        try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
+        return;
+    };
+    if (n == 0) {
+        try out.print(alloc, "(({s}{s})0)", .{ type_name, arr_suffix });
+        return;
+    }
+    const rest = arr_suffix[close + 1 ..];
+    try out.append(alloc, '{');
+    var i: u32 = 0;
+    while (i < n) : (i += 1) {
+        if (i > 0) try out.appendSlice(alloc, ", ");
+        try hlslWriteZeroInit(out, alloc, type_name, rest);
+    }
+    try out.append(alloc, '}');
+}
+
 fn hlslType(module: *const ParsedModule, type_id: u32, names: *std.AutoHashMap(u32, []const u8), alloc: std.mem.Allocator) ![]const u8 {
     const inst = getDef(module, type_id) orelse return error.UnsupportedOpcode;
     switch (inst.op) {
@@ -5438,10 +5500,25 @@ const InitSite = struct { block: usize, idx: usize };
 /// the set is computed precisely with a definite-assignment dataflow so locals
 /// assigned on every path keep their byte-identical `T v;` declaration.
 ///
-/// The rule (per local, per read): the read is covered iff a store to that local
-/// definitely executes before it on EVERY path, i.e. the textbook join
-/// `in[B] = AND over preds of (in[P] or stores-in-P)` with same-block stores
+/// The rule (per local, per read): the read is covered iff a WHOLE-VARIABLE store
+/// to that local definitely executes before it on EVERY path, i.e. the textbook
+/// join `in[B] = AND over preds of (in[P] or stores-in-P)` with same-block stores
 /// ordered by instruction index. Consequences, all deliberate:
+///  * A store through an OpAccessChain is NOT a def. It writes one cell and leaves
+///    the rest of the aggregate undefined, so `float w[4]; w[0] = t; use w[2];`,
+///    `S s; s.a = t; use s.b;` and `vec2 v; v.x = t; use v.y;` are all uncovered
+///    reads with no conditional in sight, and DXC rejects each of them with the
+///    diagnostic above. The price is that an aggregate whose cells ARE all written
+///    before the read gets an initializer it does not need (measured: 69 of 1511
+///    HLSL outputs over tests/spirv-cross, all of them a declaration gaining
+///    `= ((T)0)` and nothing else). That is the same trade the whole pass makes:
+///    a zero initializer is observable only where the read genuinely precedes
+///    every write, which is undefined in the source. Per-cell tracking would
+///    recover those, but it would have to model dynamic indices and nested chains
+///    to stay sound, and being wrong there is a silent-wrong, not a byte of churn.
+///  * A LOAD through an access chain IS a read of the root, so the read side stays
+///    over-approximate while the write side stays under-approximate. Both errors
+///    point the same way: towards initializing.
 ///  * An if/else assigning BOTH arms needs no initializer (DXC compiles the
 ///    merge read as a phi with both incomings defined).
 ///  * A local assigned only inside a conditional WITHOUT an else (the
@@ -5475,6 +5552,11 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
     // Pointer id -> rooted local id, for AccessChain results (array/struct cells).
     var roots = std.AutoHashMap(u32, u32).init(alloc);
     defer roots.deinit();
+    // Locals whose pointer escaped into an instruction this walk cannot follow.
+    // They are initialized unconditionally: the alternative is trusting an
+    // analysis that has lost sight of the reads.
+    var escaped = std.AutoHashMap(u32, void).init(alloc);
+    defer escaped.deinit();
 
     var defs = std.AutoHashMap(u32, std.ArrayListUnmanaged(InitSite)).init(alloc);
     defer {
@@ -5499,12 +5581,16 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
                 seen_label = true;
             },
             .Variable => {
-                if (inst.words.len >= 4 and inst.words.len < 5) {
+                // Exactly 4 words = result type, result id, storage class, and NO
+                // initializer. The length test is load-bearing: a 5-word OpVariable
+                // carries an initializer, so it is already definitely assigned and
+                // must not join the candidate set.
+                if (inst.words.len == 4) {
                     const vsc: spirv.StorageClass = @enumFromInt(inst.words[3]);
                     if (vsc == .Function) try locals.put(inst.words[2], {});
                 }
             },
-            .AccessChain => {
+            .AccessChain, .InBoundsAccessChain => {
                 if (inst.words.len >= 4) {
                     const base = inst.words[3];
                     if (locals.contains(base)) {
@@ -5514,15 +5600,34 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
                     }
                 }
             },
+            .CopyObject => {
+                // OpCopyObject on a pointer forwards the root, so a later LOAD
+                // through the copy is still a read of the local. A store through
+                // the copy falls under the whole-variable rule below and is not
+                // counted as a def, which only ever adds an initializer.
+                if (inst.words.len >= 4) {
+                    if (rootOfLocal(&locals, &roots, inst.words[3])) |r| {
+                        try roots.put(inst.words[2], r);
+                    }
+                }
+            },
             .Store => {
                 if (inst.words.len >= 2) {
-                    if (rootOfLocal(&locals, &roots, inst.words[1])) |r| {
-                        try appendSite(&defs, r, .{ .block = block, .idx = i }, alloc);
+                    // ONLY a whole-variable store is a def. A store through an
+                    // access chain writes ONE cell, so it leaves every other cell
+                    // of the aggregate undefined; counting it as a def of the root
+                    // is exactly the hole that let `float w[4]; w[0] = t; use w[2];`
+                    // through (DXC: "Instructions should not read uninitialized
+                    // value" on the never-stored cell). See the doc comment above.
+                    if (locals.contains(inst.words[1])) {
+                        try appendSite(&defs, inst.words[1], .{ .block = block, .idx = i }, alloc);
                     }
                 }
             },
             .Load => {
                 if (inst.words.len >= 4) {
+                    // A load through an access chain IS a read of the root: the
+                    // root direction stays conservative (over-report reads).
                     if (rootOfLocal(&locals, &roots, inst.words[3])) |r| {
                         try appendSite(&uses, r, .{ .block = block, .idx = i }, alloc);
                     }
@@ -5530,11 +5635,25 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
             },
             .CopyMemory => {
                 if (inst.words.len >= 3) {
-                    if (rootOfLocal(&locals, &roots, inst.words[1])) |r| {
-                        try appendSite(&defs, r, .{ .block = block, .idx = i }, alloc);
+                    // Target: whole-variable only, same rule as OpStore.
+                    if (locals.contains(inst.words[1])) {
+                        try appendSite(&defs, inst.words[1], .{ .block = block, .idx = i }, alloc);
                     }
                     if (rootOfLocal(&locals, &roots, inst.words[2])) |r| {
                         try appendSite(&uses, r, .{ .block = block, .idx = i }, alloc);
+                    }
+                }
+            },
+            // A local's pointer escaping into a pointer-producing instruction this
+            // walk does not model (OpPhi / OpSelect over pointers, OpPtrAccessChain,
+            // OpBitcast) hides every later store AND load through the result. Hiding
+            // a store is harmless (an extra zero initializer); hiding a load is a
+            // MISSED initializer, i.e. the silent-wrong direction. Force those roots
+            // into the set instead of guessing.
+            .Phi, .Select, .Bitcast, .PtrAccessChain, .InBoundsPtrAccessChain => {
+                if (inst.words.len >= 4) {
+                    for (inst.words[3..]) |operand| {
+                        if (rootOfLocal(&locals, &roots, operand)) |r| try escaped.put(r, {});
                     }
                 }
             },
@@ -5551,7 +5670,7 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
     // initializer, while a local assigned only on some path (or never) does.
     // Iterate to fixpoint: loop back-edges need a second pass.
     const nblocks = block + 1;
-    const succs = try blockSuccessors(alloc, body);
+    const succs = try blockSuccessors(alloc, module, body);
     defer {
         for (succs) |sl| alloc.free(sl);
         alloc.free(succs);
@@ -5576,6 +5695,11 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
 
     var lit = locals.keyIterator();
     while (lit.next()) |vid| {
+        // Pointer escaped where the walk cannot follow the reads: initialize.
+        if (escaped.contains(vid.*)) {
+            try set.put(vid.*, {});
+            continue;
+        }
         // Never read (only stored, or passed byref to a call): no undef read.
         const ulist = uses.get(vid.*) orelse continue;
         const dlist = defs.get(vid.*);
@@ -5611,7 +5735,17 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
                     any = true;
                     if (!(is_in[p] or has_def[p])) all = false;
                 }
-                // Unreachable blocks are vacuously assigned (dead code).
+                // A block with no reachable predecessor is dead in the CFG, so its
+                // reads are vacuously covered. CAVEAT: the HLSL emitter is a linear
+                // scan over the instruction stream, not a CFG walk, so it can still
+                // emit the text of such a block; a read there would then be an
+                // uninitialized read the analysis called safe. It has never been
+                // observed (the frontend and the structurizer both drop dead blocks,
+                // and dead code with no store to a local is not a shape any producer
+                // emits), and treating unreachable blocks as reads instead would
+                // force an initializer on every local mentioned in dead code. If a
+                // dead-block undef read ever shows up in the DXC gate, this is the
+                // line that let it through.
                 const new_in = if (any) all else true;
                 if (new_in != is_in[b]) {
                     is_in[b] = new_in;
@@ -5663,8 +5797,12 @@ fn rootOfLocal(locals: *const std.AutoHashMap(u32, void), roots: *const std.Auto
 ///   OpBranch [opcode, target]
 ///   OpBranchConditional [opcode, cond, true, false]
 ///   OpSwitch [opcode, selector, default, (literal, target)*]
+/// An OpSwitch case literal is as wide as the SELECTOR TYPE, not always one word:
+/// an Int64 selector makes each literal two words, so the pair stride is read from
+/// the selector's type (see switchPairStride). Assuming 32 bits there yields a
+/// garbage successor set, and a wrong CFG silently corrupts the join below.
 /// Caller frees each list and the outer slice.
-fn blockSuccessors(alloc: std.mem.Allocator, body: []const Instruction) ![][]usize {
+fn blockSuccessors(alloc: std.mem.Allocator, module: *const ParsedModule, body: []const Instruction) ![][]usize {
     var label_block = std.AutoHashMap(u32, usize).init(alloc);
     defer label_block.deinit();
     var bn: usize = 0;
@@ -5708,9 +5846,10 @@ fn blockSuccessors(alloc: std.mem.Allocator, body: []const Instruction) ![][]usi
             .Switch => {
                 if (inst.words.len >= 3) {
                     if (label_block.get(inst.words[2])) |t| try appendUnique(alloc, &tmp[c], t);
+                    const stride = switchPairStride(module, inst.words[1]);
                     var p: usize = 3;
-                    while (p + 1 < inst.words.len) : (p += 2) {
-                        if (label_block.get(inst.words[p + 1])) |t| try appendUnique(alloc, &tmp[c], t);
+                    while (p + stride - 1 < inst.words.len) : (p += stride) {
+                        if (label_block.get(inst.words[p + stride - 1])) |t| try appendUnique(alloc, &tmp[c], t);
                     }
                 }
             },
@@ -5727,6 +5866,21 @@ fn blockSuccessors(alloc: std.mem.Allocator, body: []const Instruction) ![][]usi
         filled += 1;
     }
     return succs;
+}
+
+/// Words per (literal, target) pair of an OpSwitch whose selector is `selector_id`.
+/// The literal is as wide as the selector's integer type, so a 64-bit selector
+/// spends two words on the literal plus one on the label (stride 3); everything
+/// 32-bit or narrower is stride 2. Unknown or non-integer selector types fall back
+/// to 2, the shape every shader-profile switch has.
+fn switchPairStride(module: *const ParsedModule, selector_id: u32) usize {
+    const sel = getDef(module, selector_id) orelse return 2;
+    if (sel.words.len < 2) return 2;
+    const ty = getDef(module, sel.words[1]) orelse return 2;
+    if (ty.op != .TypeInt or ty.words.len < 3) return 2;
+    const bits: usize = ty.words[2];
+    if (bits <= 32) return 2;
+    return 1 + (bits + 31) / 32;
 }
 
 /// Append `v` to the list unless already present (multi-target switches can
@@ -5780,11 +5934,15 @@ fn emitBody(
     defer label_map.deinit();
     // #cursor-warp: locals whose reads are not dominated by any store get a
     // zero initializer at declaration (DXC rejects undef reads at validation).
-    var definite_init_ids = hlslDefiniteInitSet(alloc, module, func_idx) catch
-        std.AutoHashMap(u32, void).init(alloc);
+    // The analysis only fails on allocation, and an empty set there would emit
+    // HLSL that reads uninitialized values: propagate instead of degrading.
+    var definite_init_ids = try hlslDefiniteInitSet(alloc, module, func_idx);
     defer definite_init_ids.deinit();
+    // Save and restore rather than clearing: a nested emit path (a helper
+    // function emitted mid-body) must not leave the outer function's set unset.
+    const prev_definite_init_ids = g_definite_init_ids;
     g_definite_init_ids = &definite_init_ids;
-    defer g_definite_init_ids = null;
+    defer g_definite_init_ids = prev_definite_init_ids;
     var idx = func_idx + 1;
     while (idx < module.instructions.len) : (idx += 1) {
         const inst = module.instructions[idx];
@@ -8000,7 +8158,10 @@ fn emitInstruction(
             // value"); zero-initialize it at declaration instead.
             if (g_definite_init_ids) |di| {
                 if (di.contains(result_id)) {
-                    try w.print("    {s} {s}{s} = (({s}{s})0);\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix, type_name, arr_suffix });
+                    var init_buf: std.ArrayList(u8) = .empty;
+                    defer init_buf.deinit(alloc);
+                    try hlslWriteZeroInit(&init_buf, alloc, type_name, arr_suffix);
+                    try w.print("    {s} {s}{s} = {s};\n", .{ type_name, names.get(result_id) orelse "var", arr_suffix, init_buf.items });
                     return;
                 }
             }

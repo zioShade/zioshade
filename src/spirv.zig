@@ -50,6 +50,12 @@ pub const Op = enum(u16) {
     CopyObject = 83,
     CopyLogical = 400,
     AccessChain = 65,
+    // Same shape as OpAccessChain (result type, result, base, indices...); the
+    // "in bounds" form is what several producers emit. Pointer-root tracking
+    // must treat the two identically.
+    InBoundsAccessChain = 66,
+    PtrAccessChain = 67,
+    InBoundsPtrAccessChain = 70,
     ArrayLength = 68,
     Decorate = 71,
     MemberDecorate = 72,

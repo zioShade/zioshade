@@ -196,10 +196,11 @@ structured-buffer-size failure, now PASSes.)
 
 The split above is reproducible without a real DXC, because it is decided entirely inside
 zioshade: point the harness at a stub that always exits 0 and it still prints
-`Total: 51 PASS / 3 FAIL / 2 SKIP` and names the same fixtures. That reproduction proves
-**which fixtures zioshade refuses**; it proves nothing about the other 51, since a
-stub accepts anything. Only the dated real-DXC snapshot in BENCHMARKS.md supports the claim
-that DXC compiled those 51 to DXIL.
+the same `3 FAIL / 2 SKIP` split and names the same fixtures (the PASS total is the rest of
+the fixture set, so it moves as fixtures are added: 51 when this was written, 53 today).
+That reproduction proves **which fixtures zioshade refuses**; it proves nothing about the
+PASSes, since a stub accepts anything. Only the dated real-DXC snapshot in BENCHMARKS.md
+supports the claim that DXC compiled the 51 of that run to DXIL.
 
 ### 3.3 Cross-Compilation Validation
 

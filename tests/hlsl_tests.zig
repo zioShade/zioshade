@@ -17371,9 +17371,10 @@ test "hlsl: array with conditionally-assigned elements is zero-initialized" {
     defer alloc.free(hlsl);
     // Partially-stored arrays keep whole-alloca semantics in DXC: the
     // never-stored element reads as literal undef straight into the fadd. The
-    // whole array gets the cast-form zero initializer (DXC accepts
-    // `= ((float[4])0)`; the `{0}` short form is rejected).
-    try assertContains(hlsl, "[4] = ((float[4])0);");
+    // whole array gets a per-element brace list: DXC rejects the `{0}` short
+    // form, and glslang's HLSL frontend rejects the `((float[4])0)` cast to an
+    // array type, so the list is the only spelling both oracles accept.
+    try assertContains(hlsl, "[4] = {((float)0), ((float)0), ((float)0), ((float)0)};");
 }
 
 test "hlsl: both-arms-assigned local keeps its bare declaration" {
@@ -17439,4 +17440,107 @@ test "hlsl: glslang-produced conditionally-assigned local is zero-initialized" {
     const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{});
     defer alloc.free(hlsl);
     try assertContains(hlsl, "= ((float2)0);");
+}
+
+// A store THROUGH an OpAccessChain writes ONE cell, not the whole aggregate, so
+// it cannot make the root definitely assigned. These three shapes have no
+// conditional at all: the partial store dominates the read, yet the cell that is
+// read was never written, and DXC rejects every one of them with the same
+// diagnostic the conditional shape produced:
+//
+//   error: Instructions should not read uninitialized value.
+//   note: at '%2 = fadd fast float %1, undef' in block '#0' of function 'main'.
+//
+// (pinned Linux DXC 1.9.2602.24, ps_6_0, exit 5, all three verified).
+
+test "hlsl: unconditional partial array store still zero-initializes the array" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    float w[4];
+        \\    w[0] = t;
+        \\    fragColor = vec4(w[2] + w[0], 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // w[2] is never stored: the element-wise store to w[0] is not a def of w.
+    try assertContains(hlsl, "[4] = {((float)0), ((float)0), ((float)0), ((float)0)};");
+}
+
+test "hlsl: unconditional partial struct member store still zero-initializes the struct" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\struct S { float a; float b; };
+        \\void main() {
+        \\    S s;
+        \\    s.a = t;
+        \\    fragColor = vec4(s.b + s.a, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // s.b is never stored: the member store to s.a is not a def of s.
+    try assertContains(hlsl, "= ((S)0);");
+}
+
+test "hlsl: unconditional partial vector component store still zero-initializes the vector" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    vec2 warp;
+        \\    warp.x = t;
+        \\    fragColor = vec4(warp.x + warp.y, 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // warp.y is never stored. DXC scalarizes the vector alloca, so the .y read
+    // is a literal undef exactly like the array and struct cases.
+    try assertContains(hlsl, "= ((float2)0);");
+}
+
+test "hlsl: zero-initialized array of vectors uses per-element casts" {
+    // The element zero is spelled with the ELEMENT type, once per element, so an
+    // array of vectors nests correctly and neither oracle sees a cast to an array
+    // type (glslang rejects that) or an empty `{}` (DXC treats it as no
+    // initialization at all).
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    vec3 w[2];
+        \\    w[0] = vec3(t);
+        \\    fragColor = vec4(w[1] + w[0], 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "[2] = {((float3)0), ((float3)0)};");
+}
+
+test "hlsl: whole-variable store still keeps the bare declaration (element stores aside)" {
+    // The conservative rule must not degrade into force-zero-everything: a local
+    // written whole before its read keeps `T v;`.
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    float w[4];
+        \\    w = float[4](t, t, t, t);
+        \\    w[0] = t * 2.0;
+        \\    fragColor = vec4(w[2] + w[0], 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    try assertNotContains(hlsl, "[4] = {((float)0)");
 }

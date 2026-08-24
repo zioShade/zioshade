@@ -109,9 +109,11 @@ to the per-stage tables below. Reproduce with `just dxc-image` then `just hlsl-d
 
 The 3-and-2 split is decided inside zioshade, before DXC is invoked, so it can be
 reproduced on any machine by pointing the harness at a stub `dxc` that always exits 0:
-`zig build test-dxc -- <stub> tests/spirv_bins 60` still prints
-`Total: 51 PASS / 3 FAIL / 2 SKIP` and names the same five fixtures (confirmed on macOS,
-2026-08-04). That reproduction says nothing about the 51: only a run against a real DXC,
+`zig build test-dxc -- <stub> tests/spirv_bins 60` still prints the same
+`3 FAIL / 2 SKIP` split and names the same five fixtures (confirmed on macOS,
+2026-08-04). The PASS total is just "the rest of the fixture set", so it moves whenever a
+fixture is added: it was 51 at the snapshot above and is 53 today. That reproduction says
+nothing about those PASSes: only a run against a real DXC,
 such as the snapshot above, shows that DXC accepted them.
 
 ### Older snapshots (kept for trend, superseded by the run above)
