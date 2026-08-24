@@ -7117,11 +7117,16 @@ const UniformityAnalysis = struct {
     param_index: std.AutoHashMap(u32, usize),
     /// ids currently believed to hold UNIFORM VALUES (downward fixpoint)
     values: std.AutoHashMap(u32, void),
-    /// all OpStores, grouped by the root variable they write
+    /// every OpStore into a function/output-scope variable, as ONE FLAT LIST
+    /// (an earlier version of this comment claimed they were grouped by root
+    /// variable; they never were). varStoresUniform LINEARLY SCANS the whole
+    /// list on every call and every fixpoint round, so a query costs
+    /// O(all stores), not O(stores into this root). Grouping by root is the
+    /// obvious win if this ever shows up in a profile; nothing measured has.
     stores: std.ArrayListUnmanaged(UniStore) = .empty,
-    /// all OpStores through a pointer parameter
+    /// all OpStores through a pointer parameter (flat, scanned like `stores`)
     param_stores: std.ArrayListUnmanaged(UniParamStore) = .empty,
-    /// call arguments that are pointers to variables
+    /// call arguments that are pointers to variables (flat, scanned likewise)
     arg_vars: std.ArrayListUnmanaged(UniArgVar) = .empty,
     /// (function, param index) whose argument pointer could not be resolved
     /// to a variable (forwarded pointer params, opaque aliasing)
@@ -7623,21 +7628,23 @@ const UniformityAnalysis = struct {
     /// this store rule is how uniform values actually travel (probe p24 vs
     /// p17).
     fn varStoresUniform(a: *UniformityAnalysis, root: u32) bool {
-        var ok = true;
+        // The verdict is an AND, so the first failing store settles it: return
+        // instead of carrying an `ok = false` through the rest of the (flat,
+        // whole-module) store list.
         for (a.stores.items) |st| {
             if (st.root != root) continue;
-            if (!a.values.contains(st.val)) ok = false;
+            if (!a.values.contains(st.val)) return false;
             if (st.func >= a.funcs.len) continue;
             if (st.block >= a.funcs[st.func].blocks.len) continue;
-            if (!a.funcs[st.func].blocks[st.block].flow) ok = false;
+            if (!a.funcs[st.func].blocks[st.block].flow) return false;
         }
         // stores a callee makes through the pointer it was handed for `root`
         for (a.arg_vars.items) |av| {
             if (av.root != root) continue;
             const ci = a.func_by_id.get(av.callee) orelse return false;
-            if (!a.paramStoresUniform(ci, av.pos)) ok = false;
+            if (!a.paramStoresUniform(ci, av.pos)) return false;
         }
-        return ok;
+        return true;
     }
 
     /// Every store through parameter `pi` of function `fi` wrote a uniform
@@ -7645,15 +7652,14 @@ const UniformityAnalysis = struct {
     /// unresolvable).
     fn paramStoresUniform(a: *UniformityAnalysis, fi: usize, pi: usize) bool {
         if (a.opaque_params.contains(packParamKey(fi, pi))) return false;
-        var ok = true;
         for (a.param_stores.items) |st| {
             if (st.func != fi or st.param != pi) continue;
-            if (!a.values.contains(st.val)) ok = false;
+            if (!a.values.contains(st.val)) return false;
             if (st.func >= a.funcs.len) continue;
             if (st.block >= a.funcs[fi].blocks.len) continue;
-            if (!a.funcs[fi].blocks[st.block].flow) ok = false;
+            if (!a.funcs[fi].blocks[st.block].flow) return false;
         }
-        return ok;
+        return true;
     }
 
     /// A load through pointer parameter `pi` of function `fi` is a uniform
@@ -7661,14 +7667,14 @@ const UniformityAnalysis = struct {
     /// uniform values (probe p23a/p23b: tint tracks the argument).
     fn loadThroughParamUniform(a: *UniformityAnalysis, fi: usize, pi: usize) bool {
         var seen = false;
-        var ok = true;
         const fid = a.funcs[fi].id;
         for (a.arg_vars.items) |av| {
             if (av.callee != fid or av.pos != pi) continue;
             seen = true;
-            if (!a.varStoresUniform(av.root)) ok = false;
+            if (!a.varStoresUniform(av.root)) return false;
         }
-        return seen and ok;
+        // no call site handed this parameter a variable: nothing to judge from
+        return seen;
     }
 
     /// Classify whether `id` holds a uniform value under the CURRENT state.
@@ -7893,6 +7899,13 @@ fn computeNonuniformImplicitLodSamples(
     // prepass exists to remove. A refusal is loud, actionable and rare (no
     // input has ever reached it), so it is the honest trade here.
     const max_rounds: u32 = 1000;
+    // Per-round scratch, hoisted OUT of the loop: `arena` never frees, so
+    // allocating these inside it burned one fresh allocation per round each,
+    // up to 1000 of them on a module that runs the cap out. Both are fully
+    // reset at the top of the step that uses them, so hoisting is behaviour
+    // preserving.
+    var to_remove = std.ArrayListUnmanaged(u32).empty;
+    const new_flow = try arena.alloc(bool, a.funcs.len);
     var rounds: u32 = 0;
     var stable = false;
     while (!stable and rounds < max_rounds) : (rounds += 1) {
@@ -7903,7 +7916,7 @@ fn computeNonuniformImplicitLodSamples(
         }
         // 2. value uniformity from the current values and flows
         {
-            var to_remove = std.ArrayListUnmanaged(u32).empty;
+            to_remove.clearRetainingCapacity();
             var vit = a.values.iterator();
             while (vit.next()) |entry| {
                 if (!a.valueIsUniform(entry.key_ptr.*)) try to_remove.append(arena, entry.key_ptr.*);
@@ -7916,8 +7929,7 @@ fn computeNonuniformImplicitLodSamples(
         // 3. a callee's ENTRY flow is the AND of its call sites' block flows
         //    (probe p11/p12). The entry point starts uniform and stays so.
         {
-            var new_flow = try arena.alloc(bool, a.funcs.len);
-            for (new_flow) |*nf| nf.* = true;
+            @memset(new_flow, true);
             for (a.funcs, 0..) |caller, fi| {
                 for (caller.calls) |call| {
                     const ci = a.func_by_id.get(call.callee) orelse continue;
