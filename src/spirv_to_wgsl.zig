@@ -4727,6 +4727,12 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var atomic_vars = std.AutoHashMap(u32, void).init(arena);
     collectAtomicVars(&module, &atomic_vars) catch {};
 
+    // #wgsl-uniformity-8k2: the result ids of every implicit-Lod sample that
+    // sits in non-uniform control flow (see computeNonuniformImplicitLodSamples).
+    // The emitter lowers exactly these to textureSampleLevel(..., 0.0) /
+    // textureSampleCompareLevel so tint/Dawn cannot reject the module.
+    const nonuniform_implicit = try computeNonuniformImplicitLodSamples(arena, &module);
+
     // #170: an SSBO that is an ARRAY of blocks whose struct holds a runtime-sized
     // array (`buffer SSBO { vec4 data[]; } ssbos[2];`) has no core-WGSL form —
     // a runtime array can't nest inside a fixed array (naga "Base type for the
@@ -5582,12 +5588,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         // Remap pointer param IDs to local var names in the names map
-        // Save old names to restore later (in case of shared IDs)
+        // Save old names to restore later (in case of shared IDs). The save
+        // must DUPE the string: the fetchPut below frees the displaced value,
+        // which is the very allocation a borrowed slice would point at, and
+        // the deferred restore would then read freed memory (a latent UAF
+        // that any heap-layout shift can turn into a segfault).
         var saved_names = std.ArrayList(struct { id: u32, name: []const u8 }).initCapacity(arena, 4) catch return error.OutOfMemory;
         for (inout_params.items) |ip| {
             const old_name = names.get(ip.param_id);
             if (old_name) |n| {
-                try saved_names.append(arena, .{ .id = ip.param_id, .name = n });
+                try saved_names.append(arena, .{ .id = ip.param_id, .name = try alloc.dupe(u8, n) });
             }
             // ptr<function> path: map the param id to (*name) so every OpLoad/
             // OpStore/AccessChain on it dereferences the pointer (no hot-path
@@ -5599,15 +5609,16 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
             if (try names.fetchPut(ip.param_id, mapped)) |old| alloc.free(old.value);
         }
         defer {
-            // Restore original names
+            // Restore original names. sn.name is an alloc-owned copy: its
+            // ownership transfers into the names map here (fetchPut frees the
+            // displaced mapping, never the saved copy).
             for (saved_names.items) |sn| {
-                const restored = alloc.dupe(u8, sn.name) catch continue;
-                if (names.fetchPut(sn.id, restored) catch null) |old| alloc.free(old.value);
+                if (names.fetchPut(sn.id, sn.name) catch null) |old| alloc.free(old.value);
             }
         }
 
         const inout_ret_name: ?[]const u8 = if (!use_ptr_inout and has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, .none, subpass_fragcoord_name, null, null);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, &nonuniform_implicit, .none, subpass_fragcoord_name, null, null);
 
         try w.writeAll("}\n\n");
     }
@@ -6493,7 +6504,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     };
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, early_return_mode, subpass_fragcoord_name, null, null);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, &nonuniform_implicit, early_return_mode, subpass_fragcoord_name, null, null);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -6917,7 +6928,852 @@ const RangeCtx = struct {
 /// stack overflow on valid input is a mandate violation, so refuse loudly.
 const max_region_depth: u32 = 256;
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx, range: ?RangeCtx) !void {
+// ─────────────────────────────────────────────────────────────────────────
+// #wgsl-uniformity-8k2: which implicit-Lod samples sit in non-uniform flow
+//
+// WGSL gates the implicit-Lod sampling builtins (textureSample,
+// textureSampleBias, textureSampleCompare and the proj-lowered forms of the
+// three) on UNIFORM CONTROL FLOW: tint (Chrome/Dawn) and naga reject a module
+// where the call runs after flow has diverged. The classic shape is a shader
+// that early-returns inside a conditional and then samples: every text gate
+// and the naga round-trip proxy were green while the wintty player rendered
+// black, because only the consumer stack (the browser oracle) runs the real
+// uniformity analysis (bead zioshade-8k2).
+//
+// The lowering mirrors what SPIRV-Cross does whenever an implicit-Lod form is
+// not available in the target: pin the level to 0 (its MSL backend promotes a
+// constant-zero gradient on sample_compare to `level(0)`). For the Bias
+// operand there is no uniformity-safe WGSL form at all: WGSL has no
+// textureQueryLod to fold a bias into an explicit level, and SPIRV-Cross's
+// own MSL path likewise only DROPS a bias it cannot express (constant-zero
+// bias on sample_compare is dropped outright there). So the bias is dropped
+// and the level pinned to 0 rather than honest-erroring the whole shader,
+// which would resurrect the black-player failure mode this class caused.
+//
+// WHICH samples get downgraded is decided by the analysis below, built to
+// mirror what tint actually accepts. Every rule was probed on Chrome for
+// Testing through tools/wgsl_browser_check.mjs with hand-written WGSL
+// overrides (probe names cited at each rule):
+//   * flow(B) = OR over the contributions of B's incoming edges (a block is
+//     uniform when some edge delivers the FULL invocation set, either
+//     directly or by reconverging every path that diverged):
+//       - P ends in OpBranch: flow(P)
+//       - P ends in OpBranchConditional/OpSwitch on a UNIFORM value: flow(P)
+//       - P ends in OpBranchConditional/OpSwitch on a NON-uniform value:
+//         the region's entry flow if B postdominates P, else non-uniform.
+//         Postdominance is what keeps a MERGE where every path reconverges
+//         uniform (probe p10: an `if (nonuniform) { ... }` whose arms
+//         complete keeps the following sample implicit), while a merge
+//         reached by a SUBSET is non-uniform (probe p03: early return in
+//         one arm; p13: conditional break; p09: varying-bound loop body).
+//       - loop-prelude blocks (the header chain up to the trip-count
+//         conditional, plus the continue block) execute once PER ITERATION,
+//         so their flow is the loop's entry flow gated by the uniformity of
+//         the trip-count conditions (probe p07/p09).
+//   * OpKill is NOT an exit for postdominance (probe p20: a discard does not
+//     poison the following flow; the invocation keeps executing statements).
+//   * value seeds: constants, and loads through pointers rooted at a
+//     Uniform / PushConstant variable WHOSE dynamic indices are uniform
+//     (probe p04: a member read is uniform; p22: a NON-uniform index into a
+//     uniform array is not).
+//   * values propagate through pure ops; a phi is uniform only when every
+//     incoming value is uniform AND every incoming edge left its block on a
+//     uniform branch (probe p17: a phi of constants across a non-uniform if
+//     is non-uniform; p24: across a uniform if it stays uniform).
+//   * helper functions inherit the flow of their CALL SITES (probe p11/p12)
+//     and a parameter is a uniform value iff every call site passes a
+//     uniform argument (probe p23a/p23b). Both are interprocedural and
+//     resolved by the same downward fixpoint.
+// The analysis is deliberately conservative where WGSL offers no expression
+// for more precision (function-call RESULTS and pointer PARAMETERS are
+// non-uniform values), and never claims uniformity the probes showed tint
+// rejecting, so the emitted module can only be MORE accepted, never less.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Terminator classification for one CFG block of the uniformity walk.
+const UniTerm = union(enum) {
+    branch: u32,
+    cond: struct { cond: u32, t: u32, f: u32 },
+    swit: struct { sel: u32, targets: []const u32 },
+    ret,
+    kill,
+    unreach,
+};
+
+const UniBlock = struct {
+    label: u32,
+    term: UniTerm,
+    /// successor block indices (resolved once the whole function is parsed)
+    succs: []const usize,
+    /// predecessor block indices (resolved once the whole function is parsed)
+    preds: []const usize = &.{},
+    flow: bool = true,
+    reachable: bool = false,
+};
+
+/// One OpFunctionCall site: the callee, the block the call sits in, and the
+/// argument ids (a parameter is uniform iff every site passes a uniform arg).
+const UniCall = struct { callee: u32, block: usize, args: []const u32 };
+
+/// One implicit-Lod sample instruction: its result id (the key the emitter
+/// consults) and the block it sits in.
+const UniSample = struct { result: u32, block: usize };
+
+/// One OpStore into a function/output-scope variable: what was stored, and
+/// the block the store sits in (glslang lowers locals and loop counters to
+/// variables, not phis, so uniform values flow through stores).
+const UniStore = struct { root: u32, val: u32, func: usize, block: usize };
+
+/// One OpStore THROUGH a pointer parameter (glslang's ABI passes every GLSL
+/// parameter as ptr<function, T>, so helper reads of a parameter are loads
+/// through the pointer the caller synthesized around its argument local).
+const UniParamStore = struct { func: usize, param: usize, val: u32, block: usize };
+
+/// One call argument that is a pointer to a variable: parameter position `pos`
+/// of `callee` receives (a chain rooted at) `root`. Ties the callee's loads
+/// through that parameter to the caller's stores into the variable.
+const UniArgVar = struct { callee: u32, pos: usize, root: u32 };
+
+/// One structured loop: the header block (where OpLoopMerge sits), the
+/// continue block, the prelude blocks (header chain up to the conditional
+/// that governs the trip count, plus the continue block itself) and the
+/// conditions governing that trip count. Statements in the prelude execute
+/// once PER ITERATION, so their flow is gated by the trip count's
+/// uniformity, not just by the loop entry's flow.
+const UniLoop = struct {
+    header: usize,
+    continue_block: ?usize,
+    prelude: []const usize,
+    governing: []const u32,
+};
+
+const UniFunc = struct {
+    id: u32,
+    params: []const u32,
+    blocks: []UniBlock,
+    entry_block: usize,
+    calls: []const UniCall,
+    samples: []const UniSample,
+    is_entry_point: bool,
+    /// fixpoint variables: only ever move DOWN from true
+    entry_flow: bool = true,
+    param_uniform: []bool,
+};
+
+const UniformityAnalysis = struct {
+    module: *const ParsedModule,
+    arena: std.mem.Allocator,
+    funcs: []UniFunc,
+    func_by_id: std.AutoHashMap(u32, usize),
+    label_to_block: []std.AutoHashMap(u32, usize),
+    /// result id -> owning function index (phi/parameter classification)
+    owner_func: std.AutoHashMap(u32, usize),
+    /// parameter result id -> parameter index in its function
+    param_index: std.AutoHashMap(u32, usize),
+    /// ids currently believed to hold UNIFORM VALUES (downward fixpoint)
+    values: std.AutoHashMap(u32, void),
+    /// all OpStores, grouped by the root variable they write
+    stores: std.ArrayListUnmanaged(UniStore) = .empty,
+    /// all OpStores through a pointer parameter
+    param_stores: std.ArrayListUnmanaged(UniParamStore) = .empty,
+    /// call arguments that are pointers to variables
+    arg_vars: std.ArrayListUnmanaged(UniArgVar) = .empty,
+    /// (function, param index) whose argument pointer could not be resolved
+    /// to a variable (forwarded pointer params, opaque aliasing)
+    opaque_params: std.AutoHashMap(u64, void),
+    /// (function, block) -> loop header block, for every prelude block
+    prelude_of: std.AutoHashMap(u64, u64),
+    /// function index -> its loops
+    loops_of: []std.ArrayListUnmanaged(UniLoop),
+    /// raw OpLoopMerge records (header block LABEL -> merge/continue labels),
+    /// resolved into UniLoop prelude/governing data once the function is
+    /// parsed; label ids are globally unique, block indices are not
+    loop_merges: std.AutoHashMap(u32, UniLoopMerge),
+    /// scratch (reused, arena-backed): postdominance DFS
+    visited: std.AutoHashMap(usize, void),
+    dfs_stack: std.ArrayListUnmanaged(usize) = .empty,
+
+    /// Walk a pointer chain to its root OpVariable id (null when the chain
+    /// bottoms out at a parameter or an unknown op).
+    fn pointerRoot(a: *UniformityAnalysis, ptr_id: u32, depth: u32) ?u32 {
+        if (depth > 64) return null;
+        const inst = common.getDef(a.module, ptr_id) orelse return null;
+        return switch (inst.op) {
+            .Variable => ptr_id,
+            .AccessChain => a.pointerRoot(inst.words[3], depth + 1),
+            .CopyObject => a.pointerRoot(inst.words[3], depth + 1),
+            else => null,
+        };
+    }
+
+    /// If `ptr_id` bottoms out at one of `params` (this function's pointer
+    /// parameters), return its index; null otherwise. glslang passes every
+    /// GLSL parameter this way, so loads/stores through parameters are the
+    /// COMMON shape for helper functions, not an exotic one.
+    fn pointerParamOf(a: *UniformityAnalysis, params: []const u32, ptr_id: u32, depth: u32) ?usize {
+        if (depth > 64) return null;
+        const inst = common.getDef(a.module, ptr_id) orelse return null;
+        switch (inst.op) {
+            .AccessChain, .CopyObject => return a.pointerParamOf(params, inst.words[3], depth + 1),
+            .FunctionParameter => {
+                for (params, 0..) |pid, pi| {
+                    if (pid == ptr_id) return pi;
+                }
+                return null;
+            },
+            else => return null,
+        }
+    }
+
+    /// Parse every function into blocks, call sites, stores and loops.
+    fn parse(a: *UniformityAnalysis) !void {
+        var funcs = std.ArrayListUnmanaged(UniFunc).empty;
+        var label_maps = std.ArrayListUnmanaged(std.AutoHashMap(u32, usize)).empty;
+        var loop_lists = std.ArrayListUnmanaged(std.ArrayListUnmanaged(UniLoop)).empty;
+        const m = a.module;
+        var i: usize = 0;
+        while (i < m.instructions.len) : (i += 1) {
+            if (m.instructions[i].op != .Function) continue;
+            const func_id = if (m.instructions[i].words.len > 2) m.instructions[i].words[2] else 0;
+            const my_index = funcs.items.len;
+            var params = std.ArrayListUnmanaged(u32).empty;
+            var blocks = std.ArrayListUnmanaged(UniBlock).empty;
+            var terms = std.ArrayListUnmanaged(UniTerm).empty;
+            var calls = std.ArrayListUnmanaged(UniCall).empty;
+            var samples = std.ArrayListUnmanaged(UniSample).empty;
+            var loops = std.ArrayListUnmanaged(UniLoop).empty;
+            var cur_block: usize = 0;
+            var j: usize = i + 1;
+            while (j < m.instructions.len and m.instructions[j].op != .FunctionEnd) : (j += 1) {
+                const inst = m.instructions[j];
+                if (inst.words.len > 2) {
+                    // Attribute every result id in this function to it, so
+                    // phi and parameter classification can find the context.
+                    // Instructions without a result (labels, branches) never
+                    // reach words[2] meaningfully and are never queried.
+                    if (inst.op != .Label) try a.owner_func.put(inst.words[2], my_index);
+                }
+                switch (inst.op) {
+                    .FunctionParameter => {
+                        if (inst.words.len > 2) try params.append(a.arena, inst.words[2]);
+                    },
+                    .Label => {
+                        if (inst.words.len > 1) {
+                            try blocks.append(a.arena, .{ .label = inst.words[1], .term = .unreach, .succs = &.{} });
+                            try terms.append(a.arena, .unreach);
+                            cur_block = blocks.items.len - 1;
+                        }
+                    },
+                    .Branch => {
+                        if (inst.words.len > 1) terms.items[cur_block] = .{ .branch = inst.words[1] };
+                    },
+                    .BranchConditional => {
+                        if (inst.words.len > 3) terms.items[cur_block] = .{ .cond = .{ .cond = inst.words[1], .t = inst.words[2], .f = inst.words[3] } };
+                    },
+                    .Switch => {
+                        var targets = std.ArrayListUnmanaged(u32).empty;
+                        if (inst.words.len > 2) {
+                            try targets.append(a.arena, inst.words[2]); // default target
+                            var wi: usize = 3;
+                            while (wi + 1 < inst.words.len) : (wi += 2) {
+                                try targets.append(a.arena, inst.words[wi + 1]);
+                            }
+                        }
+                        terms.items[cur_block] = .{ .swit = .{ .sel = if (inst.words.len > 1) inst.words[1] else 0, .targets = targets.items } };
+                    },
+                    .Return, .ReturnValue => terms.items[cur_block] = .ret,
+                    .Kill => terms.items[cur_block] = .kill,
+                    .Unreachable => terms.items[cur_block] = .unreach,
+                    .LoopMerge => {
+                        // merge = words[1], continue = words[2]; the prelude
+                        // and governing conditions are resolved after the
+                        // whole function is parsed (targets are forward).
+                        try loops.append(a.arena, .{
+                            .header = cur_block,
+                            .continue_block = null,
+                            .prelude = &.{},
+                            .governing = &.{},
+                        });
+                        try a.loop_merges.put(blocks.items[cur_block].label, .{
+                            .merge = if (inst.words.len > 1) inst.words[1] else 0,
+                            .cont = if (inst.words.len > 2) inst.words[2] else 0,
+                        });
+                    },
+                    .FunctionCall => {
+                        if (inst.words.len > 3) {
+                            var args = std.ArrayListUnmanaged(u32).empty;
+                            for (inst.words[4..]) |arg| try args.append(a.arena, arg);
+                            try calls.append(a.arena, .{ .callee = inst.words[3], .block = cur_block, .args = args.items });
+                            // Tie pointer arguments to the variables they
+                            // alias so the callee's loads through them can be
+                            // judged from the caller's stores. An argument
+                            // that is neither a variable chain nor one of this
+                            // function's own parameters makes the callee's
+                            // parameter opaque (conservative non-uniform).
+                            for (args.items, 0..) |arg, pos| {
+                                if (a.pointerRoot(arg, 0)) |root| {
+                                    try a.arg_vars.append(a.arena, .{ .callee = inst.words[3], .pos = pos, .root = root });
+                                } else if (a.pointerParamOf(params.items, arg, 0)) |_| {
+                                    const callee_idx = blk: {
+                                        const fid = inst.words[3];
+                                        for (funcs.items, 0..) |ff, ffi| {
+                                            if (ff.id == fid) break :blk ffi;
+                                        }
+                                        break :blk null;
+                                    };
+                                    if (callee_idx) |ci| try a.opaque_params.put(packParamKey(ci, pos), {});
+                                }
+                            }
+                        }
+                    },
+                    .Store => {
+                        if (inst.words.len > 2) {
+                            if (a.pointerRoot(inst.words[1], 0)) |root| {
+                                try a.stores.append(a.arena, .{ .root = root, .val = inst.words[2], .func = my_index, .block = cur_block });
+                            } else if (a.pointerParamOf(params.items, inst.words[1], 0)) |pi| {
+                                try a.param_stores.append(a.arena, .{ .func = my_index, .param = pi, .val = inst.words[2], .block = cur_block });
+                            }
+                        }
+                    },
+                    .ImageSampleImplicitLod, .ImageSampleDrefImplicitLod, .ImageSampleProjImplicitLod, .ImageSampleProjDrefImplicitLod => {
+                        if (inst.words.len > 2) {
+                            try samples.append(a.arena, .{ .result = inst.words[2], .block = cur_block });
+                        }
+                    },
+                    else => {},
+                }
+            }
+            // resolve label ids -> block indices (targets may be defined later)
+            var lmap = std.AutoHashMap(u32, usize).init(a.arena);
+            for (blocks.items, 0..) |blk, bi| try lmap.put(blk.label, bi);
+            var resolved = std.ArrayListUnmanaged(UniBlock).empty;
+            for (blocks.items, 0..) |blk, bi| {
+                const term = terms.items[bi];
+                var succs = std.ArrayListUnmanaged(usize).empty;
+                switch (term) {
+                    .branch => |t| if (lmap.get(t)) |ti| try succs.append(a.arena, ti),
+                    .cond => |c| {
+                        if (lmap.get(c.t)) |ti| try succs.append(a.arena, ti);
+                        if (lmap.get(c.f)) |ti| try succs.append(a.arena, ti);
+                    },
+                    .swit => |s| for (s.targets) |t| {
+                        if (lmap.get(t)) |ti| try succs.append(a.arena, ti);
+                    },
+                    else => {},
+                }
+                try resolved.append(a.arena, .{ .label = blk.label, .term = term, .succs = succs.items });
+            }
+            // predecessor lists, once (the flow pass iterates them per block)
+            {
+                var preds = try a.arena.alloc(std.ArrayListUnmanaged(usize), resolved.items.len);
+                for (preds) |*pl| pl.* = .empty;
+                for (resolved.items, 0..) |blk, bi| {
+                    for (blk.succs) |s| {
+                        if (s < preds.len) try preds[s].append(a.arena, bi);
+                    }
+                }
+                for (resolved.items, 0..) |*blk, bi| blk.preds = preds[bi].items;
+            }
+            // resolve each loop's prelude chain and governing conditions
+            for (loops.items, 0..) |*lp, li| {
+                _ = li;
+                var prelude = std.ArrayListUnmanaged(usize).empty;
+                var governing = std.ArrayListUnmanaged(u32).empty;
+                var cb: usize = lp.header;
+                var guard: u32 = 0;
+                while (guard < blocks.items.len + 1) : (guard += 1) {
+                    try prelude.append(a.arena, cb);
+                    switch (resolved.items[cb].term) {
+                        .cond => |c| {
+                            try governing.append(a.arena, c.cond);
+                            break;
+                        },
+                        .swit => |s| {
+                            try governing.append(a.arena, s.sel);
+                            break;
+                        },
+                        .branch => |t| {
+                            const nxt = lmap.get(t) orelse break;
+                            if (nxt == cb) break; // degenerate self chain
+                            cb = nxt;
+                        },
+                        else => break,
+                    }
+                }
+                var continue_block: ?usize = null;
+                if (a.loop_merges.getPtr(resolved.items[lp.header].label)) |lm| {
+                    if (lmap.get(lm.cont)) |ci| {
+                        continue_block = ci;
+                        try prelude.append(a.arena, ci);
+                        switch (resolved.items[ci].term) {
+                            .cond => |c| try governing.append(a.arena, c.cond),
+                            .swit => |s| try governing.append(a.arena, s.sel),
+                            else => {},
+                        }
+                    }
+                }
+                lp.continue_block = continue_block;
+                lp.prelude = prelude.items;
+                lp.governing = governing.items;
+            }
+            const param_uni = try a.arena.alloc(bool, params.items.len);
+            @memset(param_uni, true);
+            try funcs.append(a.arena, .{
+                .id = func_id,
+                .params = params.items,
+                .blocks = resolved.items,
+                .entry_block = 0,
+                .calls = calls.items,
+                .samples = samples.items,
+                .is_entry_point = func_id == a.module.entry_point_id,
+                .entry_flow = true,
+                .param_uniform = param_uni,
+            });
+            try label_maps.append(a.arena, lmap);
+            try loop_lists.append(a.arena, loops);
+            i = j;
+        }
+        a.funcs = funcs.items;
+        a.label_to_block = label_maps.items;
+        a.loops_of = loop_lists.items;
+        for (a.funcs, 0..) |*uf, fi| {
+            try a.func_by_id.put(uf.id, fi);
+            for (uf.params, 0..) |pid, pi| {
+                try a.owner_func.put(pid, fi);
+                try a.param_index.put(pid, pi);
+            }
+            for (a.loops_of[fi].items) |lp| {
+                for (lp.prelude) |pb| try a.prelude_of.put(packFlowKey(fi, pb), @intCast(lp.header));
+            }
+        }
+    }
+
+    /// Does block `target` postdominate block `from`: does every path from
+    /// `from` to a function exit pass through `target`? Computed as a DFS
+    /// from `from` that AVOIDS `target`; if it still reaches an exit block
+    /// (OpReturn/OpReturnValue/OpUnreachable) then a path bypasses `target`.
+    /// OpKill is deliberately NOT an exit (probe p20: a discard does not
+    /// poison the following flow, so kill paths are dead ends, not exits).
+    fn postdominates(a: *UniformityAnalysis, fi: usize, from: usize, target: usize) bool {
+        const uf = &a.funcs[fi];
+        a.visited.clearRetainingCapacity();
+        a.dfs_stack.clearRetainingCapacity();
+        for (uf.blocks[from].succs) |s| a.dfs_stack.append(a.arena, s) catch return false;
+        while (a.dfs_stack.items.len > 0) {
+            const bi = a.dfs_stack.items[a.dfs_stack.items.len - 1];
+            a.dfs_stack.items.len -= 1;
+            if (bi == target) continue;
+            if (a.visited.contains(bi)) continue;
+            a.visited.put(bi, {}) catch return false;
+            switch (uf.blocks[bi].term) {
+                .ret, .unreach => return false, // an exit path avoids `target`
+                else => {},
+            }
+            for (uf.blocks[bi].succs) |s| a.dfs_stack.append(a.arena, s) catch return false;
+        }
+        return true;
+    }
+
+    /// The loop whose prelude contains `bi`, or null.
+    fn preludeLoop(a: *UniformityAnalysis, fi: usize, bi: usize) ?*UniLoop {
+        const header = a.prelude_of.get(packFlowKey(fi, bi)) orelse return null;
+        for (a.loops_of[fi].items) |*lp| {
+            if (lp.header == header) return lp;
+        }
+        return null;
+    }
+
+    /// The flow a block contributes when reconvergence at its target makes
+    /// the branch's divergence irrelevant: the loop's ENTRY flow for prelude
+    /// blocks, the block's own flow elsewhere.
+    fn regionEntry(a: *UniformityAnalysis, fi: usize, bi: usize) bool {
+        if (a.preludeLoop(fi, bi)) |lp| return a.loopEntryFlow(fi, lp.header);
+        return a.funcs[fi].blocks[bi].flow;
+    }
+
+    /// A loop header's entry flow: the OR of its non-back-edge incoming
+    /// contributions (the back edge arrives per-iteration and is judged by
+    /// the governing condition instead).
+    fn loopEntryFlow(a: *UniformityAnalysis, fi: usize, header: usize) bool {
+        const uf = &a.funcs[fi];
+        var f = if (header == uf.entry_block) uf.entry_flow else false;
+        for (uf.blocks[header].preds) |pi| {
+            if (pi >= uf.blocks.len) continue;
+            // skip the loop's own back edge (from the continue block)
+            if (a.preludeLoop(fi, header)) |lp| {
+                if (lp.continue_block == pi) continue;
+            }
+            if (a.edgeContribution(fi, pi, header)) f = true;
+        }
+        return f;
+    }
+
+    /// Is the edge from block `pi` into block `ti` a uniform edge?
+    ///   OpBranch: uniform iff the source block's flow is uniform.
+    ///   Conditional/switch on a UNIFORM value: same as OpBranch.
+    ///   Conditional/switch on a NON-uniform value: uniform iff `ti`
+    ///   postdominates `pi` (every invocation reconverges there), and then
+    ///   the flow that survives is the REGION ENTRY flow (probe p10).
+    fn edgeContribution(a: *UniformityAnalysis, fi: usize, pi: usize, ti: usize) bool {
+        const uf = &a.funcs[fi];
+        switch (uf.blocks[pi].term) {
+            .branch => return uf.blocks[pi].flow,
+            .cond => |c| {
+                if (a.values.contains(c.cond)) return uf.blocks[pi].flow;
+                return a.postdominates(fi, pi, ti) and a.regionEntry(fi, pi);
+            },
+            .swit => |s| {
+                if (a.values.contains(s.sel)) return uf.blocks[pi].flow;
+                return a.postdominates(fi, pi, ti) and a.regionEntry(fi, pi);
+            },
+            else => return false,
+        }
+    }
+
+    /// Recompute the flow of every block of function `fi` from the current
+    /// value state and entry flow; returns true when any block moved
+    /// true -> false. Flow is an OR over incoming contributions: a block is
+    /// uniform when some incoming edge delivers the full invocation set
+    /// (either directly, or by reconverging every path that diverged).
+    fn recomputeFlow(a: *UniformityAnalysis, fi: usize) bool {
+        const uf = &a.funcs[fi];
+        if (uf.blocks.len == 0) return false;
+        var changed = true;
+        var any_changed = false;
+        while (changed) {
+            changed = false;
+            for (uf.blocks, 0..) |*b, bi| {
+                var f = if (bi == uf.entry_block) uf.entry_flow else false;
+                for (b.preds) |pi| {
+                    if (pi >= uf.blocks.len) continue;
+                    if (a.edgeContribution(fi, pi, bi)) f = true;
+                }
+                // Prelude blocks (loop header chain + continue block) execute
+                // once PER ITERATION: their flow is the loop entry flow gated
+                // by the uniformity of the trip-count conditions.
+                if (a.preludeLoop(fi, bi)) |lp| {
+                    var g = a.loopEntryFlow(fi, lp.header);
+                    for (lp.governing) |cond| {
+                        if (!a.values.contains(cond)) g = false;
+                    }
+                    // A loop with no conditional at all (pure `while (true)`
+                    // with breaks) has a condition-dependent trip count that
+                    // cannot be proven uniform: stay conservative.
+                    if (lp.governing.len == 0) g = false;
+                    f = g;
+                }
+                if (f != b.flow) {
+                    b.flow = f;
+                    changed = true;
+                    any_changed = true;
+                }
+            }
+        }
+        return any_changed;
+    }
+
+    /// Pure value-propagating ops: a result is uniform when every id operand
+    /// is uniform. Deliberately EXCLUDES loads, samples, derivatives, calls
+    /// and anything memory- or side-effect-ful (never uniform here).
+    fn isPureValueOp(op: spirv.Op) bool {
+        return switch (op) {
+            .SNegate, .FNegate, .Not => true,
+            .IAdd, .FAdd, .ISub, .FSub, .IMul, .FMul => true,
+            .UDiv, .SDiv, .FDiv, .UMod, .SMod, .SRem, .FMod, .FRem => true,
+            .VectorTimesScalar, .MatrixTimesScalar, .VectorTimesMatrix, .MatrixTimesVector, .MatrixTimesMatrix, .OuterProduct, .Transpose, .Dot => true,
+            .LogicalEqual, .LogicalNotEqual, .LogicalOr, .LogicalAnd, .LogicalNot => true,
+            .IEqual, .INotEqual, .UGreaterThan, .SGreaterThan, .UGreaterThanEqual, .SGreaterThanEqual, .ULessThan, .SLessThan, .ULessThanEqual, .SLessThanEqual => true,
+            .FOrdEqual, .FUnordEqual, .FOrdNotEqual, .FUnordNotEqual, .FOrdLessThan, .FUnordLessThan, .FOrdGreaterThan, .FUnordGreaterThan, .FOrdLessThanEqual, .FUnordLessThanEqual, .FOrdGreaterThanEqual, .FUnordGreaterThanEqual => true,
+            .ShiftRightLogical, .ShiftRightArithmetic, .ShiftLeftLogical, .BitwiseOr, .BitwiseXor, .BitwiseAnd => true,
+            .BitReverse, .BitCount, .BitFieldInsert, .BitFieldSExtract, .BitFieldUExtract => true,
+            .ConvertFToS, .ConvertSToF, .ConvertUToF, .ConvertFToU, .UConvert, .SConvert, .FConvert, .QuantizeToF16, .Bitcast => true,
+            .IsNan, .IsInf, .All, .Any => true,
+            .CompositeConstruct, .CopyObject => true,
+            .Select => true,
+            else => false,
+        };
+    }
+
+    /// For a phi incoming from block `pb`: was the BRANCH that left `pb`
+    /// uniform? A value arriving via a diverged edge is a non-uniform
+    /// SELECTION even when every incoming value is a uniform constant
+    /// (probe p17).
+    fn phiEdgeUniform(a: *UniformityAnalysis, fi: usize, pb: usize) bool {
+        const uf = &a.funcs[fi];
+        switch (uf.blocks[pb].term) {
+            .cond => |c| return a.values.contains(c.cond),
+            .swit => |s| return a.values.contains(s.sel),
+            else => return true,
+        }
+    }
+
+    /// Every store into `root` (direct, and through any pointer parameter a
+    /// callee received for it) wrote a uniform value from uniform flow.
+    /// glslang lowers assigned locals AND helper parameters to variables, so
+    /// this store rule is how uniform values actually travel (probe p24 vs
+    /// p17).
+    fn varStoresUniform(a: *UniformityAnalysis, root: u32) bool {
+        var ok = true;
+        for (a.stores.items) |st| {
+            if (st.root != root) continue;
+            if (!a.values.contains(st.val)) ok = false;
+            if (st.func >= a.funcs.len) continue;
+            if (st.block >= a.funcs[st.func].blocks.len) continue;
+            if (!a.funcs[st.func].blocks[st.block].flow) ok = false;
+        }
+        // stores a callee makes through the pointer it was handed for `root`
+        for (a.arg_vars.items) |av| {
+            if (av.root != root) continue;
+            const ci = a.func_by_id.get(av.callee) orelse return false;
+            if (!a.paramStoresUniform(ci, av.pos)) ok = false;
+        }
+        return ok;
+    }
+
+    /// Every store through parameter `pi` of function `fi` wrote a uniform
+    /// value from uniform flow (and the parameter never aliases something
+    /// unresolvable).
+    fn paramStoresUniform(a: *UniformityAnalysis, fi: usize, pi: usize) bool {
+        if (a.opaque_params.contains(packParamKey(fi, pi))) return false;
+        var ok = true;
+        for (a.param_stores.items) |st| {
+            if (st.func != fi or st.param != pi) continue;
+            if (!a.values.contains(st.val)) ok = false;
+            if (st.func >= a.funcs.len) continue;
+            if (st.block >= a.funcs[fi].blocks.len) continue;
+            if (!a.funcs[fi].blocks[st.block].flow) ok = false;
+        }
+        return ok;
+    }
+
+    /// A load through pointer parameter `pi` of function `fi` is a uniform
+    /// value iff every caller handed it a variable that only ever holds
+    /// uniform values (probe p23a/p23b: tint tracks the argument).
+    fn loadThroughParamUniform(a: *UniformityAnalysis, fi: usize, pi: usize) bool {
+        var seen = false;
+        var ok = true;
+        const fid = a.funcs[fi].id;
+        for (a.arg_vars.items) |av| {
+            if (av.callee != fid or av.pos != pi) continue;
+            seen = true;
+            if (!a.varStoresUniform(av.root)) ok = false;
+        }
+        return seen and ok;
+    }
+
+    /// Classify whether `id` holds a uniform value under the CURRENT state.
+    fn valueIsUniform(a: *UniformityAnalysis, id: u32) bool {
+        const inst = common.getDef(a.module, id) orelse return false;
+        switch (inst.op) {
+            .ConstantTrue, .ConstantFalse, .Constant, .ConstantNull, .SpecConstant, .SpecConstantTrue, .SpecConstantFalse => return true,
+            .ConstantComposite, .SpecConstantComposite => {
+                for (inst.words[3..]) |c| {
+                    if (!a.values.contains(c)) return false;
+                }
+                return true;
+            },
+            .Load => {
+                const ptr = inst.words[3];
+                // A load through a pointer parameter of the owning function
+                // (glslang's parameter ABI) is judged from the arguments.
+                if (a.owner_func.get(id)) |fi| {
+                    if (a.pointerParamOf(a.funcs[fi].params, ptr, 0)) |pi| {
+                        return a.loadThroughParamUniform(fi, pi);
+                    }
+                }
+                const root = a.pointerRoot(ptr, 0) orelse return false;
+                const rdef = common.getDef(a.module, root) orelse return false;
+                if (rdef.words.len <= 3) return false;
+                const sc: spirv.StorageClass = @enumFromInt(rdef.words[3]);
+                if (sc == .Uniform or sc == .PushConstant) {
+                    // probe p22: every dynamic index in the chain must itself
+                    // be a uniform value, or the loaded element varies.
+                    return a.chainIndicesUniform(ptr, 0);
+                }
+                if (sc == .Function or sc == .Output or sc == .Private) {
+                    return a.varStoresUniform(root);
+                }
+                return false;
+            },
+            .FunctionParameter => {
+                const fi = a.owner_func.get(id) orelse return false;
+                const pi = a.param_index.get(id) orelse return false;
+                return a.funcs[fi].param_uniform[pi];
+            },
+            .Phi => {
+                const fi = a.owner_func.get(id) orelse return false;
+                const uf = &a.funcs[fi];
+                var wi: usize = 3;
+                while (wi + 1 < inst.words.len) : (wi += 2) {
+                    const in_val = inst.words[wi];
+                    const in_parent = inst.words[wi + 1];
+                    if (!a.values.contains(in_val)) return false;
+                    const pb = a.label_to_block[fi].get(in_parent) orelse return false;
+                    if (!uf.blocks[pb].flow) return false;
+                    if (!a.phiEdgeUniform(fi, pb)) return false;
+                }
+                return true;
+            },
+            .CompositeExtract => return inst.words.len > 3 and a.values.contains(inst.words[3]),
+            .VectorShuffle => {
+                return inst.words.len > 4 and a.values.contains(inst.words[3]) and a.values.contains(inst.words[4]);
+            },
+            .CompositeInsert => {
+                return inst.words.len > 4 and a.values.contains(inst.words[3]) and a.values.contains(inst.words[4]);
+            },
+            .ExtInst => {
+                // GLSL.std.450 pure math; id operands start at words[5]. Any
+                // pointer operand (Modf/Frexp) is never a uniform value, so
+                // those forms refuse themselves.
+                for (inst.words[5..]) |op_id| {
+                    if (!a.values.contains(op_id)) return false;
+                }
+                return true;
+            },
+            else => {
+                if (!isPureValueOp(inst.op)) return false;
+                for (inst.words[3..]) |op_id| {
+                    if (!a.values.contains(op_id)) return false;
+                }
+                return true;
+            },
+        }
+    }
+
+    /// Every dynamic index of an access chain rooted at `ptr_id` is a
+    /// uniform value (probe p22).
+    fn chainIndicesUniform(a: *UniformityAnalysis, ptr_id: u32, depth: u32) bool {
+        if (depth > 64) return false;
+        const inst = common.getDef(a.module, ptr_id) orelse return false;
+        switch (inst.op) {
+            .Variable => return true,
+            .AccessChain => {
+                for (inst.words[4..]) |idx| {
+                    if (!a.values.contains(idx)) return false;
+                }
+                return a.chainIndicesUniform(inst.words[3], depth + 1);
+            },
+            .CopyObject => return a.chainIndicesUniform(inst.words[3], depth + 1),
+            else => return false,
+        }
+    }
+};
+
+/// pack a (function, block) pair into one key for the prelude map
+fn packFlowKey(fi: usize, bi: usize) u64 {
+    return (@as(u64, @intCast(fi)) << 32) | @as(u64, @intCast(bi));
+}
+
+/// pack a (function, parameter index) pair into one key
+fn packParamKey(fi: usize, pi: usize) u64 {
+    return (@as(u64, @intCast(fi)) << 32) | @as(u64, @intCast(pi));
+}
+
+/// Raw OpLoopMerge data recorded during parse, resolved once the function's
+/// blocks all exist.
+const UniLoopMerge = struct { merge: u32, cont: u32 };
+
+/// Compute the set of implicit-Lod sample RESULT ids that sit in non-uniform
+/// control flow in the generated WGSL, so the emitter can lower exactly those
+/// to the uniformity-safe explicit-Level forms. Empty (not an error) for the
+/// common module with no such sample.
+fn computeNonuniformImplicitLodSamples(
+    arena: std.mem.Allocator,
+    module: *const ParsedModule,
+) !std.AutoHashMap(u32, void) {
+    var out = std.AutoHashMap(u32, void).init(arena);
+    var a = UniformityAnalysis{
+        .module = module,
+        .arena = arena,
+        .funcs = &.{},
+        .func_by_id = std.AutoHashMap(u32, usize).init(arena),
+        .label_to_block = &.{},
+        .loops_of = &.{},
+        .owner_func = std.AutoHashMap(u32, usize).init(arena),
+        .param_index = std.AutoHashMap(u32, usize).init(arena),
+        .values = std.AutoHashMap(u32, void).init(arena),
+        .opaque_params = std.AutoHashMap(u64, void).init(arena),
+        .prelude_of = std.AutoHashMap(u64, u64).init(arena),
+        .loop_merges = std.AutoHashMap(u32, UniLoopMerge).init(arena),
+        .visited = std.AutoHashMap(usize, void).init(arena),
+    };
+    try a.parse();
+    if (a.funcs.len == 0) return out;
+
+    // Optimistic init: every id is a uniform value until proven otherwise.
+    // Every component of the fixpoint below only ever moves DOWN, so it
+    // terminates; the round cap is paranoia against hostile input.
+    for (module.id_defs, 0..) |def, id| {
+        if (def != null) try a.values.put(@intCast(id), {});
+    }
+
+    var rounds: u32 = 0;
+    var stable = false;
+    while (!stable and rounds < 1000) : (rounds += 1) {
+        stable = true;
+        // 1. block flows from the current values and entry flows
+        for (0..a.funcs.len) |fi| {
+            if (a.recomputeFlow(fi)) stable = false;
+        }
+        // 2. value uniformity from the current values and flows
+        {
+            var to_remove = std.ArrayListUnmanaged(u32).empty;
+            var vit = a.values.iterator();
+            while (vit.next()) |entry| {
+                if (!a.valueIsUniform(entry.key_ptr.*)) try to_remove.append(arena, entry.key_ptr.*);
+            }
+            if (to_remove.items.len > 0) {
+                stable = false;
+                for (to_remove.items) |id| _ = a.values.remove(id);
+            }
+        }
+        // 3. a callee's ENTRY flow is the AND of its call sites' block flows
+        //    (probe p11/p12). The entry point starts uniform and stays so.
+        {
+            var new_flow = try arena.alloc(bool, a.funcs.len);
+            for (new_flow) |*nf| nf.* = true;
+            for (a.funcs, 0..) |caller, fi| {
+                for (caller.calls) |call| {
+                    const ci = a.func_by_id.get(call.callee) orelse continue;
+                    if (ci == fi) continue; // self-recursion adds no information
+                    if (!caller.blocks[call.block].flow) new_flow[ci] = false;
+                }
+            }
+            for (a.funcs, 0..) |uf, fi| {
+                if (uf.is_entry_point) continue;
+                if (new_flow[fi] != uf.entry_flow) {
+                    a.funcs[fi].entry_flow = new_flow[fi];
+                    stable = false;
+                }
+            }
+        }
+        // 4. a PARAMETER is a uniform value iff every call site passes a
+        //    uniform argument (probe p23a/p23b)
+        for (a.funcs, 0..) |caller, fi| {
+            for (caller.calls) |call| {
+                const ci = a.func_by_id.get(call.callee) orelse continue;
+                if (ci == fi) continue;
+                const callee = &a.funcs[ci];
+                for (call.args, 0..) |arg, ai| {
+                    if (ai >= callee.params.len) break;
+                    if (!a.values.contains(arg) and callee.param_uniform[ai]) {
+                        callee.param_uniform[ai] = false;
+                        stable = false;
+                    }
+                }
+            }
+        }
+    }
+
+    for (a.funcs) |uf| {
+        for (uf.samples) |s| {
+            if (!uf.blocks[s.block].flow) try out.put(s.result, {});
+        }
+    }
+    return out;
+}
+
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, nonuniform_implicit: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx, range: ?RangeCtx) !void {
     if (range) |r| {
         if (r.depth >= max_region_depth) return error.UnsupportedRegionDepth;
     }
@@ -8163,7 +9019,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                 const lhdr = labelIsLoopHeader(module, btgt) orelse break :blk_region;
                                                 try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                                                 const region_depth: u32 = if (range) |rr| rr.depth else 0;
-                                                try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, early_return, subpass_fragcoord_name, ctx, .{
+                                                try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, nonuniform_implicit, early_return, subpass_fragcoord_name, ctx, .{
                                                     .start_idx = lhdr + 1,
                                                     .stop_label = merge_label,
                                                     .indent = body_ind,
@@ -8195,7 +9051,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                         while (ti < module.instructions.len) : (ti += 1) {
                                                             const tinst = module.instructions[ti];
                                                             if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
-                                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
                                                         }
                                                         // The arm's terminator was skipped by the loop above. When it branches
                                                         // to the SWITCH's merge it is a `break` out of the switch, and dropping
@@ -8218,7 +9074,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                             while (fi < module.instructions.len) : (fi += 1) {
                                                                 const finst = module.instructions[fi];
                                                                 if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
-                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
                                                             }
                                                             try emitSwitchArmTerminator(module, fi, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                             break;
@@ -8241,7 +9097,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                             continue;
                                         }
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
+                                        try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs, nonuniform_implicit);
                                     }
                                     break;
                                 }
@@ -8308,7 +9164,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     const lhdr = labelIsLoopHeader(module, btgt) orelse break :blk_region;
                                                     try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                                                     const region_depth: u32 = if (range) |rr| rr.depth else 0;
-                                                    try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, early_return, subpass_fragcoord_name, ctx, .{
+                                                    try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, nonuniform_implicit, early_return, subpass_fragcoord_name, ctx, .{
                                                         .start_idx = lhdr + 1,
                                                         .stop_label = merge_label,
                                                         .indent = body_ind,
@@ -8340,7 +9196,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                             while (ti < module.instructions.len) : (ti += 1) {
                                                                 const tinst = module.instructions[ti];
                                                                 if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
-                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
                                                             }
                                                             try emitSwitchArmTerminator(module, ti, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                             break;
@@ -8358,7 +9214,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                                 while (fi < module.instructions.len) : (fi += 1) {
                                                                     const finst = module.instructions[fi];
                                                                     if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
-                                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs);
+                                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
                                                                 }
                                                                 try emitSwitchArmTerminator(module, fi, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                                 break;
@@ -8381,7 +9237,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                 continue;
                                             }
                                             if (dinst.op == .Switch) break;
-                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs);
+                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs, nonuniform_implicit);
                                         }
                                         break;
                                     }
@@ -8576,7 +9432,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             switch (dinst.op) {
                                 .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
                                 else => {
-                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, indent, wrapped_members, matrix_outputs);
+                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, indent, wrapped_members, matrix_outputs, nonuniform_implicit);
                                 },
                             }
                         }
@@ -8947,7 +9803,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
+                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
                                                 }
                                             }
                                         }
@@ -8999,7 +9855,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs);
+                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
                                                 }
                                             }
                                         }
@@ -9990,6 +10846,19 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // ROUNDED (floor(layer+0.5)) for glslang parity — mirrors the depth-
                 // array path in emitDepthCompare and the MSL rint() lowering.
                 const shape = arrayedSampleShape(module, inst.words[3]);
+                // #wgsl-uniformity-8k2: this sample sits in non-uniform control
+                // flow (the uniformity prepass marked its result id), so the
+                // implicit-Lod builtins below must NOT be emitted: tint and naga
+                // reject them there ("textureSample must only be called from
+                // uniform control flow"). Lower to textureSampleLevel with the
+                // level pinned to 0, the same move SPIRV-Cross's MSL backend
+                // makes for a constant-zero gradient (promoted to level(0)).
+                // A Bias operand is DROPPED: WGSL has no textureQueryLod to fold
+                // a bias into an explicit level and textureSampleBias is gated
+                // exactly like textureSample, so the bias is lost rather than the
+                // whole shader honest-errored (erroring here is the black-player
+                // failure mode this bug class caused on wintty.io).
+                const nonuniform_flow = nonuniform_implicit.contains(inst.words[2]);
                 // Image-operands mask (words[5]). A `Bias` (0x1) operand carries an
                 // LOD bias (GLSL texture(s, P, bias)). WGSL spells this
                 // textureSampleBias(t, s, coord, [layer,] bias [, offset]) — dropping
@@ -10024,10 +10893,20 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
                         try writeInd(w, indent);
-                        try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, bias, off_suffix });
+                        if (nonuniform_flow) {
+                            // level pinned to 0, bias dropped (see above)
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                        } else {
+                            try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}{s}, i32(round({s}{s})), {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, bias, off_suffix });
+                        }
                     } else {
                         try writeInd(w, indent);
-                        try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, bias, off_suffix });
+                        if (nonuniform_flow) {
+                            // level pinned to 0, bias dropped (see above)
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
+                        } else {
+                            try w.print("let {s}: {s} = textureSampleBias({s}, {s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, bias, off_suffix });
+                        }
                     }
                 } else {
                     // Non-Bias path. The only image operand WGSL's plain textureSample
@@ -10049,7 +10928,15 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         const cs = arrayedCoordSwizzle(shape.comps);
                         const ls = arrayedLayerSwizzle(shape.comps);
                         try writeInd(w, indent);
-                        if (shape.depth) {
+                        if (nonuniform_flow) {
+                            // level pinned to 0 (#wgsl-uniformity-8k2; the depth
+                            // scalar is widened by splat exactly as below)
+                            if (shape.depth) {
+                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0.0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                            } else {
+                                try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}{s}, i32(round({s}{s})), 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, cs, coord, ls, off_suffix });
+                            }
+                        } else if (shape.depth) {
                             // WGSL's non-comparison DEPTH sample returns a SCALAR f32,
                             // while SPIR-V's result is the vec4: widen by splat so the
                             // declared vec4 let still typechecks (naga's own WGSL
@@ -10061,7 +10948,13 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                     } else {
                         try writeInd(w, indent);
-                        if (shape.depth) {
+                        if (nonuniform_flow) {
+                            if (shape.depth) {
+                                try w.print("let {s}: {s} = {s}(textureSampleLevel({s}, {s}, {s}, 0.0{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, off_suffix });
+                            } else {
+                                try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, 0.0{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
+                            }
+                        } else if (shape.depth) {
                             try w.print("let {s}: {s} = {s}(textureSample({s}, {s}, {s}{s}));\n", .{ result_name, rt, rt, tex_name, sampler_arg, coord, off_suffix });
                         } else {
                             try w.print("let {s}: {s} = textureSample({s}, {s}, {s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, off_suffix });
@@ -10166,7 +11059,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             },
 
             .ImageSampleDrefImplicitLod => {
-                try emitDepthCompare(module, names, w, indent, arena, inst, "textureSampleCompare");
+                // #wgsl-uniformity-8k2: textureSampleCompare is uniformity-gated
+                // just like textureSample; a Dref sample in non-uniform flow takes
+                // the ungated textureSampleCompareLevel (which samples mip 0,
+                // exactly the level pin the non-Dref path uses).
+                const builtin: []const u8 = if (nonuniform_implicit.contains(inst.words[2])) "textureSampleCompareLevel" else "textureSampleCompare";
+                try emitDepthCompare(module, names, w, indent, arena, inst, builtin);
             },
 
             .ImageSampleDrefExplicitLod => {
@@ -10988,12 +11886,26 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // textureSample takes a trailing const-offset arg. Dropping it would
                     // silently sample the un-offset texels.
                     const mask = if (inst.words.len > 5) inst.words[5] else 0;
+                    // #wgsl-uniformity-8k2: in non-uniform flow the gated
+                    // textureSample becomes textureSampleLevel with the level
+                    // pinned to 0 (same lowering as the non-projective path; a
+                    // projective Bias has no uniformity-safe WGSL form either
+                    // and is dropped like the Bias operand there).
+                    const proj_nonuniform = nonuniform_implicit.contains(inst.words[2]);
                     if (mask & 0x8 != 0) {
                         if (inst.words.len <= 6) return error.UnsupportedImageOperands;
                         const off = names.get(inst.words[6]) orelse "vec2<i32>(0)";
-                        try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, off });
+                        if (proj_nonuniform) {
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, 0.0, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, off });
+                        } else {
+                            try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s}, {s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp, off });
+                        }
                     } else {
-                        try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
+                        if (proj_nonuniform) {
+                            try w.print("let {s}: {s} = textureSampleLevel({s}, {s}_sampler, {s}{s} / {s}{s}, 0.0);\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
+                        } else {
+                            try w.print("let {s}: {s} = textureSample({s}, {s}_sampler, {s}{s} / {s}{s});\n", .{ result_name, rt, tex_name, tex_name, coord, lead, coord, last_comp });
+                        }
                     }
                 }
             },
@@ -11057,7 +11969,11 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     }
                 }
                 try writeInd(w, indent);
-                try w.print("let {s}: {s} = textureSampleCompare({s}, {s}, {s}{s} / {s}{s}, {s} / {s}{s}{s});\n", .{ result_name, rt, tex_name, sampler_arg, coord, lead, coord, last_comp, dref, coord, last_comp, off_suffix });
+                // #wgsl-uniformity-8k2: textureSampleCompare is uniformity-gated;
+                // for the IMPLICIT variant in non-uniform flow use the ungated
+                // textureSampleCompareLevel (same arguments; samples mip 0).
+                const cmp_builtin: []const u8 = if (nonuniform_implicit.contains(inst.words[2])) "textureSampleCompareLevel" else "textureSampleCompare";
+                try w.print("let {s}: {s} = {s}({s}, {s}, {s}{s} / {s}{s}, {s} / {s}{s}{s});\n", .{ result_name, rt, cmp_builtin, tex_name, sampler_arg, coord, lead, coord, last_comp, dref, coord, last_comp, off_suffix });
             },
 
             // ReadClockKHR — shader clock
@@ -12200,7 +13116,7 @@ fn emitCompositeInsertWgsl(module: *const ParsedModule, names: *std.AutoHashMap(
     try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
 }
 
-fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput)) !void {
+fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), nonuniform_implicit: *const std.AutoHashMap(u32, void)) !void {
     switch (inst.op) {
         .Variable => {
             if (inst.words.len >= 4) {
@@ -12290,7 +13206,14 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             const sampler_arg = resolveSamplerArg(module, names, inst.words[3], tex_name, arena);
             const coord = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
             try writeIndentStatic(w, indent);
-            try w.print("let {s}: {s} = textureSample({s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord });
+            // #wgsl-uniformity-8k2: a sample inside a switch CASE is in
+            // non-uniform flow whenever the selector is (probe p14), so the
+            // replay path applies the same level-0 downgrade as the main walk.
+            if (nonuniform_implicit.contains(inst.words[2])) {
+                try w.print("let {s}: {s} = textureSampleLevel({s}, {s}, {s}, 0.0);\n", .{ result_name, rt, tex_name, sampler_arg, coord });
+            } else {
+                try w.print("let {s}: {s} = textureSample({s}, {s}, {s});\n", .{ result_name, rt, tex_name, sampler_arg, coord });
+            }
         },
         .AccessChain => {
             // Rename result to composite.field expression
