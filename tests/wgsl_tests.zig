@@ -9785,6 +9785,101 @@ test "WGSL: default arm's loop-to-outer-continue emits continue, leaks no arm bo
     try nagaValidateOrSkip(wgsl, "region-continue");
 }
 
+// #region-stop-hoist-flush: the region's IMPLICIT case end (a top-level
+// OpBranch to the switch merge) wrote its switch-merge phi assignments
+// through the HoistWriter's PENDING buffer and then broke out of the emit
+// loop -- the pending buffer is only committed by hoistSweepAndFlush, which
+// no longer ran, so every assignment on that edge was silently DROPPED (the
+// phi kept whatever the pre-declaration initialized it to). Compound defect:
+// the pre-declaration picked the region-internal load as its initializer
+// (the "loads are safe" heuristic never checked that the LOAD ITSELF precedes
+// the SelectionMerge), emitting `var v19: u32 = v18;` where v18 is only
+// defined inside the case -- naga "no definition in scope". With the flush
+// fixed the assignment lands and the initializer falls back to a zero-init,
+// so the case-1 path carries its own value. v19 = phi(v18 from the loop tail,
+// 7 from default): case 1 must assign v18, default must assign 7u.
+test "WGSL: region implicit case end assigns switch-merge phis (region-stop hoist flush)" {
+    const spv = try assembleSpirv("region_stop_phi_flush",
+        \\               OpCapability Shader
+        \\               OpMemoryModel Logical GLSL450
+        \\               OpEntryPoint Fragment %main "main" %o
+        \\               OpExecutionMode %main OriginUpperLeft
+        \\               OpDecorate %o Location 0
+        \\       %void = OpTypeVoid
+        \\         %fn = OpTypeFunction %void
+        \\         %f32 = OpTypeFloat 32
+        \\         %v4f = OpTypeVector %f32 4
+        \\         %u32 = OpTypeInt 32 0
+        \\        %bool = OpTypeBool
+        \\          %pu = OpTypePointer Function %u32
+        \\         %po4 = OpTypePointer Output %v4f
+        \\           %o = OpVariable %po4 Output
+        \\          %f0 = OpConstant %f32 0.0
+        \\          %f1 = OpConstant %f32 1.0
+        \\          %u0 = OpConstant %u32 0
+        \\          %u1 = OpConstant %u32 1
+        \\          %u4 = OpConstant %u32 4
+        \\          %u7 = OpConstant %u32 7
+        \\         %one = OpConstantComposite %v4f %f1 %f0 %f0 %f1
+        \\        %main = OpFunction %void None %fn
+        \\       %entry = OpLabel
+        \\        %svar = OpVariable %pu Function %u1
+        \\         %acc = OpVariable %pu Function %u0
+        \\               OpBranch %sw
+        \\          %sw = OpLabel
+        \\         %sel = OpLoad %u32 %svar
+        \\               OpSelectionMerge %swm None
+        \\               OpSwitch %sel %dflt 1 %c1
+        \\          %c1 = OpLabel
+        \\               OpBranch %lhdr
+        \\        %lhdr = OpLabel
+        \\           %i = OpPhi %u32 %u0 %c1 %inext %lcont
+        \\        %icmp = OpULessThan %bool %i %u4
+        \\               OpLoopMerge %lm %lcont None
+        \\               OpBranchConditional %icmp %lbody %lm
+        \\       %lbody = OpLabel
+        \\         %il = OpLoad %u32 %acc
+        \\         %ii = OpIAdd %u32 %il %u1
+        \\               OpStore %acc %ii
+        \\               OpBranch %lcont
+        \\       %lcont = OpLabel
+        \\       %inext = OpIAdd %u32 %i %u1
+        \\               OpBranch %lhdr
+        \\          %lm = OpLabel
+        \\         %sum = OpLoad %u32 %acc
+        \\               OpBranch %swm
+        \\       %dflt = OpLabel
+        \\               OpStore %acc %u7
+        \\               OpBranch %swm
+        \\         %swm = OpLabel
+        \\        %res = OpPhi %u32 %sum %lm %u7 %dflt
+        \\         %rf = OpConvertUToF %f32 %res
+        \\         %rv = OpCompositeConstruct %v4f %rf %f0 %f0 %f1
+        \\               OpStore %o %rv
+        \\               OpReturn
+        \\               OpFunctionEnd
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // (1) the implicit-end assignment is EMITTED (was dropped with the pending
+    // buffer): the case-1 path carries the loop tail's value into the phi.
+    try assertContains(wgsl, "v19 = v18;");
+    // (2) the default path still assigns its incoming.
+    try assertContains(wgsl, "v19 = 7u;");
+    // (3) the pre-declaration must not reference the region-internal value
+    // (naga "no definition in scope"): zero-init, every edge assigns first.
+    try std.testing.expect(std.mem.indexOf(u8, wgsl, "var v19: u32 = v18;") == null);
+    try assertContains(wgsl, "var v19: u32;");
+    // (4) the assignment sits INSIDE the case (after the loop), not after the
+    // switch: find the case-1 arm and check the assignment follows its loop.
+    const c1 = std.mem.indexOf(u8, wgsl, "case 1: {") orelse return error.TestExpectedCase1;
+    const assign = std.mem.indexOfPos(u8, wgsl, c1, "v19 = v18;") orelse return error.TestExpectedAssignInCase;
+    const after_switch = std.mem.indexOf(u8, wgsl, "f32(v19)") orelse return error.TestExpectedPostRead;
+    try std.testing.expect(assign < after_switch);
+    try nagaValidateOrSkip(wgsl, "region-stop-phi-flush");
+}
+
 // #wgsl-loop-merge-phi: a phi at a LOOP's merge block (e.g. the "did we break"
 // flag read after the loop) was never DECLARED -- the sel-phi machinery only
 // materializes under a SelectionMerge, and a loop exit has none. Reads after

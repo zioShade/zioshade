@@ -7912,14 +7912,27 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // update site, so a switch-merge phi with THIS pred
                             // would keep its init: emit the assignments before
                             // the implicit break (review finding 1b).
+                            //
+                            // #region-stop-hoist-flush: the assignments must go
+                            // to the REAL writer. `w` buffers into the hoist
+                            // pending buffer, which is committed only by
+                            // hoistSweepAndFlush -- and the `break` below exits
+                            // the emit loop with no further flush, so writing
+                            // through `w` here silently DROPPED every
+                            // assignment on this edge (the phi kept its init:
+                            // naga-invalid when the init was mis-scoped,
+                            // silently-wrong otherwise). Same shape as the
+                            // #wgsl-region-continue edge: flush, then write
+                            // past the pending buffer.
+                            try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                             var spi_x = ctx.sel_phis.iterator();
                             while (spi_x.next()) |ent| {
                                 for (ent.value_ptr.*.items) |sp| {
                                     if (sp.pred_label != cur_block_label) continue;
                                     const rn_x = names.get(sp.result_id) orelse continue;
                                     const vn_x = names.get(sp.value_id) orelse continue;
-                                    try writeInd(w, indent);
-                                    try w.print("{s} = {s};\n", .{ rn_x, vn_x });
+                                    try writeInd(w_out, indent);
+                                    try w_out.print("{s} = {s};\n", .{ rn_x, vn_x });
                                 }
                             }
                             break;
@@ -8041,8 +8054,17 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                             if (val_op == .Constant or val_op == .ConstantComposite or val_op == .ConstantTrue or val_op == .ConstantFalse or val_op == .Undef) {
                                                 use_init = true;
                                             } else if (val_op == .Load or val_op == .Variable) {
-                                                // Loads from variables declared before the if-else are safe
-                                                use_init = true;
+                                                // Loads from variables declared before the if-else are
+                                                // safe ONLY when the LOAD ITSELF precedes the
+                                                // SelectionMerge: a load emitted inside an arm (or a
+                                                // switch-case region) binds its `let` there, so the
+                                                // name is not in scope at the pre-declaration site
+                                                // (naga "no definition in scope"; region_stop_phi_flush).
+                                                if (sp.value_id < module.id_defs.len) {
+                                                    if (module.id_defs[sp.value_id]) |vidx| {
+                                                        if (vidx < i) use_init = true;
+                                                    }
+                                                }
                                             } else {
                                                 // Check if the value's definition index is before this SelectionMerge.
                                                 // Use the index-backed id_defs map: the old text scan compared
