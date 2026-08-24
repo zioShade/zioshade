@@ -39,6 +39,29 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ### Fixed
 
+- **HLSL: function locals read before they are definitely assigned are zero-initialized at declaration.**
+  A local assigned only inside a conditional (the wintty gallery's excluded
+  cursor_warp shape), a never-stored array or struct cell, or a read before the
+  branch that assigns it all compiled to an HLSL read with no prior write. DXC
+  lowers that to a literal undef operand and the DXIL validator rejects the
+  module: `error: Instructions should not read uninitialized value.` /
+  `note: at '%2 = fadd fast float %1, undef' in block '#0' of function 'main'.`
+  / `Validation failed.` (exit 5; reproduced on the Windows SDK dxc 10.0.26100.0
+  and the pinned Linux DXC 1.9.2602 behind `just hlsl-dxc`; spirv-cross's HLSL
+  for the same SPIR-V fails identically). The backend now runs a
+  definite-assignment dataflow per function (join over predecessors; same-block
+  stores ordered by instruction index) and emits `T v = ((T)0);` for exactly the
+  locals with an uncovered read, so an if/else assigning both arms keeps its bare
+  `T v;` and output stays byte-identical where assignment is definite. The zero
+  cast form covers arrays and structs (`((float[4])0)`, `((S)0)`); DXC rejects
+  the `{0}` short initializer, so the cast is the portable spelling. Regression
+  coverage: 6 new tests in tests/hlsl_tests.zig (conditional assign, read before
+  assign, partial array, both-arms bare, byref-arg-only bare, glslang-produced
+  module) plus tests/spirv_bins/cond-assigned-local-undef-read.spv, which sweeps
+  the shape through the real DXC gate on every `just hlsl-dxc` (pre-fix: DXC
+  exit 5 with the diagnostic above; post-fix: exit 0). The reconstructed
+  cursor_warp shader now compiles DXC-clean and renders pixel-identical to the
+  spirv-cross reference on D3D12 WARP (256x256, 0 different pixels).
 - **Three defects the subgroup work surfaced (#643).** A NonWritable storage buffer now
   emits read-mode `var<storage>`: the old unconditional read_write was the less faithful
   spelling and tainted buffer reads as non-uniform for tint's analysis. A private variable

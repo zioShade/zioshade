@@ -17295,3 +17295,148 @@ test "OpLogicalEqual / OpLogicalNotEqual emit == / != (bool equality)" {
     try assertContains(hlsl, "==");
     try assertContains(hlsl, "!=");
 }
+
+// ---------------------------------------------------------------------------
+// Definite initialization of conditionally-assigned locals (#cursor-warp)
+// ---------------------------------------------------------------------------
+
+// The class that kept the wintty gallery's cursor_warp shader out of the
+// corpus: a local assigned only on some paths and read after. DXC lowers the
+// not-dominated read to a literal `undef` operand and the DXIL validator
+// rejects the module:
+//
+//   error: validation errors
+//   <file>.hlsl:<line>:<col>: error: Instructions should not read uninitialized value.
+//   note: at '%2 = fadd fast float %1, undef' in block '#0' of function 'main'.
+//   Validation failed.
+//
+// (Windows SDK dxc 10.0.26100.0 and the pinned Linux DXC 1.9.2602.24 used by
+// `just hlsl-dxc` both reject; spirv-cross's HLSL for the same SPIR-V fails
+// identically, which is why the gallery pair-diff could not be the fix.) The
+// backend now zero-initializes every Function-storage local whose reads are
+// not dominated by a store; see hlslDefiniteInitSet in src/spirv_to_hlsl.zig.
+// tests/spirv_bins/cond-assigned-local-undef-read.spv sweeps the same shape
+// through the real DXC gate (`just hlsl-dxc`).
+
+test "hlsl: conditionally-assigned local read after is zero-initialized" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    vec2 warp;
+        \\    if (t > 1.0) { warp = vec2(t) * 0.5; }
+        \\    fragColor = vec4(warp + vec2(t), 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // The read after the if is not dominated by the store inside it: the
+    // declaration must carry a zero initializer, not be left bare.
+    try assertContains(hlsl, "= ((float2)0);");
+}
+
+test "hlsl: local read BEFORE its conditional assignment is zero-initialized" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    vec2 warp;
+        \\    float f = warp.x + t;
+        \\    if (t > 1.0) { warp = vec2(t) * 0.5; }
+        \\    fragColor = vec4(f, warp, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // This is the shape DXC rejected even when the store existed later: the
+    // entry-block load has no reaching def at all (the exact fadd-undef error
+    // quoted above).
+    try assertContains(hlsl, "= ((float2)0);");
+}
+
+test "hlsl: array with conditionally-assigned elements is zero-initialized" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    float w[4];
+        \\    if (t > 1.0) { w[0] = t; w[1] = t * 2.0; }
+        \\    fragColor = vec4(w[2] + w[0], 0.0, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // Partially-stored arrays keep whole-alloca semantics in DXC: the
+    // never-stored element reads as literal undef straight into the fadd. The
+    // whole array gets the cast-form zero initializer (DXC accepts
+    // `= ((float[4])0)`; the `{0}` short form is rejected).
+    try assertContains(hlsl, "[4] = ((float[4])0);");
+}
+
+test "hlsl: both-arms-assigned local keeps its bare declaration" {
+    // if/else assigning BOTH arms: every path to the read passes a store, so
+    // the textbook definite-assignment join needs no initializer (DXC compiles
+    // the merge read as a phi with both incomings defined).
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    vec2 warp;
+        \\    if (t > 1.0) { warp = vec2(t) * 0.5; }
+        \\    else { warp = vec2(0.25); }
+        \\    warp *= 2.0;
+        \\    fragColor = vec4(warp, 0.0, 1.0);
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // The reassignment keeps a real variable alive (not SSA-folded away); its
+    // declaration must stay bare: the analysis is a precise join, not a blanket
+    // force-zero.
+    try assertNotContains(hlsl, "= ((float2)0)");
+    try assertContains(hlsl, "float2 v1");
+}
+
+test "hlsl: local only passed byref to a call stays uninitialized" {
+    const src =
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void helper(out vec4 o) { o = vec4(t); }
+        \\void main() {
+        \\    vec4 acc;
+        \\    helper(acc);
+        \\    fragColor = acc;
+        \\}
+    ;
+    const hlsl = try compileToHlsl(src);
+    defer alloc.free(hlsl);
+    // A local referenced only as a call argument is a byref out-param buffer,
+    // never an undef read; zero-initializing every such temp would churn every
+    // translated helper call for nothing.
+    try assertNotContains(hlsl, "= ((float4)0)");
+}
+
+test "hlsl: glslang-produced conditionally-assigned local is zero-initialized" {
+    // The same class from the reference producer (external SPIR-V shape, not
+    // zioshade's own frontend): glslang keeps the local as an OpVariable with
+    // an OpLoad at the merge block.
+    const spv = try compileToSpirv("cond_assigned",
+        \\#version 450
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in float t;
+        \\void main() {
+        \\    vec2 warp;
+        \\    if (t > 1.0) { warp = vec2(t) * 0.5; }
+        \\    fragColor = vec4(warp + vec2(t), 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spv);
+    const hlsl = try zioshade.spirvToHLSL(alloc, spv, .{});
+    defer alloc.free(hlsl);
+    try assertContains(hlsl, "= ((float2)0);");
+}
