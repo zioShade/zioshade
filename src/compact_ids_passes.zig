@@ -7011,6 +7011,9 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
     // Phase 2: Find qualifying function-local vars
     var func_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
     defer func_vars.deinit();
+    // Function vars that carry an Initializer operand (see the collection site)
+    var init_vars = try std.DynamicBitSet.initEmpty(alloc, bound);
+    defer init_vars.deinit();
     var store_count = std.AutoHashMapUnmanaged(u32, u32).empty;
     defer store_count.deinit(alloc);
     var load_count = std.AutoHashMapUnmanaged(u32, u32).empty;
@@ -7038,6 +7041,13 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
             if (opcode == 59 and wc >= 4 and words[pos + 3] == 7) {
                 const vid = words[pos + 2];
                 if (vid >= 1 and vid < bound) func_vars.set(vid);
+                // wc >= 5 carries an Initializer operand. Such a variable's
+                // pre-store loads read the initializer, not the stored value,
+                // so the constant-forward phase below must not touch it:
+                // forwarding there replaces a defined read with a different
+                // constant, which validates fine and renders wrong (#686
+                // review; initializers are common in external SPIR-V).
+                if (wc >= 5 and vid >= 1 and vid < bound) init_vars.set(vid);
             }
             if (opcode == 62 and wc >= 3) {
                 const ptr = words[pos + 1];
@@ -7045,7 +7055,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
                 if (ptr >= 1 and ptr < bound and func_vars.isSet(ptr)) {
                     const entry = try store_count.getOrPutValue(alloc, ptr, 0);
                     entry.value_ptr.* += 1;
-                    if (entry.value_ptr.* == 1 and val >= 1 and val < bound and const_ids.isSet(val)) {
+                    if (entry.value_ptr.* == 1 and val >= 1 and val < bound and const_ids.isSet(val) and !init_vars.isSet(ptr)) {
                         try const_store_val.put(alloc, ptr, val);
                     } else {
                         _ = const_store_val.remove(ptr);
@@ -7110,7 +7120,12 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         }
     }
     // Also add 1-store-1-load non-constant vars (not already in const_store_val)
-    // With dominance check: only forward if store and load are in the same basic block.
+    // With dominance check: only forward if store and load are in the same basic block
+    // AND the store comes first. A load that precedes the store reads the variable's
+    // PRE-store contents (undef for a never-stored local): forwarding the stored
+    // value there binds the read to an SSA id defined later in the block, which is
+    // use-before-definition in the emitted SPIR-V (spirv-val: "ID has not been
+    // defined") and an undeclared identifier in every backend (#686).
     {
         // Build store position map for qualifying vars
         var store_pos_map = std.AutoHashMapUnmanaged(u32, u32).empty; // var_id -> store position
@@ -7185,7 +7200,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
                         }
                         break :blk cur2;
                     };
-                    if (load_block != store_block) {
+                    if (load_block != store_block or lp < st_pos) {
                         load_same_block = false;
                         break;
                     }
@@ -8231,6 +8246,11 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
         var multi_loads: bool = false;
 
         pos = 5;
+        // Block identity for the order check below: 0 is the entry block.
+        var cur_label: u32 = 0;
+        var load_block: u32 = 0;
+        var store_blocks = std.ArrayListUnmanaged(u32).empty;
+        defer store_blocks.deinit(alloc);
         while (pos < words.len) {
             const hdr = words[pos];
             const wc: u32 = hdr >> 16;
@@ -8238,6 +8258,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
             if (wc == 0) break;
             const ie = pos + wc;
             if (ie > words.len) break;
+            if (opcode == 248 and wc >= 2) cur_label = words[pos + 1]; // OpLabel
             if (opcode == 65 and wc >= 5 and words[pos + 3] == vi.var_id) {
                 try ac_results.put(alloc, words[pos + 2], {});
                 try ac_positions.append(alloc, pos);
@@ -8246,6 +8267,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
                 const tgt = words[pos + 1];
                 if (ac_results.contains(tgt)) {
                     try store_positions.append(alloc, pos);
+                    try store_blocks.append(alloc, cur_label);
                 } else if (tgt == vi.var_id) {
                     direct_stores += 1;
                 }
@@ -8254,6 +8276,7 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
                 if (load_result == 0) {
                     load_result = words[pos + 2];
                     load_pos = pos;
+                    load_block = cur_label;
                 } else {
                     multi_loads = true;
                 }
@@ -8264,6 +8287,23 @@ pub fn scatterStoreToComposite(alloc: std.mem.Allocator, words: []const u32) err
         if (direct_stores > 0 or multi_loads or load_result == 0) continue;
         if (ac_results.count() != vi.comp_count) continue;
         if (@as(u32, @intCast(store_positions.items.len)) != vi.comp_count) continue;
+        // The rewrite replaces the whole load with a CompositeConstruct of
+        // the component stores' value ids at the LOAD's position, so every
+        // store must be defined before it: same block as the load and
+        // textually earlier. A store after the load, or in a different block,
+        // reads through to ids not yet defined (use-before-definition, #686)
+        // or breaks dominance; skipping the rewrite keeps the plain load,
+        // which is always correct.
+        {
+            var order_ok = true;
+            for (store_positions.items, store_blocks.items) |sp, sb| {
+                if (sp > load_pos or sb != load_block) {
+                    order_ok = false;
+                    break;
+                }
+            }
+            if (!order_ok) continue;
+        }
 
         var my_ac = std.ArrayListUnmanaged(u32).empty;
         var my_st = std.ArrayListUnmanaged(u32).empty;
@@ -8547,9 +8587,12 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
 
         // Qualify: exactly 1 direct store, 0 whole loads, all AC results are only loaded, no non-load AC use
         if (direct_stores == 1 and whole_loads == 0 and !ac_non_load_use and member_reads.items.len > 0) {
-            // Dominance check: store must dominate all loads.
-            // Build a map from position -> block label by scanning for OpLabel instructions.
-            // Then verify that store and load positions are in the same block.
+            // Dominance check: the store must dominate every load it forwards to.
+            // Build a map from position -> block label by scanning for OpLabel instructions,
+            // verify that store and load positions are in the same block, and that each
+            // load comes AFTER the store (a load earlier in the block reads the
+            // pre-store contents, and forwarding there emits a use before the stored
+            // value's definition, #686).
             const store_block_id = blk: {
                 var bp: u32 = 5;
                 var cur: u32 = 0;
@@ -8568,6 +8611,7 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
             };
             var same_block = true;
             for (member_reads.items) |mr| {
+                var load_pos: u32 = 0;
                 const load_block_id = blk: {
                     var bp: u32 = 5;
                     var cur: u32 = 0;
@@ -8577,14 +8621,22 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
                         if (bwc == 0) break;
                         const bop: u16 = @truncate(bh & 0xFFFF);
                         if (bop == 248 and bwc >= 2) cur = words[bp + 1]; // OpLabel
-                        if (bop == 61 and bwc >= 4 and words[bp + 2] == mr.load_result) break :blk cur;
+                        if (bop == 61 and bwc >= 4 and words[bp + 2] == mr.load_result) {
+                            load_pos = bp;
+                            break :blk cur;
+                        }
                         const bie = bp + bwc;
                         if (bie > words.len) break;
                         bp = bie;
                     }
                     break :blk cur;
                 };
-                if (load_block_id != store_block_id) {
+                // The member load must sit in the store's block AND after the store:
+                // a load that precedes the store reads the variable's PRE-store
+                // contents, and rewriting it into an extract of the stored value
+                // binds it to an id defined later in the block (use-before-definition,
+                // #686 — the same ordering bug as constStoreForward's 1-store-1-load path).
+                if (load_block_id != store_block_id or load_pos < store_pos) {
                     same_block = false;
                     break;
                 }

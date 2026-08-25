@@ -16654,6 +16654,115 @@ test "hlsl: raymarcher with inlined-function loops has no use-before-declaration
     try assertNoUseBeforeDecl(out);
 }
 
+// ---------------------------------------------------------------------------
+// #686: same-arm read of a local before its assignment
+// ---------------------------------------------------------------------------
+
+// #686: reading a local inside the same conditional arm BEFORE the statement
+// that assigns it made the optimizer (constStoreForward's 1-store-1-load path)
+// forward the LATER store's value to the earlier load, emitting a use of an SSA
+// temp before its declaration (`float v28 = v30.x;` before `float2 v30 = ...;`).
+// DXC rejects the output with "use of undeclared identifier". The read before
+// any store must keep its own load (an OpLoad of a never-stored function
+// variable reads undef, which is what the GLSL source means), not adopt the
+// id a later store defines.
+test "hlsl: reading a local in the same arm before its assignment does not emit a use before declaration (#686)" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    vec2 warp;
+        \\    if (fc.x > 1.0) {
+        \\        float f = warp.x + fc.y;
+        \\        warp = fc.zw * 0.5;
+        \\        fragColor = vec4(f, warp, 1.0);
+        \\        return;
+        \\    }
+        \\    fragColor = vec4(0.0);
+        \\}
+    ;
+    const out = try compileToHlsl(source);
+    defer alloc.free(out);
+    try assertContains(out, "if (");
+    try assertNoUseBeforeDecl(out);
+}
+
+// #686 scalar form: same one-load-before-one-store pairing in a single arm, but
+// the local is a scalar (no swizzle extract in between), so the forwarded value
+// is used directly and the use-before-declaration lands on the bare temp.
+test "hlsl: scalar local read before its assignment keeps declaration order (#686)" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    float v;
+        \\    if (fc.x > 1.0) {
+        \\        float f = v + fc.y;
+        \\        v = fc.z * 0.5;
+        \\        fragColor = vec4(f, v, 1.0);
+        \\        return;
+        \\    }
+        \\    fragColor = vec4(0.0);
+        \\}
+    ;
+    const out = try compileToHlsl(source);
+    defer alloc.free(out);
+    try assertNoUseBeforeDecl(out);
+}
+
+// #686 boundary: when the store and the read sit in DIFFERENT arms of the same
+// selection, the load is not dominated by the store and must never adopt the
+// stored value (that would silently change the undef read into the arm's value).
+// This shape was already disqualified by the same-block check; locks it in.
+test "hlsl: read in one arm, assignment in the other arm stays a real load (#686)" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    vec2 warp;
+        \\    if (fc.x > 1.0) {
+        \\        warp = fc.zw * 0.5;
+        \\    } else {
+        \\        fragColor = vec4(warp, 0.0, 1.0);
+        \\        return;
+        \\    }
+        \\    fragColor = vec4(warp, 1.0);
+        \\}
+    ;
+    const out = try compileToHlsl(source);
+    defer alloc.free(out);
+    try assertNoUseBeforeDecl(out);
+}
+
+// #686 AccessChain variant: a struct member read before the whole-struct
+// assignment in the same arm. storeForwardExtract rewrote the member load into
+// an extract of the stored composite at the load's (earlier) position, so the
+// extract's base was declared after its use here too.
+test "hlsl: struct member read before its assignment keeps declaration order (#686)" {
+    const source =
+        \\#version 430
+        \\struct S { vec2 a; float b; };
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    S s;
+        \\    if (fc.x > 1.0) {
+        \\        float f = s.b + fc.y;
+        \\        s = S(fc.zw, 0.5);
+        \\        fragColor = vec4(f, s.a, 1.0);
+        \\        return;
+        \\    }
+        \\    fragColor = vec4(0.0);
+        \\}
+    ;
+    const out = try compileToHlsl(source);
+    defer alloc.free(out);
+    try assertNoUseBeforeDecl(out);
+}
+
 test "T417.LOOSE: loose non-block uniforms are gathered into cbuffer _Globals" {
     // #417: loose (non-block) uniforms have no HLSL bare-global equivalent, so
     // they are synthesized into a single `cbuffer _Globals`. Regression guard:
