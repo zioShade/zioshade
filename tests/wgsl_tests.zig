@@ -10797,6 +10797,144 @@ test "wgsl: early return then textureProj emits textureSampleLevel (8k2)" {
 }
 
 // ---------------------------------------------------------------------------
+// #685 (#wgsl-uniformity-8k2-derivatives): derivative builtins in non-uniform
+// control flow.
+//
+// WGSL gates dpdx/dpdy/fwidth and their Coarse/Fine variants on UNIFORM
+// CONTROL FLOW exactly as it gates textureSample, and unlike the sampling half
+// there is NO lowering available: WGSL has no explicit-derivative form to pin
+// the operands of (the sampling fix's textureSampleLevel(..., 0.0) trick has
+// no analog), so a derivative after flow diverges can only be emitted as the
+// gated builtin, which tint/naga reject and the consumer renders as nothing.
+// The uniformity prepass already computes the flow verdict, so the fix is the
+// honest error: refuse, naming the construct and the hoist workaround.
+//
+// The refusal tests assert the ERROR (and its detail text); the keep tests
+// below pin the other direction and run BOTH local oracles, since tint is the
+// one that actually runs WGSL's uniformity analysis (a text-only "keep" assert
+// would pass on output tint rejects, which IS the bug).
+// ---------------------------------------------------------------------------
+
+test "wgsl: dpdx after an early return refuses (685)" {
+    const spv = try compileToSpirv("nonuniform_dpdx",
+        \\#version 450
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = vec4(dFdx(vUV.x), 0.0, 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spv);
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        // If this fires, the refusal is gone and the emitted dpdx is back to
+        // being a tint reject (a black shader in the browser).
+        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(error.UnsupportedNonuniformDerivative, e);
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try std.testing.expect(std.mem.indexOf(u8, detail, "uniform control flow") != null);
+        try std.testing.expect(std.mem.indexOf(u8, detail, "hoist the derivative") != null);
+    }
+}
+
+test "wgsl: fwidth under a conditional return refuses (685)" {
+    // Same non-uniform shape, different family member: only a subset of the
+    // invocations that entered main reaches the fwidth, so the builtin is gated.
+    const spv = try compileToSpirv("nonuniform_fwidth",
+        \\#version 450
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.y > 1.0) { fragColor = vec4(0.0); return; }
+        \\    fragColor = vec4(fwidth(vUV.x), 0.0, 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spv);
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(error.UnsupportedNonuniformDerivative, e);
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try std.testing.expect(std.mem.indexOf(u8, detail, "uniform control flow") != null);
+    }
+}
+
+test "wgsl: derivative inside a helper called from non-uniform flow refuses (685)" {
+    // The interprocedural rule: a helper's ENTRY flow is the flow of its call
+    // sites, so a derivative in a helper body is gated when the only call site
+    // sits inside a diverged branch (the same rule tint applies to
+    // textureSample in a helper, probe p11/p12 of the 8k2 prepass). The helper
+    // body is deliberately MULTI-BLOCK: a single-block helper is frontend-
+    // inlined before the prepass runs, so the call edge would never exist.
+    const spv = try compileToSpirv("nonuniform_deriv_helper",
+        \\#version 450
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\float der(float x) { float r = dFdx(x); if (x > 1.0) { r = dFdy(x); } return r; }
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (vUV.x < 0.0) { fragColor = vec4(der(vUV.x), 0.0, 0.0, 1.0); }
+        \\}
+    );
+    defer alloc.free(spv);
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(error.UnsupportedNonuniformDerivative, e);
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try std.testing.expect(std.mem.indexOf(u8, detail, "uniform control flow") != null);
+    }
+}
+
+test "wgsl: straight-line dpdx keeps emitting dpdx (685 control)" {
+    const spv = try compileToSpirv("uniform_dpdx",
+        \\#version 450
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){ fragColor = vec4(dFdx(vUV.x), 0.0, 0.0, 1.0); }
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    // Refusing HERE would be a false positive: flow never diverged, so the
+    // builtin is exactly what WGSL wants.
+    try assertContains(wgsl, "dpdx(");
+    try nagaValidateOrSkip(wgsl, "685-uniform-dpdx");
+    try tintValidateOrSkip(wgsl, "685-uniform-dpdx");
+}
+
+test "wgsl: dpdx after a reconverged if keeps emitting dpdx (685)" {
+    // Both arms fall through to the merge: every invocation that entered the
+    // if reaches the derivative, so the flow RECONVERGES and the builtin stays
+    // (the same rule that keeps textureSample after a completing if, probe p10).
+    const spv = try compileToSpirv("reconverged_dpdx",
+        \\#version 450
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    float x = vUV.x;
+        \\    if (vUV.x < 0.0) { x = vUV.y; }
+        \\    fragColor = vec4(dFdx(x), 0.0, 0.0, 1.0);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "dpdx(");
+    try nagaValidateOrSkip(wgsl, "685-reconverged-dpdx");
+    try tintValidateOrSkip(wgsl, "685-reconverged-dpdx");
+}
+
+// ---------------------------------------------------------------------------
 // zioshade-8k2 review follow-ups. Every test below was watched RED on the
 // pre-fix tree where it pins a bug, and each downgraded/kept form is checked
 // against BOTH local oracles (naga and tint); tint is the one that actually

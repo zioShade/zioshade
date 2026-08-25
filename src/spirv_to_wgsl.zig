@@ -379,6 +379,26 @@ fn recordUnsupportedNestedSwitchInSwitchCase() error{UnsupportedNestedSwitchInSw
     return error.UnsupportedNestedSwitchInSwitchCase;
 }
 
+/// Record the detail for a derivative builtin that sits in non-uniform control
+/// flow, then return the honest error. (#685, #wgsl-uniformity-8k2-derivatives)
+///
+/// WGSL gates dpdx/dpdy/fwidth and their Coarse/Fine variants on uniform
+/// control flow exactly like the implicit-Lod sampling builtins (tint: "'dpdx'
+/// must only be called from uniform control flow"), and unlike sampling there
+/// is NO lowering: WGSL has no explicit-derivative form to pin the operands of
+/// (no analog of the textureSampleLevel(..., 0.0) downgrade), so the only
+/// emittable spelling is the gated builtin and the consumer rejects the whole
+/// module, rendering nothing. Emitting it anyway was the black-shader failure
+/// mode this class caused; refuse loud instead, naming the hoist workaround.
+fn recordUnsupportedNonuniformDerivative() error{UnsupportedNonuniformDerivative} {
+    last_error_detail = std.fmt.bufPrint(
+        &last_error_detail_buf,
+        "a derivative (dpdx/dpdy/fwidth, Coarse/Fine included) is called after control flow has diverged; WGSL gates derivatives on uniform control flow like implicit-Lod sampling and has no explicit-derivative form to lower to, so the consumer rejects the shader (a black render). Workaround: hoist the derivative above the branch, or compute it unconditionally and select the result",
+        .{},
+    ) catch null;
+    return error.UnsupportedNonuniformDerivative;
+}
+
 /// Single source of truth: zioshade's internal GLSL.std.450 opcode number → WGSL
 /// builtin name. Used by BOTH the main emit path and the loop-replay path so the
 /// two cannot drift (they previously had divergent inline switches — the replay
@@ -1376,86 +1396,86 @@ fn emitDepthCompare(
 // which is what the GL_EXT_buffer_reference fixture trips over.
 const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     // Keywords (§ Keyword Summary)
-    .{ "alias", {} },                        .{ "break", {} },                         .{ "case", {} },
-    .{ "const", {} },                        .{ "const_assert", {} },                  .{ "continue", {} },
-    .{ "continuing", {} },                   .{ "default", {} },                       .{ "diagnostic", {} },
-    .{ "discard", {} },                      .{ "else", {} },                          .{ "enable", {} },
-    .{ "false", {} },                        .{ "fn", {} },                            .{ "for", {} },
-    .{ "if", {} },                           .{ "let", {} },                           .{ "loop", {} },
-    .{ "override", {} },                     .{ "requires", {} },                      .{ "return", {} },
-    .{ "struct", {} },                       .{ "switch", {} },                        .{ "true", {} },
-    .{ "var", {} },                          .{ "while", {} },
+    .{ "alias", {} },                    .{ "break", {} },                         .{ "case", {} },
+    .{ "const", {} },                    .{ "const_assert", {} },                  .{ "continue", {} },
+    .{ "continuing", {} },               .{ "default", {} },                       .{ "diagnostic", {} },
+    .{ "discard", {} },                  .{ "else", {} },                          .{ "enable", {} },
+    .{ "false", {} },                    .{ "fn", {} },                            .{ "for", {} },
+    .{ "if", {} },                       .{ "let", {} },                           .{ "loop", {} },
+    .{ "override", {} },                 .{ "requires", {} },                      .{ "return", {} },
+    .{ "struct", {} },                   .{ "switch", {} },                        .{ "true", {} },
+    .{ "var", {} },                      .{ "while", {} },
     // Reserved words (§ Reserved Words)
                             .{ "NULL", {} },
-    .{ "Self", {} },                         .{ "abstract", {} },                      .{ "active", {} },
-    .{ "alignas", {} },                      .{ "alignof", {} },                       .{ "as", {} },
-    .{ "asm", {} },                          .{ "asm_fragment", {} },                  .{ "async", {} },
-    .{ "attribute", {} },                    .{ "auto", {} },                          .{ "await", {} },
-    .{ "become", {} },                       .{ "binding_array", {} },                 .{ "cast", {} },
-    .{ "catch", {} },                        .{ "class", {} },                         .{ "co_await", {} },
-    .{ "co_return", {} },                    .{ "co_yield", {} },                      .{ "coherent", {} },
-    .{ "column_major", {} },                 .{ "common", {} },                        .{ "compile", {} },
-    .{ "compile_fragment", {} },             .{ "concept", {} },                       .{ "const_cast", {} },
-    .{ "consteval", {} },                    .{ "constexpr", {} },                     .{ "constinit", {} },
-    .{ "crate", {} },                        .{ "debugger", {} },                      .{ "decltype", {} },
-    .{ "delete", {} },                       .{ "demote", {} },                        .{ "demote_to_helper", {} },
-    .{ "do", {} },                           .{ "dynamic_cast", {} },                  .{ "enum", {} },
-    .{ "explicit", {} },                     .{ "export", {} },                        .{ "extends", {} },
-    .{ "extern", {} },                       .{ "external", {} },                      .{ "fallthrough", {} },
-    .{ "filter", {} },                       .{ "final", {} },                         .{ "finally", {} },
-    .{ "friend", {} },                       .{ "from", {} },                          .{ "fxgroup", {} },
-    .{ "get", {} },                          .{ "goto", {} },                          .{ "groupshared", {} },
-    .{ "highp", {} },                        .{ "impl", {} },                          .{ "implements", {} },
-    .{ "import", {} },                       .{ "inline", {} },                        .{ "instanceof", {} },
-    .{ "interface", {} },                    .{ "layout", {} },                        .{ "lowp", {} },
-    .{ "macro", {} },                        .{ "macro_rules", {} },                   .{ "match", {} },
-    .{ "mediump", {} },                      .{ "meta", {} },                          .{ "mod", {} },
-    .{ "module", {} },                       .{ "move", {} },                          .{ "mut", {} },
-    .{ "mutable", {} },                      .{ "namespace", {} },                     .{ "new", {} },
-    .{ "nil", {} },                          .{ "noexcept", {} },                      .{ "noinline", {} },
-    .{ "nointerpolation", {} },              .{ "non_coherent", {} },                  .{ "noncoherent", {} },
-    .{ "noperspective", {} },                .{ "null", {} },                          .{ "nullptr", {} },
-    .{ "of", {} },                           .{ "operator", {} },                      .{ "package", {} },
-    .{ "packoffset", {} },                   .{ "partition", {} },                     .{ "pass", {} },
-    .{ "patch", {} },                        .{ "pixelfragment", {} },                 .{ "precise", {} },
-    .{ "precision", {} },                    .{ "premerge", {} },                      .{ "priv", {} },
-    .{ "protected", {} },                    .{ "pub", {} },                           .{ "public", {} },
-    .{ "readonly", {} },                     .{ "ref", {} },                           .{ "regardless", {} },
-    .{ "register", {} },                     .{ "reinterpret_cast", {} },              .{ "require", {} },
-    .{ "resource", {} },                     .{ "restrict", {} },                      .{ "self", {} },
-    .{ "set", {} },                          .{ "shared", {} },                        .{ "sizeof", {} },
-    .{ "smooth", {} },                       .{ "snorm", {} },                         .{ "static", {} },
-    .{ "static_assert", {} },                .{ "static_cast", {} },                   .{ "std", {} },
-    .{ "subroutine", {} },                   .{ "super", {} },                         .{ "target", {} },
-    .{ "template", {} },                     .{ "this", {} },                          .{ "thread_local", {} },
-    .{ "throw", {} },                        .{ "trait", {} },                         .{ "try", {} },
-    .{ "type", {} },                         .{ "typedef", {} },                       .{ "typeid", {} },
-    .{ "typename", {} },                     .{ "typeof", {} },                        .{ "union", {} },
-    .{ "unless", {} },                       .{ "unorm", {} },                         .{ "unsafe", {} },
-    .{ "unsized", {} },                      .{ "use", {} },                           .{ "using", {} },
-    .{ "varying", {} },                      .{ "virtual", {} },                       .{ "volatile", {} },
-    .{ "wgsl", {} },                         .{ "where", {} },                         .{ "with", {} },
-    .{ "writeonly", {} },                    .{ "yield", {} },
+    .{ "Self", {} },                     .{ "abstract", {} },                      .{ "active", {} },
+    .{ "alignas", {} },                  .{ "alignof", {} },                       .{ "as", {} },
+    .{ "asm", {} },                      .{ "asm_fragment", {} },                  .{ "async", {} },
+    .{ "attribute", {} },                .{ "auto", {} },                          .{ "await", {} },
+    .{ "become", {} },                   .{ "binding_array", {} },                 .{ "cast", {} },
+    .{ "catch", {} },                    .{ "class", {} },                         .{ "co_await", {} },
+    .{ "co_return", {} },                .{ "co_yield", {} },                      .{ "coherent", {} },
+    .{ "column_major", {} },             .{ "common", {} },                        .{ "compile", {} },
+    .{ "compile_fragment", {} },         .{ "concept", {} },                       .{ "const_cast", {} },
+    .{ "consteval", {} },                .{ "constexpr", {} },                     .{ "constinit", {} },
+    .{ "crate", {} },                    .{ "debugger", {} },                      .{ "decltype", {} },
+    .{ "delete", {} },                   .{ "demote", {} },                        .{ "demote_to_helper", {} },
+    .{ "do", {} },                       .{ "dynamic_cast", {} },                  .{ "enum", {} },
+    .{ "explicit", {} },                 .{ "export", {} },                        .{ "extends", {} },
+    .{ "extern", {} },                   .{ "external", {} },                      .{ "fallthrough", {} },
+    .{ "filter", {} },                   .{ "final", {} },                         .{ "finally", {} },
+    .{ "friend", {} },                   .{ "from", {} },                          .{ "fxgroup", {} },
+    .{ "get", {} },                      .{ "goto", {} },                          .{ "groupshared", {} },
+    .{ "highp", {} },                    .{ "impl", {} },                          .{ "implements", {} },
+    .{ "import", {} },                   .{ "inline", {} },                        .{ "instanceof", {} },
+    .{ "interface", {} },                .{ "layout", {} },                        .{ "lowp", {} },
+    .{ "macro", {} },                    .{ "macro_rules", {} },                   .{ "match", {} },
+    .{ "mediump", {} },                  .{ "meta", {} },                          .{ "mod", {} },
+    .{ "module", {} },                   .{ "move", {} },                          .{ "mut", {} },
+    .{ "mutable", {} },                  .{ "namespace", {} },                     .{ "new", {} },
+    .{ "nil", {} },                      .{ "noexcept", {} },                      .{ "noinline", {} },
+    .{ "nointerpolation", {} },          .{ "non_coherent", {} },                  .{ "noncoherent", {} },
+    .{ "noperspective", {} },            .{ "null", {} },                          .{ "nullptr", {} },
+    .{ "of", {} },                       .{ "operator", {} },                      .{ "package", {} },
+    .{ "packoffset", {} },               .{ "partition", {} },                     .{ "pass", {} },
+    .{ "patch", {} },                    .{ "pixelfragment", {} },                 .{ "precise", {} },
+    .{ "precision", {} },                .{ "premerge", {} },                      .{ "priv", {} },
+    .{ "protected", {} },                .{ "pub", {} },                           .{ "public", {} },
+    .{ "readonly", {} },                 .{ "ref", {} },                           .{ "regardless", {} },
+    .{ "register", {} },                 .{ "reinterpret_cast", {} },              .{ "require", {} },
+    .{ "resource", {} },                 .{ "restrict", {} },                      .{ "self", {} },
+    .{ "set", {} },                      .{ "shared", {} },                        .{ "sizeof", {} },
+    .{ "smooth", {} },                   .{ "snorm", {} },                         .{ "static", {} },
+    .{ "static_assert", {} },            .{ "static_cast", {} },                   .{ "std", {} },
+    .{ "subroutine", {} },               .{ "super", {} },                         .{ "target", {} },
+    .{ "template", {} },                 .{ "this", {} },                          .{ "thread_local", {} },
+    .{ "throw", {} },                    .{ "trait", {} },                         .{ "try", {} },
+    .{ "type", {} },                     .{ "typedef", {} },                       .{ "typeid", {} },
+    .{ "typename", {} },                 .{ "typeof", {} },                        .{ "union", {} },
+    .{ "unless", {} },                   .{ "unorm", {} },                         .{ "unsafe", {} },
+    .{ "unsized", {} },                  .{ "use", {} },                           .{ "using", {} },
+    .{ "varying", {} },                  .{ "virtual", {} },                       .{ "volatile", {} },
+    .{ "wgsl", {} },                     .{ "where", {} },                         .{ "with", {} },
+    .{ "writeonly", {} },                .{ "yield", {} },
     // Predeclared scalar / address-space / type names that are also illegal
     // as identifiers — kept from the previous (pre-spec) list for back-compat.
                             .{ "array", {} },
-    .{ "atomic", {} },                       .{ "bool", {} },                          .{ "f16", {} },
-    .{ "f32", {} },                          .{ "function", {} },                      .{ "i32", {} },
-    .{ "mat2x2", {} },                       .{ "mat2x3", {} },                        .{ "mat2x4", {} },
-    .{ "mat3x2", {} },                       .{ "mat3x3", {} },                        .{ "mat3x4", {} },
-    .{ "mat4x2", {} },                       .{ "mat4x3", {} },                        .{ "mat4x4", {} },
-    .{ "private", {} },                      .{ "ptr", {} },                           .{ "storage", {} },
-    .{ "u32", {} },                          .{ "uniform", {} },                       .{ "vec2", {} },
-    .{ "vec3", {} },                         .{ "vec4", {} },                          .{ "workgroup", {} },
+    .{ "atomic", {} },                   .{ "bool", {} },                          .{ "f16", {} },
+    .{ "f32", {} },                      .{ "function", {} },                      .{ "i32", {} },
+    .{ "mat2x2", {} },                   .{ "mat2x3", {} },                        .{ "mat2x4", {} },
+    .{ "mat3x2", {} },                   .{ "mat3x3", {} },                        .{ "mat3x4", {} },
+    .{ "mat4x2", {} },                   .{ "mat4x3", {} },                        .{ "mat4x4", {} },
+    .{ "private", {} },                  .{ "ptr", {} },                           .{ "storage", {} },
+    .{ "u32", {} },                      .{ "uniform", {} },                       .{ "vec2", {} },
+    .{ "vec3", {} },                     .{ "vec4", {} },                          .{ "workgroup", {} },
     // Predeclared texture / sampler types (§ Texture Types, § Sampler Types).
     // Not strictly reserved by the spec, but shadowing them produces output
     // that confuses naga's diagnostics and may break under future revisions.
-    .{ "sampler", {} },                      .{ "sampler_comparison", {} },            .{ "texture_1d", {} },
-    .{ "texture_2d", {} },                   .{ "texture_2d_array", {} },              .{ "texture_3d", {} },
-    .{ "texture_cube", {} },                 .{ "texture_cube_array", {} },            .{ "texture_multisampled_2d", {} },
-    .{ "texture_depth_2d", {} },             .{ "texture_depth_2d_array", {} },        .{ "texture_depth_cube", {} },
-    .{ "texture_depth_cube_array", {} },     .{ "texture_depth_multisampled_2d", {} }, .{ "texture_storage_1d", {} },
-    .{ "texture_storage_2d", {} },           .{ "texture_storage_2d_array", {} },      .{ "texture_storage_3d", {} },
+    .{ "sampler", {} },                  .{ "sampler_comparison", {} },            .{ "texture_1d", {} },
+    .{ "texture_2d", {} },               .{ "texture_2d_array", {} },              .{ "texture_3d", {} },
+    .{ "texture_cube", {} },             .{ "texture_cube_array", {} },            .{ "texture_multisampled_2d", {} },
+    .{ "texture_depth_2d", {} },         .{ "texture_depth_2d_array", {} },        .{ "texture_depth_cube", {} },
+    .{ "texture_depth_cube_array", {} }, .{ "texture_depth_multisampled_2d", {} }, .{ "texture_storage_1d", {} },
+    .{ "texture_storage_2d", {} },       .{ "texture_storage_2d_array", {} },      .{ "texture_storage_3d", {} },
     .{ "texture_external", {} },
     // Predeclared builtin FUNCTION names that zioshade EMITS as calls AND that are
     // ALSO legal GLSL identifiers — i.e. WGSL builtins whose GLSL counterpart has
@@ -1469,15 +1489,19 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     // colliding user identifier (→ `name_`) leaves the call intact. (Most other
     // WGSL builtins — min/max/dot/mix/… — are ALSO GLSL builtins, so they can't
     // be GLSL identifiers and need no entry.) (#170)
-                .{ "bitcast", {} },                       .{ "select", {} },
-    .{ "dpdx", {} },                         .{ "dpdy", {} },                          .{ "dpdxCoarse", {} },
-    .{ "dpdxFine", {} },                     .{ "dpdyCoarse", {} },                    .{ "dpdyFine", {} },
-    .{ "quantizeToF16", {} },                .{ "arrayLength", {} },                   .{ "countOneBits", {} },
-    .{ "reverseBits", {} },                  .{ "extractBits", {} },                   .{ "insertBits", {} },
-    .{ "firstLeadingBit", {} },              .{ "firstTrailingBit", {} },              .{ "pack2x16float", {} },
-    .{ "pack2x16snorm", {} },                .{ "pack2x16unorm", {} },                 .{ "pack4x8snorm", {} },
-    .{ "pack4x8unorm", {} },                 .{ "unpack2x16float", {} },               .{ "unpack2x16snorm", {} },
-    .{ "unpack2x16unorm", {} },              .{ "unpack4x8snorm", {} },                .{ "unpack4x8unorm", {} },
+            .{ "bitcast", {} },                       .{ "select", {} },
+    .{ "dpdx", {} },                     .{ "dpdy", {} },                          .{ "dpdxCoarse", {} },
+    .{ "dpdxFine", {} },                 .{ "dpdyCoarse", {} },                    .{ "dpdyFine", {} },
+    // fwidth's Fine/Coarse variants are NOT GLSL builtins, so a GLSL local may
+    // legally hold those names and shadow the emitted builtin (#685 review).
+    // Plain fwidth IS a GLSL builtin and needs no entry.
+    .{ "fwidthCoarse", {} },             .{ "fwidthFine", {} },                    .{ "quantizeToF16", {} },
+    .{ "arrayLength", {} },              .{ "countOneBits", {} },                  .{ "reverseBits", {} },
+    .{ "extractBits", {} },              .{ "insertBits", {} },                    .{ "firstLeadingBit", {} },
+    .{ "firstTrailingBit", {} },         .{ "pack2x16float", {} },                 .{ "pack2x16snorm", {} },
+    .{ "pack2x16unorm", {} },            .{ "pack4x8snorm", {} },                  .{ "pack4x8unorm", {} },
+    .{ "unpack2x16float", {} },          .{ "unpack2x16snorm", {} },               .{ "unpack2x16unorm", {} },
+    .{ "unpack4x8snorm", {} },           .{ "unpack4x8unorm", {} },
     // WGSL texture builtin functions. Their GLSL counterparts have DIFFERENT
     // names (texture→textureSample, texelFetch→textureLoad, textureSize→
     // textureDimensions, imageStore→textureStore, textureQueryLevels→
@@ -1488,11 +1512,12 @@ const wgsl_reserved_words = std.StaticStringMap(void).initComptime(.{
     // textureSampleBias / textureSampleBaseClampToEdge are reserved PROACTIVELY —
     // zioshade does not emit them yet (the ImageSample Bias/MinLod operands are not
     // currently lowered), but reserving a real WGSL builtin name is always safe. (#170)
-    .{ "textureSample", {} },                .{ "textureSampleBias", {} },             .{ "textureSampleLevel", {} },
-    .{ "textureSampleGrad", {} },            .{ "textureSampleCompare", {} },          .{ "textureSampleCompareLevel", {} },
-    .{ "textureSampleBaseClampToEdge", {} }, .{ "textureGather", {} },                 .{ "textureGatherCompare", {} },
-    .{ "textureLoad", {} },                  .{ "textureStore", {} },                  .{ "textureDimensions", {} },
-    .{ "textureNumLayers", {} },             .{ "textureNumLevels", {} },              .{ "textureNumSamples", {} },
+                   .{ "textureSample", {} },
+    .{ "textureSampleBias", {} },        .{ "textureSampleLevel", {} },            .{ "textureSampleGrad", {} },
+    .{ "textureSampleCompare", {} },     .{ "textureSampleCompareLevel", {} },     .{ "textureSampleBaseClampToEdge", {} },
+    .{ "textureGather", {} },            .{ "textureGatherCompare", {} },          .{ "textureLoad", {} },
+    .{ "textureStore", {} },             .{ "textureDimensions", {} },             .{ "textureNumLayers", {} },
+    .{ "textureNumLevels", {} },         .{ "textureNumSamples", {} },
 });
 
 fn isWgslKeyword(name: []const u8) bool {
@@ -4741,11 +4766,14 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     var atomic_vars = std.AutoHashMap(u32, void).init(arena);
     collectAtomicVars(&module, &atomic_vars) catch {};
 
-    // #wgsl-uniformity-8k2: the result ids of every implicit-Lod sample that
-    // sits in non-uniform control flow (see computeNonuniformImplicitLodSamples).
-    // The emitter lowers exactly these to textureSampleLevel(..., 0.0) /
-    // textureSampleCompareLevel so tint/Dawn cannot reject the module.
-    const nonuniform_implicit = try computeNonuniformImplicitLodSamples(arena, &module, &decorations);
+    // #wgsl-uniformity-8k2: the result ids of every uniformity-gated builtin
+    // that sits in non-uniform control flow (see
+    // computeNonuniformGatedBuiltinIds): the implicit-Lod samples AND, since
+    // #685, the derivative opcodes. The emitter lowers exactly the marked
+    // samples to textureSampleLevel(..., 0.0) / textureSampleCompareLevel so
+    // tint/Dawn cannot reject the module, and REFUSES exactly the marked
+    // derivatives (a derivative has no lowered form to downgrade to).
+    const nonuniform_gated = try computeNonuniformGatedBuiltinIds(arena, &module, &decorations);
 
     // #170: an SSBO that is an ARRAY of blocks whose struct holds a runtime-sized
     // array (`buffer SSBO { vec4 data[]; } ssbos[2];`) has no core-WGSL form —
@@ -5632,7 +5660,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
         }
 
         const inout_ret_name: ?[]const u8 = if (!use_ptr_inout and has_pointer_params and inout_params.items.len == 1 and std.mem.eql(u8, ret_type, "void")) inout_params.items[0].local_name else null;
-        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, &nonuniform_implicit, .none, subpass_fragcoord_name, null, null);
+        try emitBody(&module, &names, &decorations, fidx, w, alloc, arena, inout_ret_name, null, null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, &nonuniform_gated, .none, subpass_fragcoord_name, null, null);
 
         try w.writeAll("}\n\n");
     }
@@ -6518,7 +6546,7 @@ pub fn spirvToWGSL(alloc: std.mem.Allocator, spirv_words_in: []const u32, option
     };
 
     // Emit function body
-    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, &nonuniform_implicit, early_return_mode, subpass_fragcoord_name, null, null);
+    try emitBody(&module, &names, &decorations, entry_func_idx.?, w, alloc, arena, null, if (skip_output_var_decl) output_var_id else null, if (mrt_skip_set.count() > 0) &mrt_skip_set else null, &wrapped_uniform_arrays, &wrapped_uniform_members, &matrix_outputs, &atomic_vars, &atomic_fields, &nonuniform_gated, early_return_mode, subpass_fragcoord_name, null, null);
 
     // Re-resolve the direct-return value AFTER emitBody: a passthrough store
     // (`o = x`, or `o = -(-x)` after double-negate folding) feeds an OpLoad
@@ -6943,7 +6971,8 @@ const RangeCtx = struct {
 const max_region_depth: u32 = 256;
 
 // ─────────────────────────────────────────────────────────────────────────
-// #wgsl-uniformity-8k2: which implicit-Lod samples sit in non-uniform flow
+// #wgsl-uniformity-8k2: which implicit-Lod samples (and, since #685, which
+// derivative instructions) sit in non-uniform flow
 //
 // WGSL gates the implicit-Lod sampling builtins (textureSample,
 // textureSampleBias, textureSampleCompare and the proj-lowered forms of the
@@ -7050,14 +7079,21 @@ const max_region_depth: u32 = 256;
 //     phi of the returned values would stay uniform). Functions on a
 //     call-graph cycle keep the pre-#684 verdict outright: their result is
 //     never called uniform.
-// And one gap in the UNSAFE direction is knowingly OUT OF SCOPE here
-// (#wgsl-uniformity-8k2-derivatives): WGSL gates the DERIVATIVE builtins
-// (dpdx/dpdxCoarse/dpdxFine and the dpdy/fwidth families, emitted further down
-// this file) on uniform control flow exactly as it gates textureSample, and
-// this prepass neither analyses nor lowers them. A shader that takes a
-// derivative after flow diverges still renders black in the browser. There is
-// no level-pin trick to fall back on for a derivative, so closing that half
-// needs its own design; it is not covered by anything below.
+//
+// The DERIVATIVE half of the same WGSL rule was once a knowingly-open gap in
+// the UNSAFE direction here and is IN SCOPE since #685
+// (#wgsl-uniformity-8k2-derivatives): WGSL gates dpdx/dpdxCoarse/dpdxFine and
+// the dpdy/fwidth families on uniform control flow exactly as it gates
+// textureSample, so this prepass ALSO marks the nine derivative opcodes that
+// sit in non-uniform flow, on the same flow verdict the samples use. But
+// where a marked sample is LOWERED (the explicit-Level pin), a marked
+// derivative is REFUSED at emission: WGSL has no explicit-derivative form to
+// pin anything to, so there is no downgrade path and the honest error naming
+// the hoist workaround is the only correct move (see
+// recordUnsupportedNonuniformDerivative and the derivative arms in emitBody).
+// Both imprecisions listed above still apply to that marking in the SAFE
+// direction: a wrongly-marked derivative refuses a shader tint would have
+// accepted, never the reverse.
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Terminator classification for one CFG block of the uniformity walk.
@@ -7085,7 +7121,9 @@ const UniBlock = struct {
 const UniCall = struct { callee: u32, block: usize, args: []const u32 };
 
 /// One implicit-Lod sample instruction: its result id (the key the emitter
-/// consults) and the block it sits in.
+/// consults) and the block it sits in. The same record shape carries the
+/// DERIVATIVE instructions (see UniFunc.derivatives): result id plus block is
+/// all either consumer needs.
 const UniSample = struct { result: u32, block: usize };
 
 /// One OpStore into a function/output-scope variable: what was stored, and
@@ -7139,6 +7177,9 @@ const UniFunc = struct {
     calls: []const UniCall,
     samples: []const UniSample,
     returns: []const UniReturn,
+    /// the derivative instructions of this function (#685): unlike samples
+    /// they have no uniformity-safe lowered form, so the emitter REFUSES them
+    derivatives: []const UniSample,
     is_entry_point: bool,
     /// fixpoint variables: only ever move DOWN from true
     entry_flow: bool = true,
@@ -7275,6 +7316,7 @@ const UniformityAnalysis = struct {
             var calls = std.ArrayListUnmanaged(UniCall).empty;
             var samples = std.ArrayListUnmanaged(UniSample).empty;
             var returns = std.ArrayListUnmanaged(UniReturn).empty;
+            var derivs = std.ArrayListUnmanaged(UniSample).empty;
             var loops = std.ArrayListUnmanaged(UniLoop).empty;
             var cur_block: usize = 0;
             var j: usize = i + 1;
@@ -7392,6 +7434,20 @@ const UniformityAnalysis = struct {
                             try samples.append(a.arena, .{ .result = inst.words[2], .block = cur_block });
                         }
                     },
+                    // #685: the derivative builtins are gated on uniform
+                    // control flow by the same WGSL rule, and they have no
+                    // lowered form, so a non-uniform one is REFUSED at
+                    // emission rather than downgraded. Collected here so the
+                    // fixpoint's flow verdict (including the interprocedural
+                    // call-site rule) can mark them exactly as it marks
+                    // samples. The list is every derivative opcode there is
+                    // (spec 207-215: plain/Fine/Coarse dpdx, dpdy, fwidth;
+                    // all named in spirv.Op, so no raw numeric gap applies).
+                    .DPdx, .DPdy, .Fwidth, .DPdxFine, .DPdyFine, .FwidthFine, .DPdxCoarse, .DPdyCoarse, .FwidthCoarse => {
+                        if (inst.words.len > 2) {
+                            try derivs.append(a.arena, .{ .result = inst.words[2], .block = cur_block });
+                        }
+                    },
                     else => {
                         // OpTerminateInvocation is SPIR-V 1.6's OpKill: a
                         // DISCARD-LIKE block terminator. spirv.Op does not name
@@ -7498,6 +7554,7 @@ const UniformityAnalysis = struct {
                 .calls = calls.items,
                 .samples = samples.items,
                 .returns = returns.items,
+                .derivatives = derivs.items,
                 .is_entry_point = func_id == a.module.entry_point_id,
                 .entry_flow = true,
                 .param_uniform = param_uni,
@@ -8069,10 +8126,13 @@ fn packParamKey(fi: usize, pi: usize) u64 {
 /// blocks all exist.
 const UniLoopMerge = struct { merge: u32, cont: u32 };
 
-/// Compute the set of implicit-Lod sample RESULT ids that sit in non-uniform
-/// control flow in the generated WGSL, so the emitter can lower exactly those
-/// to the uniformity-safe explicit-Level forms. Empty (not an error) for the
-/// common module with no such sample.
+/// Compute the set of RESULT ids of the UNIFORMITY-GATED builtins (the
+/// implicit-Lod samples AND, since #685, the nine derivative opcodes) that sit
+/// in non-uniform control flow in the generated WGSL. The emitter consults the
+/// map at each gated builtin: a marked sample is LOWERED to the uniformity-safe
+/// explicit-Level form, a marked derivative is REFUSED (there is no lowered
+/// form for one; see recordUnsupportedNonuniformDerivative). Empty (not an
+/// error) for the common module with neither.
 ///
 /// The error set is written out rather than inferred. This function introduced
 /// a NEW error name into a file whose call chain is inferred end to end, and an
@@ -8080,7 +8140,7 @@ const UniLoopMerge = struct { merge: u32, cont: u32 };
 /// what makes adding another one a visible, reviewable change (and what pins
 /// `UniformityAnalysisDidNotConverge` as the ONLY non-OOM failure this prepass
 /// can produce, which is what the cli.zig detail gate relies on).
-fn computeNonuniformImplicitLodSamples(
+fn computeNonuniformGatedBuiltinIds(
     arena: std.mem.Allocator,
     module: *const ParsedModule,
     decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
@@ -8239,11 +8299,19 @@ fn computeNonuniformImplicitLodSamples(
         for (uf.samples) |s| {
             if (!uf.blocks[s.block].flow) try out.put(s.result, {});
         }
+        // #685: same verdict, different consumer decision. A derivative in
+        // non-uniform flow has no lowered form (WGSL offers no
+        // explicit-derivative spelling to pin anything to), so its result id
+        // goes into the SAME map and the derivative arms of the emitter
+        // refuse on it rather than downgrade.
+        for (uf.derivatives) |d| {
+            if (!uf.blocks[d.block].flow) try out.put(d.result, {});
+        }
     }
     return out;
 }
 
-fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, nonuniform_implicit: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx, range: ?RangeCtx) !void {
+fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), func_idx: usize, w_out: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, inout_return: ?[]const u8, skip_store_target: ?u32, skip_store_targets: ?*const std.AutoHashMap(u32, void), wrapped_uniform_arrays: *const std.AutoHashMap(u32, void), wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), atomic_vars: *const std.AutoHashMap(u32, void), atomic_fields: *const AtomicFieldMap, nonuniform_gated: *const std.AutoHashMap(u32, void), early_return: EarlyReturnMode, subpass_fragcoord_name: ?[]const u8, walk: ?*WalkCtx, range: ?RangeCtx) !void {
     if (range) |r| {
         if (r.depth >= max_region_depth) return error.UnsupportedRegionDepth;
     }
@@ -9538,7 +9606,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                 const lhdr = labelIsLoopHeader(module, btgt) orelse break :blk_region;
                                                 try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                                                 const region_depth: u32 = if (range) |rr| rr.depth else 0;
-                                                try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, nonuniform_implicit, early_return, subpass_fragcoord_name, ctx, .{
+                                                try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, nonuniform_gated, early_return, subpass_fragcoord_name, ctx, .{
                                                     .start_idx = lhdr + 1,
                                                     .stop_label = merge_label,
                                                     .indent = body_ind,
@@ -9570,7 +9638,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                         while (ti < module.instructions.len) : (ti += 1) {
                                                             const tinst = module.instructions[ti];
                                                             if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
-                                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_gated);
                                                         }
                                                         // The arm's terminator was skipped by the loop above. When it branches
                                                         // to the SWITCH's merge it is a `break` out of the switch, and dropping
@@ -9593,7 +9661,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                             while (fi < module.instructions.len) : (fi += 1) {
                                                                 const finst = module.instructions[fi];
                                                                 if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
-                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_gated);
                                                             }
                                                             try emitSwitchArmTerminator(module, fi, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                             break;
@@ -9616,7 +9684,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                             continue;
                                         }
                                         if (dinst.op == .Switch) break;
-                                        try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                        try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs, nonuniform_gated);
                                     }
                                     break;
                                 }
@@ -9683,7 +9751,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     const lhdr = labelIsLoopHeader(module, btgt) orelse break :blk_region;
                                                     try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                                                     const region_depth: u32 = if (range) |rr| rr.depth else 0;
-                                                    try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, nonuniform_implicit, early_return, subpass_fragcoord_name, ctx, .{
+                                                    try emitBody(module, names, decorations, func_idx, w_out, alloc, arena, inout_return, skip_store_target, skip_store_targets, wrapped_uniform_arrays, wrapped_members, matrix_outputs, atomic_vars, atomic_fields, nonuniform_gated, early_return, subpass_fragcoord_name, ctx, .{
                                                         .start_idx = lhdr + 1,
                                                         .stop_label = merge_label,
                                                         .indent = body_ind,
@@ -9715,7 +9783,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                             while (ti < module.instructions.len) : (ti += 1) {
                                                                 const tinst = module.instructions[ti];
                                                                 if (tinst.op == .Label or tinst.op == .Branch or tinst.op == .BranchConditional) break;
-                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                                                try emitSimpleInstruction(module, names, &ctx.inline_exprs, tinst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_gated);
                                                             }
                                                             try emitSwitchArmTerminator(module, ti, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                             break;
@@ -9733,7 +9801,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                                 while (fi < module.instructions.len) : (fi += 1) {
                                                                     const finst = module.instructions[fi];
                                                                     if (finst.op == .Label or finst.op == .Branch or finst.op == .BranchConditional) break;
-                                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, finst, w, alloc, arena, body_ind + 1, wrapped_members, matrix_outputs, nonuniform_gated);
                                                                 }
                                                                 try emitSwitchArmTerminator(module, fi, merge_label.?, false, &.{merge_lbl}, if (in_loop) loop_continue_label else null, w, body_ind + 1);
                                                                 break;
@@ -9756,7 +9824,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                 continue;
                                             }
                                             if (dinst.op == .Switch) break;
-                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                            try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, body_ind, wrapped_members, matrix_outputs, nonuniform_gated);
                                         }
                                         break;
                                     }
@@ -9951,7 +10019,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             switch (dinst.op) {
                                 .BranchConditional, .Branch, .SelectionMerge, .LoopMerge, .Phi, .FunctionEnd => {},
                                 else => {
-                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, indent, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, dinst, w, alloc, arena, indent, wrapped_members, matrix_outputs, nonuniform_gated);
                                 },
                             }
                         }
@@ -10322,7 +10390,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs, nonuniform_gated);
                                                 }
                                             }
                                         }
@@ -10374,7 +10442,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                                     }
                                                 }
                                                 if (is_phi_val) {
-                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs, nonuniform_implicit);
+                                                    try emitSimpleInstruction(module, names, &ctx.inline_exprs, cbinst, w, alloc, arena, indent + 1, wrapped_members, matrix_outputs, nonuniform_gated);
                                                 }
                                             }
                                         }
@@ -11377,7 +11445,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // exactly like textureSample, so the bias is lost rather than the
                 // whole shader honest-errored (erroring here is the black-player
                 // failure mode this bug class caused on wintty.io).
-                const nonuniform_flow = nonuniform_implicit.contains(inst.words[2]);
+                const nonuniform_flow = nonuniform_gated.contains(inst.words[2]);
                 // Image-operands mask (words[5]). A `Bias` (0x1) operand carries an
                 // LOD bias (GLSL texture(s, P, bias)). WGSL spells this
                 // textureSampleBias(t, s, coord, [layer,] bias [, offset]) — dropping
@@ -11569,7 +11637,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // just like textureSample; a Dref sample in non-uniform flow takes
                 // the ungated textureSampleCompareLevel (which samples mip 0,
                 // exactly the level pin the non-Dref path uses).
-                const builtin: []const u8 = if (nonuniform_implicit.contains(inst.words[2])) "textureSampleCompareLevel" else "textureSampleCompare";
+                const builtin: []const u8 = if (nonuniform_gated.contains(inst.words[2])) "textureSampleCompareLevel" else "textureSampleCompare";
                 try emitDepthCompare(module, names, w, indent, arena, inst, builtin);
             },
 
@@ -11855,26 +11923,29 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
 
             // Derivatives. Ordered to match the SPIR-V spec numbering:
             // plain (207-209), Fine (210-212), Coarse (213-215). WGSL has a
-            // direct builtin for every one of the nine variants.
-            // NOT fully handled, though: see #wgsl-uniformity-8k2-derivatives
-            // in the uniformity-prepass header above. WGSL gates all nine on
-            // UNIFORM CONTROL FLOW exactly as it gates textureSample, and the
-            // prepass neither analyses nor lowers them, so a derivative taken
-            // after flow diverges is still a tint reject (a black shader in the
-            // browser). A one-to-one builtin is the whole story for the SPELLING
-            // only.
-            .DPdx => try emitCall(module, names, inst, "dpdx", w, arena, indent),
-            .DPdy => try emitCall(module, names, inst, "dpdy", w, arena, indent),
-            .Fwidth => try emitCall(module, names, inst, "fwidth", w, arena, indent),
+            // direct builtin for every one of the nine variants, and in
+            // UNIFORM flow that one-to-one spelling is the whole story. Out of
+            // uniform flow it is a REFUSAL (#685,
+            // #wgsl-uniformity-8k2-derivatives): WGSL gates all nine on
+            // uniform control flow exactly as it gates textureSample, and a
+            // derivative has no lowered form to downgrade to (nothing analog
+            // to the textureSampleLevel pin), so the only emittable builtin
+            // would be a tint reject and a black shader in the browser.
+            // emitDerivative consults the uniformity prepass's marked-result
+            // map and refuses exactly those, matching the sampling half's
+            // verdict at the same flow information.
+            .DPdx => try emitDerivative(module, names, inst, nonuniform_gated, "dpdx", w, arena, indent),
+            .DPdy => try emitDerivative(module, names, inst, nonuniform_gated, "dpdy", w, arena, indent),
+            .Fwidth => try emitDerivative(module, names, inst, nonuniform_gated, "fwidth", w, arena, indent),
             // Fine-quality variants (OpDPdxFine 210 / OpDPdyFine 211 /
             // OpFwidthFine 212). Previously these fell through to the honest-
             // error else branch even though WGSL can represent them directly.
-            .DPdxFine => try emitCall(module, names, inst, "dpdxFine", w, arena, indent),
-            .DPdyFine => try emitCall(module, names, inst, "dpdyFine", w, arena, indent),
-            .FwidthFine => try emitCall(module, names, inst, "fwidthFine", w, arena, indent),
-            .DPdxCoarse => try emitCall(module, names, inst, "dpdxCoarse", w, arena, indent),
-            .DPdyCoarse => try emitCall(module, names, inst, "dpdyCoarse", w, arena, indent),
-            .FwidthCoarse => try emitCall(module, names, inst, "fwidthCoarse", w, arena, indent),
+            .DPdxFine => try emitDerivative(module, names, inst, nonuniform_gated, "dpdxFine", w, arena, indent),
+            .DPdyFine => try emitDerivative(module, names, inst, nonuniform_gated, "dpdyFine", w, arena, indent),
+            .FwidthFine => try emitDerivative(module, names, inst, nonuniform_gated, "fwidthFine", w, arena, indent),
+            .DPdxCoarse => try emitDerivative(module, names, inst, nonuniform_gated, "dpdxCoarse", w, arena, indent),
+            .DPdyCoarse => try emitDerivative(module, names, inst, nonuniform_gated, "dpdyCoarse", w, arena, indent),
+            .FwidthCoarse => try emitDerivative(module, names, inst, nonuniform_gated, "fwidthCoarse", w, arena, indent),
 
             // OpQuantizeToF16 (116): quantize a 32-bit float to f16
             // precision/range, then widen back to f32. WGSL's `quantizeToF16`
@@ -12404,7 +12475,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                     // pinned to 0 (same lowering as the non-projective path; a
                     // projective Bias has no uniformity-safe WGSL form either
                     // and is dropped like the Bias operand there).
-                    const proj_nonuniform = nonuniform_implicit.contains(inst.words[2]);
+                    const proj_nonuniform = nonuniform_gated.contains(inst.words[2]);
                     if (mask & 0x8 != 0) {
                         if (inst.words.len <= 6) return error.UnsupportedImageOperands;
                         const off = names.get(inst.words[6]) orelse "vec2<i32>(0)";
@@ -12490,10 +12561,12 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                 // compare-with-LOD builtin), so the level-pinned builtin is the
                 // faithful spelling exactly as on the non-proj
                 // ImageSampleDrefExplicitLod path -- and the prepass only ever
-                // records the four *ImplicitLod opcodes, so consulting it here
-                // could never have marked an Explicit sample and this arm was
-                // emitting the gated builtin for every one of them.
-                const cmp_builtin: []const u8 = if (inst.op == .ImageSampleProjDrefExplicitLod or nonuniform_implicit.contains(inst.words[2]))
+                // records the four *ImplicitLod opcodes among the SAMPLES (its
+                // other entries are derivative result ids, which no sample arm
+                // can consult), so consulting it here could never have marked
+                // an Explicit sample and this arm was emitting the gated
+                // builtin for every one of them.
+                const cmp_builtin: []const u8 = if (inst.op == .ImageSampleProjDrefExplicitLod or nonuniform_gated.contains(inst.words[2]))
                     "textureSampleCompareLevel"
                 else
                     "textureSampleCompare";
@@ -13640,7 +13713,7 @@ fn emitCompositeInsertWgsl(module: *const ParsedModule, names: *std.AutoHashMap(
     try w.print("{s}{s} = {s};\n", .{ result_name, access.items, object });
 }
 
-fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), nonuniform_implicit: *const std.AutoHashMap(u32, void)) !void {
+fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inline_exprs: *const std.AutoHashMap(u32, []const u8), inst: Instruction, w: anytype, alloc: std.mem.Allocator, arena: std.mem.Allocator, indent: u32, wrapped_members: *const WrappedUniformMemberMap, matrix_outputs: *const std.AutoHashMap(u32, MatrixOutput), nonuniform_gated: *const std.AutoHashMap(u32, void)) !void {
     switch (inst.op) {
         .Variable => {
             if (inst.words.len >= 4) {
@@ -13735,7 +13808,7 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             // replay path applies the same level-0 downgrade as the main walk.
             // Builtin and level picked into consts and printed once, the shape
             // the main path and the Dref arms use.
-            const nonuniform_flow = nonuniform_implicit.contains(inst.words[2]);
+            const nonuniform_flow = nonuniform_gated.contains(inst.words[2]);
             const builtin: []const u8 = if (nonuniform_flow) "textureSampleLevel" else "textureSample";
             const level_arg: []const u8 = if (nonuniform_flow) ", 0.0" else "";
             try w.print("let {s}: {s} = {s}({s}, {s}, {s}{s});\n", .{ result_name, rt, builtin, tex_name, sampler_arg, coord, level_arg });
@@ -14124,6 +14197,16 @@ fn getConvFunc(op: spirv.Op) ?[]const u8 {
         .Bitcast => "bitcast", // will be handled specially
         else => null,
     };
+}
+
+/// Derivative emission shared by all nine OpDPdx*/OpDPdy*/OpFwidth* arms: a
+/// derivative the uniformity prepass marked as sitting in non-uniform flow
+/// (#685) is REFUSED (WGSL gates it on uniform control flow and there is no
+/// explicit-derivative form to lower to); anything else is the plain
+/// one-to-one builtin via emitCall.
+fn emitDerivative(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, nonuniform_gated: *const std.AutoHashMap(u32, void), func: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
+    if (nonuniform_gated.contains(inst.words[2])) return recordUnsupportedNonuniformDerivative();
+    return emitCall(module, names, inst, func, w, arena, indent);
 }
 
 fn emitCall(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8), inst: Instruction, func: []const u8, w: anytype, arena: std.mem.Allocator, indent: u32) !void {
