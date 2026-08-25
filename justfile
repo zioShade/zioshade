@@ -212,6 +212,29 @@ wgsl-browser +dirs="tests/wintty_gallery":
     {{zig}} build cli
     node tools/wgsl_browser_check.mjs {{dirs}}
 
+# TINT-RULE corpus gate: sweep the committed uniformity probes
+# (tools/wgsl_uniformity_probes, issue #691) through the browser oracle. Each
+# probe's .wgsl is hand-written to embody ONE rule of the WGSL uniformity
+# prepass (src/wgsl_uniformity.zig) WITHOUT zioshade's lowering, so the verdict
+# is tint's own accept/reject -- the empirical basis the prepass's rules cite.
+# The paired .frag files are staging drivers only (the harness needs a shader
+# to compile before ZWB_OVERRIDE_DIR swaps in the probe text).
+#
+# Expected: the 9 pinned REJECTs and the 1 pinned FAIL-black of
+# tools/wgsl_browser_baseline.txt, everything else LIVE-PASS. ZWB_STALE_IS_FAIL
+# makes BOTH drift directions loud: a probe tint newly ACCEPTS (pinned REJECT
+# goes stale) or newly REJECTS (a NEW REJECT) fails the gate, which is the day
+# tint changes a rule -- the exact scenario the corpus was committed for.
+# ZWB_NO_REFERENCE because what is being measured is tint's verdict, not pixels
+# (the probes render arbitrary hand-written shapes against a driver reference).
+# MANUAL ONLY, same requirements as wgsl-browser.
+wgsl-uniformity-probes:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{zig}} build cli
+    ZWB_NO_REFERENCE=1 ZWB_STALE_IS_FAIL=1 ZWB_OVERRIDE_DIR=tools/wgsl_uniformity_probes \
+      node tools/wgsl_browser_check.mjs tools/wgsl_uniformity_probes
+
 # WARP render-diff on the real DXC->DXIL->D3D12 path (tools/warp/, run on a Windows
 # box - WARP is the CPU rasterizer so no GPU needed). Renders zioshade's HLSL vs
 # SPIRV-Cross's HLSL on the same runtime and pixel-diffs: the final HLSL gate macOS

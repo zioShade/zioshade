@@ -32,7 +32,22 @@
 //! WHICH samples get downgraded is decided by this module's analysis, built to
 //! mirror what tint actually accepts. Every rule was probed on Chrome for
 //! Testing through tools/wgsl_browser_check.mjs with hand-written WGSL
-//! overrides (probe names cited at each rule):
+//! overrides; those probes are COMMITTED as tools/wgsl_uniformity_probes/
+//! (issue #691), each pNN_name.wgsl a self-contained module whose tint
+//! verdict is the evidence, so the basis is re-runnable: the
+//! wgsl-uniformity-probes just recipe sweeps them through the same oracle and
+//! fails on a verdict flip in EITHER direction. Probe names are cited at each
+//! rule below; the verdicts of the committed corpus are:
+//!   tint REJECTS: p02_nonuniform_if, p03_early_return_one_arm (reconstructed
+//!     2026-08-25 from the rule text; the original probing session's file was
+//!     lost, and modern tint rejects the reconstruction exactly as recorded),
+//!     p09_varying_bound_loop, p12_helper_in_nonuniform_if,
+//!     p13_cond_break_loop, p14_switch_nonuniform, p17_phi_of_consts,
+//!     p22_indexed_uniform_read, p23b_param_nonuniform
+//!   tint ACCEPTS: p01_control, p04_uniform_if, p05_uniform_early_return,
+//!     p07_const_loop, p08_uniform_bound_loop, p10_empty_if_join,
+//!     p11_helper_toplevel, p18_after_varying_loop, p20_discard,
+//!     p21_after_nonuniform_switch, p23a_param_uniform, p24_phi_uniform_edge
 //!   * flow(B) = OR over the contributions of B's incoming edges (a block is
 //!     uniform when some edge delivers the FULL invocation set, either
 //!     directly or by reconverging every path that diverged):

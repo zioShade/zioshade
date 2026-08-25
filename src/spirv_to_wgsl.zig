@@ -12467,7 +12467,8 @@ fn emitSimpleInstruction(module: *const ParsedModule, names: *std.AutoHashMap(u3
             const coord = resolveOperandExpr(module, names, inline_exprs, inst.words[4], arena, 0);
             try writeIndentStatic(w, indent);
             // #wgsl-uniformity-8k2: a sample inside a switch CASE is in
-            // non-uniform flow whenever the selector is (probe p14), so the
+            // non-uniform flow whenever the selector is (probe p14,
+            // tools/wgsl_uniformity_probes/p14_switch_nonuniform.wgsl), so the
             // replay path applies the same level-0 downgrade as the main walk.
             // Builtin and level picked into consts and printed once, the shape
             // the main path and the Dref arms use.

@@ -10,3 +10,21 @@
 # feature, a black region) is a consumer-corpus regression.
 tests/wintty_gallery/interference.frag: triaged-and-accepted: CHAOS per chaos-classify; structure identical side-by-side (same tiles, same phase fronts), diffs confined to high-frequency neighborhoods (local std 10.5 at diff px vs 5.3 at matching px), bit-deterministic across runs, and the Metal-proxy gate renders this shader MATCH Metal-vs-Metal so the WGSL semantics are agreed; residual is tint/SwiftShader-vs-Metal transcendental precision (max=57, avg=3.09, bad=3.5%)
 tests/wintty_gallery/lightning_strike.frag: triaged-and-accepted: CHAOS per chaos-classify; structure identical side-by-side (same bolt positions, same branching), every >32-diff pixel sits on a textured edge (local std 19.9 at diff px vs 0.7 at matching px), bit-deterministic across runs, and the Metal-proxy gate renders this shader MATCH Metal-vs-Metal; residual is tint/SwiftShader-vs-Metal transcendental precision (max=193, avg=0.79, bad=1.4%)
+# Uniformity probe corpus (tools/wgsl_uniformity_probes, issue #691): the
+# tint-rule evidence for the WGSL uniformity prepass. These entries are the
+# EXPECTED verdicts of the probe sweep (just wgsl-uniformity-probes), not
+# regressions: each probe is hand-written to make tint reject/accept on
+# purpose. The REJECT lines below are what the analysis mirrors; a probe
+# turning ACCEPT (STALE under ZWB_STALE_IS_FAIL) or a LIVE-PASS probe turning
+# REJECT means tint's rules moved and src/wgsl_uniformity.zig must be re-read
+# against the new evidence.
+tools/wgsl_uniformity_probes/p02_nonuniform_if.frag: uniformity probe p02: tint rejects a textureSample inside a taken arm of a non-uniform if, on purpose (evidence for the flow rule)
+tools/wgsl_uniformity_probes/p03_early_return_one_arm.frag: uniformity probe p03: tint rejects a sample after an early return in one arm of a non-uniform if (subset merge), on purpose
+tools/wgsl_uniformity_probes/p05_uniform_early_return.frag: uniformity probe p05: accepted by tint but renders ALL BLACK under the harness uniform state (Globals.flag reads 256.0, so the early-return arm always wins); the FAIL-black is by construction, the verdict that matters is the absence of a REJECT
+tools/wgsl_uniformity_probes/p09_varying_bound_loop.frag: uniformity probe p09: tint rejects a sample inside a varying-bound (non-uniform trip count) loop, on purpose
+tools/wgsl_uniformity_probes/p12_helper_in_nonuniform_if.frag: uniformity probe p12: tint rejects a helper-body sample when the helper is called only from diverged flow, on purpose
+tools/wgsl_uniformity_probes/p13_cond_break_loop.frag: uniformity probe p13: tint rejects a sample in a loop body guarded by a conditional break (subset per iteration), on purpose
+tools/wgsl_uniformity_probes/p14_switch_nonuniform.frag: uniformity probe p14: tint rejects a sample in a switch case on a non-uniform selector, on purpose
+tools/wgsl_uniformity_probes/p17_phi_of_consts.frag: uniformity probe p17: tint rejects a branch-on-phi-of-constants from a non-uniform if gating a sample, on purpose
+tools/wgsl_uniformity_probes/p22_indexed_uniform_read.frag: uniformity probe p22: tint rejects branching on a non-uniformly indexed uniform array read, on purpose
+tools/wgsl_uniformity_probes/p23b_param_nonuniform.frag: uniformity probe p23b: tint rejects a helper whose parameter gets a non-uniform argument at its only call site, on purpose

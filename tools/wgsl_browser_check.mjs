@@ -68,7 +68,17 @@
 //   ZWB_OVERRIDE_DIR=<dir>   per-shader negative control: if <dir>/<name>.wgsl exists,
 //                            THAT text is rendered instead of the freshly compiled
 //                            output (how the "broken WGSL must FAIL" proof is run; the
-//                            staged outputs land in the share dir to hand-edit)
+//                            staged outputs land in the share dir to hand-edit; this
+//                            is also how the tint-rule corpus
+//                            tools/wgsl_uniformity_probes/ is swept: the .frag files
+//                            there are staging drivers and the .wgsl files are the
+//                            probes)
+//   ZWB_STALE_IS_FAIL=1      a pinned baseline entry that no longer REJECTs/FAILs
+//                            fails the gate instead of printing a STALE hint. Set by
+//                            the wgsl-uniformity-probes recipe: for the probe corpus
+//                            a pinned REJECT that tint now ACCEPTS is exactly the
+//                            rule drift the corpus exists to detect, so there the
+//                            stale direction must be loud too.
 //   ZWB_SHARE=<dir>          staging + artifacts (default /tmp/zioshade_wgsl_browser);
 //                            per shader: *.g.frag *.src.spv *.z.wgsl *.ref.msl
 //                            *.shot.png (the screenshot) and *.browser.ppm (decoded)
@@ -602,9 +612,12 @@ console.log("  REJECT/FAIL NEW (gate fail):  " + newCount);
 if (stale) console.log("  baseline STALE entries:       " + stale + " (cleanup suggested)");
 console.log("  runtime: " + ((Date.now() - t0) / 1000).toFixed(1) + "s");
 
-if (newCount > 0 || refused.length > 0) {
+const staleIsFail = process.env.ZWB_STALE_IS_FAIL === "1";
+if (newCount > 0 || refused.length > 0 || (staleIsFail && stale > 0)) {
   console.log("");
-  console.log("WGSL BROWSER GATE: FAIL (" + newCount + " new REJECT/FAIL, " + refused.length + " glslang-refused source(s))");
+  const why = [newCount + " new REJECT/FAIL", refused.length + " glslang-refused source(s)"];
+  if (staleIsFail && stale > 0) why.push(stale + " stale baseline entries (pinned verdicts that no longer fail)");
+  console.log("WGSL BROWSER GATE: FAIL (" + why.join(", ") + ")");
   process.exit(1);
 }
 console.log("");
