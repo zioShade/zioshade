@@ -16,7 +16,7 @@
 //           silent-black fallback: black where the reference has content)
 //
 // HOW IT WORKS. Per shader, in one browser that stays up for the whole sweep:
-//   1. source GLSL ->(glslang; see the fallback note below)-> src.spv
+//   1. source GLSL ->(glslang)-> src.spv
 //   2. src.spv ->(zioshade wgsl)-> z.wgsl            [the output under test]
 //   3. src.spv ->(spirv-cross --msl)-> ref.msl ->(ShaderCompare on Metal)-> reference PPM
 //      (the same reference leg tools/wgsl_render_check.sh uses; ShaderCompare is invoked
@@ -54,7 +54,7 @@
 //               for this shader): pipeline built + frames rendered + non-black coverage;
 //               CLEARLY WEAKER, labeled as such (still catches every REJECT)
 //   SKIP-*      the WGSL itself could not be produced (glslang refused the source
-//               outside the gallery fallback, or a zioshade honest error)
+//               outside the gallery corpus, or a zioshade honest error)
 //
 // CROSS-GPU EPSILON. The proxy gate compares Metal-vs-Metal (maxdiff <= 1). This oracle
 // compares SwiftShader-vs-Metal, so pure FP-ordering noise is wider; the thresholds below
@@ -77,10 +77,13 @@
 //   ZWB_CHROME=<path>        Chrome for Testing executable (the headless shell has no
 //                            WebGPU; a full Chrome is required)
 //
-// SOURCE-LEG FALLBACK (same policy as the proxy): two gallery shaders declare a
-// variable named `active`, reserved in GLSL, so glslang refuses the SOURCE; for the
-// wintty_gallery corpus only, src.spv is then built by the zioshade frontend
-// (counted as fallback-zfrontend). Anywhere else a glslang refusal stays a skip.
+// SOURCE LEG: src.spv comes from glslang, an oracle independent of zioshade's
+// frontend, for every corpus including the gallery. Gallery sources must compile
+// under glslang verbatim (the corpus README invariant): a refusal there is a
+// broken gallery entry and fails the gate, never a reason to stage the source
+// through zioshade's own frontend (that lower-rigor leg would silently absorb
+// the next real refusal into a frontend-correlated comparison). Outside the
+// gallery corpus a glslang refusal stays a plain skip-glslang.
 //
 // BASELINE / GATE semantics (same style as tools/wgsl_render_baseline.txt):
 // expected REJECT/FAIL entries are pinned in tools/wgsl_browser_baseline.txt, one per
@@ -285,17 +288,20 @@ function stageShader(dir, name) {
   const alias = path.basename(dir);
   const d = path.join(SHARE, alias + "." + name);
   stageFragSource(inRoot(dir) + "/" + name + ".frag", d + ".g.frag");
-  const out = { key: dir + "/" + name + ".frag", d, wgsl: null, ref: null, skip: null, overridden: false, fallback: false };
+  const out = { key: dir + "/" + name + ".frag", d, wgsl: null, ref: null, skip: null, overridden: false, refused: false };
 
   const g = run("glslangValidator", ["-V", "-S", "frag", d + ".g.frag", "-o", d + ".src.spv"]);
   if (!g.ok) {
-    // gallery-only frontend fallback (same policy + reason as the proxy)
-    if (/wintty_gallery/.test(dir) && run(CLI, ["spirv", d + ".g.frag", "--stage", "fragment", "-o", d + ".src.spv"]).ok) {
-      out.fallback = true;
+    // A gallery source glslang refuses is a broken gallery entry, not a
+    // compiler verdict: it fails the gate loudly (see the staging loop)
+    // instead of being skipped, pinned, or staged through a lower-rigor
+    // source leg. Other corpora keep the historical skip.
+    if (/wintty_gallery/.test(dir)) {
+      out.refused = true;
     } else {
       out.skip = "skip-glslang";
-      return out;
     }
+    return out;
   }
 
   const w = run(CLI, ["wgsl", d + ".src.spv", "--stage", "fragment"]);
@@ -463,6 +469,7 @@ if (overrideDir) console.log("  MODE: ZWB_OVERRIDE_DIR=" + overrideDir + " (nega
 console.log("");
 
 const staged = [];
+const refused = [];
 const counts = {};
 const bump = (k) => (counts[k] = (counts[k] || 0) + 1);
 
@@ -471,14 +478,14 @@ for (const dir of dirs) {
   for (const f of files) {
     const name = f.slice(0, -5);
     const s = stageShader(dir, name);
+    if (s.refused) { refused.push(s.key); continue; }
     if (s.skip) { bump(s.skip); continue; }
-    if (s.fallback) bump("fallback");
     if (s.overridden) bump("overridden");
     if (s.noref) bump("noref-" + s.noref);
     staged.push({ name, key: s.key, d: s.d, wgsl: s.wgsl, ref: s.ref });
   }
 }
-if (staged.length === 0) die("no shader staged (all legs skipped); refusing to report a vacuous green");
+if (staged.length === 0) die("no shader staged (all legs skipped or glslang-refused); refusing to report a vacuous green");
 
 const browserResults = await sweep(staged);
 const fails = [];
@@ -581,8 +588,12 @@ if (updateBaseline) {
 const newCount = fails.filter((f) => !base.has(f.key)).length;
 console.log("");
 console.log("=== WGSL browser oracle coverage ===");
-for (const k of ["PASS", "LIVE-PASS", "REJECT", "FAIL", "overridden", "fallback", "noref-crossmsl-failed", "noref-refrender-failed", "skip-glslang", "skip-zwgsl"]) {
+for (const k of ["PASS", "LIVE-PASS", "REJECT", "FAIL", "overridden", "noref-crossmsl-failed", "noref-refrender-failed", "skip-glslang", "skip-zwgsl"]) {
   if (counts[k]) console.log("  " + k + ": " + counts[k]);
+}
+if (refused.length) {
+  console.log("  GLSLANG-REFUSED (gate fail, gallery corpus): " + refused.length);
+  for (const k of refused) console.log("    " + k + " - gallery sources must compile under glslang verbatim (broken gallery entry)");
 }
 const adapter = browserResults.map((r) => r.adapter).find(Boolean);
 if (adapter) console.log("  adapter (first case): " + adapter);
@@ -591,9 +602,9 @@ console.log("  REJECT/FAIL NEW (gate fail):  " + newCount);
 if (stale) console.log("  baseline STALE entries:       " + stale + " (cleanup suggested)");
 console.log("  runtime: " + ((Date.now() - t0) / 1000).toFixed(1) + "s");
 
-if (newCount > 0) {
+if (newCount > 0 || refused.length > 0) {
   console.log("");
-  console.log("WGSL BROWSER GATE: FAIL (" + newCount + " new REJECT/FAIL)");
+  console.log("WGSL BROWSER GATE: FAIL (" + newCount + " new REJECT/FAIL, " + refused.length + " glslang-refused source(s))");
   process.exit(1);
 }
 console.log("");

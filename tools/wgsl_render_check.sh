@@ -16,21 +16,15 @@
 # corpus that exposed the three silent-wrong bug classes no other gate saw).
 # Pass explicit dirs to scope it: tools/wgsl_render_check.sh tests/integer_corpus
 #
-# ── Reference-leg fallback (gallery corpus only) ────────────────────────────
-# The source SPIR-V is normally built by glslang (an oracle independent of
-# zioshade's frontend). Two gallery shaders are legal to zioshade but refused
-# by glslang (cursor_teleport/lightning_strike declare a variable named
-# `active`, reserved in GLSL; wintty ships them and zioshade accepts), so the
-# oracle cannot parse the source at all. For those, and ONLY for the gallery
-# corpus (wintty compiles these through zioshade in production, so the
-# zioshade frontend IS the shipping source leg), the source SPIR-V is built
-# by the zioshade frontend instead (counted as fallback-zfrontend). Both legs
-# then share that one src.spv - reference = spirv-cross MSL of it, test = naga
-# SPIR-V of zioshade's WGSL of it - so the comparison stays apples-to-apples
-# for the WGSL BACKEND this proxy tests; only frontend-independence of the
-# source is lost, and only for sources the GLSL oracle cannot parse. In every
-# other corpus a glslang refusal stays a plain skip-glslang (the historical
-# behavior), so the fallback never silently widens the compared population.
+# ── Source leg (glslang) ─────────────────────────────────────────────────────
+# The source SPIR-V is built by glslang, an oracle independent of zioshade's
+# frontend, for every corpus including the gallery. Gallery sources must
+# compile under glslang verbatim (the corpus README invariant): a refusal
+# there is a broken gallery entry and FAILS the gate, never a reason to stage
+# the source through zioshade's own frontend (that lower-rigor leg would
+# silently absorb the next real refusal into a frontend-correlated
+# comparison). In every other corpus a glslang refusal stays a plain
+# skip-glslang (the historical behavior).
 #
 # ── Undefined-read sources (skip-undef-read) ────────────────────────────────
 # A source that reads undefined Function memory (loop-dominator-and-switch-
@@ -88,7 +82,7 @@ DIRS=("${ARGS[@]}")
 [ ${#DIRS[@]} -eq 0 ] && DIRS=(tests/spirv-cross tests/wintty_gallery)
 
 # check_one runs AFTER "$d.src.spv" exists (the parent builds it so the
-# fallback accounting survives the command substitution subshell).
+# counter bumps survive the command substitution subshell).
 check_one() {
   local d="$1"
   spirv-cross --msl "$d.src.spv" > "$d.ref.msl" 2>/dev/null || { echo "skip-crossmsl"; return; }
@@ -106,7 +100,7 @@ check_one() {
 }
 
 declare -A C
-FALLBACKS=()
+REFUSED=()      # gallery sources glslang refused (broken gallery entries)
 DIFFERS=()      # "key<TAB>verdict" for every DIFFER
 bump() { C[$1]=$((${C[$1]:-0}+1)); }
 for DIR in "${DIRS[@]}"; do
@@ -114,14 +108,14 @@ for DIR in "${DIRS[@]}"; do
   # The gallery corpus needs the mid-animation cursor uniforms (ShaderCompare
   # env knob) or the mode-change shaders short-circuit to their static path
   # and their bug shapes never execute. Other corpora keep the historical set.
-  # The same corpus also allows the reference-leg fallback: for other corpora
-  # a glslang refusal stays a skip (the historical behavior), so the fallback
-  # never silently widens the compared population.
-  ALLOW_FALLBACK=0
+  # The same corpus also requires glslang to accept every source verbatim:
+  # a refusal is a broken gallery entry and fails the gate (other corpora
+  # keep the historical skip-glslang).
+  REQUIRE_GLSLANG=0
   case "$DIR" in
     *wintty_gallery*)
       export SHADERCOMPARE_GALLERY_UNIFORMS=1
-      ALLOW_FALLBACK=1
+      REQUIRE_GLSLANG=1
       ;;
     *) unset SHADERCOMPARE_GALLERY_UNIFORMS || true;;
   esac
@@ -133,13 +127,13 @@ for DIR in "${DIRS[@]}"; do
     d="$SHARE/$alias_.$name"
     sed 's/^\(out [a-z0-9]*vec4 [A-Za-z_][A-Za-z0-9_]*;\)/layout(location=0) \1/' "$f" > "$d.g.frag"
     if ! glslangValidator -V -S frag "$d.g.frag" -o "$d.src.spv" >/dev/null 2>&1; then
-      # glslang refuses the SOURCE. Gallery only (see header): build the shared
-      # source SPIR-V with the zioshade frontend; elsewhere keep the skip.
-      if [ "$ALLOW_FALLBACK" = 1 ] && "$CLI" spirv "$d.g.frag" --stage fragment -o "$d.src.spv" >/dev/null 2>&1; then
-        FALLBACKS+=("$key")
-      else
-        bump skip-glslang; continue
+      # glslang refuses the SOURCE. Gallery only (see header): a broken
+      # gallery entry fails the gate; elsewhere keep the historical skip.
+      if [ "$REQUIRE_GLSLANG" = 1 ]; then
+        REFUSED+=("$key")
+        continue
       fi
+      bump skip-glslang; continue
     fi
     # #undef-read-oracle: a source that READS undefined Function memory (no
     # initializer, first read before any store, on the unconditional prefix;
@@ -244,11 +238,20 @@ echo "=== WGSL render proxy coverage ==="
 for k in MATCH "EDGE(fast-math-fp)" DIFFER skip-binding skip-glslang skip-crossmsl skip-zwgsl skip-naga skip-zcrossmsl skip-render skip-undef-read; do
   echo "  $k: ${C[$k]:-0}"
 done
-echo "  fallback-zfrontend (src.spv via zioshade, glslang refused source): ${#FALLBACKS[@]}"
+NREF=${#REFUSED[@]}
+echo "  glslang-refused (gate fail, gallery corpus): $NREF"
+for r in "${REFUSED[@]:-}"; do
+  [ -z "$r" ] && continue
+  echo "    $r - gallery sources must compile under glslang verbatim (broken gallery entry)"
+done
 echo "  DIFFER known (baseline): $KNOWN"
 echo "  DIFFER NEW (gate fail):  $NEW"
 [ "$STALE" -gt 0 ] && echo "  baseline STALE entries:  $STALE (cleanup suggested)"
 
-[ "$NEW" -gt 0 ] && { echo ""; echo "WGSL RENDER GATE: FAIL ($NEW new divergence(s))"; exit 1; }
+if [ "$NEW" -gt 0 ] || [ "$NREF" -gt 0 ]; then
+  echo ""
+  echo "WGSL RENDER GATE: FAIL ($NEW new divergence(s), $NREF glslang-refused source(s))"
+  exit 1
+fi
 echo "WGSL RENDER GATE: PASS (no new divergences; $KNOWN known)"
 exit 0
