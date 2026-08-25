@@ -28,7 +28,9 @@
 #   glslang-limit  = both zioshade and spirv-cross HLSL fail glslang — a glslang HLSL
 #                    frontend limitation, NOT a zioshade bug (counted, not fatal)
 #   inconclusive   = the spirv-cross reference could not be built (SPIR-V build or
-#                    spirv-cross failed) so the case can't be classified
+#                    spirv-cross failed) so the case can't be classified. RATCHETED
+#                    (#690): an inconclusive case not in KNOWN_INCONCLUSIVE below
+#                    fails the gate (see the comment at the discrimination step).
 #   oracle-crash   = glslangValidator segfaulted (exit > 128) — the oracle is unstable
 #                    here; counted separately, not fatal
 #   honest-error   = zioshade frontend refused (Unsupported*) — no HLSL emitted
@@ -70,7 +72,7 @@ hlsl_check() { # $1 = file  -> echoes "ok"|"crash"|"bad"
   else echo bad; fi
 }
 
-valid=0 invalid=0 glim=0 incon=0 ocrash=0 herr=0 total=0 regression=0
+valid=0 invalid=0 glim=0 incon=0 ocrash=0 herr=0 total=0 regression=0 incon_regression=0
 
 # KNOWN-DEFERRED real bugs: triaged, root-caused, and explicitly deferred (core
 # machinery / structural work the 5-voice panel deferred to the canonical DXC gate).
@@ -116,6 +118,39 @@ case "$STAGE" in
 esac
 is_known() { case " $KNOWN_INVALID " in *" $1 "*) return 0;; *) return 1;; esac; }
 
+# KNOWN_INCONCLUSIVE ratchet (#690): the CURRENT per-stage set of shaders whose
+# spirv-cross reference cannot be built, so neither leg can judge them. See the
+# comment at the discrimination step below for why this class must not be a free
+# pass. An INCONCLUSIVE not in this stage's list is a NEW unjudgeable case and
+# FAILS the gate; the set may only shrink, and an entry that no longer lands in
+# the class prints a prune note after the run. Keep per-stage, like KNOWN_INVALID.
+case "$STAGE" in
+  fragment)
+    KNOWN_INCONCLUSIVE=" nested_transform.frag pixel-interlock-ordered.frag pixel-interlock-unordered.frag sample-interlock-ordered.frag sample-interlock-unordered.frag stencil-export.desktop.frag switch_loop.frag";;
+  vertex)
+    # No INCONCLUSIVE HLSL vertex cases currently.
+    KNOWN_INCONCLUSIVE=" ";;
+  compute)
+    KNOWN_INCONCLUSIVE=" array-of-buffer-reference.nocompat.vk.comp buffer-reference-bitcast-uvec2-2.nocompat.invalid.vk.comp fp-atomic.nocompat.vk.comp";;
+  *)
+    KNOWN_INCONCLUSIVE=" ";;
+esac
+is_known_incon() { case " $KNOWN_INCONCLUSIVE " in *" $1 "*) return 0;; *) return 1;; esac; }
+
+incon_seen=""
+# Record one reference-unbuildable case. Ratcheted (#690): an entry outside
+# KNOWN_INCONCLUSIVE is a NEW inconclusive and fails the gate.
+record_incon() { # $1 = shader name, $2 = reason
+  incon=$((incon+1))
+  if is_known_incon "$1"; then
+    incon_seen="$incon_seen $1"
+    echo "INCONCLUSIVE $1 ($2)  [known/ratcheted]"
+  else
+    incon_regression=$((incon_regression+1))
+    echo "INCONCLUSIVE $1 ($2)  *** NEW INCONCLUSIVE: not in KNOWN_INCONCLUSIVE ***"
+  fi
+}
+
 for f in "$DIR"/*."$EXT"; do
   [ -e "$f" ] || continue
   case "$f" in *.asm.*) continue;; esac   # SPIR-V assembly, not GLSL source
@@ -134,11 +169,22 @@ for f in "$DIR"/*."$EXT"; do
 
   # 3. zioshade failed glslang -> discriminate against the spirv-cross reference.
   #    Build SPIR-V from the GLSL source, cross it to HLSL, check the reference.
+  #    INCONCLUSIVE means OUR output is invalid AND the reference cannot be built, so
+  #    NEITHER leg can judge the case. That is not a pass: ungated, it is a free pass
+  #    an invalid output can hide behind (#690). PR #680 is the motivating example: it
+  #    found 12 corpus shaders that were already emitting glslang-invalid HLSL and had
+  #    survived this gate purely because their reference does not build; they surfaced
+  #    only when a later change spread the same shape to shaders the sweep CAN
+  #    classify, at which point 14 INVALIDs appeared at once. So the class is
+  #    ratcheted: a shader landing on either branch below that is not in this stage's
+  #    KNOWN_INCONCLUSIVE list is a NEW unjudgeable case and FAILS the gate (the set
+  #    may only shrink). This ratchets ONLY the reference-unbuildable class;
+  #    oracle-crash and glslang-limit are counted separately and stay non-gating.
   if ! glslangValidator -V -S "$HSTAGE" "$f" -o "$TMP/r.spv" >/dev/null 2>&1; then
-    incon=$((incon+1)); echo "INCONCLUSIVE $name (SPIR-V build failed)"; continue
+    record_incon "$name" "SPIR-V build failed"; continue
   fi
   if ! spirv-cross "$TMP/r.spv" --hlsl --shader-model 50 > "$TMP/ref.hlsl" 2>/dev/null; then
-    incon=$((incon+1)); echo "INCONCLUSIVE $name (spirv-cross failed)"; continue
+    record_incon "$name" "spirv-cross failed"; continue
   fi
   rc=$(hlsl_check "$TMP/ref.hlsl")
   if [ "$rc" = ok ]; then
@@ -156,7 +202,14 @@ for f in "$DIR"/*."$EXT"; do
 done
 
 echo
+# Stale-entry hygiene (#690): a listed shader that did not land in the class this run
+# is fixed or environment drift. Prune it so the list stays the CURRENT set; a
+# ratchet listing non-members is a ratchet nobody reads (the disease #688 pruned).
+for k in $KNOWN_INCONCLUSIVE; do
+  case " $incon_seen " in *" $k "*) ;; *) echo "NOTE: KNOWN_INCONCLUSIVE entry $k was not inconclusive this run -- prune it from the $STAGE list.";; esac
+done
+echo
 echo "HLSL (interim glslang gate, spirv-cross-discriminated):"
-echo "  valid=$valid  INVALID(real-bug)=$invalid (regression=$regression)  glslang-limit=$glim  inconclusive=$incon  oracle-crash=$ocrash  honest-error=$herr  / $total"
-echo "Gate signal is REGRESSION (an INVALID not in the known-deferred set)."
-[ "$regression" -eq 0 ]
+echo "  valid=$valid  INVALID(real-bug)=$invalid (regression=$regression)  glslang-limit=$glim  inconclusive=$incon (new=$incon_regression)  oracle-crash=$ocrash  honest-error=$herr  / $total"
+echo "Gate signal is REGRESSION (an INVALID not in the known-deferred set) plus no NEW INCONCLUSIVE (ratchet, #690)."
+[ "$regression" -eq 0 ] && [ "$incon_regression" -eq 0 ]

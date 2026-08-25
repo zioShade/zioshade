@@ -198,8 +198,14 @@ for backend in glsl wgsl msl hlsl; do
     hlsl) cur_files=$h_crash_files;;
   esac
   # Extract this backend's section from the baseline: lines after `crash-files:<backend>`
-  # until the next section marker (a line containing ':').
-  base_files=$(sed -n "/^crash-files:$backend\$/,/^[^#].*:/{/^crash-files:$backend$/d;/^[^#].*:/d;p;}" "$BASELINE" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$' || true)
+  # until the next section marker (a non-comment line containing ':'). Comment lines are
+  # NEVER entries and must be filtered here: `crash-files:hlsl` is the LAST section, and
+  # the comment block appended after it (#662's expected-refusals table) contains no
+  # non-comment ':' line, so the range scan ran to EOF and every WORD of that block was
+  # taken for a listed crash file, printing a "no longer crashes" NOTE per word for
+  # crashes that never existed (#688). There was no real stale entry to prune; the
+  # phantom entries were the comment text itself.
+  base_files=$(sed -n "/^crash-files:$backend\$/,/^[^#].*:/{/^crash-files:$backend$/d;/^[^#].*:/d;p;}" "$BASELINE" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$' | grep -v '^[[:space:]]*#' || true)
   for f in $cur_files; do
     if ! printf '%s\n' "$base_files" | grep -qx "$f"; then
       echo "REGRESSION: NEW crash on $backend: $f (not in baseline)"; bad=1
