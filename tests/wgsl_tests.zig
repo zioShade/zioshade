@@ -11358,10 +11358,9 @@ test "wgsl: a real OpPhi over a UNIFORM short circuit keeps textureSample (8k2 F
 
 test "wgsl: a sample after a conditional discard keeps textureSample (8k2 F9)" {
     // The most load-bearing KEEP rule for real shaders: OpKill is not an exit
-    // for postdominance (probe p20 of tools/wgsl_uniformity_probes). Treating
-    // a discard as an exit would
-    // downgrade a huge share of ordinary fragment shaders, and tint accepts
-    // the implicit form here.
+    // for postdominance (probe p20 of tools/wgsl_uniformity_probes).
+    // Treating a discard as an exit would downgrade a huge share of ordinary
+    // fragment shaders, and tint accepts the implicit form here.
     const spv = try compileToSpirv("kill_then_sample",
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;

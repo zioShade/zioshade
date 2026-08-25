@@ -1,7 +1,7 @@
 // Uniformity probe p03_early_return_one_arm: WGSL uniformity prepass tint-evidence
 // corpus (issue #691). A self-contained WGSL module whose accept/reject
 // by tint (Chrome for Testing + Dawn) is the empirical basis for one rule
-// of src/wgsl_uniformity.zig. Probed 2026-08-24; re-run: the
+// of src/wgsl_uniformity.zig. originally probed 2026-08-24; this file is a 2026-08-25 reconstruction (see PROVENANCE below); re-run: the
 // wgsl-uniformity-probes just recipe (a ZWB_OVERRIDE_DIR sweep of this
 // directory through tools/wgsl_browser_check.mjs).
 // RULE EVIDENCED:
