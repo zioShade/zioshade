@@ -81,9 +81,10 @@ pub const Insertion = struct { header_label: u32, merge_label: u32 };
 /// `module` is any parsed module carrying `instructions` + `id_defs` (the shape
 /// both `common.ParsedModule` and the backends' private copies share), because the
 /// stride lives in the selector's `OpTypeInt`, which a function body alone cannot
-/// see. This is the ONE stride resolver: every OpSwitch walk must call it rather
-/// than reimplement the pair arithmetic (#689: two walks once disagreed here and
-/// the fix reached only one).
+/// see. This is the ONE stride resolver for CFG walks: every CFG-side OpSwitch
+/// walk must call it rather than reimplement the pair arithmetic (#689: two
+/// walks once disagreed here and the fix reached only one). The EMIT-side
+/// walks still hardcode stride 2 behind the Int64 gates; see issue #697.
 pub fn switchPairStride(module: anytype, selector_id: u32) usize {
     const si = moduleDefIndex(module, selector_id) orelse return 2;
     const sel = module.instructions[si];
@@ -371,6 +372,9 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, module: anytype, insts: anytyp
     for (insts) |ins| {
         switch (ins.op) {
             .Label => {
+                // Pass 1 skips labels shorter than 2 words; match it so a
+                // malformed module cannot desync the two passes.
+                if (ins.words.len < 2) continue;
                 cur = idx_of.get(ins.words[1]).?;
                 pending_merge = null;
                 pending_loop = null;

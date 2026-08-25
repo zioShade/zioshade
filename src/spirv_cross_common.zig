@@ -1344,7 +1344,11 @@ pub fn resultIdFromOp(op: spirv.Op, words: []const u32) ?u32 {
 pub const Wide64Type = enum { none, float64, int64 };
 pub fn wide64Type(instructions: anytype) Wide64Type {
     for (instructions) |inst| {
-        if (inst.words.len > 2 and inst.words[2] == 64) {
+        // > 32, not == 64: an exotic width (a parseable OpTypeInt 128) is not a
+        // 64-bit type, but every emit-side OpSwitch walk still reads case pairs
+        // at 32-bit stride, so anything wider than 32 must hit this gate and
+        // honest-error rather than reach those walks (silent-wrong otherwise).
+        if (inst.words.len > 2 and inst.words[2] > 32) {
             if (inst.op == .TypeFloat) return .float64;
             if (inst.op == .TypeInt) return .int64;
         }
