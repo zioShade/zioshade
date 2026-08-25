@@ -870,3 +870,115 @@ test "optimizer: CSE does not merge OpAll into OpAny (distinct opcodes, same ope
     try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.All)) >= 1);
     try std.testing.expect(countOpcodeStrict(spirv, @intFromEnum(zioshade.spirv.Op.Any)) >= 1);
 }
+// #686: reading a function-local in the same block BEFORE the single store that
+// writes it must keep its own load (an OpLoad of a never-stored variable reads
+// undef). constStoreForward's 1-store-1-load path forwarded the LATER store's
+// value to the EARLIER load, and storeForwardExtract did the same to AccessChain
+// member reads, emitting a use of an SSA id before its definition (spirv-val:
+// "ID has not been defined"; every backend then emitted a use before declaration).
+fn assertNoUseBeforeDefinition(spirv: []const u32) !void {
+    // Walk the module tracking which ids are already defined; inside function
+    // bodies, every id USED by an OpCompositeExtract (base) or OpLoad (pointer)
+    // must have a defining instruction earlier in the stream. Result-id slots:
+    // types (19-38) and OpLabel carry the result in slot 1; everything else that
+    // has a result (constants, variables, params, loads, arithmetic, ...) carries
+    // it in slot 2 behind a result type. No-result opcodes are excluded by the
+    // denylist so a literal or decoration word is never mistaken for a definition.
+    const no_result = [_]u16{ 5, 6, 8, 9, 62, 63, 71, 72, 73, 74, 75, 76, 77, 78, 224, 225, 246, 247, 249, 250, 251, 252, 253, 254, 255 };
+    var defined = std.AutoHashMap(u32, void).init(alloc);
+    defer defined.deinit();
+    var in_function = false;
+    var pos: usize = 5;
+    while (pos < spirv.len) {
+        const wc: u32 = spirv[pos] >> 16;
+        if (wc == 0) break;
+        const op: u16 = @truncate(spirv[pos] & 0xFFFF);
+        const ie = pos + wc;
+        if (ie > spirv.len) break;
+
+        if (in_function) {
+            const used_slot: ?usize = switch (op) {
+                61 => 3, // OpLoad pointer
+                81 => 3, // OpCompositeExtract base
+                else => null,
+            };
+            if (used_slot) |slot| {
+                const used = spirv[pos + slot];
+                if (!defined.contains(used)) {
+                    std.debug.print("#686: id {d} used before definition by opcode {d} at word {d}\n", .{ used, op, pos });
+                    return error.UseBeforeDefinition;
+                }
+            }
+        }
+
+        // Record the result id this instruction defines, if any.
+        const is_type = op >= 19 and op <= 38;
+        const is_label = op == 248;
+        var has_result = is_type or is_label;
+        if (!is_type and !is_label) {
+            has_result = switch (op) {
+                1, 11, 41, 42, 43, 44, 48, 49, 50, 54, 55, 59 => true, // module-scope result carriers
+                else => blk: {
+                    if (!in_function) break :blk false;
+                    for (no_result) |nr| {
+                        if (nr == op) break :blk false;
+                    }
+                    break :blk true; // in-body: default to result in slot 2
+                },
+            };
+        }
+        if (has_result) {
+            const slot: usize = if (is_type or is_label) 1 else 2;
+            if (wc > slot) try defined.put(spirv[pos + slot], {});
+        }
+        if (op == 54) in_function = true;
+        if (op == 56) in_function = false;
+        pos = ie;
+    }
+}
+
+test "optimizer: load before the single same-block store is not forwarded to the stored value (#686)" {
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    vec2 warp;
+        \\    if (fc.x > 1.0) {
+        \\        float f = warp.x + fc.y;
+        \\        warp = fc.zw * 0.5;
+        \\        o = vec4(f, warp, 1.0);
+        \\        return;
+        \\    }
+        \\    o = vec4(0.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try assertNoUseBeforeDefinition(spirv);
+}
+
+test "optimizer: member read before the same-block store is not forwarded to the stored composite (#686)" {
+    // Same unordered-forwarding shape through the AccessChain path: the struct
+    // member load precedes the whole-struct store, so storeForwardExtract must
+    // not rewrite it into an extract of the stored composite.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\struct S { vec2 a; float b; };
+        \\layout(location = 0) out vec4 o;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    S s;
+        \\    if (fc.x > 1.0) {
+        \\        float f = s.b + fc.y;
+        \\        s = S(fc.zw, 0.5);
+        \\        o = vec4(f, s.a, 1.0);
+        \\        return;
+        \\    }
+        \\    o = vec4(0.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try assertNoUseBeforeDefinition(spirv);
+}

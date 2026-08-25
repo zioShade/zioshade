@@ -7110,7 +7110,12 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
         }
     }
     // Also add 1-store-1-load non-constant vars (not already in const_store_val)
-    // With dominance check: only forward if store and load are in the same basic block.
+    // With dominance check: only forward if store and load are in the same basic block
+    // AND the store comes first. A load that precedes the store reads the variable's
+    // PRE-store contents (undef for a never-stored local): forwarding the stored
+    // value there binds the read to an SSA id defined later in the block, which is
+    // use-before-definition in the emitted SPIR-V (spirv-val: "ID has not been
+    // defined") and an undeclared identifier in every backend (#686).
     {
         // Build store position map for qualifying vars
         var store_pos_map = std.AutoHashMapUnmanaged(u32, u32).empty; // var_id -> store position
@@ -7185,7 +7190,7 @@ pub fn constStoreForward(alloc: std.mem.Allocator, words: []const u32) error{Out
                         }
                         break :blk cur2;
                     };
-                    if (load_block != store_block) {
+                    if (load_block != store_block or lp < st_pos) {
                         load_same_block = false;
                         break;
                     }
@@ -8547,9 +8552,12 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
 
         // Qualify: exactly 1 direct store, 0 whole loads, all AC results are only loaded, no non-load AC use
         if (direct_stores == 1 and whole_loads == 0 and !ac_non_load_use and member_reads.items.len > 0) {
-            // Dominance check: store must dominate all loads.
-            // Build a map from position -> block label by scanning for OpLabel instructions.
-            // Then verify that store and load positions are in the same block.
+            // Dominance check: the store must dominate every load it forwards to.
+            // Build a map from position -> block label by scanning for OpLabel instructions,
+            // verify that store and load positions are in the same block, and that each
+            // load comes AFTER the store (a load earlier in the block reads the
+            // pre-store contents, and forwarding there emits a use before the stored
+            // value's definition — #686).
             const store_block_id = blk: {
                 var bp: u32 = 5;
                 var cur: u32 = 0;
@@ -8568,6 +8576,7 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
             };
             var same_block = true;
             for (member_reads.items) |mr| {
+                var load_pos: u32 = 0;
                 const load_block_id = blk: {
                     var bp: u32 = 5;
                     var cur: u32 = 0;
@@ -8577,14 +8586,22 @@ pub fn storeForwardExtract(alloc: std.mem.Allocator, words: []const u32) error{O
                         if (bwc == 0) break;
                         const bop: u16 = @truncate(bh & 0xFFFF);
                         if (bop == 248 and bwc >= 2) cur = words[bp + 1]; // OpLabel
-                        if (bop == 61 and bwc >= 4 and words[bp + 2] == mr.load_result) break :blk cur;
+                        if (bop == 61 and bwc >= 4 and words[bp + 2] == mr.load_result) {
+                            load_pos = bp;
+                            break :blk cur;
+                        }
                         const bie = bp + bwc;
                         if (bie > words.len) break;
                         bp = bie;
                     }
                     break :blk cur;
                 };
-                if (load_block_id != store_block_id) {
+                // The member load must sit in the store's block AND after the store:
+                // a load that precedes the store reads the variable's PRE-store
+                // contents, and rewriting it into an extract of the stored value
+                // binds it to an id defined later in the block (use-before-definition,
+                // #686 — the same ordering bug as constStoreForward's 1-store-1-load path).
+                if (load_block_id != store_block_id or load_pos < store_pos) {
                     same_block = false;
                     break;
                 }

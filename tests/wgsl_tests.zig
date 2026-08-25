@@ -11332,3 +11332,93 @@ test "wgsl: a sample in a switch CASE downgrades on the replay path (8k2 F9)" {
     try nagaValidateOrSkip(wgsl, "8k2-switch-case-replay");
     try tintValidateOrSkip(wgsl, "8k2-switch-case-replay");
 }
+
+// ---------------------------------------------------------------------------
+// #686: same-arm read of a local before its assignment
+// ---------------------------------------------------------------------------
+
+/// #686: assert no SSA temp (`v<digits>`) is referenced textually before its
+/// WGSL binding. A binding site is an occurrence whose previous token is `let`
+/// or `var` (the textual mirror of the #413 HLSL helper; WGSL declares every
+/// temp as `let vN: T = ...`). A use before that line is a use of an
+/// undeclared identifier, which tint/naga reject.
+fn assertNoUseBeforeBinding(src: []const u8) !void {
+    var seen = std.StringHashMap(void).init(alloc);
+    defer {
+        var it = seen.keyIterator();
+        while (it.next()) |k| alloc.free(k.*);
+        seen.deinit();
+    }
+    var i: usize = 0;
+    while (i < src.len) {
+        if (!(std.ascii.isAlphanumeric(src[i]) or src[i] == '_')) {
+            i += 1;
+            continue;
+        }
+        var j = i;
+        while (j < src.len and (std.ascii.isAlphanumeric(src[j]) or src[j] == '_')) j += 1;
+        const tok = src[i..j];
+        const start = i;
+        i = j;
+        if (tok.len < 2 or tok[0] != 'v') continue;
+        var all_digits = true;
+        for (tok[1..]) |ch| {
+            if (!std.ascii.isDigit(ch)) {
+                all_digits = false;
+                break;
+            }
+        }
+        if (!all_digits) continue;
+        // Binding = previous token (skipping spaces) is `let` or `var`.
+        var k = start;
+        while (k > 0 and (src[k - 1] == ' ' or src[k - 1] == '\t')) k -= 1;
+        var is_binding = false;
+        if (k > 0 and (std.ascii.isAlphanumeric(src[k - 1]) or src[k - 1] == '_')) {
+            var t0 = k;
+            while (t0 > 0 and (std.ascii.isAlphanumeric(src[t0 - 1]) or src[t0 - 1] == '_')) t0 -= 1;
+            const prev = src[t0..k];
+            is_binding = std.mem.eql(u8, prev, "let") or std.mem.eql(u8, prev, "var");
+        }
+        if (is_binding and seen.contains(tok)) {
+            std.debug.print("#686: `{s}` is referenced before its binding in output:\n{s}\n", .{ tok, src });
+            return error.UseBeforeBinding;
+        }
+        if (!seen.contains(tok)) {
+            const dup = try alloc.dupe(u8, tok);
+            try seen.put(dup, {});
+        }
+    }
+}
+
+// #686: reading a local inside the same conditional arm BEFORE the statement
+// that assigns it made constStoreForward bind the read to the later store's SSA
+// id, so every backend (WGSL included) emitted `let v29: f32 = v30.x + ...;`
+// before `let v30: vec2f = ...;`. The intermediate SPIR-V itself was invalid
+// ("ID has not been defined"), so also run the real spirv-val oracle when the
+// Vulkan SDK is present.
+test "wgsl: reading a local in the same arm before its assignment keeps binding order (#686)" {
+    const source =
+        \\#version 430
+        \\layout(location = 0) out vec4 fragColor;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    vec2 warp;
+        \\    if (fc.x > 1.0) {
+        \\        float f = warp.x + fc.y;
+        \\        warp = fc.zw * 0.5;
+        \\        fragColor = vec4(f, warp, 1.0);
+        \\        return;
+        \\    }
+        \\    fragColor = vec4(0.0);
+        \\}
+    ;
+    const spirv = try zioshade.compileToSPIRV(alloc, source, .{ .stage = .fragment });
+    defer alloc.free(spirv);
+    try spirvValValidateOrSkip(spirv, "i686-same-arm-read-before-assign");
+    const wgsl = try zioshade.spirvToWGSL(alloc, spirv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "if ");
+    try assertNoUseBeforeBinding(wgsl);
+    try nagaValidateOrSkip(wgsl, "i686-same-arm-read-before-assign");
+    try tintValidateOrSkip(wgsl, "i686-same-arm-read-before-assign");
+}
