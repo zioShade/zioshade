@@ -5551,8 +5551,8 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
         while (it.next()) |l| l.deinit(alloc);
         uses.deinit();
     }
-    // One walk: block indexing matches buildCfgFromBody (blocks are numbered by
-    // OpLabel appearance in the body slice).
+    // One walk: blocks are numbered by OpLabel appearance in the body slice
+    // (the indexing buildCfgFromBody uses too; see the successor note below).
     var block: usize = 0;
     var seen_label = false;
     for (body, 0..) |inst, i| {
@@ -5651,11 +5651,16 @@ fn hlslDefiniteInitSet(alloc: std.mem.Allocator, module: *const ParsedModule, fu
     // initializer, while a local assigned only on some path (or never) does.
     // Iterate to fixpoint: loop back-edges need a second pass.
     const nblocks = block + 1;
-    const succs = try blockSuccessors(alloc, module, body);
-    defer {
-        for (succs) |sl| alloc.free(sl);
-        alloc.free(succs);
-    }
+    // Successors come from the SHARED cfg walk (cfg_structurize.buildCfgFromBody):
+    // one implementation of block numbering, terminator walking and target dedup
+    // for every consumer, including the selector-width-aware OpSwitch stride
+    // (#689: this pass once carried a private copy of the walk, and a stride fix
+    // that reached only one of the two silently diverged them). Its block
+    // numbering matches the `block` counter above: both count OpLabel
+    // appearances in `body`.
+    var sc = try @import("cfg_structurize.zig").buildCfgFromBody(alloc, module, body);
+    defer sc.deinit();
+    const succs = sc.succ_store;
     const preds = try alloc.alloc(std.ArrayList(usize), nblocks);
     for (preds) |*p| p.* = .empty;
     defer {
@@ -5771,106 +5776,6 @@ fn appendSite(map: *std.AutoHashMap(u32, std.ArrayListUnmanaged(InitSite)), id: 
 fn rootOfLocal(locals: *const std.AutoHashMap(u32, void), roots: *const std.AutoHashMap(u32, u32), ptr_id: u32) ?u32 {
     if (locals.contains(ptr_id)) return ptr_id;
     return roots.get(ptr_id);
-}
-
-/// Successor block indices for each block of `body` (blocks numbered by OpLabel
-/// appearance, entry = 0), from the terminators:
-///   OpBranch [opcode, target]
-///   OpBranchConditional [opcode, cond, true, false]
-///   OpSwitch [opcode, selector, default, (literal, target)*]
-/// An OpSwitch case literal is as wide as the SELECTOR TYPE, not always one word:
-/// an Int64 selector makes each literal two words, so the pair stride is read from
-/// the selector's type (see switchPairStride). Assuming 32 bits there yields a
-/// garbage successor set, and a wrong CFG silently corrupts the join below.
-/// Caller frees each list and the outer slice.
-fn blockSuccessors(alloc: std.mem.Allocator, module: *const ParsedModule, body: []const Instruction) ![][]usize {
-    var label_block = std.AutoHashMap(u32, usize).init(alloc);
-    defer label_block.deinit();
-    var bn: usize = 0;
-    var seen_first = false;
-    for (body) |inst| {
-        if (inst.op != .Label or inst.words.len < 2) continue;
-        if (seen_first) bn += 1;
-        seen_first = true;
-        try label_block.put(inst.words[1], bn);
-    }
-    const n = bn + 1;
-
-    const succs = try alloc.alloc([]usize, n);
-    errdefer alloc.free(succs);
-    var tmp = try alloc.alloc(std.ArrayList(usize), n);
-    defer {
-        for (tmp) |*l| l.deinit(alloc);
-        alloc.free(tmp);
-    }
-    for (tmp) |*l| l.* = .empty;
-
-    var cur: ?usize = null;
-    for (body) |inst| {
-        if (inst.op == .Label and inst.words.len >= 2) {
-            cur = label_block.get(inst.words[1]);
-            continue;
-        }
-        const c = cur orelse continue;
-        switch (inst.op) {
-            .Branch => {
-                if (inst.words.len >= 2) {
-                    if (label_block.get(inst.words[1])) |t| try appendUnique(alloc, &tmp[c], t);
-                }
-            },
-            .BranchConditional => {
-                if (inst.words.len >= 4) {
-                    if (label_block.get(inst.words[2])) |t| try appendUnique(alloc, &tmp[c], t);
-                    if (label_block.get(inst.words[3])) |t| try appendUnique(alloc, &tmp[c], t);
-                }
-            },
-            .Switch => {
-                if (inst.words.len >= 3) {
-                    if (label_block.get(inst.words[2])) |t| try appendUnique(alloc, &tmp[c], t);
-                    const stride = switchPairStride(module, inst.words[1]);
-                    var p: usize = 3;
-                    while (p + stride - 1 < inst.words.len) : (p += stride) {
-                        if (label_block.get(inst.words[p + stride - 1])) |t| try appendUnique(alloc, &tmp[c], t);
-                    }
-                }
-            },
-            else => {},
-        }
-    }
-
-    var filled: usize = 0;
-    errdefer for (succs[0..filled]) |sl| {
-        alloc.free(sl);
-    };
-    for (tmp, 0..) |*l, i| {
-        succs[i] = try alloc.dupe(usize, l.items);
-        filled += 1;
-    }
-    return succs;
-}
-
-/// Words per (literal, target) pair of an OpSwitch whose selector is `selector_id`.
-/// The literal is as wide as the selector's integer type, so a 64-bit selector
-/// spends two words on the literal plus one on the label (stride 3); everything
-/// 32-bit or narrower is stride 2. Unknown or non-integer selector types fall back
-/// to 2, the shape every shader-profile switch has.
-fn switchPairStride(module: *const ParsedModule, selector_id: u32) usize {
-    const sel = getDef(module, selector_id) orelse return 2;
-    if (sel.words.len < 2) return 2;
-    const ty = getDef(module, sel.words[1]) orelse return 2;
-    if (ty.op != .TypeInt or ty.words.len < 3) return 2;
-    const bits: usize = ty.words[2];
-    if (bits <= 32) return 2;
-    return 1 + (bits + 31) / 32;
-}
-
-/// Append `v` to the list unless already present (multi-target switches can
-/// repeat a label).
-fn appendUnique(alloc: std.mem.Allocator, list: *std.ArrayList(usize), v: usize) !void {
-    for (list.items) |x| {
-        if (x == v) return;
-    }
-    try list.append(alloc, v);
 }
 
 /// Which blocks are reachable from the entry block (index 0) over `succs`.
