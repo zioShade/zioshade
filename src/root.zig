@@ -8,6 +8,9 @@ pub const spirv = @import("spirv.zig");
 /// reducible SPIR-V. `structurizeModule(words) -> words` is a no-op on already-
 /// structured input. See docs/specs/2026-06-02-cfg-structurization.md.
 pub const cfg_structurize = @import("cfg_structurize.zig");
+/// The WGSL uniformity prepass, extracted from spirv_to_wgsl.zig (#691).
+/// Public for the in-file unit tests and for the backend's single call site.
+pub const wgsl_uniformity = @import("wgsl_uniformity.zig");
 pub const compat = @import("compat.zig");
 /// Exposed publicly for `tests/spirv_min_word_count_tests.zig`, which asserts
 /// the generated `minWordCount` table never exceeds the real word count of any
@@ -1253,6 +1256,7 @@ test {
     _ = parser;
     _ = semantic;
     _ = cfg_structurize;
+    _ = wgsl_uniformity;
     // gap_tests.zig is intentionally NOT imported here. It contains markers
     // for known unimplemented features that fail on purpose; run it
     // standalone with `zig test src/gap_tests.zig` to audit the gap list.

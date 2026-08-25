@@ -10827,7 +10827,8 @@ test "wgsl: derivative inside a helper called from non-uniform flow refuses (685
     // The interprocedural rule: a helper's ENTRY flow is the flow of its call
     // sites, so a derivative in a helper body is gated when the only call site
     // sits inside a diverged branch (the same rule tint applies to
-    // textureSample in a helper, probe p11/p12 of the 8k2 prepass). The helper
+    // textureSample in a helper, probes p11/p12 of the committed corpus
+    // tools/wgsl_uniformity_probes). The helper
     // body is deliberately MULTI-BLOCK: a single-block helper is frontend-
     // inlined before the prepass runs, so the call edge would never exist.
     const spv = try compileToSpirv("nonuniform_deriv_helper",
@@ -10872,7 +10873,8 @@ test "wgsl: straight-line dpdx keeps emitting dpdx (685 control)" {
 test "wgsl: dpdx after a reconverged if keeps emitting dpdx (685)" {
     // Both arms fall through to the merge: every invocation that entered the
     // if reaches the derivative, so the flow RECONVERGES and the builtin stays
-    // (the same rule that keeps textureSample after a completing if, probe p10).
+    // (the same rule that keeps textureSample after a completing if, probe
+    // p10 of tools/wgsl_uniformity_probes).
     const spv = try compileToSpirv("reconverged_dpdx",
         \\#version 450
         \\layout(location=0) in vec2 vUV;
@@ -11356,9 +11358,9 @@ test "wgsl: a real OpPhi over a UNIFORM short circuit keeps textureSample (8k2 F
 
 test "wgsl: a sample after a conditional discard keeps textureSample (8k2 F9)" {
     // The most load-bearing KEEP rule for real shaders: OpKill is not an exit
-    // for postdominance (probe p20). Treating a discard as an exit would
-    // downgrade a huge share of ordinary fragment shaders, and tint accepts
-    // the implicit form here.
+    // for postdominance (probe p20 of tools/wgsl_uniformity_probes).
+    // Treating a discard as an exit would downgrade a huge share of ordinary
+    // fragment shaders, and tint accepts the implicit form here.
     const spv = try compileToSpirv("kill_then_sample",
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;
@@ -11404,7 +11406,7 @@ test "wgsl: a sample after a const-bounded loop keeps textureSample (8k2 F9)" {
 test "wgsl: a sample in a switch CASE downgrades on the replay path (8k2 F9)" {
     // The switch case-body walk goes through emitSimpleInstruction, the FIFTH
     // emission site, which had no coverage. A non-uniform selector makes every
-    // case body non-uniform flow (probe p14).
+    // case body non-uniform flow (probe p14 of tools/wgsl_uniformity_probes).
     const spv = try compileToSpirv("switch_case_replay_downgrade",
         \\#version 450
         \\layout(binding=0) uniform sampler2D tex;

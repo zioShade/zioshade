@@ -10,7 +10,10 @@ const log = std.log.scoped(.spirv_to_glsl);
 const common = @import("spirv_cross_common.zig");
 const Instruction = common.Instruction;
 const ParsedModule = common.ParsedModule;
-const DecorationEntry = struct { decoration: spirv.Decoration, extra: []const u32 };
+// Identical layout to the old file-local struct; aliased to common's (issue
+// #691) so the shared common.hasDec typechecks against this file's decoration
+// maps.
+const DecorationEntry = common.DecorationEntry;
 const CbufferDecl = struct { name: []const u8, type_id: u32, binding: u32 };
 const TextureDecl = struct { name: []const u8, binding: u32, is_storage: bool = false, format_str: []const u8 = "rgba8f", dim_str: []const u8 = "2D", is_uint: bool = false, is_int: bool = false, array_size: u32 = 0, arrayed: bool = false, shadow: bool = false, is_ms: bool = false };
 
@@ -1245,13 +1248,10 @@ fn getDecVal(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), 
     return null;
 }
 
-fn hasDec(decs: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) bool {
-    const list = decs.get(id) orelse return false;
-    for (list.items) |e| {
-        if (e.decoration == dec) return true;
-    }
-    return false;
-}
+/// Whether `id` carries the value-less decoration `dec`. Moved to
+/// spirv_cross_common.zig by issue #691 (this, the MSL and the WGSL backend
+/// each kept a verbatim copy).
+const hasDec = common.hasDec;
 
 /// The GLSL interpolation-qualifier prefix for a varying (`flat ` / `noperspective `,
 /// else "" for the default `smooth`). Flat (no interpolation) and NoPerspective (linear)
