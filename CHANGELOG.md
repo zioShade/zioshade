@@ -39,6 +39,70 @@ All notable changes to zioshade are documented here. The format is loosely based
 
 ### Fixed
 
+- **HLSL: function locals read before they are definitely assigned are zero-initialized at declaration.**
+  A local assigned only inside a conditional (the wintty gallery's excluded
+  cursor_warp shape), a never-stored array or struct cell, or a read before the
+  branch that assigns it all compiled to an HLSL read with no prior write. DXC
+  lowers that to a literal undef operand and the DXIL validator rejects the
+  module: `error: Instructions should not read uninitialized value.` /
+  `note: at '%2 = fadd fast float %1, undef' in block '#0' of function 'main'.`
+  / `Validation failed.` (exit 5; reproduced on the Windows SDK dxc 10.0.26100.0
+  and the pinned Linux DXC 1.9.2602 behind `just hlsl-dxc`; spirv-cross's HLSL
+  for the same SPIR-V fails identically). The backend now runs a
+  definite-assignment dataflow per function (join over predecessors; same-block
+  stores ordered by instruction index) and emits `T v = ((T)0);` for exactly the
+  locals with an uncovered read, so an if/else assigning both arms keeps its bare
+  `T v;` and output stays byte-identical where assignment is definite. The zero
+  is spelled `((T)0)` for a scalar, vector, matrix or struct, and a per-element
+  brace list for an array (`float w[4] = {((float)0), ((float)0), ((float)0),
+  ((float)0)};`, nested once per dimension), which is what spirv-cross's
+  `--force-zero-initialized-variables` emits too. An array whose extent cannot
+  be read is refused rather than emitted: there is no other array spelling both
+  oracles accept, so the alternative is knowingly emitting output glslang
+  rejects. The two shorter spellings are
+  both traps: DXC rejects `{0}`, and glslang's HLSL frontend rejects a cast to an
+  array type, so `((float[4])0)` compiles under DXC while turning the always-on
+  `hlsl-glslang-all` gate INVALID (12 corpus outputs emitted it; they escaped the
+  gate only because their spirv-cross reference does not build, so the sweep
+  classed them INCONCLUSIVE). `= {}` parses in both and initializes in neither:
+  DXC compiles it to no initialization at all and the DXIL validator still
+  rejects the read (verified, exit 5).
+  **Only a WHOLE-variable store is a def.** A store through an `OpAccessChain`
+  writes one cell and leaves the rest of the aggregate undefined, so it cannot
+  make the root definitely assigned: `float w[4]; w[0] = t; use w[2];`,
+  `S s; s.a = t; use s.b;` and `vec2 v; v.x = t; use v.y;` have no conditional at
+  all, and all three were rejected by DXC with the diagnostic above until this
+  rule landed. The rule over-initializes an aggregate whose cells are in fact all
+  written before the read; that is harmless by the same argument as the rest of
+  this entry (a zero initializer is only observable where the read genuinely
+  precedes every write, which is undefined in the source) and it is what keeps the
+  analysis conservative in the direction that matters. Loads through an access
+  chain still count as reads of the root, `OpInBoundsAccessChain` and a pointer
+  `OpCopyObject` forward the root like `OpAccessChain`, and a local whose pointer
+  escapes into an instruction the walk cannot follow (pointer `OpPhi`/`OpSelect`,
+  `OpBitcast`, `OpPtrAccessChain`) is initialized unconditionally rather than
+  assumed safe. Corpus impact, measured by byte-diffing every HLSL output of
+  tests/spirv-cross: 81 of 1511 files, 92 declarations, and every changed line is
+  the same declaration with a zero initializer added or respelled, nothing else.
+  Of those, 69 files (80 declarations) are the whole-store rule adding an
+  initializer and 12 are the array-spelling change above. Regression coverage:
+  11 tests in tests/hlsl_tests.zig (conditional assign, read before assign,
+  conditional partial array, unconditional partial array, unconditional partial
+  struct member, unconditional partial vector component, array-of-vectors element
+  spelling, whole-array store stays bare, both-arms bare, byref-arg-only bare,
+  glslang-produced module) plus two fixtures that sweep the class through the real
+  DXC gate on every `just hlsl-dxc`:
+  tests/spirv_bins/cond-assigned-local-undef-read.spv (conditional shape) and
+  tests/spirv_bins/partial-store-local-undef-read.spv (unconditional array +
+  struct + vector partial stores, glslang-produced). Both are pre-fix DXC exit 5
+  with the diagnostic above and post-fix exit 0; the gate is 53 PASS / 3 FAIL /
+  2 SKIP, the 3 FAILs being the documented honest refusals. The reconstructed
+  cursor_warp shader now compiles DXC-clean and renders pixel-identical to the
+  spirv-cross reference on D3D12 WARP (256x256, 0 different pixels).
+  Also in the same analysis: an `OpSwitch` case literal is as wide as the selector
+  type, so the successor walk reads the pair stride from the selector (an Int64
+  selector used to yield a garbage successor set, i.e. a wrong CFG feeding the
+  join), and a failed analysis now propagates instead of degrading to an empty set.
 - **Three defects the subgroup work surfaced (#643).** A NonWritable storage buffer now
   emits read-mode `var<storage>`: the old unconditional read_write was the less faithful
   spelling and tainted buffer reads as non-uniform for tint's analysis. A private variable
