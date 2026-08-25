@@ -28,6 +28,13 @@ check_one() {
   local d="$SHARE/$name"
   sed 's/^\(out [a-z0-9]*vec4 [A-Za-z_][A-Za-z0-9_]*;\)/layout(location=0) \1/' "$frag" > "$d.g.frag"
   glslangValidator -V -S frag "$d.g.frag" -o "$d.src.spv" >/dev/null 2>&1 || { echo "skip-glslang"; return; }
+  # z.spv = zioshade-GLSL(source) -> glslang  (the round-tripped SPIR-V the proxy uses)
+  "$CLI" glsl "$d.src.spv" --stage fragment > "$d.z.glsl" 2>/dev/null || { echo "skip-zglsl"; return; }
+  glslangValidator -V -S frag "$d.z.glsl" -o "$d.z.spv" >/dev/null 2>&1 || { echo "skip-zglslang"; return; }
+  # ref = zioshade-MSL(source) — the PROVEN-correct rendering (3-oracle AGREE on the source).
+  # n.metal = naga(z.spv) — an INDEPENDENT renderer of the round-tripped SPIR-V.
+  "$CLI" msl "$d.src.spv" --stage fragment > "$d.ref.msl" 2>/dev/null || { echo "skip-refmsl"; return; }
+  naga "$d.z.spv" "$d.z.naga.metal" 2>/dev/null || { echo "skip-naga"; return; }
   # #undef-read-oracle (ported from tools/wgsl_render_check.sh): a source that
   # READS undefined Function memory (no initializer, first read before any
   # store, on the unconditional prefix; tools/spv_undef_read.py documents the
@@ -36,17 +43,14 @@ check_one() {
   # and const_expr_array_size both flipped FAITHFUL once every read was
   # initialized in a copy). Such a DIFFER is oracle noise, not a zioshade-GLSL
   # bug, so skip the whole CLASS (never by name; a miss stays a loud
-  # UNFAITHFUL). A missing python3/spirv-dis degrades to compare-as-before.
+  # UNFAITHFUL). Checked HERE, at the render compare and after every compile
+  # leg: undefined values invalidate the RENDER comparison, not the
+  # compilations, so a compiler crash or an honest refuse still reports
+  # CRASH-zglsl / skip-zglsl rather than hiding behind this skip. A missing
+  # python3/spirv-dis degrades to compare-as-before.
   if python3 tools/spv_undef_read.py "$d.src.spv" >/dev/null 2>&1; then
     echo "skip-undef-read"; return
   fi
-  # z.spv = zioshade-GLSL(source) -> glslang  (the round-tripped SPIR-V the proxy uses)
-  "$CLI" glsl "$d.src.spv" --stage fragment > "$d.z.glsl" 2>/dev/null || { echo "skip-zglsl"; return; }
-  glslangValidator -V -S frag "$d.z.glsl" -o "$d.z.spv" >/dev/null 2>&1 || { echo "skip-zglslang"; return; }
-  # ref = zioshade-MSL(source) — the PROVEN-correct rendering (3-oracle AGREE on the source).
-  # n.metal = naga(z.spv) — an INDEPENDENT renderer of the round-tripped SPIR-V.
-  "$CLI" msl "$d.src.spv" --stage fragment > "$d.ref.msl" 2>/dev/null || { echo "skip-refmsl"; return; }
-  naga "$d.z.spv" "$d.z.naga.metal" 2>/dev/null || { echo "skip-naga"; return; }
   local o; o=$("$NC" "$d.ref.msl" "$d.z.naga.metal" "${d}_r" 2>&1)
   printf '%s' "$o" | grep -q 'MATCH' && { echo "FAITHFUL"; return; }
   printf '%s' "$o" | grep -q 'DIFFER' || { echo "skip-render"; return; }

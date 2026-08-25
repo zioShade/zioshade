@@ -89,6 +89,24 @@ check_one() {
   "$CLI" wgsl "$d.src.spv" --stage fragment > "$d.z.wgsl" 2>/dev/null || { echo "skip-zwgsl"; return; }
   naga --input-kind wgsl "$d.z.wgsl" "$d.z.spv" >/dev/null 2>&1 || { echo "skip-naga"; return; }
   spirv-cross --msl "$d.z.spv" > "$d.z.msl" 2>/dev/null || { echo "skip-zcrossmsl"; return; }
+  # #undef-read-oracle: a source that READS undefined Function memory (no
+  # initializer, first read before any store, on the unconditional prefix;
+  # tools/spv_undef_read.py documents the two conservative exclusions) has
+  # no deterministic reference leg: spirv-cross keeps the variable
+  # uninitialized, so the reference renders whatever the GPU thread memory
+  # held (rendering the reference MSL against itself differs on half the
+  # frame), while the WGSL leg must zero-initialize -- WGSL has no
+  # uninitialized var, so no zioshade output can ever match. The comparison
+  # is not an oracle for such a source; skip it as a CLASS (like
+  # skip-binding: a harness limit, never a gate pass/fail), not per name.
+  # Checked HERE, at the render compare and after every compile leg:
+  # undefined values invalidate the RENDER comparison, not the
+  # compilations, so a compiler crash or an honest refuse still reports
+  # skip-zwgsl / skip-naga rather than hiding behind this skip. A missing
+  # python3/spirv-dis degrades to compare-as-before.
+  if python3 tools/spv_undef_read.py "$d.src.spv" >/dev/null 2>&1; then
+    echo "skip-undef-read"; return
+  fi
   local o; o=$("$SC" "$d.z.msl" "$d.ref.msl" "${d}_r" 2>&1)
   printf '%s' "$o" | grep -q '^MATCH' && { echo "MATCH"; return; }
   printf '%s' "$o" | grep -q 'SKIP(harness-binding)' && { echo "skip-binding"; return; }
@@ -134,20 +152,6 @@ for DIR in "${DIRS[@]}"; do
         continue
       fi
       bump skip-glslang; continue
-    fi
-    # #undef-read-oracle: a source that READS undefined Function memory (no
-    # initializer, first read before any store, on the unconditional prefix;
-    # tools/spv_undef_read.py documents the two conservative exclusions) has
-    # no deterministic reference leg: spirv-cross keeps the variable
-    # uninitialized, so the reference renders whatever the GPU thread memory
-    # held (rendering the reference MSL against itself differs on half the
-    # frame), while the WGSL leg must zero-initialize -- WGSL has no
-    # uninitialized var, so no zioshade output can ever match. The comparison
-    # is not an oracle for such a source; skip it as a CLASS (like
-    # skip-binding: a harness limit, never a gate pass/fail), not per name.
-    # A missing python3/spirv-dis degrades to compare-as-before.
-    if python3 tools/spv_undef_read.py "$d.src.spv" >/dev/null 2>&1; then
-      bump skip-undef-read; continue
     fi
     v=$(check_one "$d"); keyv=${v%% *}; bump "$keyv"
     case "$v" in DIFFER*) DIFFERS+=("$key"$'\t'"$v");; esac

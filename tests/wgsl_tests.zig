@@ -157,6 +157,23 @@ fn assertContains(haystack: []const u8, needle: []const u8) !void {
     }
 }
 
+/// The expect-refusal preamble shared by the honest-error tests: zioshade must
+/// REFUSE `spv` with `expected_err`, and the last-error detail must contain
+/// `detail_substr`. A success prints the emitted text and fails loudly
+/// (TestUnexpectedSuccess), so a regression that starts emitting instead of
+/// refusing cannot pass as a silent no-op.
+fn expectWgslRefusal(spv: []const u32, expected_err: anyerror, detail_substr: []const u8) !void {
+    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
+        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
+        alloc.free(ok);
+        return error.TestUnexpectedSuccess;
+    } else |e| {
+        try std.testing.expectEqual(expected_err, e);
+        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
+        try std.testing.expect(std.mem.indexOf(u8, detail, detail_substr) != null);
+    }
+}
+
 /// OpPhi, for the shape guards that assert glslang really emitted one. Named
 /// so the call sites do not carry a bare 245.
 const op_phi: u16 = @intFromEnum(zioshade.spirv.Op.Phi);
@@ -9671,16 +9688,8 @@ test "WGSL: case-body branch to an internal block refuses (no silent truncation)
         \\               OpFunctionEnd
     );
     defer alloc.free(spv);
-    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
-        // If this fires, the truncation class is back (or was never reached).
-        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
-        alloc.free(ok);
-        return error.TestUnexpectedSuccess;
-    } else |e| {
-        try std.testing.expectEqual(error.UnsupportedSwitchCaseExit, e);
-        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
-        try std.testing.expect(std.mem.indexOf(u8, detail, "internal") != null);
-    }
+    // If this fires, the truncation class is back (or was never reached).
+    try expectWgslRefusal(spv, error.UnsupportedSwitchCaseExit, "internal");
 }
 
 // #wgsl-region-continue (loop-dominator-and-switch-default): a switch-case
@@ -9769,16 +9778,20 @@ test "WGSL: default arm's loop-to-outer-continue emits continue, leaks no arm bo
 // #region-stop-hoist-flush: the region's IMPLICIT case end (a top-level
 // OpBranch to the switch merge) wrote its switch-merge phi assignments
 // through the HoistWriter's PENDING buffer and then broke out of the emit
-// loop -- the pending buffer is only committed by hoistSweepAndFlush, which
-// no longer ran, so every assignment on that edge was silently DROPPED (the
-// phi kept whatever the pre-declaration initialized it to). Compound defect:
-// the pre-declaration picked the region-internal load as its initializer
-// (the "loads are safe" heuristic never checked that the LOAD ITSELF precedes
-// the SelectionMerge), emitting `var v19: u32 = v18;` where v18 is only
-// defined inside the case -- naga "no definition in scope". With the flush
-// fixed the assignment lands and the initializer falls back to a zero-init,
-// so the case-1 path carries its own value. v19 = phi(v18 from the loop tail,
-// 7 from default): case 1 must assign v18, default must assign 7u.
+// loop -- the pending buffer is only committed by hoistSweepAndFlush, so
+// every assignment on that edge was silently DROPPED (the phi kept whatever
+// the pre-declaration initialized it to). Compound defect: the
+// pre-declaration picked the region-internal load as its initializer (the
+// "loads are safe" heuristic never checked that the LOAD ITSELF precedes the
+// SelectionMerge), emitting `var v19: u32 = v18;` where v18 is only defined
+// inside the case -- naga "no definition in scope". The fix was the WRITER
+// SWAP: the assignments now go to the real writer, not the pending buffer.
+// (The flush call beside the swap is defensive symmetry with the
+// region-continue edge, a no-op today; the tag above is the permanent grep
+// handle and names that flush, not the fix.) With the swap the assignment
+// lands and the initializer falls back to a zero-init, so the case-1 path
+// carries its own value. v19 = phi(v18 from the loop tail, 7 from default):
+// case 1 must assign v18, default must assign 7u.
 test "WGSL: region implicit case end assigns switch-merge phis (region-stop hoist flush)" {
     const spv = try assembleSpirv("region_stop_phi_flush",
         \\               OpCapability Shader
@@ -9801,7 +9814,6 @@ test "WGSL: region implicit case end assigns switch-merge phis (region-stop hois
         \\          %u1 = OpConstant %u32 1
         \\          %u4 = OpConstant %u32 4
         \\          %u7 = OpConstant %u32 7
-        \\         %one = OpConstantComposite %v4f %f1 %f0 %f0 %f1
         \\        %main = OpFunction %void None %fn
         \\       %entry = OpLabel
         \\        %svar = OpVariable %pu Function %u1
@@ -9852,14 +9864,75 @@ test "WGSL: region implicit case end assigns switch-merge phis (region-stop hois
     // (naga "no definition in scope"): zero-init, every edge assigns first.
     try std.testing.expect(std.mem.indexOf(u8, wgsl, "var v19: u32 = v18;") == null);
     try assertContains(wgsl, "var v19: u32;");
-    // (4) the assignment sits INSIDE the case (after the loop), not after the
-    // switch: find the case-1 arm and check the assignment follows its loop.
+    // (4) the assignment sits INSIDE the case, AFTER the loop, not after the
+    // switch: it must appear after the case-1 open, after the loop-tail read
+    // that defines its right-hand side (`let v18` is the load at the loop
+    // merge, emitted after the loop closes -- an assignment placed before it
+    // would be hoisted above the loop), and before the post-switch read.
     const c1 = std.mem.indexOf(u8, wgsl, "case 1: {") orelse return error.TestExpectedCase1;
-    const assign = std.mem.indexOfPos(u8, wgsl, c1, "v19 = v18;") orelse return error.TestExpectedAssignInCase;
+    const loop_tail_read = std.mem.indexOfPos(u8, wgsl, c1, "let v18: u32 = v11;") orelse return error.TestExpectedLoopTailRead;
+    const assign = std.mem.indexOfPos(u8, wgsl, loop_tail_read, "v19 = v18;") orelse return error.TestExpectedAssignInCase;
     const after_switch = std.mem.indexOf(u8, wgsl, "f32(v19)") orelse return error.TestExpectedPostRead;
     try std.testing.expect(assign < after_switch);
     try nagaValidateOrSkip(wgsl, "region-stop-phi-flush");
 }
+
+// Shared head for the two #wgsl-region-loop-break refusal modules below:
+// identical through the region's inner loop (the %imerge block that follows
+// is where they differ: a plain OpBranch to the outer merge vs the same break
+// taken as a BranchConditional arm). The asm_8k2_head precedent shape.
+const asm_region_break_head =
+    \\               OpCapability Shader
+    \\               OpMemoryModel Logical GLSL450
+    \\               OpEntryPoint Fragment %main "main" %o
+    \\               OpExecutionMode %main OriginUpperLeft
+    \\               OpDecorate %o Location 0
+    \\       %void = OpTypeVoid
+    \\         %fn = OpTypeFunction %void
+    \\         %f32 = OpTypeFloat 32
+    \\         %v4f = OpTypeVector %f32 4
+    \\         %u32 = OpTypeInt 32 0
+    \\        %bool = OpTypeBool
+    \\          %pu = OpTypePointer Function %u32
+    \\         %po4 = OpTypePointer Output %v4f
+    \\           %o = OpVariable %po4 Output
+    \\          %f0 = OpConstant %f32 0.0
+    \\          %f1 = OpConstant %f32 1.0
+    \\          %u0 = OpConstant %u32 0
+    \\          %u1 = OpConstant %u32 1
+    \\          %u3 = OpConstant %u32 3
+    \\          %u4 = OpConstant %u32 4
+    \\          %u5 = OpConstant %u32 5
+    \\          %u9 = OpConstant %u32 9
+    \\        %main = OpFunction %void None %fn
+    \\       %entry = OpLabel
+    \\         %ci = OpVariable %pu Function %u1
+    \\          %n = OpVariable %pu Function %u0
+    \\               OpBranch %lhdr
+    \\        %lhdr = OpLabel
+    \\           %i = OpPhi %u32 %u0 %entry %inext %lcont
+    \\        %cmp = OpSLessThan %bool %i %u4
+    \\               OpLoopMerge %lmerge %lcont None
+    \\               OpBranchConditional %cmp %lbody %lmerge
+    \\       %lbody = OpLabel
+    \\         %sel = OpLoad %u32 %ci
+    \\               OpSelectionMerge %swm None
+    \\               OpSwitch %sel %dflt 1 %c1
+    \\          %c1 = OpLabel
+    \\               OpBranch %ihdr
+    \\        %ihdr = OpLabel
+    \\           %j = OpPhi %u32 %u0 %c1 %jnext %icont
+    \\        %icmp = OpSLessThan %bool %j %u1
+    \\               OpLoopMerge %imerge %icont None
+    \\               OpBranchConditional %icmp %ibody %imerge
+    \\       %ibody = OpLabel
+    \\               OpStore %n %u3
+    \\               OpBranch %icont
+    \\       %icont = OpLabel
+    \\       %jnext = OpIAdd %u32 %j %u1
+    \\               OpBranch %ihdr
+    \\
+;
 
 // #wgsl-region-loop-break: a branch to the ENCLOSING loop's merge from inside
 // a switch-case REGION is a break that must exit the loop, but WGSL binds
@@ -9872,57 +9945,7 @@ test "WGSL: region implicit case end assigns switch-merge phis (region-stop hois
 // hit it. The twin CONTINUE edge is spellable (`continue` binds to the loop
 // through the switch) and is handled by #wgsl-region-continue.
 test "WGSL: region break to the enclosing loop merge refuses (no mis-bound break)" {
-    const spv = try assembleSpirv("region_loop_break",
-        \\               OpCapability Shader
-        \\               OpMemoryModel Logical GLSL450
-        \\               OpEntryPoint Fragment %main "main" %o
-        \\               OpExecutionMode %main OriginUpperLeft
-        \\               OpDecorate %o Location 0
-        \\       %void = OpTypeVoid
-        \\         %fn = OpTypeFunction %void
-        \\         %f32 = OpTypeFloat 32
-        \\         %v4f = OpTypeVector %f32 4
-        \\         %u32 = OpTypeInt 32 0
-        \\        %bool = OpTypeBool
-        \\          %pu = OpTypePointer Function %u32
-        \\         %po4 = OpTypePointer Output %v4f
-        \\           %o = OpVariable %po4 Output
-        \\          %f0 = OpConstant %f32 0.0
-        \\          %f1 = OpConstant %f32 1.0
-        \\          %u0 = OpConstant %u32 0
-        \\          %u1 = OpConstant %u32 1
-        \\          %u3 = OpConstant %u32 3
-        \\          %u4 = OpConstant %u32 4
-        \\          %u5 = OpConstant %u32 5
-        \\          %u9 = OpConstant %u32 9
-        \\         %one = OpConstantComposite %v4f %f1 %f0 %f0 %f1
-        \\        %main = OpFunction %void None %fn
-        \\       %entry = OpLabel
-        \\         %ci = OpVariable %pu Function %u1
-        \\          %n = OpVariable %pu Function %u0
-        \\               OpBranch %lhdr
-        \\        %lhdr = OpLabel
-        \\           %i = OpPhi %u32 %u0 %entry %inext %lcont
-        \\        %cmp = OpSLessThan %bool %i %u4
-        \\               OpLoopMerge %lmerge %lcont None
-        \\               OpBranchConditional %cmp %lbody %lmerge
-        \\       %lbody = OpLabel
-        \\         %sel = OpLoad %u32 %ci
-        \\               OpSelectionMerge %swm None
-        \\               OpSwitch %sel %dflt 1 %c1
-        \\          %c1 = OpLabel
-        \\               OpBranch %ihdr
-        \\        %ihdr = OpLabel
-        \\           %j = OpPhi %u32 %u0 %c1 %jnext %icont
-        \\        %icmp = OpSLessThan %bool %j %u1
-        \\               OpLoopMerge %imerge %icont None
-        \\               OpBranchConditional %icmp %ibody %imerge
-        \\       %ibody = OpLabel
-        \\               OpStore %n %u3
-        \\               OpBranch %icont
-        \\       %icont = OpLabel
-        \\       %jnext = OpIAdd %u32 %j %u1
-        \\               OpBranch %ihdr
+    const spv = try assembleSpirv("region_loop_break", asm_region_break_head ++
         \\       %imerge = OpLabel
         \\               OpStore %n %u5
         \\               OpBranch %lmerge
@@ -9944,18 +9967,10 @@ test "WGSL: region break to the enclosing loop merge refuses (no mis-bound break
         \\               OpFunctionEnd
     );
     defer alloc.free(spv);
-    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
-        // If this fires, the dropped-edge class is back (or was never
-        // reached): the emitted WGSL would run the loop tail on the break
-        // path and leak the default arm's body into case 1.
-        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
-        alloc.free(ok);
-        return error.TestUnexpectedSuccess;
-    } else |e| {
-        try std.testing.expectEqual(error.UnsupportedRegionExit, e);
-        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
-        try std.testing.expect(std.mem.indexOf(u8, detail, "enclosing loop's merge") != null);
-    }
+    // If this fires, the dropped-edge class is back (or was never reached):
+    // the emitted WGSL would run the loop tail on the break path and leak the
+    // default arm's body into case 1.
+    try expectWgslRefusal(spv, error.UnsupportedRegionExit, "enclosing loop's merge");
 }
 
 // #wgsl-region-loop-break, BranchConditional form: the same break taken as a
@@ -9964,57 +9979,7 @@ test "WGSL: region break to the enclosing loop merge refuses (no mis-bound break
 // and silently dropped the exit, so the loop tail ran on the break path too
 // (n = 9 instead of 5). Same honest error as the OpBranch form.
 test "WGSL: region conditional break to the enclosing loop merge refuses" {
-    const spv = try assembleSpirv("region_loop_break_cond",
-        \\               OpCapability Shader
-        \\               OpMemoryModel Logical GLSL450
-        \\               OpEntryPoint Fragment %main "main" %o
-        \\               OpExecutionMode %main OriginUpperLeft
-        \\               OpDecorate %o Location 0
-        \\       %void = OpTypeVoid
-        \\         %fn = OpTypeFunction %void
-        \\         %f32 = OpTypeFloat 32
-        \\         %v4f = OpTypeVector %f32 4
-        \\         %u32 = OpTypeInt 32 0
-        \\        %bool = OpTypeBool
-        \\          %pu = OpTypePointer Function %u32
-        \\         %po4 = OpTypePointer Output %v4f
-        \\           %o = OpVariable %po4 Output
-        \\          %f0 = OpConstant %f32 0.0
-        \\          %f1 = OpConstant %f32 1.0
-        \\          %u0 = OpConstant %u32 0
-        \\          %u1 = OpConstant %u32 1
-        \\          %u3 = OpConstant %u32 3
-        \\          %u4 = OpConstant %u32 4
-        \\          %u5 = OpConstant %u32 5
-        \\          %u9 = OpConstant %u32 9
-        \\         %one = OpConstantComposite %v4f %f1 %f0 %f0 %f1
-        \\        %main = OpFunction %void None %fn
-        \\       %entry = OpLabel
-        \\         %ci = OpVariable %pu Function %u1
-        \\          %n = OpVariable %pu Function %u0
-        \\               OpBranch %lhdr
-        \\        %lhdr = OpLabel
-        \\           %i = OpPhi %u32 %u0 %entry %inext %lcont
-        \\        %cmp = OpSLessThan %bool %i %u4
-        \\               OpLoopMerge %lmerge %lcont None
-        \\               OpBranchConditional %cmp %lbody %lmerge
-        \\       %lbody = OpLabel
-        \\         %sel = OpLoad %u32 %ci
-        \\               OpSelectionMerge %swm None
-        \\               OpSwitch %sel %dflt 1 %c1
-        \\          %c1 = OpLabel
-        \\               OpBranch %ihdr
-        \\        %ihdr = OpLabel
-        \\           %j = OpPhi %u32 %u0 %c1 %jnext %icont
-        \\        %icmp = OpSLessThan %bool %j %u1
-        \\               OpLoopMerge %imerge %icont None
-        \\               OpBranchConditional %icmp %ibody %imerge
-        \\       %ibody = OpLabel
-        \\               OpStore %n %u3
-        \\               OpBranch %icont
-        \\       %icont = OpLabel
-        \\       %jnext = OpIAdd %u32 %j %u1
-        \\               OpBranch %ihdr
+    const spv = try assembleSpirv("region_loop_break_cond", asm_region_break_head ++
         \\       %imerge = OpLabel
         \\         %bc = OpSLessThan %bool %i %u1
         \\               OpSelectionMerge %isel2 None
@@ -10044,15 +10009,7 @@ test "WGSL: region conditional break to the enclosing loop merge refuses" {
         \\               OpFunctionEnd
     );
     defer alloc.free(spv);
-    if (zioshade.spirvToWGSL(alloc, spv, .{})) |ok| {
-        std.debug.print("unexpectedly emitted:\n{s}\n", .{ok});
-        alloc.free(ok);
-        return error.TestUnexpectedSuccess;
-    } else |e| {
-        try std.testing.expectEqual(error.UnsupportedRegionExit, e);
-        const detail = zioshade.wgslLastErrorDetail() orelse return error.TestExpectedDetail;
-        try std.testing.expect(std.mem.indexOf(u8, detail, "enclosing loop's merge") != null);
-    }
+    try expectWgslRefusal(spv, error.UnsupportedRegionExit, "enclosing loop's merge");
 }
 
 // #wgsl-loop-merge-phi: a phi at a LOOP's merge block (e.g. the "did we break"

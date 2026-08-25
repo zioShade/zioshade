@@ -534,6 +534,26 @@ fn nameInUse(names: *const std.AutoHashMap(u32, []const u8), candidate: []const 
     return false;
 }
 
+/// Does `inst` branch to `target` -- plainly (OpBranch), or through either
+/// BranchConditional arm? Shared by the region-mode guards: the switch-merge
+/// stop (the implicit case end) and the enclosing-loop-merge refusal. This
+/// word-index logic was already wrong once (issue #687 item 1): the original
+/// missed words[2] (the TRUE target of a merge-flag BranchConditional,
+/// `if (flag) goto merge else ...`), which exits through words[2] and whose
+/// omission dropped a break plus its phi assignment (review finding 1b). It
+/// lives in ONE place so the next fix to it cannot be applied to only one
+/// caller.
+fn branchesTo(inst: Instruction, target: u32) bool {
+    if (inst.op != .Branch and inst.op != .BranchConditional) return false;
+    if (inst.words.len < 2) return false;
+    if (inst.words[1] == target) return true;
+    if (inst.op == .BranchConditional) {
+        if (inst.words.len > 3 and inst.words[3] == target) return true;
+        if (inst.words.len > 2 and inst.words[2] == target) return true;
+    }
+    return false;
+}
+
 /// For a CompositeExtract whose source is an OpExtInst FrexpStruct (52) / ModfStruct
 /// (36), returns the WGSL builtin result-struct field name for member `idx`: index 0
 /// is `.fract`, index 1 is `.exp` (frexp) / `.whole` (modf). glslang names the SPIR-V
@@ -9289,14 +9309,9 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                         }
                     }
                 }
-                // words[2] (the TRUE target) must be checked too -- a merge-flag
-                // BranchConditional (`if (flag) goto switch-merge else ...`)
-                // exits through words[2]; missing it dropped the break and the
-                // phi assignment (review finding 1b).
-                const branch_to_sl = (inst.op == .Branch or inst.op == .BranchConditional) and inst.words.len > 1 and
-                    (inst.words[1] == sl or
-                        (inst.op == .BranchConditional and ((inst.words.len > 3 and inst.words[3] == sl) or
-                            (inst.words.len > 2 and inst.words[2] == sl))));
+                // words[2] (the TRUE target of a merge-flag BranchConditional)
+                // is checked too; see branchesTo for why that arm matters.
+                const branch_to_sl = branchesTo(inst, sl);
                 const top_level = if_depth == 0 and loop_stack.items.len == 0;
                 if (inst.op == .Label and inst.words.len > 1 and inst.words[1] == sl and top_level) break;
                 if (branch_to_sl) {
@@ -9307,17 +9322,23 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                             // would keep its init: emit the assignments before
                             // the implicit break (review finding 1b).
                             //
-                            // #region-stop-hoist-flush: the assignments must go
-                            // to the REAL writer. `w` buffers into the hoist
+                            // #region-stop-hoist-flush: the FIX was the writer
+                            // swap -- the assignments go to the REAL writer
+                            // `w_out`, never `w`. `w` buffers into the hoist
                             // pending buffer, which is committed only by
-                            // hoistSweepAndFlush -- and the `break` below exits
+                            // hoistSweepAndFlush, and the `break` below exits
                             // the emit loop with no further flush, so writing
                             // through `w` here silently DROPPED every
                             // assignment on this edge (the phi kept its init:
                             // naga-invalid when the init was mis-scoped,
-                            // silently-wrong otherwise). Same shape as the
-                            // #wgsl-region-continue edge: flush, then write
-                            // past the pending buffer.
+                            // silently-wrong otherwise). The flush call below
+                            // is defensive symmetry with the #wgsl-region-
+                            // continue edge (flush, then write past the pending
+                            // buffer), NOT part of the fix: the top-of-iteration
+                            // flush already ran unconditionally and nothing has
+                            // written since, so the buffer is provably empty
+                            // here today. It keeps this edge correct if a future
+                            // edit ever emits through `w` above the break.
                             try hoistSweepAndFlush(&hoist_pending, alloc, &ctx.hoisted_ids, names, w_out);
                             var spi_x = ctx.sel_phis.iterator();
                             while (spi_x.next()) |ent| {
@@ -9357,10 +9378,7 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
             // the switch, which is why #wgsl-region-continue can spell its
             // twin.)
             if (r.loop_merge) |om| {
-                const branch_to_om = (inst.op == .Branch or inst.op == .BranchConditional) and inst.words.len > 1 and
-                    (inst.words[1] == om or
-                        (inst.op == .BranchConditional and ((inst.words.len > 3 and inst.words[3] == om) or
-                            (inst.words.len > 2 and inst.words[2] == om))));
+                const branch_to_om = branchesTo(inst, om);
                 if (branch_to_om) {
                     last_error_detail = std.fmt.bufPrint(&last_error_detail_buf, "a construct inside a switch-case region branches to the enclosing loop's merge (a break out of the loop taken from inside the switch); WGSL binds break to the switch there and has no labeled break, so it cannot be spelled without a flag variable", .{}) catch null;
                     return error.UnsupportedRegionExit;
@@ -9466,47 +9484,35 @@ fn emitBody(module: *const ParsedModule, names: *std.AutoHashMap(u32, []const u8
                                     // Check if the init value is defined BEFORE the SelectionMerge
                                     // If defined inside the if-else block, use a type-appropriate zero instead
                                     const init_val_name = names.get(sp.value_id);
-                                    var use_init = false;
-                                    if (init_val_name != null) {
-                                        // Check if value_id is a constant (always safe to reference)
-                                        const val_def = getDef(module, sp.value_id);
-                                        if (val_def != null) {
-                                            const val_op = val_def.?.op;
-                                            if (val_op == .Constant or val_op == .ConstantComposite or val_op == .ConstantTrue or val_op == .ConstantFalse or val_op == .Undef) {
-                                                use_init = true;
-                                            } else if (val_op == .Load or val_op == .Variable) {
-                                                // Loads from variables declared before the if-else are
-                                                // safe ONLY when the LOAD ITSELF precedes the
-                                                // SelectionMerge: a load emitted inside an arm (or a
-                                                // switch-case region) binds its `let` there, so the
-                                                // name is not in scope at the pre-declaration site
-                                                // (naga "no definition in scope"; region_stop_phi_flush).
-                                                if (sp.value_id < module.id_defs.len) {
-                                                    if (module.id_defs[sp.value_id]) |vidx| {
-                                                        if (vidx < i) use_init = true;
-                                                    }
-                                                }
-                                            } else {
-                                                // Check if the value's definition index is before this SelectionMerge.
-                                                // Use the index-backed id_defs map: the old text scan compared
-                                                // words[2] against the value id for EVERY instruction, but words[2]
-                                                // is a result id only for value-producing ops; a non-result
-                                                // instruction whose words[2] is data (an OpName string word) can
-                                                // numerically alias the value id. tint names a transfer-function
-                                                // constant "B" (string word 66), which aliased an arm-local
-                                                // VectorShuffle's id: the then-arm value passed as an in-scope
-                                                // initializer and the emitted `var phi = <arm value>;` referenced
-                                                // a name declared only inside the branch (naga: undeclared
-                                                // identifier at exit 0). (#wgsl-cts)
-                                                if (sp.value_id < module.id_defs.len) {
-                                                    if (module.id_defs[sp.value_id]) |vidx| {
-                                                        if (vidx < i) use_init = true;
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                    if (use_init and init_val_name != null) {
+                                    const use_init = init_val_name != null and init: {
+                                        const val_def = getDef(module, sp.value_id) orelse break :init false;
+                                        const val_op = val_def.op;
+                                        // Constants (and Undef) are always safe to reference.
+                                        if (val_op == .Constant or val_op == .ConstantComposite or val_op == .ConstantTrue or val_op == .ConstantFalse or val_op == .Undef) break :init true;
+                                        // Everything else -- loads included, whose OpVariable index
+                                        // is always in the entry block and thus always before i -- is
+                                        // safe ONLY when the value's definition index precedes this
+                                        // SelectionMerge: a value defined inside an arm (or a
+                                        // switch-case region) binds its name there, so the name is
+                                        // not in scope at the pre-declaration site (naga "no
+                                        // definition in scope"; region_stop_phi_flush). Use the
+                                        // index-backed id_defs map, not a text scan: the old scan
+                                        // compared words[2] against the value id for EVERY
+                                        // instruction, but words[2] is a result id only for
+                                        // value-producing ops; a non-result instruction whose
+                                        // words[2] is data (an OpName string word) can numerically
+                                        // alias the value id. tint names a transfer-function
+                                        // constant "B" (string word 66), which aliased an
+                                        // arm-local VectorShuffle's id: the then-arm value passed
+                                        // as an in-scope initializer and the emitted
+                                        // `var phi = <arm value>;` referenced a name declared only
+                                        // inside the branch (naga: undeclared identifier at
+                                        // exit 0). (#wgsl-cts)
+                                        if (sp.value_id >= module.id_defs.len) break :init false;
+                                        const vidx = module.id_defs[sp.value_id] orelse break :init false;
+                                        break :init vidx < i;
+                                    };
+                                    if (use_init) {
                                         try writeInd(w, indent);
                                         if (!ctx.declared_merge_phis.contains(sp.result_id)) {
                                             try w.print("var {s}: {s} = {s};\n", .{ phi_result.?, phi_type, init_val_name.? });
