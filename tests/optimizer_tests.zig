@@ -900,6 +900,8 @@ fn assertNoUseBeforeDefinition(spirv: []const u32) !void {
             const used_slot: ?usize = switch (op) {
                 61 => 3, // OpLoad pointer
                 81 => 3, // OpCompositeExtract base
+                65 => 3, // OpAccessChain base
+                80 => null, // OpCompositeConstruct: checked below, all operands
                 else => null,
             };
             if (used_slot) |slot| {
@@ -907,6 +909,16 @@ fn assertNoUseBeforeDefinition(spirv: []const u32) !void {
                 if (!defined.contains(used)) {
                     std.debug.print("#686: id {d} used before definition by opcode {d} at word {d}\n", .{ used, op, pos });
                     return error.UseBeforeDefinition;
+                }
+            }
+            if (op == 80) {
+                // OpCompositeConstruct constituents start at slot 3 and run to
+                // the end of the instruction; every one is a used id.
+                for (spirv[pos + 3 .. ie]) |used| {
+                    if (!defined.contains(used)) {
+                        std.debug.print("#686: id {d} used before definition by opcode {d} at word {d}\n", .{ used, op, pos });
+                        return error.UseBeforeDefinition;
+                    }
                 }
             }
         }
@@ -976,6 +988,37 @@ test "optimizer: member read before the same-block store is not forwarded to the
         \\        return;
         \\    }
         \\    o = vec4(0.0);
+        \\}
+    ;
+    const spirv = try compileFrag(source);
+    defer alloc.free(spirv);
+    try assertNoUseBeforeDefinition(spirv);
+}
+
+// Why there is no positive-direction (#686) test here: a store that precedes
+// its single same-block read is resolved by the frontend's own store-to-load
+// cache before the optimizer ever runs, so a GLSL-driven test cannot observe
+// the optimizer's forwarding in isolation; the pass only fires on shapes the
+// cache does not fold (external SPIR-V, cross-expression reuse). The positive
+// direction therefore has no GLSL-reachable assertion, by construction.
+
+test "optimizer: whole read before the scattered component stores is not rewritten (#686)" {
+    // scatterStoreToComposite rewrites a lone whole load of a
+    // never-directly-stored vector into a CompositeConstruct of the component
+    // stores' values AT THE LOAD'S POSITION. A whole read that precedes the
+    // scatter would make that construct reference ids defined after it
+    // (use-before-definition), so the pass must skip the variable and leave
+    // the plain load. assertNoUseBeforeDefinition checks OpCompositeConstruct
+    // (80) constituents, which is exactly the vector here.
+    const source: [:0]const u8 =
+        \\#version 450
+        \\layout(location = 0) out vec4 o;
+        \\layout(location = 0) in vec4 fc;
+        \\void main() {
+        \\    vec4 v;
+        \\    o = v;                                        // whole read BEFORE the scatter
+        \\    v.x = fc.x; v.y = fc.y; v.z = fc.z; v.w = fc.w;
+        \\    o += vec4(1.0);
         \\}
     ;
     const spirv = try compileFrag(source);
