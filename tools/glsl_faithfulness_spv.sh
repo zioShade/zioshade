@@ -69,17 +69,6 @@ check_one() {
   gs=$(glslang_stage "$spv")
   [ -z "$gs" ] && { echo "skip-stage"; return; }
   [ "$gs" != "frag" ] && { echo "skip-stage"; return; }  # NagaCompare is fragment-only
-  # #undef-read-oracle (ported from tools/wgsl_render_check.sh, same skip class
-  # as the .frag gate tools/glsl_faithfulness.sh): a module that READS undefined
-  # Function memory (no initializer, first read before any store, on the
-  # unconditional prefix; tools/spv_undef_read.py documents the two conservative
-  # exclusions) has undefined values, and the two renders may legitimately
-  # differ -- a DIFFER here is oracle noise, not a zioshade-GLSL bug. Skip the
-  # CLASS (never by name; a miss stays a loud UNFAITHFUL). A missing
-  # python3/spirv-dis degrades to compare-as-before.
-  if python3 tools/spv_undef_read.py "$spv" >/dev/null 2>&1; then
-    echo "skip-undef-read"; return
-  fi
   d="$SHARE/$name"
 
   "$CLI" glsl "$spv" > "$d.z.glsl" 2>"$d.zglsl.err"; rc=$?
@@ -99,6 +88,20 @@ check_one() {
   if [ $rc -ne 0 ]; then
     # naga is an ORACLE; its crash/reject is not a zioshade mandate violation.
     if is_crash "$d.naga.err" "$rc"; then echo "CRASH-naga"; else echo "skip-naga"; fi; return
+  fi
+  # #undef-read-oracle (ported from tools/wgsl_render_check.sh, same skip class
+  # as the .frag gate tools/glsl_faithfulness.sh): a module that READS undefined
+  # Function memory (no initializer, first read before any store, on the
+  # unconditional prefix; tools/spv_undef_read.py documents the two conservative
+  # exclusions) has undefined values, and the two renders may legitimately
+  # differ -- a DIFFER here is oracle noise, not a zioshade-GLSL bug. Skip the
+  # CLASS (never by name; a miss stays a loud UNFAITHFUL). Checked HERE, at the
+  # render compare and after every compile leg: undefined values invalidate the
+  # RENDER comparison, not the compilations, so a compiler crash or an honest
+  # refuse still reports CRASH-zglsl / skip-zglsl rather than hiding behind
+  # this skip. A missing python3/spirv-dis degrades to compare-as-before.
+  if python3 tools/spv_undef_read.py "$spv" >/dev/null 2>&1; then
+    echo "skip-undef-read"; return
   fi
   local o; o=$("$NC" "$d.ref.msl" "$d.z.naga.metal" "${d}_r" 2>&1)
   printf '%s' "$o" | grep -q '^MATCH' && { echo "FAITHFUL"; return; }
