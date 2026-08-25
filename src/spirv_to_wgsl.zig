@@ -6999,13 +6999,27 @@ const max_region_depth: u32 = 256;
 //     incoming value is uniform AND every incoming edge left its block on a
 //     uniform branch (probe p17: a phi of constants across a non-uniform if
 //     is non-uniform; p24: across a uniform if it stays uniform).
+//   * a store into a FUNCTION-scope variable reaches only the loads its block
+//     can actually flow to (#684): the store rule is FLOW-SENSITIVE within
+//     one function, on the successor graph with loop back edges included, so
+//     a store later in a loop body still poisons an earlier load on the next
+//     iteration while a store AFTER a load it can no longer reach does not
+//     poison it. tint's local-variable uniformity is flow-sensitive the same
+//     way. Module-scope Private/Output roots keep the flow-insensitive rule
+//     (see the imprecision list below for why).
 //   * helper functions inherit the flow of their CALL SITES (probe p11/p12)
 //     and a parameter is a uniform value iff every call site passes a
 //     uniform argument (probe p23a/p23b). Both are interprocedural and
 //     resolved by the same downward fixpoint.
-// The analysis is deliberately conservative where WGSL offers no expression
-// for more precision (function-call RESULTS and pointer PARAMETERS are
-// non-uniform values).
+//   * a function-call RESULT is uniform iff every OpReturnValue of the callee
+//     returns a uniform value from a block with uniform flow (#684; probed:
+//     a uniform value returned from a diverged arm is NON-uniform, the same
+//     selection rule as a phi edge, while a return after a reconverged if or
+//     selected by a uniform condition stays uniform). This is a third
+//     interprocedural component of the same downward fixpoint.
+// The analysis is deliberately conservative where it cannot model tint
+// exactly (pointer PARAMETERS are never uniform VALUES; loads through them
+// are judged from the call sites instead).
 //
 // WHAT THIS DOES NOT COVER. An earlier version of this comment claimed the
 // analysis "never claims uniformity the probes showed tint rejecting, so the
@@ -7014,15 +7028,28 @@ const max_region_depth: u32 = 256;
 // SPIR-V storage class, so a Vulkan-1.0 SSBO read counted as uniform, the
 // implicit sample was kept, and tint rejected the module; fixed above by
 // readIsUniformStorage), and the claim is not something the analysis can
-// promise in general: it is a heuristic mirror of tint's rules, not tint. Two
-// known imprecisions in the SAFE direction, both silent MIP CHANGES rather
+// promise in general: it is a heuristic mirror of tint's rules, not tint.
+// Known imprecisions in the SAFE direction, all silent MIP CHANGES rather
 // than rejects, are left standing on purpose:
-//   * varStoresUniform is flow-INSENSITIVE: it requires EVERY store into a
-//     variable anywhere in the function to be uniform, so reusing one scratch
-//     local for a later non-uniform value retroactively poisons the earlier
-//     uniform loads. tint accepts those; we downgrade.
-//   * a FunctionCall RESULT is never a uniform value, however uniform its
-//     inputs and body are.
+//   * the #684 store-reachability filter applies ONLY to stores in the SAME
+//     function as the load, only when that function is not on a call-graph
+//     cycle, and only when the variable itself is FUNCTION-scope: the filter
+//     argues about ONE invocation, and only a Function-scope variable's
+//     contents live and die with one. A module-scope Private or Output root
+//     persists across SEQUENTIAL calls of the same function (a store by an
+//     earlier call can feed a load of a later one from an unreachable block;
+//     the #684 review repro), so for those, for stores made in a DIFFERENT
+//     function, and for cyclic functions, every store counts unconditionally.
+//     Stores a callee makes through a pointer parameter are likewise judged
+//     per PARAMETER (every store through it uniform), not per reaching store
+//     site within the callee.
+//   * the #684 return rule consults the callee's flow, whose entry is the
+//     AND of its call sites: a helper with ONE non-uniform call site has
+//     every block poisoned, so its result is called non-uniform even at its
+//     uniform call sites where tint would keep it (and where a same-shaped
+//     phi of the returned values would stay uniform). Functions on a
+//     call-graph cycle keep the pre-#684 verdict outright: their result is
+//     never called uniform.
 // And one gap in the UNSAFE direction is knowingly OUT OF SCOPE here
 // (#wgsl-uniformity-8k2-derivatives): WGSL gates the DERIVATIVE builtins
 // (dpdx/dpdxCoarse/dpdxFine and the dpdy/fwidth families, emitted further down
@@ -7073,8 +7100,23 @@ const UniParamStore = struct { func: usize, param: usize, val: u32, block: usize
 
 /// One call argument that is a pointer to a variable: parameter position `pos`
 /// of `callee` receives (a chain rooted at) `root`. Ties the callee's loads
-/// through that parameter to the caller's stores into the variable.
-const UniArgVar = struct { callee: u32, pos: usize, root: u32 };
+/// through that parameter to the caller's stores into the variable. The call
+/// site (`caller`, `block`) is what the #684 reachability filter consults: a
+/// callee store through this pointer only matters to a load the CALL can feed.
+const UniArgVar = struct { callee: u32, pos: usize, root: u32, caller: usize, block: usize };
+
+/// One OpReturnValue: the value returned and the block it returns from. The
+/// block is load-bearing (#684): tint judges a return from a DIVERGED arm
+/// non-uniform even when the returned value is uniform (probed; the same
+/// selection rule as a phi edge), so the return rule needs WHERE, not just
+/// WHAT.
+const UniReturn = struct { val: u32, block: usize };
+
+/// WHERE a load sits (function index + block index). The #684 store rule
+/// counts only stores whose block can REACH this point; null means "location
+/// unknown" and disables the filter (every store counts, the conservative
+/// pre-#684 verdict).
+const UniLoc = struct { func: usize, block: usize };
 
 /// One structured loop: the header block (where OpLoopMerge sits), the
 /// continue block, the prelude blocks (header chain up to the conditional
@@ -7096,10 +7138,13 @@ const UniFunc = struct {
     entry_block: usize,
     calls: []const UniCall,
     samples: []const UniSample,
+    returns: []const UniReturn,
     is_entry_point: bool,
     /// fixpoint variables: only ever move DOWN from true
     entry_flow: bool = true,
     param_uniform: []bool,
+    /// (#684) fixpoint variable: this function's RESULT is a uniform value
+    returns_uniform: bool = true,
 };
 
 const UniformityAnalysis = struct {
@@ -7113,6 +7158,9 @@ const UniformityAnalysis = struct {
     label_to_block: []std.AutoHashMap(u32, usize),
     /// result id -> owning function index (phi/parameter classification)
     owner_func: std.AutoHashMap(u32, usize),
+    /// result id -> block index within its owning function. The #684 store
+    /// rule needs WHERE a load sits, not just which function owns it.
+    block_of: std.AutoHashMap(u32, usize),
     /// parameter result id -> parameter index in its function
     param_index: std.AutoHashMap(u32, usize),
     /// ids currently believed to hold UNIFORM VALUES (downward fixpoint)
@@ -7139,6 +7187,21 @@ const UniformityAnalysis = struct {
     /// resolved into UniLoop prelude/governing data once the function is
     /// parsed; label ids are globally unique, block indices are not
     loop_merges: std.AutoHashMap(u32, UniLoopMerge),
+    /// per-function transitive block-reachability rows, computed LAZILY on
+    /// first query (#684): rows[from][to] says some CFG path leads from block
+    /// `from` to block `to`. Built from the RAW successor graph (loop back
+    /// edges included), because the store rule is a MAY-WRITE filter: a store
+    /// later in a loop body still feeds a load earlier in the same loop on the
+    /// next iteration. The diagonal is true: within one block the store/load
+    /// order is not modelled, so a store in the load's own block counts.
+    reach_rows: []?[]const []const bool = &.{},
+    /// functions that can reach THEMSELVES through at least one call edge
+    /// (self-recursion or a cycle, #684). Both #684 rules need one invocation
+    /// to be the only relevant one: same-function store reachability and
+    /// return-value uniformity are only sound for functions that cannot be on
+    /// the stack twice, so cyclic functions keep the pre-#684 conservative
+    /// verdicts (count every store, never a uniform result).
+    recursive_funcs: []const bool = &.{},
     /// scratch (reused, arena-backed): postdominance DFS
     visited: std.AutoHashMap(usize, void),
     dfs_stack: std.ArrayListUnmanaged(usize) = .empty,
@@ -7211,6 +7274,7 @@ const UniformityAnalysis = struct {
             var terms = std.ArrayListUnmanaged(UniTerm).empty;
             var calls = std.ArrayListUnmanaged(UniCall).empty;
             var samples = std.ArrayListUnmanaged(UniSample).empty;
+            var returns = std.ArrayListUnmanaged(UniReturn).empty;
             var loops = std.ArrayListUnmanaged(UniLoop).empty;
             var cur_block: usize = 0;
             var j: usize = i + 1;
@@ -7226,7 +7290,12 @@ const UniformityAnalysis = struct {
                 // id to this function -- .Phi would then look up the wrong
                 // block and call a uniform value non-uniform.
                 if (common.resultIdFromOp(inst.op, inst.words)) |rid| {
-                    if (inst.op != .Label) try a.owner_func.put(rid, my_index);
+                    if (inst.op != .Label) {
+                        try a.owner_func.put(rid, my_index);
+                        // #684: the store rule needs the load's block too.
+                        // Same result-id predicate as owner_func, same guard.
+                        try a.block_of.put(rid, cur_block);
+                    }
                 }
                 switch (inst.op) {
                     .FunctionParameter => {
@@ -7256,7 +7325,15 @@ const UniformityAnalysis = struct {
                         }
                         terms.items[cur_block] = .{ .swit = .{ .sel = if (inst.words.len > 1) inst.words[1] else 0, .targets = targets.items } };
                     },
-                    .Return, .ReturnValue => terms.items[cur_block] = .ret,
+                    .Return => terms.items[cur_block] = .ret,
+                    .ReturnValue => {
+                        terms.items[cur_block] = .ret;
+                        // #684: WHAT comes back and FROM WHERE (a return from
+                        // a diverged arm is a non-uniform result for tint even
+                        // when the value is uniform; words[1] is the value,
+                        // OpReturnValue has no result id of its own).
+                        if (inst.words.len > 1) try returns.append(a.arena, .{ .val = inst.words[1], .block = cur_block });
+                    },
                     .Kill => terms.items[cur_block] = .kill,
                     .Unreachable => terms.items[cur_block] = .unreach,
                     .LoopMerge => {
@@ -7287,7 +7364,7 @@ const UniformityAnalysis = struct {
                             // parameter opaque (conservative non-uniform).
                             for (args.items, 0..) |arg, pos| {
                                 if (a.pointerRoot(arg, 0)) |root| {
-                                    try a.arg_vars.append(a.arena, .{ .callee = inst.words[3], .pos = pos, .root = root });
+                                    try a.arg_vars.append(a.arena, .{ .callee = inst.words[3], .pos = pos, .root = root, .caller = my_index, .block = cur_block });
                                 } else if (a.pointerParamOf(params.items, arg, 0)) |_| {
                                     const callee_idx = blk: {
                                         const fid = inst.words[3];
@@ -7420,9 +7497,11 @@ const UniformityAnalysis = struct {
                 .entry_block = 0,
                 .calls = calls.items,
                 .samples = samples.items,
+                .returns = returns.items,
                 .is_entry_point = func_id == a.module.entry_point_id,
                 .entry_flow = true,
                 .param_uniform = param_uni,
+                .returns_uniform = true,
             });
             try label_maps.append(a.arena, lmap);
             try loop_lists.append(a.arena, loops);
@@ -7431,6 +7510,9 @@ const UniformityAnalysis = struct {
         a.funcs = funcs.items;
         a.label_to_block = label_maps.items;
         a.loops_of = loop_lists.items;
+        const rows = try a.arena.alloc(?[]const []const bool, funcs.items.len);
+        @memset(rows, null);
+        a.reach_rows = rows;
         for (a.funcs, 0..) |*uf, fi| {
             try a.func_by_id.put(uf.id, fi);
             for (uf.params, 0..) |pid, pi| {
@@ -7441,6 +7523,90 @@ const UniformityAnalysis = struct {
                 for (lp.prelude) |pb| try a.prelude_of.put(packFlowKey(fi, pb), @intCast(lp.header));
             }
         }
+        // AFTER func_by_id exists: the cycle walk resolves callee ids.
+        try a.computeRecursive();
+    }
+
+    /// Mark every function that can reach ITSELF through at least one call
+    /// edge (self-recursion or a mutual cycle). Both #684 rules model ONE
+    /// invocation of a function: a store reaches a load along a CFG path of
+    /// the SAME invocation, and a return value is what ONE invocation returns.
+    /// Recursion breaks both in the unsafe direction -- a store executed by an
+    /// OUTER invocation can feed a load of an INNER one with no same-frame CFG
+    /// path between them -- so functions on a cycle keep the pre-#684 rules.
+    /// glslang cannot emit recursion (GLSL forbids it); this guard exists for
+    /// hand-authored or external SPIR-V. O(F * (F + E)) on the call graph.
+    fn computeRecursive(a: *UniformityAnalysis) !void {
+        const rec = try a.arena.alloc(bool, a.funcs.len);
+        @memset(rec, false);
+        for (0..a.funcs.len) |fi| {
+            a.visited.clearRetainingCapacity();
+            a.dfs_stack.clearRetainingCapacity();
+            for (a.funcs[fi].calls) |call| {
+                if (a.func_by_id.get(call.callee)) |ci| try a.dfs_stack.append(a.arena, ci);
+            }
+            while (a.dfs_stack.items.len > 0) {
+                const ci = a.dfs_stack.items[a.dfs_stack.items.len - 1];
+                a.dfs_stack.items.len -= 1;
+                if (ci == fi) {
+                    rec[fi] = true;
+                    break;
+                }
+                if (a.visited.contains(ci)) continue;
+                try a.visited.put(ci, {});
+                for (a.funcs[ci].calls) |call| {
+                    if (a.func_by_id.get(call.callee)) |cj| try a.dfs_stack.append(a.arena, cj);
+                }
+            }
+        }
+        a.recursive_funcs = rec;
+    }
+
+    /// The transitive block-reachability rows of function `fi`, built on
+    /// first use (most functions never need them: only a load of a
+    /// Function/Output/Private-scope variable consults the store filter).
+    /// Null only on allocation failure; callers treat that as "reachability
+    /// unknown", i.e. every store counts (the conservative direction).
+    fn reachRow(a: *UniformityAnalysis, fi: usize) ?[]const []const bool {
+        if (fi >= a.funcs.len) return null;
+        if (a.reach_rows[fi]) |rows| return rows;
+        const uf = &a.funcs[fi];
+        const rows = a.arena.alloc([]bool, uf.blocks.len) catch return null;
+        for (rows) |*r| {
+            const row = a.arena.alloc(bool, uf.blocks.len) catch return null;
+            @memset(row, false);
+            r.* = row;
+        }
+        for (0..uf.blocks.len) |from| {
+            // a block trivially reaches itself: intra-block store/load order
+            // is not modelled, so a store in the load's own block counts.
+            rows[from][from] = true;
+            a.visited.clearRetainingCapacity();
+            a.dfs_stack.clearRetainingCapacity();
+            a.visited.put(from, {}) catch return null;
+            for (uf.blocks[from].succs) |s| a.dfs_stack.append(a.arena, s) catch return null;
+            while (a.dfs_stack.items.len > 0) {
+                const bi = a.dfs_stack.items[a.dfs_stack.items.len - 1];
+                a.dfs_stack.items.len -= 1;
+                if (a.visited.contains(bi)) continue;
+                a.visited.put(bi, {}) catch return null;
+                rows[from][bi] = true;
+                for (uf.blocks[bi].succs) |s| a.dfs_stack.append(a.arena, s) catch return null;
+            }
+        }
+        a.reach_rows[fi] = rows;
+        return rows;
+    }
+
+    /// Can block `from` reach block `to` in function `fi`'s successor graph?
+    /// Answers TRUE whenever the answer is unavailable (no such function,
+    /// allocation failure, out-of-range block): this is a MAY-WRITE filter
+    /// for the store rule, so "cannot prove irrelevance" must mean "counts",
+    /// never the other way.
+    fn blockReaches(a: *UniformityAnalysis, fi: usize, from: usize, to: usize) bool {
+        const rows = a.reachRow(fi) orelse return true;
+        if (from >= rows.len or to >= rows.len) return true;
+        return rows[from][to];
     }
 
     /// Does block `target` postdominate block `from`: does every path from
@@ -7622,25 +7788,60 @@ const UniformityAnalysis = struct {
         }
     }
 
-    /// Every store into `root` (direct, and through any pointer parameter a
-    /// callee received for it) wrote a uniform value from uniform flow.
-    /// glslang lowers assigned locals AND helper parameters to variables, so
-    /// this store rule is how uniform values actually travel (probe p24 vs
-    /// p17).
-    fn varStoresUniform(a: *UniformityAnalysis, root: u32) bool {
+    /// Is `root` a FUNCTION-scope variable? The #684 reachability filter is
+    /// only sound for those: a Function-scope variable's contents live and
+    /// die with ONE invocation, so a store cannot feed a load no CFG path
+    /// leads to. A module-scope Private or Output variable PERSISTS across
+    /// sequential invocations of the same function, so a store made by an
+    /// earlier call can feed a load of a later one from an unreachable block
+    /// (the #684 review repro), and tint poisons such reads from a
+    /// non-uniform store anywhere in the module. Anything that is not a
+    /// Function-scope variable (or whose definition cannot be read) keeps the
+    /// flow-insensitive rule: every store counts.
+    fn rootScopeIsFunction(a: *UniformityAnalysis, root: u32) bool {
+        const rdef = common.getDef(a.module, root) orelse return false;
+        if (rdef.words.len <= 3) return false;
+        const sc: spirv.StorageClass = @enumFromInt(rdef.words[3]);
+        return sc == .Function;
+    }
+
+    /// Every store into `root` that can REACH the load at `loc` (direct, and
+    /// through any pointer parameter a callee received for it) wrote a uniform
+    /// value from uniform flow. glslang lowers assigned locals AND helper
+    /// parameters to variables, so this store rule is how uniform values
+    /// actually travel (probe p24 vs p17).
+    ///
+    /// #684 made the rule FLOW-SENSITIVE for stores in the SAME function as
+    /// the load: a store whose block cannot reach the load's block on any CFG
+    /// path can never write the value the load reads, so reusing a scratch
+    /// local for a later value must not poison the earlier loads. The filter
+    /// argues about ONE invocation, so it is disabled for functions on a
+    /// call-graph cycle, for stores made in a DIFFERENT function (cross-
+    /// invocation reachability is not modelled), and for roots that are not
+    /// Function-scope (see rootScopeIsFunction: module-scope Private/Output
+    /// storage persists across calls of the same function, which is the same
+    /// hole cross-function stores already cover).
+    fn varStoresUniform(a: *UniformityAnalysis, root: u32, loc: ?UniLoc) bool {
         // The verdict is an AND, so the first failing store settles it: return
         // instead of carrying an `ok = false` through the rest of the (flat,
         // whole-module) store list.
+        const l = loc orelse UniLoc{ .func = std.math.maxInt(usize), .block = 0 };
+        const use_reach = l.func < a.funcs.len and !a.recursive_funcs[l.func] and a.rootScopeIsFunction(root);
         for (a.stores.items) |st| {
             if (st.root != root) continue;
+            if (use_reach and st.func == l.func and !a.blockReaches(l.func, st.block, l.block)) continue;
             if (!a.values.contains(st.val)) return false;
             if (st.func >= a.funcs.len) continue;
             if (st.block >= a.funcs[st.func].blocks.len) continue;
             if (!a.funcs[st.func].blocks[st.block].flow) return false;
         }
-        // stores a callee makes through the pointer it was handed for `root`
+        // stores a callee makes through the pointer it was handed for `root`:
+        // only call sites that can feed the load matter (the callee's store
+        // executes iff the call does, and it feeds the load iff control can
+        // still reach the load after the call returns)
         for (a.arg_vars.items) |av| {
             if (av.root != root) continue;
+            if (use_reach and av.caller == l.func and !a.blockReaches(l.func, av.block, l.block)) continue;
             const ci = a.func_by_id.get(av.callee) orelse return false;
             if (!a.paramStoresUniform(ci, av.pos)) return false;
         }
@@ -7664,14 +7865,17 @@ const UniformityAnalysis = struct {
 
     /// A load through pointer parameter `pi` of function `fi` is a uniform
     /// value iff every caller handed it a variable that only ever holds
-    /// uniform values (probe p23a/p23b: tint tracks the argument).
-    fn loadThroughParamUniform(a: *UniformityAnalysis, fi: usize, pi: usize) bool {
+    /// uniform values (probe p23a/p23b: tint tracks the argument). `loc` is
+    /// where the load sits; it only sharpens the store filter for stores into
+    /// the variable made in this same function (`fi`), since the caller's
+    /// stores are cross-function and count unconditionally.
+    fn loadThroughParamUniform(a: *UniformityAnalysis, fi: usize, pi: usize, loc: ?UniLoc) bool {
         var seen = false;
         const fid = a.funcs[fi].id;
         for (a.arg_vars.items) |av| {
             if (av.callee != fid or av.pos != pi) continue;
             seen = true;
-            if (!a.varStoresUniform(av.root)) return false;
+            if (!a.varStoresUniform(av.root, loc)) return false;
         }
         // no call site handed this parameter a variable: nothing to judge from
         return seen;
@@ -7694,11 +7898,20 @@ const UniformityAnalysis = struct {
                 // end. Conservative answer: not a uniform value.
                 if (inst.words.len <= 3) return false;
                 const ptr = inst.words[3];
+                // #684: WHERE this load sits, for the flow-sensitive store
+                // rule. An unknown function or block disables the filter
+                // (every store counts), which is the conservative direction.
+                const owner = a.owner_func.get(id);
+                const loc: ?UniLoc = if (owner) |fi| blk: {
+                    const bi = a.block_of.get(id) orelse break :blk null;
+                    if (bi >= a.funcs[fi].blocks.len) break :blk null;
+                    break :blk UniLoc{ .func = fi, .block = bi };
+                } else null;
                 // A load through a pointer parameter of the owning function
                 // (glslang's parameter ABI) is judged from the arguments.
-                if (a.owner_func.get(id)) |fi| {
+                if (owner) |fi| {
                     if (a.pointerParamOf(a.funcs[fi].params, ptr, 0)) |pi| {
-                        return a.loadThroughParamUniform(fi, pi);
+                        return a.loadThroughParamUniform(fi, pi, loc);
                     }
                 }
                 const root = a.pointerRoot(ptr, 0) orelse return false;
@@ -7711,7 +7924,7 @@ const UniformityAnalysis = struct {
                     return a.chainIndicesUniform(ptr, 0);
                 }
                 if (sc == .Function or sc == .Output or sc == .Private) {
-                    return a.varStoresUniform(root);
+                    return a.varStoresUniform(root, loc);
                 }
                 return false;
             },
@@ -7754,6 +7967,22 @@ const UniformityAnalysis = struct {
                     if (!a.values.contains(op_id)) return false;
                 }
                 return true;
+            },
+            // #684: tint tracks return-value uniformity, so a call whose
+            // callee only returns uniform values from uniform flow IS a
+            // uniform value (probed on tint: accepted). The old blanket
+            // "never uniform" silently downgraded samples gated by such
+            // helpers, changing mip selection with no diagnostic. Note the
+            // call SITE's flow deliberately plays no part: a uniform value
+            // stays a uniform value wherever it is computed; where it is
+            // STORED is already judged by the store rule.
+            .FunctionCall => {
+                // words[3] is the callee; getDef only guarantees 3 words, and
+                // a call to a function this prepass never saw has no verdict
+                // to consult: both answer non-uniform.
+                if (inst.words.len <= 3) return false;
+                const ci = a.func_by_id.get(inst.words[3]) orelse return false;
+                return a.funcs[ci].returns_uniform;
             },
             else => {
                 if (!isPureValueOp(inst.op)) return false;
@@ -7866,6 +8095,7 @@ fn computeNonuniformImplicitLodSamples(
         .label_to_block = &.{},
         .loops_of = &.{},
         .owner_func = std.AutoHashMap(u32, usize).init(arena),
+        .block_of = std.AutoHashMap(u32, usize).init(arena),
         .param_index = std.AutoHashMap(u32, usize).init(arena),
         .values = std.AutoHashMap(u32, void).init(arena),
         .opaque_params = std.AutoHashMap(u64, void).init(arena),
@@ -7959,6 +8189,43 @@ fn computeNonuniformImplicitLodSamples(
                         stable = false;
                     }
                 }
+            }
+        }
+        // 5. (#684) a function's RESULT is a uniform value iff every
+        //    OpReturnValue returns a uniform value FROM A BLOCK WITH UNIFORM
+        //    FLOW. The block half is load-bearing, probed on tint: a uniform
+        //    value returned from a DIVERGED arm is a non-uniform result (which
+        //    return fired was selected by diverged flow, the same selection
+        //    rule as a phi edge, probe p17), while a return after a
+        //    reconverged if, or selected by a uniform condition, stays
+        //    uniform. Value-only would be unsound here. The flow consulted is
+        //    the callee's own, whose entry is the AND of its call sites, so a
+        //    helper with one non-uniform call site has its result called
+        //    non-uniform everywhere (tint would keep it at the uniform sites);
+        //    that costs keeps, never correctness. Functions on a call-graph
+        //    cycle keep the pre-#684 verdict: never a uniform result.
+        for (a.funcs, 0..) |*uf, fi| {
+            if (a.recursive_funcs[fi]) {
+                if (uf.returns_uniform) {
+                    uf.returns_uniform = false;
+                    stable = false;
+                }
+                continue;
+            }
+            var ru = true;
+            for (uf.returns) |r| {
+                if (!a.values.contains(r.val)) {
+                    ru = false;
+                    break;
+                }
+                if (r.block >= uf.blocks.len or !uf.blocks[r.block].flow) {
+                    ru = false;
+                    break;
+                }
+            }
+            if (ru != uf.returns_uniform) {
+                uf.returns_uniform = ru;
+                stable = false;
             }
         }
     }

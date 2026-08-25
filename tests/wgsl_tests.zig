@@ -11422,3 +11422,277 @@ test "wgsl: reading a local in the same arm before its assignment keeps binding 
     try nagaValidateOrSkip(wgsl, "i686-same-arm-read-before-assign");
     try tintValidateOrSkip(wgsl, "i686-same-arm-read-before-assign");
 }
+
+// ---------------------------------------------------------------------------
+// zioshade-8k2 round 3 (#684): two SILENT over-downgrades the review left
+// standing in the uniformity prepass. Both shapes were probed on tint: the
+// implicit form is ACCEPTED there, so downgrading them silently changes mip
+// selection on multi-mip textures with no diagnostic -- the mandate's worse
+// direction. Every KEEP test below was watched RED on the pre-fix tree, and
+// each has a DOWNGRADE counterpart pinning that the fix cannot overshoot into
+// under-approximation (which would resurrect the black-shader bug the prepass
+// exists to kill). tint is the oracle that proves each verdict: it is the
+// only local tool that actually runs WGSL's uniformity analysis.
+//
+//   1. varStoresUniform was flow-INSENSITIVE: EVERY store into a variable
+//      anywhere in the function had to be uniform, so glslang's lowering of
+//      every GLSL local to a variable meant reusing one scratch local for a
+//      later non-uniform value retroactively poisoned the earlier uniform
+//      loads. tint's local-variable uniformity is flow-sensitive: only
+//      stores whose block can REACH the load's block matter.
+//   2. a FunctionCall RESULT was never a uniform value. tint tracks
+//      return-value uniformity (probed: a uniform value returned from a
+//      reconverged or uniform arm is uniform; a return from a DIVERGED arm
+//      is not, exactly like the p17 phi-edge rule), so a uniform-returning
+//      helper gating a sample keeps the implicit form.
+// ---------------------------------------------------------------------------
+
+test "wgsl: a LATER non-reaching store no longer poisons an earlier uniform load (8k2 #684)" {
+    // The store of vUV.x into m happens after the early-return if; the load
+    // of m that gates the sample is the if's own condition. tint accepts the
+    // implicit form here (verified: flow-sensitive var analysis), but the
+    // flow-insensitive store rule downgraded it.
+    const spv = try compileToSpirv("store_poisoning_keep",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    float m = uMode;
+        \\    if (m > 0.5) { fragColor = texture(tex, vUV); return; }
+        \\    m = vUV.x;
+        \\    fragColor = vec4(m);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-store-poisoning-keep");
+    try tintValidateOrSkip(wgsl, "8k2-store-poisoning-keep");
+}
+
+test "wgsl: a store on a non-uniform PATH feeding the load still downgrades (8k2 #684)" {
+    // Counterpart of the keep above: the store of 1.0 into m sits inside a
+    // branch on vUV.x and REACHES the load below, so m is a value selected by
+    // diverged flow. tint rejects the implicit form here (probed), so the
+    // reachability filter must still count this store.
+    const spv = try compileToSpirv("store_on_nonuniform_path_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    float m = uMode;
+        \\    if (vUV.x > 0.5) { m = 1.0; }
+        \\    if (m > 0.5) { fragColor = texture(tex, vUV); return; }
+        \\    fragColor = vec4(0.0);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-store-nonuniform-path");
+    try tintValidateOrSkip(wgsl, "8k2-store-nonuniform-path");
+}
+
+test "wgsl: a store in a loop body feeding a LATER load in the same loop still downgrades (8k2 #684)" {
+    // The loop shape of the same rule: the store and the load it feeds are
+    // both inside the loop body, store first. Reachability must be computed
+    // on the successor graph INCLUDING loop back edges, and tint rejects the
+    // implicit form here (probed).
+    const spv = try compileToSpirv("store_in_loop_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    vec4 col = vec4(0.0);
+        \\    float m = uMode;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        if (vUV.x > 2.0) { m = 1.0; }
+        \\        if (m > 0.5) { col += texture(tex, vUV); }
+        \\    }
+        \\    fragColor = col;
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-store-in-loop");
+    try tintValidateOrSkip(wgsl, "8k2-store-in-loop");
+}
+
+test "wgsl: a store in a loop body feeding an EARLIER load via the back edge still downgrades (8k2 #684)" {
+    // The same loop with store and load SWAPPED: the load gates the sample
+    // before the store runs in each iteration, but the store still feeds it
+    // on every later iteration through the back edge. tint rejects the
+    // implicit form here (probed), so reachability must not be collapsed to
+    // an intra-iteration/dominance order.
+    const spv = try compileToSpirv("store_backedge_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\void main(){
+        \\    vec4 col = vec4(0.0);
+        \\    float m = uMode;
+        \\    for (int i = 0; i < 4; i++) {
+        \\        if (m > 0.5) { col += texture(tex, vUV); }
+        \\        if (vUV.x > 2.0) { m = 1.0; }
+        \\    }
+        \\    fragColor = col;
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-store-backedge");
+    try tintValidateOrSkip(wgsl, "8k2-store-backedge");
+}
+
+test "wgsl: a uniform-returning helper call keeps textureSample (8k2 #684)" {
+    // tint accepts the implicit form here (verified): thr's return value is
+    // a uniform read, so the branch on it does not diverge flow. Treating
+    // every FunctionCall result as non-uniform downgraded this silently.
+    const spv = try compileToSpirv("call_result_keep",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\float thr() { return uMode; }
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (thr() > 0.5) return;
+        \\    fragColor = texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSample(tex");
+    try assertNotContains(wgsl, "textureSampleLevel(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-call-result-keep");
+    try tintValidateOrSkip(wgsl, "8k2-call-result-keep");
+}
+
+test "wgsl: a helper returning a NON-uniform value still downgrades (8k2 #684)" {
+    // Counterpart of the keep above: thr passes its argument through, and
+    // the one call site feeds it vUV.x, so the returned value is non-uniform
+    // (tint rejects the implicit form; probed). The return-uniformity rule
+    // must resolve through the existing parameter machinery, not assume a
+    // uniform result.
+    const spv = try compileToSpirv("call_result_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\float thr(float x) { return x; }
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (thr(vUV.x) > 0.5) return;
+        \\    fragColor = texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-call-result-downgrade");
+    try tintValidateOrSkip(wgsl, "8k2-call-result-downgrade");
+}
+
+// --- #684 review findings --------------------------------------------------
+//
+// 1. (HIGH) the store-reachability filter treated "same function" as "same
+//    invocation". True for Function-scope locals, FALSE for module-scope
+//    Private/Output variables, whose contents persist across sequential
+//    invocations: a store made by an earlier call can feed a load of a later
+//    one from a block the store's block cannot reach in the CFG. The filter
+//    is now gated on the root's storage class being Function; module-scope
+//    roots keep the flow-insensitive rule. This test was RED on the pre-fix
+//    tree: it emitted textureSample while tint rejects that form.
+// 2. the return rule's BLOCK-FLOW half had no test. A uniform VALUE returned
+//    from a diverged arm is a non-uniform result for tint (probed), so this
+//    must downgrade; a future value-only "simplification" of the fixpoint
+//    step would pass every other test and reintroduce a tint reject.
+
+test "wgsl: a module-scope private stored in an unreachable arm still poisons the load (8k2 #684 review)" {
+    // g is module-scope Private: its value survives across calls of rd, and
+    // tint poisons its reads from a non-uniform store anywhere in the module
+    // (the flipped-to-implicit form is a tint reject; verified). rd's store
+    // arm ends in a return, so the merge-block load is NOT reachable from it
+    // in the CFG: the one-invocation reachability argument must not apply to
+    // a persisting variable, or this wrongly keeps the implicit form.
+    const spv = try compileToSpirv("private_store_cross_call_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\float g = 0.0;
+        \\float rd() {
+        \\    if (uMode > 0.5) { g = vUV.x; return 0.0; }
+        \\    return g;
+        \\}
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (rd() > 0.5) return;
+        \\    fragColor = texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "var<private> g");
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-private-store-cross-call");
+    try tintValidateOrSkip(wgsl, "8k2-private-store-cross-call");
+}
+
+test "wgsl: a uniform VALUE returned from a diverged arm is a non-uniform result (8k2 #684 review)" {
+    // Both of thr's returns hand back uMode (a uniform VALUE), but the arm
+    // that fires is selected by vUV.x, so the RESULT is non-uniform for tint
+    // (the same selection rule as a phi edge; the flipped form is a tint
+    // reject, verified). This pins the block-flow half of the return rule: a
+    // value-only version of the fixpoint step would keep textureSample here
+    // and pass every other test in this file.
+    const spv = try compileToSpirv("return_from_diverged_arm_downgrade",
+        \\#version 450
+        \\layout(binding=0) uniform sampler2D tex;
+        \\layout(binding=1) uniform Globals { float uMode; };
+        \\layout(location=0) in vec2 vUV;
+        \\layout(location=0) out vec4 fragColor;
+        \\float thr(float x) {
+        \\    if (x > 0.5) return uMode;
+        \\    return uMode;
+        \\}
+        \\void main(){
+        \\    fragColor = vec4(0.0);
+        \\    if (thr(vUV.x) > 0.5) return;
+        \\    fragColor = texture(tex, vUV);
+        \\}
+    );
+    defer alloc.free(spv);
+    const wgsl = try zioshade.spirvToWGSL(alloc, spv, .{});
+    defer alloc.free(wgsl);
+    try assertContains(wgsl, "textureSampleLevel(tex");
+    try assertNotContains(wgsl, "textureSample(tex");
+    try nagaValidateOrSkip(wgsl, "8k2-return-diverged-arm");
+    try tintValidateOrSkip(wgsl, "8k2-return-diverged-arm");
+}
