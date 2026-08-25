@@ -72,6 +72,41 @@ pub const SpirvCfg = struct {
 /// (currently lacking an `OpSelectionMerge`) gets `OpSelectionMerge %merge_label`.
 pub const Insertion = struct { header_label: u32, merge_label: u32 };
 
+/// Words per (literal, target) pair of an OpSwitch whose selector is `selector_id`.
+/// The literal is as wide as the selector's integer type, so a 64-bit selector
+/// spends two words on the literal plus one on the label (stride 3); everything
+/// 32-bit or narrower is stride 2. Unknown or non-integer selector types fall back
+/// to 2, the shape every shader-profile switch has.
+///
+/// `module` is any parsed module carrying `instructions` + `id_defs` (the shape
+/// both `common.ParsedModule` and the backends' private copies share), because the
+/// stride lives in the selector's `OpTypeInt`, which a function body alone cannot
+/// see. This is the ONE stride resolver for CFG walks: every CFG-side OpSwitch
+/// walk must call it rather than reimplement the pair arithmetic (#689: two
+/// walks once disagreed here and the fix reached only one). The EMIT-side
+/// walks still hardcode stride 2 behind the Int64 gates; see issue #697.
+pub fn switchPairStride(module: anytype, selector_id: u32) usize {
+    const si = moduleDefIndex(module, selector_id) orelse return 2;
+    const sel = module.instructions[si];
+    if (sel.words.len < 2) return 2;
+    const ti = moduleDefIndex(module, sel.words[1]) orelse return 2;
+    const ty = module.instructions[ti];
+    if (ty.op != .TypeInt or ty.words.len < 3) return 2;
+    const bits: usize = ty.words[2];
+    if (bits <= 32) return 2;
+    return 1 + (bits + 31) / 32;
+}
+
+/// Instruction index that defines result id `id` in `module` (its `id_defs`
+/// lookup), or null. Generic over the module struct so the shared walk accepts
+/// both `common.ParsedModule` and the backends' private copies of it.
+fn moduleDefIndex(module: anytype, id: u32) ?usize {
+    if (id >= module.id_defs.len) return null;
+    const idx = module.id_defs[id] orelse return null;
+    if (idx >= module.instructions.len) return null;
+    return idx;
+}
+
 /// Decide the `OpSelectionMerge`s needed to structurize the selection headers of a
 /// function body that lacks them. Pure: computes the insertions (header→merge),
 /// or returns `error.UnstructuredControlFlow` if any conditional header cannot be
@@ -81,8 +116,8 @@ pub const Insertion = struct { header_label: u32, merge_label: u32 };
 ///
 /// Headers that already carry an `OpSelectionMerge` and loop headers are left
 /// alone (loop merges are recovered separately, Phase 3). Caller owns the result.
-pub fn recoverSelectionMerges(alloc: std.mem.Allocator, insts: []const Instruction) ![]Insertion {
-    var sc = try buildCfgFromBody(alloc, insts);
+pub fn recoverSelectionMerges(alloc: std.mem.Allocator, module: anytype, insts: anytype) ![]Insertion {
+    var sc = try buildCfgFromBody(alloc, module, insts);
     defer sc.deinit();
 
     // No-op fast path FIRST (and critically, before any reducibility judgement):
@@ -172,7 +207,7 @@ pub fn structurizeModule(alloc: std.mem.Allocator, words: []const u32) ![]u32 {
     // lands, unstructured loops keep honest-erroring downstream — the trustworthy
     // interim (valid Shader SPIR-V is always structured, so this is malformed-input
     // robustness, never a real shader path).
-    const sel_ins = try recoverSelectionMerges(alloc, module.instructions[lo..hi]);
+    const sel_ins = try recoverSelectionMerges(alloc, &module, module.instructions[lo..hi]);
     defer alloc.free(sel_ins);
     return spliceSelectionMerges(alloc, words, sel_ins);
 }
@@ -186,8 +221,8 @@ pub const LoopInsertion = struct { header_label: u32, merge_label: u32, continue
 /// `error.UnstructuredControlFlow` for shapes a simple structured loop cannot
 /// express: irreducible CFG, multiple latches, multiple distinct exit targets, or
 /// an exit-less (infinite) loop with no merge block. Phase 3 of the spec.
-pub fn recoverLoopMerges(alloc: std.mem.Allocator, insts: []const Instruction) ![]LoopInsertion {
-    var sc = try buildCfgFromBody(alloc, insts);
+pub fn recoverLoopMerges(alloc: std.mem.Allocator, module: anytype, insts: anytype) ![]LoopInsertion {
+    var sc = try buildCfgFromBody(alloc, module, insts);
     defer sc.deinit();
     var dom = try analyze(alloc, sc.cfg);
     defer dom.deinit(alloc);
@@ -277,7 +312,13 @@ pub fn recoverLoopMerges(alloc: std.mem.Allocator, insts: []const Instruction) !
 /// Existing `OpSelectionMerge`s are recorded (as ground truth) but their edges are
 /// NOT added to the CFG — the CFG is the raw branch graph, exactly what the
 /// recovery pass sees for unstructured input. Pure; never mutates input.
-pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !SpirvCfg {
+///
+/// `module` is the module `insts` came from: the `OpSwitch` case-literal stride
+/// depends on the selector's `OpTypeInt`, which lives outside the function body
+/// (see `switchPairStride`, #689). It only needs `instructions` + `id_defs`; both
+/// `common.ParsedModule` and the backends' private copies carry those. `insts`
+/// likewise accepts either `Instruction` flavor (same `{op, words}` shape).
+pub fn buildCfgFromBody(alloc: std.mem.Allocator, module: anytype, insts: anytype) !SpirvCfg {
     // Pass 1: enumerate blocks (OpLabel result ids), in order.
     var labels = std.ArrayList(u32).empty;
     errdefer labels.deinit(alloc);
@@ -331,6 +372,9 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
     for (insts) |ins| {
         switch (ins.op) {
             .Label => {
+                // Pass 1 skips labels shorter than 2 words; match it so a
+                // malformed module cannot desync the two passes.
+                if (ins.words.len < 2) continue;
                 cur = idx_of.get(ins.words[1]).?;
                 pending_merge = null;
                 pending_loop = null;
@@ -368,9 +412,14 @@ pub fn buildCfgFromBody(alloc: std.mem.Allocator, insts: []const Instruction) !S
                 if (cur) |b| {
                     tmp.clearRetainingCapacity();
                     // words[2] = default label, then (literal, label) pairs from words[3].
+                    // The literal is as wide as the SELECTOR TYPE, so the pair stride
+                    // comes from the selector's OpTypeInt via the module (#689): a
+                    // hardcoded 2 reads the literal halves of every wide selector as
+                    // targets and drops real ones, silently corrupting the CFG.
                     if (ins.words.len >= 3) if (idx_of.get(ins.words[2])) |d| try tmp.append(alloc, d);
-                    var w: usize = 4;
-                    while (w < ins.words.len) : (w += 2) {
+                    const stride = switchPairStride(module, ins.words[1]);
+                    var w: usize = 2 + stride;
+                    while (w < ins.words.len) : (w += stride) {
                         if (idx_of.get(ins.words[w])) |t| {
                             var seen = false;
                             for (tmp.items) |e| if (e == t) {
@@ -855,7 +904,10 @@ test "adapter+recover: if-else body — CFG built and ipdom re-derives the merge
         .{ .op = .Return, .words = &ret },
     };
 
-    var sc = try buildCfgFromBody(a, &insts);
+    // No OpSwitch in this body, so a module carrying no type facts is enough.
+    const typelessModule = common.ParsedModule{ .instructions = &insts, .id_defs = &.{} };
+
+    var sc = try buildCfgFromBody(a, &typelessModule, &insts);
     defer sc.deinit();
 
     try testing.expectEqual(@as(usize, 4), sc.cfg.n);
@@ -902,7 +954,8 @@ test "recover: if-else WITHOUT a merge → synthesizes header→merge insertion"
         .{ .op = .Label, .words = &lbl4 },
         .{ .op = .Return, .words = &ret },
     };
-    const ins = try recoverSelectionMerges(a, &insts);
+    const typelessModule = common.ParsedModule{ .instructions = &insts, .id_defs = &.{} };
+    const ins = try recoverSelectionMerges(a, &typelessModule, &insts);
     defer a.free(ins);
     try testing.expectEqual(@as(usize, 1), ins.len);
     try testing.expectEqual(@as(u32, 1), ins[0].header_label);
@@ -1005,7 +1058,8 @@ test "recover-loop: natural loop → header/merge/continue recovered" {
         .{ .op = .Label, .words = &l4 }, .{ .op = .Branch, .words = &b42 },
         .{ .op = .Label, .words = &l5 }, .{ .op = .Return, .words = &ret },
     };
-    const ins = try recoverLoopMerges(a, &insts);
+    const typelessModule = common.ParsedModule{ .instructions = &insts, .id_defs = &.{} };
+    const ins = try recoverLoopMerges(a, &typelessModule, &insts);
     defer a.free(ins);
     try testing.expectEqual(@as(usize, 1), ins.len);
     try testing.expectEqual(@as(u32, 2), ins[0].header_label);
@@ -1035,7 +1089,144 @@ test "recover: arm returns early → honest-error (no structured merge)" {
         .{ .op = .Label, .words = &lbl4 },
         .{ .op = .Return, .words = &ret4 },
     };
-    try testing.expectError(error.UnstructuredControlFlow, recoverSelectionMerges(a, &insts));
+    const typelessModule = common.ParsedModule{ .instructions = &insts, .id_defs = &.{} };
+    try testing.expectError(error.UnstructuredControlFlow, recoverSelectionMerges(a, &typelessModule, &insts));
+}
+
+// ─── #689: OpSwitch case-literal stride is the selector's width ──────────────
+
+test "switch stride: Int64 selector walks case targets at stride 3" {
+    // OpSwitch case literals are as wide as the SELECTOR TYPE, so with %11
+    // typed Int64 every (literal, target) pair is three words and the targets
+    // live at words[5] and words[8]. The bug this pins hardcoded stride 2 and
+    // read words[4] and words[6], the literal HALVES. The literals are chosen
+    // so the bogus reads collide with real label ids: case A is
+    // 0x00000004_0000000A (its high word 4 IS the label of case B's target)
+    // and case B's low word 0xB names no label. The buggy walk then reported
+    // {default, caseB} and dropped case A's target: block 2 became unreachable
+    // and every consumer built its CFG from wrong edges (detectably wrong, not
+    // the same output).
+    const a = testing.allocator;
+    const ti = [_]u32{ 0, 10, 64, 1 }; // OpTypeInt %10 : 64-bit signed
+    const ld = [_]u32{ 0, 10, 11, 12 }; // OpLoad %11 : %10 (the selector)
+    const lbl1 = [_]u32{ 0, 1 };
+    // OpSwitch %11 default=%2 (0x0000000A -> %3) (0x0000000B -> %4)
+    const sw = [_]u32{ 0, 11, 2, 0xA, 4, 3, 0xB, 0, 4 };
+    const lbl2 = [_]u32{ 0, 2 };
+    const br5a = [_]u32{ 0, 5 };
+    const lbl3 = [_]u32{ 0, 3 };
+    const br5b = [_]u32{ 0, 5 };
+    const lbl4 = [_]u32{ 0, 4 };
+    const br5c = [_]u32{ 0, 5 };
+    const lbl5 = [_]u32{ 0, 5 };
+    const ret = [_]u32{0};
+    const insts = [_]Instruction{
+        .{ .op = .TypeInt, .words = &ti },
+        .{ .op = .Load, .words = &ld },
+        .{ .op = .Label, .words = &lbl1 },
+        .{ .op = .Switch, .words = &sw },
+        .{ .op = .Label, .words = &lbl2 },
+        .{ .op = .Branch, .words = &br5a },
+        .{ .op = .Label, .words = &lbl3 },
+        .{ .op = .Branch, .words = &br5b },
+        .{ .op = .Label, .words = &lbl4 },
+        .{ .op = .Branch, .words = &br5c },
+        .{ .op = .Label, .words = &lbl5 },
+        .{ .op = .Return, .words = &ret },
+    };
+    // id_defs: %10 -> the OpTypeInt, %11 -> the selector's def.
+    const defs = [_]?usize{ null, null, null, null, null, null, null, null, null, null, 0, 1 };
+    const module = common.ParsedModule{ .instructions = &insts, .id_defs = &defs };
+
+    var sc = try buildCfgFromBody(a, &module, &insts);
+    defer sc.deinit();
+
+    // Blocks: 0=%1 (entry+switch) 1=%2 (default) 2=%3 (case A) 3=%4 (case B) 4=%5.
+    try testing.expectEqual(@as(usize, 5), sc.cfg.n);
+    // entry -> {default(1), caseA(2), caseB(3)}; the buggy stride-2 walk
+    // reported {1, 3} and left block 2 unreachable.
+    try testing.expectEqual(@as(usize, 3), sc.cfg.succ[0].len);
+    try testing.expectEqual(@as(usize, 1), sc.cfg.succ[0][0]);
+    try testing.expectEqual(@as(usize, 2), sc.cfg.succ[0][1]);
+    try testing.expectEqual(@as(usize, 3), sc.cfg.succ[0][2]);
+}
+
+test "switch stride: 32-bit selector keeps the stride-2 walk" {
+    // The shader-profile shape: %11 typed Int32, one word per literal, targets
+    // at words[4] and words[6]. Pins that threading the module into the walk
+    // did not move the 32-bit path (every glslang-produced switch).
+    const a = testing.allocator;
+    const ti = [_]u32{ 0, 10, 32, 1 }; // OpTypeInt %10 : 32-bit signed
+    const ld = [_]u32{ 0, 10, 11, 12 }; // OpLoad %11 : %10 (the selector)
+    const lbl1 = [_]u32{ 0, 1 };
+    // OpSwitch %11 default=%2 (1 -> %3) (2 -> %4)
+    const sw = [_]u32{ 0, 11, 2, 1, 3, 2, 4 };
+    const lbl2 = [_]u32{ 0, 2 };
+    const br5a = [_]u32{ 0, 5 };
+    const lbl3 = [_]u32{ 0, 3 };
+    const br5b = [_]u32{ 0, 5 };
+    const lbl4 = [_]u32{ 0, 4 };
+    const br5c = [_]u32{ 0, 5 };
+    const lbl5 = [_]u32{ 0, 5 };
+    const ret = [_]u32{0};
+    const insts = [_]Instruction{
+        .{ .op = .TypeInt, .words = &ti },
+        .{ .op = .Load, .words = &ld },
+        .{ .op = .Label, .words = &lbl1 },
+        .{ .op = .Switch, .words = &sw },
+        .{ .op = .Label, .words = &lbl2 },
+        .{ .op = .Branch, .words = &br5a },
+        .{ .op = .Label, .words = &lbl3 },
+        .{ .op = .Branch, .words = &br5b },
+        .{ .op = .Label, .words = &lbl4 },
+        .{ .op = .Branch, .words = &br5c },
+        .{ .op = .Label, .words = &lbl5 },
+        .{ .op = .Return, .words = &ret },
+    };
+    const defs = [_]?usize{ null, null, null, null, null, null, null, null, null, null, 0, 1 };
+    const module = common.ParsedModule{ .instructions = &insts, .id_defs = &defs };
+
+    var sc = try buildCfgFromBody(a, &module, &insts);
+    defer sc.deinit();
+
+    try testing.expectEqual(@as(usize, 5), sc.cfg.n);
+    // entry -> {default(1), caseA(2), caseB(3)}, exactly as before #689.
+    try testing.expectEqual(@as(usize, 3), sc.cfg.succ[0].len);
+    try testing.expectEqual(@as(usize, 1), sc.cfg.succ[0][0]);
+    try testing.expectEqual(@as(usize, 2), sc.cfg.succ[0][1]);
+    try testing.expectEqual(@as(usize, 3), sc.cfg.succ[0][2]);
+}
+
+test "switch stride: Int64 selector end-to-end, honest error never a wrong merge" {
+    // Same Int64 switch shape, spliced through the real parse + recovery path
+    // (what all four backends call). The arms branch to DIFFERENT return
+    // blocks, so the arms do not reconverge on a real block and
+    // structurizeModule must honest-error. Under the buggy stride the case-A
+    // arm was unreachable, the remaining arms DID reconverge, and a WRONG
+    // OpSelectionMerge got spliced in silently, the failure class this
+    // project refuses.
+    const a = testing.allocator;
+    const L: u32 = @intFromEnum(spirv.Op.Label);
+    const BR: u32 = @intFromEnum(spirv.Op.Branch);
+    const RET: u32 = @intFromEnum(spirv.Op.Return);
+    const TI: u32 = @intFromEnum(spirv.Op.TypeInt);
+    const LD: u32 = @intFromEnum(spirv.Op.Load);
+    const SW: u32 = @intFromEnum(spirv.Op.Switch);
+    // Rows: header (bound 13) ; OpTypeInt %10 64 1 ; OpLoad %11 : %10 ; %1 entry
+    // holds the Int64 switch (no merge) ; default -> %5 ; case A (0x4_0000000A)
+    // -> %6 ; case B (0xB) -> %5 ; %5 and %6 both return.
+    const words = [_]u32{
+        spirv.MAGIC,    0x10000,         0,             13,              0,
+        (4 << 16) | TI, 10,              64,            1,               (4 << 16) | LD,
+        10,             11,              12,            (2 << 16) | L,   1,
+        (9 << 16) | SW, 11,              2,             0xA,             4,
+        3,              0xB,             0,             4,               (2 << 16) | L,
+        2,              (2 << 16) | BR,  5,             (2 << 16) | L,   3,
+        (2 << 16) | BR, 6,               (2 << 16) | L, 4,               (2 << 16) | BR,
+        5,              (2 << 16) | L,   5,             (1 << 16) | RET, (2 << 16) | L,
+        6,              (1 << 16) | RET,
+    };
+    try testing.expectError(error.UnstructuredControlFlow, structurizeModule(a, &words));
 }
 
 test "postdom: loop — immediate post-dom is the next in-loop block, not the merge" {
