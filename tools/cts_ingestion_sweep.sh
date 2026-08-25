@@ -205,7 +205,7 @@ for backend in glsl wgsl msl hlsl; do
   # taken for a listed crash file, printing a "no longer crashes" NOTE per word for
   # crashes that never existed (#688). There was no real stale entry to prune; the
   # phantom entries were the comment text itself.
-  base_files=$(sed -n "/^crash-files:$backend\$/,/^[^#].*:/{/^crash-files:$backend$/d;/^[^#].*:/d;p;}" "$BASELINE" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$' | grep -v '^#' || true)
+  base_files=$(sed -n "/^crash-files:$backend\$/,/^[^#].*:/{/^crash-files:$backend$/d;/^[^#].*:/d;p;}" "$BASELINE" 2>/dev/null | sed 's/[[:space:]]*$//' | grep -v '^$' | grep -v '^[[:space:]]*#' || true)
   for f in $cur_files; do
     if ! printf '%s\n' "$base_files" | grep -qx "$f"; then
       echo "REGRESSION: NEW crash on $backend: $f (not in baseline)"; bad=1
