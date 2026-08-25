@@ -62,11 +62,13 @@ void main() { mainImage (_fragColor, gl_FragCoord.xy); }
 // shape flips: the cursor's bottom-left corner only moves when the cell
 // moves.
 //
-// Kept deliberately branchless. zioshade (v0.6.x) sinks the incoming
-// store of a local that is modified inside a conditional containing a
-// loop, so the not-taken path reads an uninitialized variable and the
-// idle frame renders black. The ghost loop runs unconditionally (8 taps,
-// same shape as text_glow) and the whole effect is gated by multipliers.
+// Kept deliberately branchless. Written around a zioshade v0.6.x bug
+// that sank the incoming store of a local modified inside a conditional
+// containing a loop, so the not-taken path read an uninitialized
+// variable and the idle frame rendered black. The store-sink is fixed
+// as of v0.8.2; the shape stays because it costs nothing extra. The
+// ghost loop runs unconditionally (8 taps, same shape as text_glow) and
+// the whole effect is gated by multipliers.
 
 const float DURATION       = 0.22; // total effect, seconds
 const int   GHOST_TAPS     = 8;    // samples averaged into the streak
@@ -112,8 +114,8 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     // resize the rect around a fixed corner, only a real move shifts it.
     float cornerJump = length(iCurrentCursor.xy - iPreviousCursor.xy);
     float age = iTime - iTimeCursorChange;
-    float active = step(cellH * JUMP_THRESHOLD, cornerJump)
-                 * step(age, DURATION) * step(0.0, age);
+    float activeGate = step(cellH * JUMP_THRESHOLD, cornerJump)
+                     * step(age, DURATION) * step(0.0, age);
     float p = clamp(age / DURATION, 0.0, 1.0);
     float e = easeOutQuart(p); // travel: leaves fast, settles in
     float fade = 1.0 - p;
@@ -138,18 +140,18 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     vec3 ghost = acc / wsum;
     // The streak lives in the band only; keep the cursor cell crisp.
     float hole = 1.0 - step(0.0, sdRect(fragCoord.xy, curCenter, curHalf * 1.05));
-    float streakA = band * fade * GHOST_STRENGTH * hole * active;
+    float streakA = band * fade * GHOST_STRENGTH * hole * activeGate;
     vec3 newColor = mix(col, ghost, streakA);
     // A tint over the band so it reads as energy, not smudge.
     newColor += mix(tint, vec3(1.0), 0.25) * band * fade * 0.30
-              * hole * active;
+              * hole * activeGate;
 
     // 1b) Traveling beam: a bright core inside the band, running from
     // the old position to the easing head. It spans the whole path at
     // p=0 and collapses into the arrival point. The radius is sized by
     // the cell, not the jump, so single-cell moves still get a fat
     // visible streak.
-    float beam = exp(-dLine / max(cellH * 0.30, 3.0)) * fade * hole * active;
+    float beam = exp(-dLine / max(cellH * 0.30, 3.0)) * fade * hole * activeGate;
     newColor += mix(tint, vec3(1.0), 0.5) * beam * BEAM_BRIGHT;
 
     // 2) Departure: the old cell flashes and collapses to nothing over
@@ -159,7 +161,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
     float sdfOld = sdRect(fragCoord.xy, prevCenter, oldHalf);
     float outGlow = exp(-max(sdfOld, 0.0) / max(cellH * 0.50, 3.0));
     newColor += mix(tint, vec3(1.0), 0.4) * outGlow * (1.0 - outP)
-              * (1.0 - outP) * OUT_FLASH * active;
+              * (1.0 - outP) * OUT_FLASH * activeGate;
 
     // 3) Arrival: a pulse of light where the cursor materializes,
     // peaking around 65% and gone by the end.
@@ -169,7 +171,7 @@ void mainImage(out vec4 fragColor, in vec2 fragCoord)
                           curHalf * (1.0 + 0.35 * pulse));
     float inGlow = exp(-max(sdfNew, 0.0) / max(cellH * 0.45, 3.0));
     newColor += mix(tint, vec3(1.0), 0.6) * inGlow * pulse
-              * IN_FLASH * active;
+              * IN_FLASH * activeGate;
 
     fragColor = vec4(newColor, 1.0);
 }
