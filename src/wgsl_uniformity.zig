@@ -311,7 +311,25 @@ const UniformityAnalysis = struct {
     /// (function, param index) whose argument pointer could not be resolved
     /// to a variable (forwarded pointer params, opaque aliasing)
     opaque_params: std.AutoHashMap(u64, void),
-    /// (function, block) -> loop header block, for every prelude block
+    /// (function, block) -> loop header block, for every prelude block.
+    /// SINGLE-VALUED, and the write loop in `parse` is last-write-wins; that
+    /// is a deliberate policy, not an accident (issue #691 asked for one of
+    /// the two). A block CAN sit in two loops' prelude chains: an outer
+    /// `for (;;)` whose header branches straight into a nested loop's header
+    /// puts that header in the outer chain (the chain walk stops at the inner
+    /// trip-count conditional) and in the inner chain too, and that shape is
+    /// reachable from ordinary glslang output, so asserting no collision would
+    /// reject shaders glslang legitimately produces. Which loop wins follows
+    /// parse order, which follows block layout: in structured layouts the
+    /// outer loop's OpLoopMerge precedes the inner's, so the INNER loop wins,
+    /// and that resolution is the correct-or-conservative one -- the losing
+    /// outer loop's gating still reaches the block, because the outer header
+    /// is itself a prelude block whose flow loopEntryFlow's pred walk
+    /// consults. A module with an unstructured block layout could lay the
+    /// inner loop's blocks out first and resolve the collision to the OUTER
+    /// loop, judging the block by the outer trip count where tint judges it
+    /// by the inner's; that corner belongs to the imprecision accounting in
+    /// the module doc, not to an assert.
     prelude_of: std.AutoHashMap(u64, u64),
     /// function index -> its loops
     loops_of: []std.ArrayListUnmanaged(UniLoop),
@@ -1231,12 +1249,23 @@ const UniLoopMerge = struct { merge: u32, cont: u32 };
 /// this prepass can produce, which is what the cli.zig detail gate relies on.
 /// The human-readable detail for that error is recorded by the CALLER: this
 /// module has no error-detail channel of its own.
+///
+/// LIFETIME: the returned map (and only it) is allocated from `result_arena`
+/// and lives as long as the caller's arena does; every per-function block and
+/// predecessor array, label map, reachability row and DFS stack the analysis
+/// builds lives in an arena this function owns and is FREED when it returns
+/// (before this owned its scratch, all of it came from the compile-wide arena
+/// and stayed resident through the whole emission phase although only the
+/// returned map is read afterwards).
 pub fn computeNonuniformGatedBuiltinIds(
-    arena: std.mem.Allocator,
+    result_arena: std.mem.Allocator,
     module: *const ParsedModule,
     decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)),
 ) Error!std.AutoHashMap(u32, void) {
-    var out = std.AutoHashMap(u32, void).init(arena);
+    var scratch = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer scratch.deinit();
+    const arena = scratch.allocator();
+    var out = std.AutoHashMap(u32, void).init(result_arena);
     var a = UniformityAnalysis{
         .module = module,
         .decorations = decorations,
