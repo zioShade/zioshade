@@ -35,6 +35,12 @@ header and the license texts are in `LICENSES/`. The `.frag` files here are
 vendored verbatim (prefix + shader, no edits) so the corpus stays
 byte-comparable with upstream.
 
+Corpus invariant: every `.frag` must compile under `glslang` verbatim.
+The gates build the reference leg from these exact files, so a source
+glslang refuses fails the gate rather than degrading the comparison; in
+particular no GLSL reserved word may be used as an identifier (the
+`active` trap, GLSL 4.60 section 3.6).
+
 | id | author | license | source |
 | --- | --- | --- | --- |
 | cursor_tail | Sahaj Bhatt | MIT | sahaj-b/ghostty-cursor-shaders |
