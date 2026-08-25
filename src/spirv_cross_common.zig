@@ -1362,6 +1362,33 @@ pub fn getDef(module: *const ParsedModule, id: u32) ?Instruction {
     return module.instructions[idx];
 }
 
+/// Unwrap every TypeArray / TypeRuntimeArray level of `type_id`, returning the
+/// id of the innermost (non-array) element type; a non-array type is returned
+/// unchanged. Used to reach the block STRUCT behind an `array<Block, N>`
+/// pointee: glslang's legacy SPIR-V puts the `BufferBlock` decoration on the
+/// struct, not on the array, so an array-of-SSBO variable must unwrap to the
+/// element struct before the decoration check, otherwise it is mis-classified
+/// as a read-only uniform and a store is silently rejected by naga. (#170)
+///
+/// `depth` caps the walk: valid SPIR-V types form an acyclic DAG so real array
+/// nesting is 1-2 levels deep, but a malformed/hostile module could encode a
+/// self-referential array type. The cap degrades that gracefully (returns the
+/// last array id, which callers treat as a non-struct, no honest behavior
+/// change) rather than hanging, matching the depth-guarded type walks in the
+/// backends. (Lived in spirv_to_wgsl.zig before issue #691; shared with
+/// wgsl_uniformity.zig since.)
+pub fn arrayElementType(module: *const ParsedModule, type_id: u32) u32 {
+    var tid = type_id;
+    var depth: u32 = 0;
+    while (depth < 64) : (depth += 1) {
+        const d = getDef(module, tid) orelse break;
+        if ((d.op == .TypeArray or d.op == .TypeRuntimeArray) and d.words.len >= 3) {
+            tid = d.words[2];
+        } else break;
+    }
+    return tid;
+}
+
 /// The default value of an integer OpSpecConstant `id` (its literal word[3]), used to
 /// resolve LocalSizeId operands to concrete workgroup dimensions. Falls back to
 /// `fallback` if `id` is not an OpSpecConstant (shouldn't happen for valid SPIR-V).
@@ -1760,6 +1787,18 @@ pub fn getDecorationValue(decorations: *const std.AutoHashMap(u32, std.ArrayList
         if (entry.decoration == dec and entry.extra.len > 0) return entry.extra[0];
     }
     return null;
+}
+
+/// Whether `id` carries the VALUE-LESS decoration `dec` (Flat,
+/// NonWritable, BufferBlock, ...; for decorations whose value word you need,
+/// getDecorationValue). The WGSL, MSL and GLSL backends each had a verbatim
+/// copy of this before issue #691 moved it here.
+pub fn hasDec(decorations: *const std.AutoHashMap(u32, std.ArrayList(DecorationEntry)), id: u32, dec: spirv.Decoration) bool {
+    const list = decorations.get(id) orelse return false;
+    for (list.items) |entry| {
+        if (entry.decoration == dec) return true;
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
