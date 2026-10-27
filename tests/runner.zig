@@ -834,7 +834,7 @@ fn mainImpl() !void {
         // Histogram: linear array of (ctx_slice, count) pairs. N is small (<256).
         const max_hist = 256;
         var hist_ctx: [max_hist][]const u8 = undefined;
-        var hist_cnt: [max_hist]u32 = [_]u32{0} ** max_hist;
+        var hist_cnt: [max_hist]u32 = @splat(0);
         var hist_n: usize = 0;
 
         log("\n=== STRICT-ENUMERATE: false-positive candidates ===\n", .{});

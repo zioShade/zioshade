@@ -126,9 +126,9 @@ pub fn main() !void {
     const warmup = 10;
 
     std.debug.print("zioshade Performance Benchmark ({d} iterations per shader)\n", .{iterations});
-    std.debug.print("={s}\n", .{"=" ** 60});
+    std.debug.print("={s}\n", .{&@as([60]u8, @splat('='))});
     std.debug.print("{s:<16} {s:>12} {s:>12} {s:>12} {s:>10} {s:>10}\n", .{ "Shader", "Avg (µs)", "Min (µs)", "SPIR-V→HLSL", "SPV words", "HLSL bytes" });
-    std.debug.print("{s}\n", .{"-" ** 76});
+    std.debug.print("{s}\n", .{&@as([76]u8, @splat('-'))});
 
     var total_avg: u64 = 0;
 
@@ -204,7 +204,7 @@ pub fn main() !void {
         });
     }
 
-    std.debug.print("{s}\n", .{"-" ** 76});
+    std.debug.print("{s}\n", .{&@as([76]u8, @splat('-'))});
     std.debug.print("Total average: {d} µs across {d} shaders\n", .{ total_avg, test_shaders.len });
 
     // Also benchmark full pipeline (all 3 backends)

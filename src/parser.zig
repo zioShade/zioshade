@@ -3,6 +3,7 @@ const std = @import("std");
 const lexer = @import("lexer.zig");
 const ast = @import("ast.zig");
 const semantic = @import("semantic.zig");
+const compat = @import("compat.zig");
 
 pub const Error = error{
     OutOfMemory,
@@ -24,7 +25,7 @@ pub const max_parse_depth: u32 = 256;
 /// expression dimension such as `a[N + 1]` (the parser stores such a dimension
 /// as source text, not an AST).
 pub fn parseExprText(alloc: std.mem.Allocator, text: []const u8) ?ast.Node {
-    const src = alloc.dupeZ(u8, text) catch return null;
+    const src = compat.dupeZ(alloc, text) catch return null;
     const tokens = lexer.tokenize(alloc, src) catch return null;
     var p = Parser{
         .alloc = alloc,
@@ -3367,7 +3368,7 @@ test "hostile: deeply nested parentheses return an honest error, not a stack ove
     try buf.appendSlice(alloc, "1.0");
     try buf.appendNTimes(alloc, ')', n);
     try buf.appendSlice(alloc, ";}");
-    const src = try alloc.dupeZ(u8, buf.items);
+    const src = try compat.dupeZ(alloc, buf.items);
     defer alloc.free(src);
     const tokens = try lexer.tokenize(alloc, src);
     defer alloc.free(tokens);
@@ -3386,7 +3387,7 @@ test "hostile: deeply nested ternary returns an honest error, not a stack overfl
     var i: usize = 0;
     while (i < n) : (i += 1) try buf.appendSlice(alloc, "1>0?1.0:");
     try buf.appendSlice(alloc, "1.0; }");
-    const src = try alloc.dupeZ(u8, buf.items);
+    const src = try compat.dupeZ(alloc, buf.items);
     defer alloc.free(src);
     const tokens = try lexer.tokenize(alloc, src);
     defer alloc.free(tokens);
@@ -3405,7 +3406,7 @@ test "hostile: deeply nested assignment chain returns an honest error, not a sta
     var i: usize = 0;
     while (i < n) : (i += 1) try buf.appendSlice(alloc, "x = ");
     try buf.appendSlice(alloc, "1.0; }");
-    const src = try alloc.dupeZ(u8, buf.items);
+    const src = try compat.dupeZ(alloc, buf.items);
     defer alloc.free(src);
     const tokens = try lexer.tokenize(alloc, src);
     defer alloc.free(tokens);
@@ -3421,7 +3422,7 @@ test "hostile: deeply nested braces return an honest error, not a stack overflow
     try buf.appendSlice(alloc, "void main()");
     try buf.appendNTimes(alloc, '{', n);
     try buf.appendNTimes(alloc, '}', n);
-    const src = try alloc.dupeZ(u8, buf.items);
+    const src = try compat.dupeZ(alloc, buf.items);
     defer alloc.free(src);
     const tokens = try lexer.tokenize(alloc, src);
     defer alloc.free(tokens);

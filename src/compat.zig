@@ -65,6 +65,31 @@ pub const Mutex = if (is_0_16) struct {
     }
 } else std.Thread.Mutex;
 
+/// Duplicate `m` into a caller-owned, NUL-terminated buffer.
+///
+/// Zig 0.17 removed `Allocator.dupeZ` in favour of the general
+/// `dupeSentinel(T, m, sentinel)`; selected by capability so 0.15/0.16 keep the
+/// original call. COMPAT(0.16): inline as `dupeSentinel` once the floor is 0.17.
+pub fn dupeZ(alloc: std.mem.Allocator, m: []const u8) std.mem.Allocator.Error![:0]u8 {
+    if (comptime @hasDecl(std.mem.Allocator, "dupeSentinel")) {
+        return alloc.dupeSentinel(u8, m, 0);
+    } else {
+        return alloc.dupeZ(u8, m);
+    }
+}
+
+/// Format into `buf` with a trailing NUL, returning the sentinel slice.
+///
+/// Zig 0.17 removed `std.fmt.bufPrintZ`; its replacement is
+/// `std.mem.printSentinel(buf, fmt, args, 0)`. COMPAT(0.16).
+pub fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) ![:0]u8 {
+    if (comptime @hasDecl(std.fmt, "bufPrintZ")) {
+        return std.fmt.bufPrintZ(buf, fmt, args);
+    } else {
+        return std.mem.printSentinel(buf, fmt, args, 0);
+    }
+}
+
 // ---- File system types ----
 
 pub const Dir = if (is_0_16) std.Io.Dir else std.fs.Dir;
@@ -569,7 +594,7 @@ pub fn argsAlloc(alloc: std.mem.Allocator) !Args {
             list.deinit(alloc);
         }
         while (it.next()) |arg| {
-            const owned = try alloc.dupeZ(u8, arg);
+            const owned = try dupeZ(alloc, arg);
             errdefer alloc.free(owned);
             try list.append(alloc, owned);
         }

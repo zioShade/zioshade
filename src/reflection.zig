@@ -232,17 +232,20 @@ pub const ShaderResources = struct {
     entry_points: []const EntryPoint = &.{},
 
     pub fn deinit(self: *ShaderResources, alloc: std.mem.Allocator) void {
-        inline for (std.meta.fields(ShaderResources)) |field| {
-            if (field.type == []const Resource) {
-                const slice: []const Resource = @field(self, field.name);
+        // `std.meta.fieldNames` + `@FieldType` exist on 0.15.2 through 0.17;
+        // `std.meta.fields` is a compile error on 0.17 (struct-of-arrays @typeInfo).
+        inline for (comptime std.meta.fieldNames(ShaderResources)) |field_name| {
+            const FieldT = @FieldType(ShaderResources, field_name);
+            if (FieldT == []const Resource) {
+                const slice: []const Resource = @field(self, field_name);
                 for (slice) |*res| {
                     if (res.name.len > 0) alloc.free(res.name);
                     if (res.type_name.len > 0) alloc.free(res.type_name);
                     if (res.members.len > 0) freeMembers(alloc, res.members);
                 }
                 if (slice.len > 0) alloc.free(slice);
-            } else if (field.type == []const EntryPoint) {
-                const slice: []const EntryPoint = @field(self, field.name);
+            } else if (FieldT == []const EntryPoint) {
+                const slice: []const EntryPoint = @field(self, field_name);
                 for (slice) |*ep| {
                     if (ep.name.len > 0) alloc.free(ep.name);
                 }
@@ -758,7 +761,7 @@ pub fn reflect(alloc: std.mem.Allocator, spirv_words: []const u32) !ShaderResour
                 .mmat = &mmat,
                 .const_u32 = &const_u32,
             };
-            var visited = [_]u32{0} ** MAX_STRUCT_DEPTH;
+            var visited: [MAX_STRUCT_DEPTH]u32 = @splat(0);
             res.members = buildMembers(ctx, res.type_id, &visited, 0) catch continue;
 
             // block_size = max over all members of (offset + member_extent).

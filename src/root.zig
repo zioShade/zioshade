@@ -800,7 +800,7 @@ pub fn compileGlslToHlsl(
         .shader_model = 60,
     });
     defer alloc.free(hlsl);
-    return try alloc.dupeZ(u8, hlsl);
+    return try compat.dupeZ(alloc, hlsl);
 }
 
 /// One-shot GLSL -> MSL compilation.
@@ -820,7 +820,7 @@ pub fn compileGlslToMsl(
 
     const msl = try spirvToMSL(alloc, spirv_words, .{});
     defer alloc.free(msl);
-    return try alloc.dupeZ(u8, msl);
+    return try compat.dupeZ(alloc, msl);
 }
 
 /// One-shot GLSL → WGSL compilation.
@@ -839,7 +839,7 @@ pub fn compileGlslToWgsl(
 
     const wgsl = try spirvToWGSL(alloc, spirv_words, .{});
     defer alloc.free(wgsl);
-    return try alloc.dupeZ(u8, wgsl);
+    return try compat.dupeZ(alloc, wgsl);
 }
 
 /// One-shot GLSL -> GLSL compilation (round-trip / decompiled).
@@ -869,7 +869,7 @@ pub fn compileGlslToGlslVersion(
 
     const glsl = try spirvToGLSL(alloc, spirv_words, .{ .version = glsl_version });
     defer alloc.free(glsl);
-    return try alloc.dupeZ(u8, glsl);
+    return try compat.dupeZ(alloc, glsl);
 }
 
 /// Merge multiple SPIR-V modules into a single module with proper ID remapping.
@@ -1663,7 +1663,7 @@ test "hostile C1: the long-name repro compiles instead of overflowing the name b
     // codegen stack buffer. It is legal GLSL (under the lexer's 1024 cap), so it
     // must now compile to valid SPIR-V.
     const alloc = std.testing.allocator;
-    const source = try alloc.dupeZ(u8, @embedFile("testdata/hostile_longname.frag"));
+    const source = try compat.dupeZ(alloc, @embedFile("testdata/hostile_longname.frag"));
     defer alloc.free(source);
     const words = try compileToSPIRV(alloc, source, .{ .stage = .fragment });
     defer alloc.free(words);

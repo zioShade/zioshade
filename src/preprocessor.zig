@@ -614,7 +614,7 @@ pub const Preprocessor = struct {
                 const dir_part = self.source_file_path[0..dir_end];
 
                 var full_path_buf: [4096]u8 = undefined;
-                const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}{s}", .{ dir_part, path }) catch return error.FileNotFound;
+                const full_path = compat.bufPrintZ(&full_path_buf, "{s}{s}", .{ dir_part, path }) catch return error.FileNotFound;
 
                 // The root is the directory holding the including file. An empty
                 // dir_part means the including file is itself cwd-relative.
@@ -628,7 +628,7 @@ pub const Preprocessor = struct {
 
                 const raw = compat.readFileByPath(self.alloc, real_path, 10 * 1024 * 1024) catch return error.FileNotFound;
                 // Null-terminate for lexer
-                const z = try self.alloc.dupeZ(u8, raw);
+                const z = try compat.dupeZ(self.alloc, raw);
                 self.alloc.free(raw);
                 try self.included_sources.append(self.alloc, z);
                 return z;
@@ -643,7 +643,7 @@ pub const Preprocessor = struct {
             var refused_for_containment = false;
             for (self.include_paths) |inc_path| {
                 var full_path_buf: [4096]u8 = undefined;
-                const full_path = std.fmt.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
+                const full_path = compat.bufPrintZ(&full_path_buf, "{s}/{s}", .{ inc_path, path }) catch continue;
 
                 // A miss on one root is normal: try the next. A refusal is not a
                 // miss, but a LATER root may still resolve the same spelling
@@ -657,7 +657,7 @@ pub const Preprocessor = struct {
                 };
 
                 const raw = compat.readFileByPath(self.alloc, real_path, 10 * 1024 * 1024) catch continue;
-                const z = try self.alloc.dupeZ(u8, raw);
+                const z = try compat.dupeZ(self.alloc, raw);
                 self.alloc.free(raw);
                 try self.included_sources.append(self.alloc, z);
                 return z;
@@ -809,7 +809,7 @@ pub const Preprocessor = struct {
             index.* += 1;
             const line_num = identifier_tok.loc.line;
             var buf: [20]u8 = undefined;
-            const line_str = try std.fmt.bufPrintZ(&buf, "{}", .{line_num});
+            const line_str = try compat.bufPrintZ(&buf, "{}", .{line_num});
             const ls_start = try self.internText(line_str);
             try self.output.append(self.alloc, .{
                 .tag = .int_literal,
@@ -835,7 +835,7 @@ pub const Preprocessor = struct {
         if (std.mem.eql(u8, name, "__VERSION__")) {
             index.* += 1;
             var buf: [20]u8 = undefined;
-            const ver_str = try std.fmt.bufPrintZ(&buf, "{}", .{self.version});
+            const ver_str = try compat.bufPrintZ(&buf, "{}", .{self.version});
             const vs_start = try self.internText(ver_str);
             try self.output.append(self.alloc, .{
                 .tag = .int_literal,
@@ -2414,7 +2414,7 @@ test "hostile: exponential macro fan-out hits the expansion budget, not OOM" {
         try buf.appendSlice(alloc, line);
     }
     try buf.appendSlice(alloc, "void main(){ float x = A24; }");
-    const source = try alloc.dupeZ(u8, buf.items);
+    const source = try compat.dupeZ(alloc, buf.items);
     defer alloc.free(source);
     const tokens = try lexer.tokenize(alloc, source);
     defer alloc.free(tokens);

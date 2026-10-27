@@ -304,9 +304,9 @@ fn printShaderRow(r: PerShaderResult) void {
 
 fn printSummary(results: []const PerShaderResult, naga_available: bool) void {
     const total = results.len;
-    var pass_counts: [6]u32 = .{0} ** 6;
-    var fail_counts: [6]u32 = .{0} ** 6;
-    var skip_counts: [6]u32 = .{0} ** 6;
+    var pass_counts: [6]u32 = @splat(0);
+    var fail_counts: [6]u32 = @splat(0);
+    var skip_counts: [6]u32 = @splat(0);
 
     for (results) |r| {
         inline for (.{ Backend.spirv, Backend.glsl, Backend.hlsl, Backend.msl, Backend.wgsl, Backend.naga }) |b| {

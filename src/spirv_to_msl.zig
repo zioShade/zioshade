@@ -7944,7 +7944,7 @@ fn emitWhileLoopMSL(
                     vbuf[cn] = vname;
                     cn += 1;
                 }
-                var emitted = [_]bool{false} ** 16;
+                var emitted: [16]bool = @splat(false);
                 var emitted_cnt: usize = 0;
                 while (emitted_cnt < cn) {
                     var progressed = false;

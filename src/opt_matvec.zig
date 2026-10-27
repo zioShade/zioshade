@@ -128,9 +128,9 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
         if (!sequential) continue;
 
         // For each extract, find VTS using it as scalar
-        var chain_exts: [4]u32 = .{0} ** 4;
-        var chain_vts: [4]u32 = .{0} ** 4;
-        var chain_rows: [4]u32 = .{0} ** 4;
+        var chain_exts: [4]u32 = @splat(0);
+        var chain_vts: [4]u32 = @splat(0);
+        var chain_rows: [4]u32 = @splat(0);
         var result_type: u32 = 0;
         var num_rows: u32 = 0;
         var all_ok = true;
@@ -195,7 +195,7 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
             }
         }
 
-        var chain_fadds: [4]u32 = .{0} ** 4;
+        var chain_fadds: [4]u32 = @splat(0);
         var num_fadds: u32 = 0;
         var fsit = fadd_set.iterator();
         while (fsit.next()) |fe| {
@@ -221,7 +221,7 @@ pub fn optimizeMatVecMul(alloc: std.mem.Allocator, words: []const u32) error{Out
         };
 
         // Build final row list
-        var all_rows: [5]u32 = .{0} ** 5;
+        var all_rows: [5]u32 = @splat(0);
         for (0..num_rows) |j| all_rows[j] = chain_rows[j];
         var total_rows = num_rows;
         if (extra_row != 0 and total_rows < 5) {

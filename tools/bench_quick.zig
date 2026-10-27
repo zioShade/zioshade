@@ -85,7 +85,7 @@ pub fn main() !void {
 
     // Compile-only benchmark
     std.debug.print("{s:<16} {s:>12} {s:>12} {s:>12} {s:>8}\n", .{ "Shader", "Avg(µs)", "Min(µs)", "Max(µs)", "Size(w)" });
-    std.debug.print("{s}\n", .{"-" ** 64});
+    std.debug.print("{s}\n", .{&@as([64]u8, @splat('-'))});
 
     for (shaders) |shader| {
         var total_ns: u64 = 0;
@@ -112,7 +112,7 @@ pub fn main() !void {
     }
 
     // Full pipeline benchmark (GLSL → SPIR-V → HLSL + GLSL + MSL)
-    std.debug.print("\n{s}\n", .{"-" ** 64});
+    std.debug.print("\n{s}\n", .{&@as([64]u8, @splat('-'))});
     std.debug.print("Full pipeline: GLSL → SPIR-V → HLSL + GLSL + MSL\n", .{});
 
     for (shaders) |shader| {
@@ -149,7 +149,7 @@ pub fn main() !void {
     }
 
     // Cross-compile only benchmark
-    std.debug.print("\n{s}\n", .{"-" ** 64});
+    std.debug.print("\n{s}\n", .{&@as([64]u8, @splat('-'))});
     std.debug.print("Cross-compile only: SPIR-V → backend (pre-compiled SPIR-V)\n", .{});
 
     const pre_spv = zioshade.compileToSPIRV(alloc, shaders[0].source, .{ .stage = .fragment }) catch unreachable;
