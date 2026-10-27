@@ -31,7 +31,11 @@ pub fn build(b: *std.Build) void {
         .root_module = example_mod,
     });
     const run_example = b.addRunArtifact(example_exe);
-    if (b.args) |args| run_example.addArgs(args);
+    // Zig 0.17 removed `b.args`; forward `zig build run-example -- ...` via the
+    // Run step's passthru placeholder there, and via `b.args` on 0.15/0.16.
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run_example.addPassthruArgs();
+    } else if (b.args) |args| run_example.addArgs(args);
     const run_example_step = b.step("run-example", "Run the example");
     run_example_step.dependOn(&run_example.step);
 }

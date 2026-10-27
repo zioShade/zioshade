@@ -266,11 +266,7 @@ pub fn build(b: *std.Build) void {
         .root_module = runner_mod,
     });
     const run_conformance = b.addRunArtifact(runner_exe);
-    if (b.args) |args| {
-        for (args) |arg| {
-            run_conformance.addArg(arg);
-        }
-    }
+    bcompat.forwardArgs(b, run_conformance);
     conformance_step.dependOn(&run_conformance.step);
 
     // "build-runner" step: just compile the runner, don't run it
@@ -293,11 +289,7 @@ pub fn build(b: *std.Build) void {
     const strict_gate_step = b.step("strict-gate", "Verify no curated-valid fixtures are rejected by the fail-loud API");
     const run_strict_gate = b.addRunArtifact(runner_exe);
     run_strict_gate.addArg("--strict-gate");
-    if (b.args) |args| {
-        for (args) |arg| {
-            run_strict_gate.addArg(arg);
-        }
-    }
+    bcompat.forwardArgs(b, run_strict_gate);
     strict_gate_step.dependOn(&run_strict_gate.step);
 
     // Runner self-tests: the conformance runner's own exit decision and its
@@ -478,9 +470,7 @@ pub fn build(b: *std.Build) void {
     });
     const run_dxc_test = b.addRunArtifact(dxc_exe);
     // Forward extra `--` args so `zig build test-dxc -- <dxc> <spv_dir> <sm>` works.
-    if (b.args) |a| {
-        for (a) |arg| run_dxc_test.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_dxc_test);
     dxc_test_step.dependOn(&run_dxc_test.step);
 
     // GLSL backend tests - run with: zig build test-glsl
@@ -872,9 +862,7 @@ pub fn build(b: *std.Build) void {
         .root_module = dump_shader_mod,
     });
     const run_dump_shader = b.addRunArtifact(dump_shader_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_dump_shader.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_dump_shader);
     dump_shader_step.dependOn(&run_dump_shader.step);
 
     // Convenience: dump CRT shader (all formats)
@@ -959,7 +947,7 @@ pub fn build(b: *std.Build) void {
     }) |l| lib_bench_mod.linkSystemLibrary(l, .{});
     const lib_bench_exe = b.addExecutable(.{ .name = "lib-bench", .root_module = lib_bench_mod });
     const run_lib_bench = b.addRunArtifact(lib_bench_exe);
-    if (b.args) |a| for (a) |arg| run_lib_bench.addArg(arg);
+    bcompat.forwardArgs(b, run_lib_bench);
     lib_bench_step.dependOn(&run_lib_bench.step);
 
     // Tool: dump SPIR-V binary - run with: zig build dump-spv
@@ -975,9 +963,7 @@ pub fn build(b: *std.Build) void {
         .root_module = dump_spv_mod,
     });
     const run_dump_spv = b.addRunArtifact(dump_spv_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_dump_spv.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_dump_spv);
     dump_spv_step.dependOn(&run_dump_spv.step);
 
     // Tools migrated to Zig 0.15.2 + wired so they stay buildable (regression
@@ -991,7 +977,7 @@ pub fn build(b: *std.Build) void {
         mod.addImport("zioshade", zioshade_mod);
         const exe = b.addExecutable(.{ .name = t[0], .root_module = mod });
         const run = b.addRunArtifact(exe);
-        if (b.args) |a| for (a) |arg| run.addArg(arg);
+        bcompat.forwardArgs(b, run);
         step.dependOn(&run.step);
     }
 
@@ -1042,9 +1028,7 @@ pub fn build(b: *std.Build) void {
         .root_module = spv_to_glsl_mod,
     });
     const run_spv_to_glsl = b.addRunArtifact(spv_to_glsl_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_spv_to_glsl.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_spv_to_glsl);
     spv_to_glsl_step.dependOn(&run_spv_to_glsl.step);
 
     // Tool: SPIR-V to HLSL - run with: zig build spv-to-hlsl -- <input.spv> <output.hlsl>
@@ -1060,9 +1044,7 @@ pub fn build(b: *std.Build) void {
         .root_module = spv_to_hlsl_mod,
     });
     const run_spv_to_hlsl = b.addRunArtifact(spv_to_hlsl_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_spv_to_hlsl.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_spv_to_hlsl);
     spv_to_hlsl_step.dependOn(&run_spv_to_hlsl.step);
 
     // Tool: SPIR-V dump - compile GLSL through zioshade and dump SPIR-V binary
@@ -1078,9 +1060,7 @@ pub fn build(b: *std.Build) void {
         .root_module = spv_dump_mod,
     });
     const run_spv_dump = b.addRunArtifact(spv_dump_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_spv_dump.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_spv_dump);
     spv_dump_step.dependOn(&run_spv_dump.step);
 
     // Tool: Dump SPIR-V without optimization (for debugging optimizer bugs)
@@ -1096,9 +1076,7 @@ pub fn build(b: *std.Build) void {
         .root_module = spv_noopt_mod,
     });
     const run_spv_noopt = b.addRunArtifact(spv_noopt_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_spv_noopt.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_spv_noopt);
     spv_noopt_step.dependOn(&run_spv_noopt.step);
 
     // Tool: Fuzz test - generate random GLSL and validate through zioshade
@@ -1114,9 +1092,7 @@ pub fn build(b: *std.Build) void {
         .root_module = fuzz_mod,
     });
     const run_fuzz = b.addRunArtifact(fuzz_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_fuzz.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_fuzz);
     fuzz_step.dependOn(&run_fuzz.step);
 
     // Real-world WGSL validation - run with: zig build test-realworld
@@ -1132,9 +1108,7 @@ pub fn build(b: *std.Build) void {
         .root_module = realworld_mod,
     });
     const run_realworld = b.addRunArtifact(realworld_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_realworld.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_realworld);
     realworld_step.dependOn(&run_realworld.step);
 
     // Head-to-head benchmark - runs zioshade vs glslang+spirv-cross subprocess.
@@ -1151,9 +1125,7 @@ pub fn build(b: *std.Build) void {
         .root_module = bench_compare_mod,
     });
     const run_bench_compare = b.addRunArtifact(bench_compare_exe);
-    if (b.args) |a| {
-        for (a) |arg| run_bench_compare.addArg(arg);
-    }
+    bcompat.forwardArgs(b, run_bench_compare);
     bench_compare_step.dependOn(&run_bench_compare.step);
 
     // Examples - build with: zig build examples

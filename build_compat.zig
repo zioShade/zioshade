@@ -23,3 +23,18 @@ pub fn getEnvVarOwned(alloc: std.mem.Allocator, name: []const u8) ?[]const u8 {
         return null;
     }
 }
+
+/// Forward the extra arguments given after `zig build <step> --` to a Run step.
+///
+/// Zig 0.17 removed `std.Build.args`; the Run step now carries a `.passthru`
+/// argv placeholder appended by `Run.addPassthruArgs()`, resolved by the maker
+/// at make time. Older versions expose the args at configure time as
+/// `b.args: ?[]const []const u8`. COMPAT(0.16): drop the `b.args` branch once
+/// the floor reaches 0.17.
+pub fn forwardArgs(b: *std.Build, run: *std.Build.Step.Run) void {
+    if (comptime @hasDecl(std.Build.Step.Run, "addPassthruArgs")) {
+        run.addPassthruArgs();
+    } else {
+        if (b.args) |args| run.addArgs(args);
+    }
+}
